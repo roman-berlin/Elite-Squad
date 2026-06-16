@@ -136,9 +136,11 @@ def handle_command(cfg, audit, text: str) -> bool:
 
     if cmd in ("help", "start"):
         notify.send("Commands:\n/standup — daily report\n/status — recent tasks\n"
-                    "/drill — train the unit\n/run <app> <what to build> [--live]\n"
+                    "/drill — train the unit\n/council [topic] — convene the daily council\n"
+                    "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
-                    "Or reply  TICKET: <decision>  to answer a question.")
+                    "Reply  TICKET: <decision>  to answer a question, or send any note and "
+                    "I'll log it as standing guidance for the unit.")
     elif cmd == "standup":
         notify.send(D.standup(cfg))
     elif cmd == "status":
@@ -155,6 +157,16 @@ def handle_command(cfg, audit, text: str) -> bool:
             except Exception as exc:  # noqa: BLE001
                 notify.send(f"⚠️ drill failed: {exc}")
         threading.Thread(target=_d, daemon=True).start()
+    elif cmd == "council":
+        notify.send("🎖️ Convening the daily council…")
+
+        def _c():
+            try:
+                from . import council
+                asyncio.run(council.hold_council(cfg, topic=arg or None, audit=audit))
+            except Exception as exc:  # noqa: BLE001
+                notify.send(f"⚠️ council failed: {exc}")
+        threading.Thread(target=_c, daemon=True).start()
     elif cmd in ("run", "drain"):
         live = "--live" in arg
         arg = arg.replace("--live", "").strip()
@@ -182,11 +194,28 @@ def handle_command(cfg, audit, text: str) -> bool:
 
 def route_message(cfg, audit, text: str) -> bool:
     text = (text or "").strip()
+    if not text:
+        return False
     if text.startswith("/"):
         return handle_command(cfg, audit, text)
     if load(cfg):
         return handle_reply(cfg, audit, text)
-    return False
+    # Otherwise: a free-text message (e.g. a reply to a council question). The General
+    # answers it in Telegram and logs the exchange as standing guidance for the unit.
+    from . import council
+    try:
+        audit.record("commander_msg", text=text[:300])
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _answer():
+        try:
+            asyncio.run(council.respond_to_commander(cfg, text))
+        except Exception as exc:  # noqa: BLE001
+            council.add_commander_note(cfg, text)   # at least capture it
+            notify.send(f"⚠️ the General couldn't reply ({exc}); logged your note.")
+    threading.Thread(target=_answer, daemon=True).start()
+    return True
 
 
 def _read_offset(cfg) -> int | None:

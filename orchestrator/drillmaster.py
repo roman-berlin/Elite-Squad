@@ -114,14 +114,14 @@ def _prompt(sig: dict, cfg: Config) -> str:
 
 async def drill(cfg: Config) -> str:
     sig = collect_signals(cfg)
-    cwd = str(Path(cfg.audit_path).resolve().parent)
+    cwd = str(Path(__file__).resolve().parent.parent)   # the General's repo root
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
         system_prompt=DRILLMASTER_SYSTEM,
         cwd=cwd,
         permission_mode="default",
         allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "MultiEdit"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
         setting_sources=["project"],
         max_turns=20,
         effort="high",

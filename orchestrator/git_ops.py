@@ -48,6 +48,10 @@ class Git:
                               capture_output=True, text=True)
         return proc.returncode, proc.stdout, proc.stderr
 
+    def _code_at(self, cwd: Path, *args: str) -> tuple[int, str, str]:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        return proc.returncode, proc.stdout, proc.stderr
+
     def _guard(self, branch: str) -> None:
         if branch == self.protected:
             raise GitError(f"refusing to operate on protected branch '{self.protected}'")
@@ -190,6 +194,34 @@ class Git:
         self._run("merge", "--ff-only", temp)
         self._run("push", "origin", self.base)
         self._run_code("branch", "-D", temp)
+
+    def sync_main_base(self) -> str:
+        """Isolated mode only. After a live land, bring <base> in the user's MAIN
+        checkout up to date so it's QA-ready — WITHOUT disturbing their work:
+          • on <base> & clean  -> fast-forward it (working tree now has the merge)
+          • on another branch  -> advance the <base> ref only (working tree untouched)
+          • on <base> & dirty  -> leave it; tell them to pull when ready
+        Returns a short human note. Never raises (it's a convenience, not custody)."""
+        if not self.isolated:
+            return ""   # in-tree mode already advanced the local base during land
+        main = self.main
+        try:
+            self._git(main, "fetch", "origin", self.base, check=False)
+            cur = self._git(main, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+            if cur == self.base:
+                if self._git(main, "status", "--porcelain", check=False):
+                    return f"{self.base} has local edits in your checkout — pull it when ready"
+                code, _, err = self._code_at(main, "merge", "--ff-only", self.base_ref)
+                if code == 0:
+                    return f"{self.base} fast-forwarded in your checkout — ready to QA"
+                return f"{self.base} not advanced (diverged locally — pull manually)"
+            # base not checked out: ff its ref without touching the working tree
+            code, _, _ = self._code_at(main, "fetch", "origin", f"{self.base}:{self.base}")
+            if code == 0:
+                return f"{self.base} ref updated (you're on {cur}) — checkout {self.base} to QA"
+            return f"{self.base} left as-is (you're on {cur})"
+        except Exception as exc:  # noqa: BLE001 - never break the run over a convenience sync
+            return f"{self.base} sync skipped ({str(exc).splitlines()[0][:50]})"
 
     # -- cleanup ---------------------------------------------------------- #
     def discard_and_return_base(self) -> None:

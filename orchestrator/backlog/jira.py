@@ -38,6 +38,9 @@ class JiraAdapter(BacklogAdapter):
         self.jql_override = b.get("jql")
         self.ac_field = b.get("acceptance_criteria_field")
         self.status_map = b.get("status_map", {})
+        # Queue order: resume In Progress first, then pull the ready column (To Do),
+        # each ordered by board Rank (top first). Override with `queue_statuses:` in config.
+        self.queue_statuses = b.get("queue_statuses") or ["In Progress", self.ready_status]
         self.session = requests.Session()
         self.session.auth = (os.environ["JIRA_EMAIL"], os.environ["JIRA_API_TOKEN"])
         self.session.headers.update({"Accept": "application/json",
@@ -53,27 +56,39 @@ class JiraAdapter(BacklogAdapter):
             fields.append(self.ac_field)
         return fields
 
-    def _ready_jql(self) -> str:
-        if self.jql_override:
-            return self.jql_override
+    def _jql_for_status(self, status: str) -> str:
         clauses = []
         if self.project:
             clauses.append(f'project = "{self.project}"')
-        clauses.append(f'status = "{self.ready_status}"')
+        clauses.append(f'status = "{status}"')
         if self.only_mine:
-            clauses.append("assignee = currentUser()")
+            clauses.append("assignee = currentUser()")        # = you (the API-token owner)
         if self.require_label and self.label:
             clauses.append(f'labels = "{self.label}"')
-        return " AND ".join(clauses) + " ORDER BY Rank ASC"
+        return " AND ".join(clauses) + " ORDER BY Rank ASC"     # board order, top first
 
     # -- interface -------------------------------------------------------- #
     def get_ready_tasks(self, limit: int) -> list[Ticket]:
-        # Current Jira Cloud search endpoint. Older instances: POST /rest/api/3/search
-        resp = self.session.post(self._url("search/jql"), json={
-            "jql": self._ready_jql(), "maxResults": max(1, limit), "fields": self._fields(),
-        })
-        resp.raise_for_status()
-        return [self._to_ticket(i) for i in resp.json().get("issues", [])]
+        """Resume In Progress first, then pull To Do top-to-bottom (board Rank),
+        assignee = you. A full `jql:` override, if set, replaces this entirely.
+        (Jira Cloud search endpoint; older instances: POST /rest/api/3/search.)"""
+        queries = [self.jql_override] if self.jql_override else \
+            [self._jql_for_status(s) for s in self.queue_statuses]
+        out: list[Ticket] = []
+        seen: set[str] = set()
+        for jql in queries:
+            if len(out) >= limit:
+                break
+            resp = self.session.post(self._url("search/jql"), json={
+                "jql": jql, "maxResults": max(1, limit - len(out)), "fields": self._fields(),
+            })
+            resp.raise_for_status()
+            for issue in resp.json().get("issues", []):
+                t = self._to_ticket(issue)
+                if t.key not in seen:
+                    seen.add(t.key)
+                    out.append(t)
+        return out[:limit]
 
     def get_task(self, key: str) -> Ticket:
         resp = self.session.get(self._url(f"issue/{key}"),
@@ -81,15 +96,27 @@ class JiraAdapter(BacklogAdapter):
         resp.raise_for_status()
         return self._to_ticket(resp.json())
 
+    def _current_status(self, key: str) -> str | None:
+        try:
+            r = self.session.get(self._url(f"issue/{key}"), params={"fields": "status"})
+            r.raise_for_status()
+            return ((r.json().get("fields", {}) or {}).get("status", {}) or {}).get("name")
+        except requests.RequestException:
+            return None
+
     def set_status(self, ticket: Ticket, status: str) -> None:
         target = self.status_map.get(status, status)
+        # Already in the target column (e.g. resuming an In Progress ticket)? No-op, no comment.
+        current = self._current_status(ticket.key)
+        if current and current.lower() == target.lower():
+            return
         tr = self.session.get(self._url(f"issue/{ticket.key}/transitions"))
         tr.raise_for_status()
         match = next((t for t in tr.json().get("transitions", [])
                       if t["to"]["name"].lower() == target.lower()), None)
         if not match:
             self.add_comment(ticket, f"[autodev] No transition to '{target}' available "
-                                     f"from the current status; please move it manually.")
+                                     f"from '{current or 'current status'}'; please move it manually.")
             return
         self.session.post(self._url(f"issue/{ticket.key}/transitions"),
                           json={"transition": {"id": match["id"]}}).raise_for_status()

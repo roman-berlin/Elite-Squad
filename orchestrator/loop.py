@@ -272,7 +272,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     if not reason:
         git.land_trial(temp)
         git.delete_local_branch(branch)   # merged into DEV (commits live there) -> retire the feature branch
+        sync = git.sync_main_base() if getattr(cfg, "sync_base_after_merge", False) else ""
         print(f"  land · merged into {app.base_branch} ✓ (pushed) · feature branch retired", flush=True)
+        if sync:
+            print(f"  land · {sync}", flush=True)
         _bar(4)
         if not ticket.ephemeral:
             if cfg.mark_done_on_merge:
@@ -281,7 +284,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             else:
                 backlog.set_status(ticket, "QA")   # your QA column; you move it Done or back To Do
                 backlog.add_comment(ticket, f"Merged to {app.base_branch}; moved to QA for your review. {review.summary}")
-        done = " · marked Done" if cfg.mark_done_on_merge else " · moved to QA"
+        if ticket.ephemeral:
+            done = ""   # ad-hoc task: no Jira ticket to move
+        else:
+            done = " · marked Done" if cfg.mark_done_on_merge else " · moved to QA"
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}")
         audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,

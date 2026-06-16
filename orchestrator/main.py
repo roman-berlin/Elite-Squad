@@ -50,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     k = sub.add_parser("ticket", help="work one or more Jira tickets by key")
     k.add_argument("app")
     k.add_argument("keys", nargs="+", help="Jira ticket key(s), e.g. AUTO-123")
+    k.add_argument("--spec-file", help="use this markdown/txt file as the build brief instead of the Jira "
+                                       "description (keeps the ticket's identity, so status moves still fire)")
+    k.add_argument("--title", help="override the summary used for the branch/commit (Jira summary stays as-is)")
 
     d = sub.add_parser("drain", help="pull ready tickets from the backlog")
     d.add_argument("app", nargs="?", default=None, help="app name; omit to drain every backlogged app")
@@ -65,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
     dr = sub.add_parser("drill", help="Drillmaster: review the unit's record, propose officer upgrades")
     dr.add_argument("--telegram", action="store_true", help="also send a summary to Telegram")
+    cnl = sub.add_parser("council", help="hold the Elite Unit's daily council (officers muster, brief you)")
+    cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
+    adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
+    adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     return p
 
 
@@ -241,6 +248,23 @@ async def _main(argv: list[str]) -> int:
             notify.send("🎖️ Drillmaster report ready:\n\n" + report[:1500])
         return 0
 
+    if args.command == "council":
+        from . import council
+        from .audit import AuditLog
+        briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None),
+                                              audit=AuditLog(cfg.audit_path))
+        print("\n" + briefing)
+        return 0
+
+    if args.command == "adjutant":
+        from . import adjutant, notify
+        report = await adjutant.propose(cfg)
+        print(report)
+        Path(cfg.audit_path).with_name("adjutant-report.md").write_text(report, encoding="utf-8")
+        if getattr(args, "telegram", False):
+            notify.send("🪖 Adjutant — personnel review:\n\n" + report[:3000])
+        return 0
+
     if args.command in ("dashboard", "status"):
         from . import dashboard as D
         charged = bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -266,7 +290,12 @@ async def _main(argv: list[str]) -> int:
         else:
             print("Provide a description or --spec-file."); return 2
     elif args.command == "ticket":
-        worklist = intake.from_tickets(cfg, args.app, args.keys)
+        spec = None
+        if getattr(args, "spec_file", None):
+            from pathlib import Path
+            spec = Path(args.spec_file).expanduser().read_text(encoding="utf-8")
+        worklist = intake.from_tickets(cfg, args.app, args.keys, spec=spec,
+                                       title=getattr(args, "title", None))
     elif args.command == "drain":
         worklist = intake.from_drain(cfg, args.app, cfg.max_tickets_per_run)
     else:  # pragma: no cover

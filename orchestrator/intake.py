@@ -47,10 +47,21 @@ def extract_key(s: str) -> str:
     return m.group(0) if m else s
 
 
-def from_tickets(cfg: Config, app_name: str, keys: list[str]) -> list[WorkItem]:
+def from_tickets(cfg: Config, app_name: str, keys: list[str],
+                 spec: str | None = None, title: str | None = None) -> list[WorkItem]:
+    """Fetch real Jira tickets (so status moves + comments + Telegram fire). With `spec`,
+    the build brief comes from that file instead of the Jira description — for tickets
+    whose real spec lives in a linked doc — while keeping the ticket's Jira identity."""
+    from dataclasses import replace
     app = cfg.app(app_name)
     backlog = make_backlog(app)
-    return [(app, backlog.get_task(extract_key(k))) for k in keys]
+    items: list[WorkItem] = []
+    for k in keys:
+        t = backlog.get_task(extract_key(k))
+        if spec is not None:
+            t = replace(t, description=spec, summary=(title or t.summary))
+        items.append((app, t))
+    return items
 
 
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:

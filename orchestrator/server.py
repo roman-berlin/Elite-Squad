@@ -75,6 +75,8 @@ def _control_bar(cfg: Config) -> str:
   <a class=pill href="/standup">&#129303; Daily standup</a>
   <form method=post action=/api/drill style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("drilling") else ""}>&#127894; Drill</button></form>
   <a class=pill href="/drill">last drill</a>
+  <form method=post action=/api/council style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("councilling") else ""}>&#128172; Council</button></form>
+  <a class=pill href="/council">councils</a>
   &nbsp;<a href="/" style="font-size:12px">&#8635; reload</a>
 </div>"""
 
@@ -152,6 +154,40 @@ def create_app(cfg: Config):
         else:
             body = "<p>No drill report yet — click 🎖️ Drill on the cockpit.</p>"
         return _wrap("Drillmaster report", body)
+
+    @app.post("/api/council")
+    def council_api():
+        if not _state.get("councilling"):
+            def _bg():
+                _state["councilling"] = True
+                try:
+                    from . import council
+                    asyncio.run(council.hold_council(cfg, audit=audit))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"council failed: {exc}"
+                finally:
+                    _state["councilling"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/council")
+
+    @app.get("/council")
+    def council_page():
+        from . import council
+        hist = council.history(cfg, limit=25)
+        top = "<p>🎖️ The officers are in session… reload shortly.</p>" if _state.get("councilling") else ""
+        if not hist:
+            return _wrap("Daily Council", top + "<p>No councils yet — press &#128172; Council on "
+                         "the cockpit, or run <code>general council</code>.</p>")
+        want = request.args.get("f") or hist[0]["file"]
+        transcript = council.transcript_text(cfg, want) or "(transcript missing)"
+        items = "".join(
+            f"<li><a href='/council?f={html.escape(h['file'])}'>{html.escape(h['ts'][:16])} — "
+            f"{html.escape(h['summary'])}</a></li>" for h in hist)
+        body = (top + "<div style='display:flex;gap:24px;align-items:flex-start'>"
+                "<div style='flex:1;min-width:0'><h3>Transcript</h3><pre class=rep>"
+                + html.escape(transcript) + "</pre></div>"
+                "<div style='width:300px'><h3>Recent councils</h3><ul>" + items + "</ul></div></div>")
+        return _wrap("Daily Council", body)
 
     @app.get("/report")
     def report_form():

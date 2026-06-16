@@ -69,6 +69,7 @@ class Config:
     use_worktree: bool = True           # run each app in a dedicated linked git worktree based on origin/<base>
     worktree_dir: Optional[str] = None  # parent dir for worktrees; default: <repo_parent>/.general-worktrees/<app>
     worktree_setup_cmd: Optional[str] = None  # run ONCE when a worktree is first created (e.g. "bun install")
+    sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
 
     # --- safety ---
     dry_run: bool = True                # full loop incl. trial merge, but NO push / PR / backlog writes
