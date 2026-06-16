@@ -17,6 +17,7 @@ qa-reports/
 commander_notes.md
 adjutant-report.md
 scout-report.md
+provost-report.md
 council/*.log
 backups/
 blocked_tickets.json

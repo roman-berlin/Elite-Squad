@@ -65,6 +65,11 @@ COUNCIL = [
      "— the defects unit tests and diff review miss. From the record (and any e2e results), name "
      "the biggest live-QA blind spot and the one smoke test worth standing up first. If there is "
      "no browser/e2e coverage yet, say so plainly."),
+    ("Provost Marshal", "Security",
+     "Your lens is security and exposure. From the record and recent changes, name the single "
+     "biggest risk the unit is carrying — a secret in code, a tenant-isolation or authz gap, "
+     "injection, or a known-vulnerable dependency — and the one control to add. If you have no "
+     "signal yet, say so plainly."),
     ("Drillmaster", "Doctrine & Training",
      "Your lens is improvement — the unit studies every day. From recurring weaknesses, name "
      "the ONE drill (a precise edit to an officer's Identity/Knowledge/Skills file) that yields "
