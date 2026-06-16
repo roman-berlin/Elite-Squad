@@ -13,5 +13,9 @@ pending_decisions.json
 telegram_offset.txt
 qa-reports/
 .general-worktrees/
+# council runtime — keep transcripts (council/*.md) + index as minutes; ignore private notes + logs
+commander_notes.md
+adjutant-report.md
+council/*.log
 # macOS
 .DS_Store
