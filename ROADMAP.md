@@ -7,6 +7,14 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **War Room cockpit (v1)** — `general serve` now opens the command view: KPI strip
+  (merged today, merged total, needs-you, avg passes/ticket, parked, security blocks),
+  the **active run** with a Build→Gate→Review→Security→Land phase bar, the **8-officer
+  roster** with live/recent/idle status dots, and the unit **activity feed** — all
+  scoped by a **project switcher** in the header (multi-project). Auto-refreshes every
+  5s. Detailed transcript table moved to `/tasks`. (Live per-event SSE streaming is the
+  remaining war-room piece — see Next.)
+
 - **Autonomous pipeline** — build → gate → review → **security gate (Provost)** → land on DEV → QA, on an isolated git worktree; MAIN never touched.
 - **Seven officers** — Adjutant (S-1/HR) · Field Engineer (Builder) · Inspector General (Reviewer) · Scout (S-2/QA) · Provost Marshal (Security) · Quartermaster (S-4/DevOps) · Drillmaster (Doctrine).
 - **Autopilot** — always-on worker: resume In Progress, else take top To Do (assignee-pinned to you), with a park-guard so it never spins on a stuck ticket; KeepAlive launchd.

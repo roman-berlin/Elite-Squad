@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import dashboard as D
 from . import intake
+from . import warroom
 from .audit import AuditLog
 from .config import Config
 from .loop import run as run_loop
@@ -38,9 +39,10 @@ def _charged() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _control_bar(cfg: Config) -> str:
-    apps = "".join(f"<option value='{html.escape(a.name)}'>{html.escape(a.name)}</option>"
-                   for a in cfg.apps)
+def _control_bar(cfg: Config, current_app: str | None = None) -> str:
+    apps = "".join(
+        f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
+        f"{html.escape(a.name)}</option>" for a in cfg.apps)
     effort = "".join(f"<option value='{e}'>{e}</option>" for e in ("low", "medium", "high", "max"))
     if _state["active"]:
         status = '<span class="b warn">● run in progress — reload to refresh</span>'
@@ -77,6 +79,7 @@ def _control_bar(cfg: Config) -> str:
   <a class=pill href="/drill">last drill</a>
   <form method=post action=/api/council style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("councilling") else ""}>&#128172; Council</button></form>
   <a class=pill href="/council">councils</a>
+  <a class=pill href="/tasks">&#128203; Task log</a>
   &nbsp;<a href="/" style="font-size:12px">&#8635; reload</a>
 </div>"""
 
@@ -88,6 +91,17 @@ def create_app(cfg: Config):
 
     @app.get("/")
     def index():
+        appq = request.args.get("app")
+        return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq))
+
+    @app.get("/api/board")
+    def board_api():
+        from flask import Response
+        appq = request.args.get("app")
+        return Response(warroom.render_board(cfg, appq, _state), mimetype="text/html")
+
+    @app.get("/tasks")
+    def tasks_page():
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged())
         return page.replace("</header>", "</header>" + _control_bar(cfg), 1)
 
