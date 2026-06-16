@@ -74,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
+    sct = sub.add_parser("scout", help="Scout (S-2): smoke-test DEV in a browser (e2e / a11y) and report")
+    sct.add_argument("app")
+    sct.add_argument("--url", help="a deployed DEV URL to test (else the app's local dev server)")
+    sct.add_argument("--telegram", action="store_true", help="also send the recon report to Telegram")
     return p
 
 
@@ -264,6 +268,15 @@ async def _main(argv: list[str]) -> int:
         print("\n" + briefing)
         return 0
 
+    if args.command == "scout":
+        from . import scout, notify
+        report = await scout.recon(cfg, args.app, url=getattr(args, "url", None))
+        print(report)
+        Path(cfg.audit_path).with_name("scout-report.md").write_text(report, encoding="utf-8")
+        if getattr(args, "telegram", False):
+            notify.send("🛰️ Scout — DEV recon:\n\n" + report[:3000])
+        return 0
+
     if args.command == "adjutant":
         from . import adjutant, notify
         if getattr(args, "apply", False):
@@ -295,7 +308,6 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "task":
         if args.spec_file:
-            from pathlib import Path
             spec = Path(args.spec_file).expanduser().read_text(encoding="utf-8")
             title = " ".join(args.description) or args.title or spec.strip().splitlines()[0][:80]
             worklist = intake.from_text(cfg, args.app, title, args.ac, description=spec)
@@ -306,7 +318,6 @@ async def _main(argv: list[str]) -> int:
     elif args.command == "ticket":
         spec = None
         if getattr(args, "spec_file", None):
-            from pathlib import Path
             spec = Path(args.spec_file).expanduser().read_text(encoding="utf-8")
         worklist = intake.from_tickets(cfg, args.app, args.keys, spec=spec,
                                        title=getattr(args, "title", None))

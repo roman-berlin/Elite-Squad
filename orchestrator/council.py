@@ -60,6 +60,11 @@ COUNCIL = [
      "Your lens is quality and risk. What recurring defects or spec-gaps are you catching, and "
      "what is slipping through? Call the single quality risk the unit must close, and whether "
      "standards should tighten or ease."),
+    ("Scout", "S-2 · Recon (QA)",
+     "Your lens is what actually breaks in the running app on DEV — runtime, UX, accessibility "
+     "— the defects unit tests and diff review miss. From the record (and any e2e results), name "
+     "the biggest live-QA blind spot and the one smoke test worth standing up first. If there is "
+     "no browser/e2e coverage yet, say so plainly."),
     ("Drillmaster", "Doctrine & Training",
      "Your lens is improvement — the unit studies every day. From recurring weaknesses, name "
      "the ONE drill (a precise edit to an officer's Identity/Knowledge/Skills file) that yields "

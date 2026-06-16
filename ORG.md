@@ -20,7 +20,7 @@ graph TD
     G --> ENG["Field Engineer · Builder<br/>Sonnet · full tools · builds on a worktree"]
     G --> INS["Inspector General · Reviewer<br/>Opus · read-only · independent audit"]
     G --> DRL["Drillmaster · Doctrine & Training<br/>improves the officers from the record"]
-    G -.-> SCT["Scout · S-2 Recon (QA)<br/>browser / e2e on DEV"]
+    G --> SCT["Scout · S-2 Recon (QA)<br/>browser / e2e on DEV"]
     G -.-> PRV["Provost Marshal · Security<br/>security gate"]
     G -.-> QM["Quartermaster · S-4 DevOps<br/>CI / deploy readiness"]
 
@@ -30,8 +30,8 @@ graph TD
     classDef active fill:#0b3d2e,stroke:#10b981,color:#d1fae5;
     classDef planned fill:#1f2937,stroke:#6b7280,color:#9ca3af,stroke-dasharray:5 5;
     class C,G command;
-    class ADJ,ENG,INS,DRL,SQ active;
-    class SCT,PRV,QM planned;
+    class ADJ,ENG,INS,DRL,SCT,SQ active;
+    class PRV,QM planned;
 ```
 
 **Build vs. check (no one signs off their own bridge):** officers that *build* live inside the
@@ -101,7 +101,7 @@ Run it: `general council` (now) · scheduled 10:00 via `scripts/com.roman.genera
 | Field Engineer | Builder | Implements the ticket on a worktree | **active** | `officers/engineer.md`, `builder.py` |
 | Inspector General | Reviewer | Independent read-only spec + quality audit | **active** | `officers/inspector.md`, `reviewer.py` |
 | Drillmaster | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
-| Scout | S-2 | Browser / e2e smoke on DEV | _planned_ | — |
+| Scout | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
 | Provost Marshal | — | Security gate before merge | _planned_ | — |
 | Quartermaster | S-4 | CI / deploy readiness | _planned_ | — |
 
