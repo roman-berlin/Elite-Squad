@@ -38,7 +38,9 @@ graph TD
 Field Engineer (the FE/BE/DB/AI squad). Officers that *independently verify* — Inspector
 General, and the planned Scout & Provost — are separate and read-only. Defense in depth. The
 **Adjutant** changes the *composition* of the corps (hire/retire); the **Drillmaster** sharpens
-the officers already in post.
+the officers already in post. **Chain of recruitment:** every major may recruit its own
+soldiers (its `.claude/agents` squad), subject to the **Adjutant's (HR) approval**; standing up
+a new *major* officer needs the General's call and your sign-off.
 
 ## Mission flow (one ticket)
 
@@ -65,6 +67,11 @@ record, the Drillmaster names the one drill worth running, the Adjutant covers p
 the General chairs — producing a briefing, the day's orders, and the questions only you can
 answer. The unit can also call an **ad-hoc muster** to work a specific improvement
 (`general council --topic "…"`).
+
+Only the **major officers** sit on the council — the squads do not attend; each major consults
+and reports for its own soldiers, keeping the muster sharp. The unit solves its own technical
+and process problems and escalates to you **only** for genuinely Commander-level calls (product
+direction, business strategy, irreversible decisions). Most mornings, that's *None*.
 
 ```mermaid
 flowchart LR

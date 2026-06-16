@@ -31,7 +31,13 @@ chronically underperforming. Quote the evidence from the record.
 
 When you propose a recruit, draft the new officer's file in Identity / Knowledge / Skills
 form (follow officers/_TEMPLATE.md), give it an army codename matching its work, and state
-exactly which recurring gap it closes."""
+exactly which recurring gap it closes.
+
+Chain of recruitment: each MAJOR officer may recruit its own SOLDIERS (build-specialists in
+the app repo's .claude/agents — e.g. the Field Engineer's FE/BE/DB/DevOps squad), but every
+soldier hire needs YOUR approval before it stands. New MAJOR officers are the General's and
+Drillmaster's call, with the Commander's sign-off. You are the gate on every hire — keep the
+corps lean; approve a soldier only against a real, repeated need."""
 
 
 def officers_dir(cfg: Config) -> Path:
