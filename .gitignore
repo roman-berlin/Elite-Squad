@@ -16,7 +16,9 @@ qa-reports/
 # council runtime — keep transcripts (council/*.md) + index as minutes; ignore private notes + logs
 commander_notes.md
 adjutant-report.md
+scout-report.md
 council/*.log
 backups/
+blocked_tickets.json
 # macOS
 .DS_Store

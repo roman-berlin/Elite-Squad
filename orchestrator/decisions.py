@@ -139,6 +139,7 @@ def handle_command(cfg, audit, text: str) -> bool:
                     "/drill — train the unit\n/council [topic] — convene the daily council\n"
                     "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
+                    "/unblock <id> — retry a parked (escalated) ticket\n"
                     "Reply  TICKET: <decision>  to answer a question, or send any note and "
                     "I'll log it as standing guidance for the unit.")
     elif cmd == "standup":
@@ -167,6 +168,9 @@ def handle_command(cfg, audit, text: str) -> bool:
             except Exception as exc:  # noqa: BLE001
                 notify.send(f"⚠️ council failed: {exc}")
         threading.Thread(target=_c, daemon=True).start()
+    elif cmd == "unblock":
+        from . import autopilot as ap_mod
+        notify.send("▶️ " + ap_mod.unblock(cfg, arg or None) + " — autopilot will retry it.")
     elif cmd in ("run", "drain"):
         live = "--live" in arg
         arg = arg.replace("--live", "").strip()

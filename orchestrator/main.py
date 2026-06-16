@@ -78,6 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     sct.add_argument("app")
     sct.add_argument("--url", help="a deployed DEV URL to test (else the app's local dev server)")
     sct.add_argument("--telegram", action="store_true", help="also send the recon report to Telegram")
+    apc = sub.add_parser("autopilot", help="always-on: resume In Progress, else take the top To Do -> QA, continuously")
+    apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
+    apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
+    apc.add_argument("--interval", type=int, default=60, help="seconds to wait when the queue is empty (default 60)")
     return p
 
 
@@ -275,6 +279,12 @@ async def _main(argv: list[str]) -> int:
         Path(cfg.audit_path).with_name("scout-report.md").write_text(report, encoding="utf-8")
         if getattr(args, "telegram", False):
             notify.send("🛰️ Scout — DEV recon:\n\n" + report[:3000])
+        return 0
+
+    if args.command == "autopilot":
+        from . import autopilot as autopilot_mod
+        await autopilot_mod.autopilot(cfg, args.app, once=getattr(args, "once", False),
+                                      interval=getattr(args, "interval", 60))
         return 0
 
     if args.command == "adjutant":
