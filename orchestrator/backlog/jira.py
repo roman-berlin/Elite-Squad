@@ -34,6 +34,7 @@ class JiraAdapter(BacklogAdapter):
         self.ready_status = b.get("ready_status", "To Do")
         self.label = b.get("label", "autodev")
         self.only_mine = b.get("only_mine", True)        # assignee = currentUser()
+        self.assignee = b.get("assignee")                # explicit assignee accountId; overrides currentUser()
         self.require_label = b.get("require_label", False)  # also require the label?
         self.jql_override = b.get("jql")
         self.ac_field = b.get("acceptance_criteria_field")
@@ -61,8 +62,10 @@ class JiraAdapter(BacklogAdapter):
         if self.project:
             clauses.append(f'project = "{self.project}"')
         clauses.append(f'status = "{status}"')
-        if self.only_mine:
-            clauses.append("assignee = currentUser()")        # = you (the API-token owner)
+        if self.assignee:
+            clauses.append(f'assignee = "{self.assignee}"')   # pinned to a specific person (accountId)
+        elif self.only_mine:
+            clauses.append("assignee = currentUser()")        # = the API-token owner's account
         if self.require_label and self.label:
             clauses.append(f'labels = "{self.label}"')
         return " AND ".join(clauses) + " ORDER BY Rank ASC"     # board order, top first

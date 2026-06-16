@@ -59,6 +59,9 @@ apps:
       ready_status: "To Do"          # the "ready" column drain pulls from
       queue_statuses: ["In Progress", "To Do"]   # work order: resume In Progress first, then To Do (each by board Rank)
       only_mine: true                # ...assigned to you (assignee = currentUser())
+      # assignee: "70121:051c9744-..."  # pin the queue to a specific person's Jira accountId. Overrides
+                                        # currentUser() — use this when the API token authenticates as a
+                                        # DIFFERENT account than the person whose tickets you want worked.
       require_label: false           # set true (+ label) to also require a label
       label: "autodev"
       # jql: '<full JQL override; overrides the above>'
