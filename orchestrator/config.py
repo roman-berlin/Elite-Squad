@@ -7,6 +7,8 @@ by the pipeline — you merge that yourself after QA in dev.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -109,4 +111,39 @@ class Config:
             return "ANTHROPIC_API_KEY (per-token API billing)"
         if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
             return "CLAUDE_CODE_OAUTH_TOKEN (subscription / Max plan)"
-        return None  # may still be logged in via `claude` (~/.claude credentials)
+        if _claude_login_present():
+            return "claude login (subscription / Max plan)"
+        return None
+
+
+def _claude_login_present() -> bool:
+    """Best-effort: is there a `claude` subscription login the agent SDK can use even
+    with no auth env var? Checks the Claude Code config/credentials files and the macOS
+    Keychain. Never reads a secret (so it never triggers a prompt) and never raises."""
+    home = Path.home()
+    # credentials file (headless / Linux installs)
+    for p in (home / ".claude" / ".credentials.json",
+              home / ".config" / "claude" / ".credentials.json"):
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                return True
+        except OSError:
+            pass
+    # Claude Code's config records the logged-in account
+    try:
+        cj = home / ".claude.json"
+        if cj.is_file() and "oauthAccount" in cj.read_text(encoding="utf-8", errors="ignore"):
+            return True
+    except OSError:
+        pass
+    # macOS keeps the OAuth credentials in the login Keychain
+    if sys.platform == "darwin":
+        for service in ("Claude Code-credentials", "Claude Code"):
+            try:
+                r = subprocess.run(["security", "find-generic-password", "-s", service],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    return True
+            except Exception:  # noqa: BLE001 - detection must never break doctor
+                pass
+    return False

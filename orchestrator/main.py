@@ -137,9 +137,8 @@ def _doctor(cfg_path: str) -> int:
     if auth:
         print(f"{ok} auth: {auth}")
     else:
-        print(f"{warn} no auth env var found — on a Max/Pro plan run `claude` and /login "
-              f"(or `claude setup-token` for headless). Only set ANTHROPIC_API_KEY if you want "
-              f"per-token API billing instead of your subscription.")
+        print(f"{warn} no auth detected (no env var, no `claude` login found) — run `claude` then /login "
+              f"(or `claude setup-token` for headless). Set ANTHROPIC_API_KEY only for per-token API billing.")
     try:
         import claude_agent_sdk  # noqa: F401
         print(f"{ok} claude-agent-sdk importable")
