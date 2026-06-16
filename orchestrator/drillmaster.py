@@ -170,7 +170,7 @@ async def apply(cfg: Config) -> str:
         model=cfg.reviewer_model,
         system_prompt=DRILL_APPLY_SYSTEM,
         cwd=root,
-        permission_mode="acceptEdits",
+        permission_mode="bypassPermissions",   # unattended write; originals are snapshotted first
         allowed_tools=["Read", "Grep", "Glob", "Edit", "Write"],
         disallowed_tools=["Bash", "NotebookEdit"],
         setting_sources=["project"],

@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
     apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
     apc.add_argument("--interval", type=int, default=60, help="seconds to wait when the queue is empty (default 60)")
+    ub = sub.add_parser("unblock", help="clear a parked (escalated) ticket so autopilot retries it")
+    ub.add_argument("ticket", nargs="?", default=None, help="ticket id; omit to clear all parked")
     return p
 
 
@@ -285,6 +287,11 @@ async def _main(argv: list[str]) -> int:
         from . import autopilot as autopilot_mod
         await autopilot_mod.autopilot(cfg, args.app, once=getattr(args, "once", False),
                                       interval=getattr(args, "interval", 60))
+        return 0
+
+    if args.command == "unblock":
+        from . import autopilot as autopilot_mod
+        print(autopilot_mod.unblock(cfg, args.ticket))
         return 0
 
     if args.command == "adjutant":
