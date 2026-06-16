@@ -137,6 +137,40 @@ class JiraAdapter(BacklogAdapter):
         except requests.RequestException:
             self.add_comment(ticket, f"PR: {pr_url}")
 
+    # -- filing (officers raise their own tickets) ------------------------ #
+    def create_task(self, summary: str, description: str, labels=None,
+                    issue_type: str = "Task") -> str | None:
+        fields: dict[str, Any] = {
+            "project": {"key": self.project},
+            "summary": summary[:240],
+            "issuetype": {"name": issue_type},
+            "description": _adf(description or summary),
+        }
+        if self.assignee:
+            fields["assignee"] = {"accountId": self.assignee}
+        if labels:
+            fields["labels"] = [str(l).replace(" ", "-") for l in labels]
+        r = self.session.post(self._url("issue"), json={"fields": fields})
+        r.raise_for_status()
+        return r.json().get("key")
+
+    def find_open_by_summary(self, summary: str) -> str | None:
+        """Return an OPEN ticket with a matching summary (de-dup), else None."""
+        q = summary.replace('"', " ").replace("\\", " ").strip()[:120]
+        if not q:
+            return None
+        try:
+            r = self.session.post(self._url("search/jql"), json={
+                "jql": f'project = "{self.project}" AND statusCategory != Done AND summary ~ "{q}"',
+                "maxResults": 5, "fields": ["summary"]})
+            r.raise_for_status()
+            for it in r.json().get("issues", []):
+                if ((it.get("fields", {}) or {}).get("summary", "")).strip().lower() == summary.strip().lower():
+                    return it.get("key")
+        except requests.RequestException:
+            return None
+        return None
+
     # -- parsing ---------------------------------------------------------- #
     def _to_ticket(self, issue: dict[str, Any]) -> Ticket:
         f = issue.get("fields", {})

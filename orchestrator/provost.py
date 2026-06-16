@@ -13,6 +13,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 
 from .agent import run_agent
 from .config import Config
+from .filing import TICKET_BLOCK_RULE
 
 PROVOST_SYSTEM = """\
 You are the Provost Marshal — the Elite Unit's security officer, reporting to THE GENERAL.
@@ -52,7 +53,7 @@ async def inspect(cfg: Config, app_name: str) -> str:
     app = cfg.app(app_name)
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,            # security judgment — use the strong model
-        system_prompt=PROVOST_SYSTEM,
+        system_prompt=PROVOST_SYSTEM + TICKET_BLOCK_RULE,
         cwd=app.repo_path,
         # Unattended so it never stalls on the repo's Bash ask-gate. Still read-only: Write/Edit
         # are disallowed outright, and the repo's deny rules (rm -rf, force-push) still hold.

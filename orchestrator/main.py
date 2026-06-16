@@ -78,12 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
     sct.add_argument("app")
     sct.add_argument("--url", help="a deployed DEV URL to test (else the app's local dev server)")
     sct.add_argument("--telegram", action="store_true", help="also send the recon report to Telegram")
+    sct.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
     prv = sub.add_parser("provost", help="Provost Marshal: security recon of the latest DEV changes")
     prv.add_argument("app")
     prv.add_argument("--telegram", action="store_true", help="also send the security report to Telegram")
+    prv.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
     qm = sub.add_parser("quartermaster", help="Quartermaster (S-4): certify DEV is deploy-ready before DEV->MAIN")
     qm.add_argument("app")
     qm.add_argument("--telegram", action="store_true", help="also send the readiness report to Telegram")
+    qm.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
     apc = sub.add_parser("autopilot", help="always-on: resume In Progress, else take the top To Do -> QA, continuously")
     apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
     apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
@@ -281,30 +284,33 @@ async def _main(argv: list[str]) -> int:
         return 0
 
     if args.command == "scout":
-        from . import scout, notify
+        from . import scout, notify, filing
         report = await scout.recon(cfg, args.app, url=getattr(args, "url", None))
-        print(report)
-        Path(cfg.audit_path).with_name("scout-report.md").write_text(report, encoding="utf-8")
+        clean, filed = filing.present(report, cfg.app(args.app), "scout", getattr(args, "file", False))
+        print(clean + (("\n\n" + filed) if filed else ""))
+        Path(cfg.audit_path).with_name("scout-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("🛰️ Scout — DEV recon:\n\n" + report[:3000])
+            notify.send("🛰️ Scout — DEV recon:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
         return 0
 
     if args.command == "provost":
-        from . import provost, notify
+        from . import provost, notify, filing
         report = await provost.inspect(cfg, args.app)
-        print(report)
-        Path(cfg.audit_path).with_name("provost-report.md").write_text(report, encoding="utf-8")
+        clean, filed = filing.present(report, cfg.app(args.app), "provost", getattr(args, "file", False))
+        print(clean + (("\n\n" + filed) if filed else ""))
+        Path(cfg.audit_path).with_name("provost-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("🛡️ Provost — security recon:\n\n" + report[:3000])
+            notify.send("🛡️ Provost — security recon:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
         return 0
 
     if args.command == "quartermaster":
-        from . import quartermaster, notify
+        from . import quartermaster, notify, filing
         report = await quartermaster.inspect(cfg, args.app)
-        print(report)
-        Path(cfg.audit_path).with_name("quartermaster-report.md").write_text(report, encoding="utf-8")
+        clean, filed = filing.present(report, cfg.app(args.app), "quartermaster", getattr(args, "file", False))
+        print(clean + (("\n\n" + filed) if filed else ""))
+        Path(cfg.audit_path).with_name("quartermaster-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("📦 Quartermaster — deploy readiness:\n\n" + report[:3000])
+            notify.send("📦 Quartermaster — deploy readiness:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
         return 0
 
     if args.command == "autopilot":

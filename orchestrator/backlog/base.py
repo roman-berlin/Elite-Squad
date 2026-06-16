@@ -32,6 +32,15 @@ class BacklogAdapter(ABC):
         """Optional: link a PR to the ticket. Default no-op."""
         return None
 
+    def create_task(self, summary: str, description: str, labels=None,
+                    issue_type: str = "Task") -> Optional[str]:
+        """Optional: file a new ticket (officers raising findings). Default: not supported."""
+        return None
+
+    def find_open_by_summary(self, summary: str) -> Optional[str]:
+        """Optional: find an open ticket with this summary, for de-dup. Default: None."""
+        return None
+
 
 class NoneBacklog(BacklogAdapter):
     """For apps with no tracker (ad-hoc / free-text only)."""
