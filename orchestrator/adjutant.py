@@ -34,10 +34,11 @@ form (follow officers/_TEMPLATE.md), give it an army codename matching its work,
 exactly which recurring gap it closes.
 
 Chain of recruitment: each MAJOR officer may recruit its own SOLDIERS (build-specialists in
-the app repo's .claude/agents — e.g. the Field Engineer's FE/BE/DB/DevOps squad), but every
-soldier hire needs YOUR approval before it stands. New MAJOR officers are the General's and
-Drillmaster's call, with the Commander's sign-off. You are the gate on every hire — keep the
-corps lean; approve a soldier only against a real, repeated need."""
+the app repo's .claude/agents — e.g. the Field Engineer's FE/BE/DB/DevOps squad) and, when a
+focus area needs its own leadership, JUNIOR OFFICERS (sub-leads) who are in turn given soldiers
+for sub-tasks. EVERY such hire needs YOUR approval before it stands. New MAJOR officers are the
+General's and Drillmaster's call, with the Commander's sign-off. You are the gate on every hire
+— keep the corps lean; approve only against a real, repeated need."""
 
 
 def officers_dir(cfg: Config) -> Path:

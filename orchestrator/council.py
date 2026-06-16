@@ -53,8 +53,9 @@ COUNCIL = [
      "Your lens is delivery. You command a squad (Vanguard FE · Ordnance BE · Logistics DB · "
      "DevOps · …) — consult their status, but you alone report for them here. What shipped, "
      "what fought back, where did the build burn passes or hit max effort? Name the friction "
-     "and the one change that makes the next build cleaner. If the squad needs a new soldier, "
-     "request it — the Adjutant approves the hire."),
+     "and the one change that makes the next build cleaner. If the squad needs a new soldier — "
+     "or a junior officer (sub-lead) to own a focus area and command soldiers of its own — "
+     "request it; the Adjutant approves the hire."),
     ("Inspector General", "Reviewer",
      "Your lens is quality and risk. What recurring defects or spec-gaps are you catching, and "
      "what is slipping through? Call the single quality risk the unit must close, and whether "

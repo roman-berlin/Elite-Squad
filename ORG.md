@@ -38,9 +38,14 @@ graph TD
 Field Engineer (the FE/BE/DB/AI squad). Officers that *independently verify* — Inspector
 General, and the planned Scout & Provost — are separate and read-only. Defense in depth. The
 **Adjutant** changes the *composition* of the corps (hire/retire); the **Drillmaster** sharpens
-the officers already in post. **Chain of recruitment:** every major may recruit its own
-soldiers (its `.claude/agents` squad), subject to the **Adjutant's (HR) approval**; standing up
-a new *major* officer needs the General's call and your sign-off.
+the officers already in post.
+
+**Ranks & chain of recruitment.** Commander → General → **major officers** (sit on the council)
+→ **junior officers / sub-leads** → **soldiers**. A major may recruit its own soldiers (its
+`.claude/agents` squad) and, when a focus area needs its own leadership, junior officers who are
+handed soldiers for sub-tasks — **every hire is gated by the Adjutant's (HR) approval**. Standing
+up a new *major* officer needs the General's call and your sign-off. Only majors sit on the daily
+council; everyone below reports up the chain.
 
 ## Mission flow (one ticket)
 
