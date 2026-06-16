@@ -1,0 +1,74 @@
+# ===========================================================================
+# The General — example config. Copy to config.yaml and edit.
+# Secrets do NOT go here (see .env.example): ANTHROPIC_API_KEY, JIRA_*.
+# Keep config.yaml and audit.jsonl OUTSIDE every target repo.
+# ===========================================================================
+
+# --- the two officers (role asymmetry: a strong reviewer is worth it) ---
+builder_model: "claude-sonnet-4-6"
+reviewer_model: "claude-opus-4-8"
+
+builder_effort: "high"            # low | medium | high | max (thinking depth)
+reviewer_effort: "high"
+escalate_effort_on_retry: true    # bump the Builder's effort when a pass is rejected (low->medium->high->max)
+
+# --- loop bounds / cost ---
+max_iterations: 4            # build<->review cycles before escalating to you
+max_cost_usd: 0             # 0 = no cap (subscription/Max). Set a number only for per-token API billing.
+max_tickets_per_run: 1      # per app; raise once you trust it
+
+# --- how passing work lands on dev ---
+merge_to_dev: true          # auto-merge feature -> dev when review passes AND dev stays green
+open_pr_on_block: true      # if it can't merge cleanly (or dev would break), open a PR instead
+mark_done_on_merge: false   # false = leave ticket In Progress for your manual QA; true = mark Done on dev-merge
+
+# --- safety ---
+dry_run: true               # full loop incl. a trial merge, but NO push / merge / Jira writes
+                            # flip per-run with --live
+notify_verbose: false       # Telegram also on implemented / verdict / pushed (not just key events)
+
+# --- isolation (so the General never collides with your own git checkout) ---
+use_worktree: true          # run each app in a dedicated linked git worktree based on origin/<base>;
+                            # the General builds + lands there (ff-push to origin/<base>) and never touches
+                            # the branch / working tree you have checked out. You pull <base> to QA.
+                            # Auto-falls back to in-tree if the repo has no origin remote.
+# worktree_dir: "..."       # optional parent for worktrees (default: <repo_parent>/.general-worktrees/<app>)
+# worktree_setup_cmd: "npm install"   # optional: run ONCE when a fresh worktree is created (deps for the gate)
+
+audit_path: "./audit.jsonl" # append-only log of every step; keep outside your repos
+
+# --- your unit of apps. Add one block per app/repo. ---
+apps:
+  - name: automatixy
+    repo_path: "/Users/romanberlin/code/automatixy"
+    base_branch: "dev"               # features branch off and merge back to dev
+    protected_branch: "main"         # the General NEVER touches this — you merge dev->main
+    branch_prefix: "autodev"
+    gate_commands:                   # your own tests/lint/typecheck (run on the branch AND on dev)
+      - "npm run lint"
+      # memory-safe vitest (vitest defaults to one worker per CPU core -> can OOM):
+      # - "npx vitest run --pool=forks --poolOptions.forks.maxForks=4"
+    gate_env:                        # extra env for gate commands so tests can't exhaust RAM
+      NODE_OPTIONS: "--max-old-space-size=3072"
+    backlog_backend: "jira"          # "jira" | "notion" | "none"
+    backlog:
+      base_url: "https://YOURTEAM.atlassian.net"
+      project_key: "AUTO"
+      ready_status: "To Do"          # `drain` pulls tickets in this status...
+      only_mine: true                # ...assigned to you (assignee = currentUser())
+      require_label: false           # set true (+ label) to also require a label
+      label: "autodev"
+      # jql: '<full JQL override; overrides the above>'
+      acceptance_criteria_field: ""  # e.g. "customfield_10034"; blank = parse from description
+      status_map:                    # logical -> your board's columns
+        In Progress: "In Progress"
+        QA: "QA"                      # merged tickets land here for your review (pass->Done, fail->To Do)
+        Done: "Done"
+        Needs Human: "In Progress"
+
+  # A second app with no tracker — drive it only with free-text `task` commands.
+  - name: signaldesk
+    repo_path: "/Users/romanberlin/code/signaldesk"
+    base_branch: "dev"
+    gate_commands: ["pytest -q"]
+    backlog_backend: "none"

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config.yaml
+audit.jsonl
+run.log
+# runtime artifacts
+dashboard.html
+dashboard-sample.html
+drill-report.md
+pending_decisions.json
+telegram_offset.txt
+qa-reports/
+.general-worktrees/
+# macOS
+.DS_Store

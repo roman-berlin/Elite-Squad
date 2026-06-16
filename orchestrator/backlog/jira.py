@@ -1,0 +1,193 @@
+"""Jira Cloud backlog adapter (REST API v3).
+
+Auth is HTTP basic with an Atlassian email + API token from the environment
+(JIRA_EMAIL, JIRA_API_TOKEN). Per-app settings come from the app's `backlog:` block:
+
+  base_url:        https://your-domain.atlassian.net
+  project_key:     AUTO
+  ready_status:    "To Do"            # status marking a ticket ready for autodev
+  label:           autodev            # only pick tickets carrying this label
+  jql:             "<override>"        # optional full JQL, overrides the above
+  acceptance_criteria_field: customfield_10xxx   # optional custom field id
+  status_map:                          # logical -> workflow status names
+    In Progress: "In Progress"
+    In Review:   "In Review"
+    Needs Human: "Needs Triage"
+"""
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import requests
+
+from ..contracts import Ticket
+from .base import BacklogAdapter
+
+
+class JiraAdapter(BacklogAdapter):
+    def __init__(self, app):
+        b = app.backlog
+        self.app_name = app.name
+        self.base_url = b["base_url"].rstrip("/")
+        self.project = b.get("project_key")
+        self.ready_status = b.get("ready_status", "To Do")
+        self.label = b.get("label", "autodev")
+        self.only_mine = b.get("only_mine", True)        # assignee = currentUser()
+        self.require_label = b.get("require_label", False)  # also require the label?
+        self.jql_override = b.get("jql")
+        self.ac_field = b.get("acceptance_criteria_field")
+        self.status_map = b.get("status_map", {})
+        self.session = requests.Session()
+        self.session.auth = (os.environ["JIRA_EMAIL"], os.environ["JIRA_API_TOKEN"])
+        self.session.headers.update({"Accept": "application/json",
+                                     "Content-Type": "application/json"})
+
+    # -- helpers ---------------------------------------------------------- #
+    def _url(self, path: str) -> str:
+        return f"{self.base_url}/rest/api/3/{path.lstrip('/')}"
+
+    def _fields(self) -> list[str]:
+        fields = ["summary", "description", "status", "comment"]
+        if self.ac_field:
+            fields.append(self.ac_field)
+        return fields
+
+    def _ready_jql(self) -> str:
+        if self.jql_override:
+            return self.jql_override
+        clauses = []
+        if self.project:
+            clauses.append(f'project = "{self.project}"')
+        clauses.append(f'status = "{self.ready_status}"')
+        if self.only_mine:
+            clauses.append("assignee = currentUser()")
+        if self.require_label and self.label:
+            clauses.append(f'labels = "{self.label}"')
+        return " AND ".join(clauses) + " ORDER BY Rank ASC"
+
+    # -- interface -------------------------------------------------------- #
+    def get_ready_tasks(self, limit: int) -> list[Ticket]:
+        # Current Jira Cloud search endpoint. Older instances: POST /rest/api/3/search
+        resp = self.session.post(self._url("search/jql"), json={
+            "jql": self._ready_jql(), "maxResults": max(1, limit), "fields": self._fields(),
+        })
+        resp.raise_for_status()
+        return [self._to_ticket(i) for i in resp.json().get("issues", [])]
+
+    def get_task(self, key: str) -> Ticket:
+        resp = self.session.get(self._url(f"issue/{key}"),
+                                params={"fields": ",".join(self._fields())})
+        resp.raise_for_status()
+        return self._to_ticket(resp.json())
+
+    def set_status(self, ticket: Ticket, status: str) -> None:
+        target = self.status_map.get(status, status)
+        tr = self.session.get(self._url(f"issue/{ticket.key}/transitions"))
+        tr.raise_for_status()
+        match = next((t for t in tr.json().get("transitions", [])
+                      if t["to"]["name"].lower() == target.lower()), None)
+        if not match:
+            self.add_comment(ticket, f"[autodev] No transition to '{target}' available "
+                                     f"from the current status; please move it manually.")
+            return
+        self.session.post(self._url(f"issue/{ticket.key}/transitions"),
+                          json={"transition": {"id": match["id"]}}).raise_for_status()
+
+    def add_comment(self, ticket: Ticket, body: str) -> None:
+        # Prefix so the General's own comments can be told apart from the Commander's.
+        self.session.post(self._url(f"issue/{ticket.key}/comment"),
+                          json={"body": _adf("[General] " + body)}).raise_for_status()
+
+    def attach_pr(self, ticket: Ticket, pr_url: str) -> None:
+        try:
+            self.session.post(self._url(f"issue/{ticket.key}/remotelink"), json={
+                "object": {"url": pr_url, "title": "Pull request"}
+            }).raise_for_status()
+        except requests.RequestException:
+            self.add_comment(ticket, f"PR: {pr_url}")
+
+    # -- parsing ---------------------------------------------------------- #
+    def _to_ticket(self, issue: dict[str, Any]) -> Ticket:
+        f = issue.get("fields", {})
+        description = _adf_to_text(f.get("description"))
+        ac: list[str] = []
+        if self.ac_field and f.get(self.ac_field):
+            ac = _split_criteria(_adf_to_text(f[self.ac_field]))
+        if not ac:
+            ac = _criteria_from_description(description)
+        # Bring the Commander's latest comments into context (skip the General's own).
+        feedback = []
+        for c in (f.get("comment", {}) or {}).get("comments", []) or []:
+            txt = _adf_to_text(c.get("body"))
+            if txt and not txt.startswith("[General]"):
+                feedback.append(txt)
+        if feedback:
+            description += "\n\nLatest feedback from the Commander:\n" + "\n---\n".join(feedback[-2:])
+        return Ticket(
+            id=issue["key"],
+            key=issue["key"],
+            summary=f.get("summary", ""),
+            description=description,
+            acceptance_criteria=ac,
+            url=f"{self.base_url}/browse/{issue['key']}",
+            app=self.app_name,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Atlassian Document Format helpers
+# --------------------------------------------------------------------------- #
+def _adf(text: str) -> dict:
+    """Wrap plain text in a minimal ADF document for comments."""
+    return {"type": "doc", "version": 1,
+            "content": [{"type": "paragraph",
+                         "content": [{"type": "text", "text": text}]}]}
+
+
+def _adf_to_text(node: Any) -> str:
+    """Flatten an ADF node tree to plain text (newline per block)."""
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    out: list[str] = []
+
+    def walk(n: Any) -> None:
+        if isinstance(n, dict):
+            if n.get("type") == "text":
+                out.append(n.get("text", ""))
+            for child in n.get("content", []) or []:
+                walk(child)
+            # listItem excluded: its child paragraph already emits the newline.
+            if n.get("type") in ("paragraph", "heading"):
+                out.append("\n")
+        elif isinstance(n, list):
+            for child in n:
+                walk(child)
+
+    walk(node)
+    return "".join(out).strip()
+
+
+def _split_criteria(text: str) -> list[str]:
+    lines = [l.strip(" -*•\t") for l in text.splitlines()]
+    return [l for l in lines if l]
+
+
+def _criteria_from_description(description: str) -> list[str]:
+    """Pull bullets under an 'Acceptance Criteria' heading in the description."""
+    out: list[str] = []
+    capturing = False
+    for line in description.splitlines():
+        if "acceptance criteria" in line.strip().lower():
+            capturing = True
+            continue
+        if capturing:
+            s = line.strip()
+            if not s:
+                if out:
+                    break
+                continue
+            out.append(s.strip(" -*•\t"))
+    return out

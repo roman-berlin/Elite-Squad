@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The General — thin wrapper so you can run `./general ...` instead of the module.
+# Activates the venv and loads secrets from .env, then dispatches to the CLI.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Activate venv if present
+if [[ -f "$HERE/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$HERE/.venv/bin/activate"
+fi
+
+# Load secrets (ANTHROPIC_API_KEY, JIRA_*) if a .env exists
+if [[ -f "$HERE/.env" ]]; then
+  set -a; # shellcheck disable=SC1091
+  source "$HERE/.env"; set +a
+fi
+
+# Default to the config next to this script unless the caller passed one
+if [[ "$*" != *"--config"* ]]; then
+  exec python -m orchestrator.main --config "$HERE/config.yaml" "$@"
+else
+  exec python -m orchestrator.main "$@"
+fi
