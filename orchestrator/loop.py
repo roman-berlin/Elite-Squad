@@ -12,6 +12,7 @@ from pathlib import Path
 from . import builder as builder_mod
 from . import decisions
 from . import notify
+from . import provost as provost_mod
 from . import reviewer as reviewer_mod
 from .audit import AuditLog
 from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
@@ -220,7 +221,19 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
 
         # 4) DECIDE
         if review.is_ship_ready():
-            return _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review)
+            security_block = None
+            if getattr(cfg, "security_gate", False):
+                print("  security · Provost gating the diff…", flush=True)
+                sec_ok, sec_report = await provost_mod.gate(cfg, app, diff)
+                if not sec_ok:
+                    print("  security · Provost BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
+                    _notify(cfg, f"🛡️ {ticket.id} — Provost blocked the merge (security).\n\n{sec_report[:1200]}")
+                    audit.record("security_block", ticket_id=ticket.id, iteration=iteration)
+                    security_block = sec_report
+                else:
+                    print("  security · Provost PASS ✓", flush=True)
+            return _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
+                         security_block=security_block)
 
         last_changes = review.required_changes or review.spec_gaps or [
             q.detail for q in review.blocking_issues]
@@ -240,7 +253,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
                         notes="max_iterations reached without a passing review")
 
 
-def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review) -> TicketReport:
+def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
+          security_block=None) -> TicketReport:
     """Passed review. Validate the merge on a THROWAWAY trial branch so DEV is never
     touched until the single, final, validated merge."""
     git.commit_all(f"{ticket.id}: {ticket.summary}\n\n{build.summary}\n\nReviewed-by: autodev-reviewer")
@@ -255,6 +269,8 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         reason = "could not merge cleanly into dev" if cfg.merge_to_dev else "merge_to_dev disabled"
     elif not green:
         reason = "dev gate fails after merge"
+    elif security_block:
+        reason = "Provost blocked — CRITICAL/HIGH security finding"
     else:
         reason = ""
 

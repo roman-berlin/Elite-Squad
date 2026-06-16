@@ -70,6 +70,7 @@ class Config:
     worktree_dir: Optional[str] = None  # parent dir for worktrees; default: <repo_parent>/.general-worktrees/<app>
     worktree_setup_cmd: Optional[str] = None  # run ONCE when a worktree is first created (e.g. "bun install")
     sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
+    security_gate: bool = False         # Provost reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
 
     # --- safety ---
     dry_run: bool = True                # full loop incl. trial merge, but NO push / PR / backlog writes

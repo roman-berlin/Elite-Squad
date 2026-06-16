@@ -65,3 +65,40 @@ async def inspect(cfg: Config, app_name: str) -> str:
     )
     run = await run_agent(_prompt(app), options, tag="provost")
     return run.final or "(Provost produced no report.)"
+
+
+PROVOST_GATE_SYSTEM = """\
+You are the Provost Marshal security-gating a diff before it merges to the integration branch.
+Same doctrine as a full recon but FAST and decisive: hunt secrets, tenant-isolation breaks,
+authz/IDOR gaps, injection / unsafe execution, and obviously-vulnerable dependencies in THIS
+diff. Read surrounding files only as needed to judge exploitability. You are read-only — flag,
+never edit.
+
+Be strict but fair: BLOCK only for a CRITICAL or HIGH issue a competent attacker could exploit.
+Medium/low hardening does NOT block. End your response with EXACTLY one line, nothing after it:
+  SECURITY GATE: BLOCK   (if any CRITICAL or HIGH finding)
+  SECURITY GATE: PASS    (otherwise)
+Above that line, briefly list any findings (severity · where · why · fix)."""
+
+
+async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
+    """Security-gate a diff before merge. Returns (passed, report). BLOCK only on CRITICAL/HIGH."""
+    options = ClaudeAgentOptions(
+        model=cfg.reviewer_model,
+        system_prompt=PROVOST_GATE_SYSTEM,
+        cwd=app.workdir or app.repo_path,
+        permission_mode="bypassPermissions",
+        allowed_tools=["Read", "Grep", "Glob", "Bash"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit"],
+        setting_sources=["project"],
+        max_turns=18,
+        effort="high",
+    )
+    prompt = "\n".join([
+        f"Security-gate this diff before it merges to '{app.base_branch}':", "",
+        "```diff", diff[:60000], "```", "", "Issue your gate verdict.",
+    ])
+    run = await run_agent(prompt, options, tag="provost-gate")
+    report = (run.final or run.text or "(no report)").strip()
+    blocked = "SECURITY GATE: BLOCK" in report.upper()
+    return (not blocked, report)

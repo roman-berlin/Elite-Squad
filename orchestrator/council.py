@@ -70,6 +70,10 @@ COUNCIL = [
      "biggest risk the unit is carrying — a secret in code, a tenant-isolation or authz gap, "
      "injection, or a known-vulnerable dependency — and the one control to add. If you have no "
      "signal yet, say so plainly."),
+    ("Quartermaster", "S-4 · Deploy readiness",
+     "Your lens is whether DEV can actually ship to MAIN — build, types, migrations, deps, env, "
+     "deploy config. Name the single biggest thing standing between DEV and a clean promotion, "
+     "and the one readiness check to add. If readiness is unknown, say what to verify."),
     ("Drillmaster", "Doctrine & Training",
      "Your lens is improvement — the unit studies every day. From recurring weaknesses, name "
      "the ONE drill (a precise edit to an officer's Identity/Knowledge/Skills file) that yields "

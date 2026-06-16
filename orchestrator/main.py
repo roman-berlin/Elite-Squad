@@ -81,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     prv = sub.add_parser("provost", help="Provost Marshal: security recon of the latest DEV changes")
     prv.add_argument("app")
     prv.add_argument("--telegram", action="store_true", help="also send the security report to Telegram")
+    qm = sub.add_parser("quartermaster", help="Quartermaster (S-4): certify DEV is deploy-ready before DEV->MAIN")
+    qm.add_argument("app")
+    qm.add_argument("--telegram", action="store_true", help="also send the readiness report to Telegram")
     apc = sub.add_parser("autopilot", help="always-on: resume In Progress, else take the top To Do -> QA, continuously")
     apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
     apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
@@ -293,6 +296,15 @@ async def _main(argv: list[str]) -> int:
         Path(cfg.audit_path).with_name("provost-report.md").write_text(report, encoding="utf-8")
         if getattr(args, "telegram", False):
             notify.send("🛡️ Provost — security recon:\n\n" + report[:3000])
+        return 0
+
+    if args.command == "quartermaster":
+        from . import quartermaster, notify
+        report = await quartermaster.inspect(cfg, args.app)
+        print(report)
+        Path(cfg.audit_path).with_name("quartermaster-report.md").write_text(report, encoding="utf-8")
+        if getattr(args, "telegram", False):
+            notify.send("📦 Quartermaster — deploy readiness:\n\n" + report[:3000])
         return 0
 
     if args.command == "autopilot":

@@ -22,7 +22,7 @@ graph TD
     G --> DRL["Drillmaster · Doctrine & Training<br/>improves the officers from the record"]
     G --> SCT["Scout · S-2 Recon (QA)<br/>browser / e2e on DEV"]
     G --> PRV["Provost Marshal · Security<br/>secrets · tenant-isolation · CVEs"]
-    G -.-> QM["Quartermaster · S-4 DevOps<br/>CI / deploy readiness"]
+    G --> QM["Quartermaster · S-4 DevOps<br/>CI / deploy readiness"]
 
     ENG --> SQ["Field Engineer's squad — your repo's .claude/agents<br/>Vanguard FE · Ordnance BE · Logistics DB<br/>Scribe Docs · AI · Judge Advocate Legal · Growth"]
 
@@ -30,8 +30,7 @@ graph TD
     classDef active fill:#0b3d2e,stroke:#10b981,color:#d1fae5;
     classDef planned fill:#1f2937,stroke:#6b7280,color:#9ca3af,stroke-dasharray:5 5;
     class C,G command;
-    class ADJ,ENG,INS,DRL,SCT,PRV,SQ active;
-    class QM planned;
+    class ADJ,ENG,INS,DRL,SCT,PRV,QM,SQ active;
 ```
 
 **Build vs. check (no one signs off their own bridge):** officers that *build* live inside the
@@ -103,7 +102,7 @@ Run it: `general council` (now) · scheduled 10:00 via `scripts/com.roman.genera
 | Drillmaster | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
 | Scout | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
 | Provost Marshal | — | Security: secrets, tenant-isolation, authz, CVEs | **active** | `officers/provost.md`, `provost.py` |
-| Quartermaster | S-4 | CI / deploy readiness | _planned_ | — |
+| Quartermaster | S-4 | CI / deploy readiness (build, migrations, env) | **active** | `officers/quartermaster.md`, `quartermaster.py` |
 
 ## Jira lifecycle (a ticket's path)
 

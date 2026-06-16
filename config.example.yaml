@@ -34,6 +34,8 @@ use_worktree: true          # run each app in a dedicated linked git worktree ba
                             # Auto-falls back to in-tree if the repo has no origin remote.
 sync_base_after_merge: true # after a green live merge, bring <base> in your main checkout up to date for QA
                             # (ff if you're on <base> & clean, else advance the ref; never clobbers dirty work)
+security_gate: false        # true = the Provost Marshal reviews each diff before merge; a CRITICAL/HIGH security
+                            # finding (secrets, tenant-isolation, authz, injection) opens a PR instead of landing
 # worktree_dir: "..."       # optional parent for worktrees (default: <repo_parent>/.general-worktrees/<app>)
 # worktree_setup_cmd: "npm install"   # optional: run ONCE when a fresh worktree is created (deps for the gate)
 
