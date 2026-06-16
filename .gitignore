@@ -17,5 +17,6 @@ qa-reports/
 commander_notes.md
 adjutant-report.md
 council/*.log
+backups/
 # macOS
 .DS_Store

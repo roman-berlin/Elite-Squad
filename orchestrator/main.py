@@ -68,10 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
     dr = sub.add_parser("drill", help="Drillmaster: review the unit's record, propose officer upgrades")
     dr.add_argument("--telegram", action="store_true", help="also send a summary to Telegram")
+    dr.add_argument("--apply", action="store_true", help="EXECUTE the approved drill (writes the officer/squad edits; originals backed up first)")
     cnl = sub.add_parser("council", help="hold the Elite Unit's daily council (officers muster, brief you)")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
+    adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
     return p
 
 
@@ -239,6 +241,12 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "drill":
         from . import drillmaster, notify
+        if getattr(args, "apply", False):
+            out = await drillmaster.apply(cfg)
+            print(out)
+            if getattr(args, "telegram", False):
+                notify.send("🎖️ Drill applied:\n\n" + out[:1500])
+            return 0
         report = await drillmaster.drill(cfg)
         print(report)
         out = Path(cfg.audit_path).with_name("drill-report.md")
@@ -258,6 +266,12 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "adjutant":
         from . import adjutant, notify
+        if getattr(args, "apply", False):
+            out = await adjutant.apply(cfg)
+            print(out)
+            if getattr(args, "telegram", False):
+                notify.send("🪖 Personnel action applied:\n\n" + out[:1500])
+            return 0
         report = await adjutant.propose(cfg)
         print(report)
         Path(cfg.audit_path).with_name("adjutant-report.md").write_text(report, encoding="utf-8")

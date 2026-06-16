@@ -103,3 +103,43 @@ async def propose(cfg: Config) -> str:
     ])
     run = await run_agent(prompt, options, tag="adjutant")
     return run.final or "(Adjutant produced no report.)"
+
+
+ADJUTANT_APPLY_SYSTEM = """\
+You are the Adjutant, now EXECUTING an approved personnel action (not proposing). From the
+approved personnel report, carry out the SINGLE approved action and nothing else:
+  • HIRE a soldier or junior officer -> write its file to ~/.claude/agents/<codename>.md
+  • HIRE a new MAJOR officer -> write officers/<codename>.md
+  • RETIRE -> move the officer's file into officers/retired/
+Write the file in Identity / Knowledge / Skills form (follow officers/_TEMPLATE.md), with an
+army codename matching its work. Do exactly the one approved action, then report what you did
+and where. If the report is ambiguous about which action was approved, STOP and say so."""
+
+
+async def apply(cfg: Config) -> str:
+    """Execute the approved personnel action (hire/retire). Backs up first."""
+    from .drillmaster import snapshot_doctrine
+    root = str(Path(__file__).resolve().parent.parent)
+    report = Path(cfg.audit_path).with_name("adjutant-report.md")
+    plan = report.read_text(encoding="utf-8") if report.exists() else ""
+    backup = snapshot_doctrine(cfg)
+    options = ClaudeAgentOptions(
+        model=cfg.reviewer_model,
+        system_prompt=ADJUTANT_APPLY_SYSTEM,
+        cwd=root,
+        permission_mode="acceptEdits",
+        allowed_tools=["Read", "Grep", "Glob", "Edit", "Write"],
+        disallowed_tools=["Bash", "NotebookEdit"],
+        setting_sources=["project"],
+        max_turns=20,
+        effort="high",
+    )
+    prompt = "\n".join([
+        "The Commander approved this personnel action. Carry it out now:",
+        "",
+        plan or "(No saved report. Re-derive the single most-needed action and carry it out.)",
+        "",
+        "Back-ups are taken. Do the one approved action and report exactly what changed.",
+    ])
+    run = await run_agent(prompt, options, tag="adjutant-apply")
+    return f"Applied. Originals backed up at: {backup}\n\n" + (run.final or "(no summary)")
