@@ -26,5 +26,10 @@ MAIN. Quality and tenant-safety over speed.
 <!-- SCRIBE:BEGIN -->
 ## Lessons & Decisions  _(Scribe-maintained — newest first)_
 
+- 2026-06-16: Engineer exit gate now hard-requires axe-core-clean AND non-negative coverage delta in `frontend-engineer.md` — a11y and tests failed every Inspector pass (×4 each) on the unit's first ticket because the build side had no mandatory stop. Kill these defects at build origin, not in review cycles.
+- 2026-06-16: Inspector A11y and Test-Coverage auditors are calibrated correctly (caught every instance) — they now serve as final verifiers, not primary catch. Recurring Inspector bounces signal a missing build-side gate, not a check-side gap.
+- 2026-06-16: Enforce build rules at a single point — edit the Engineer's exit gate only; leave `post-dev-checklist` untouched to avoid duplicate/conflicting enforcement.
+- 2026-06-16: Three max-effort burns on one ticket = work harder than scoped or exit criteria undefined at build time; treat repeated max-effort as a signal to tighten exit gates, not retry harder.
+- 2026-06-16: Hold roster as constituted; don't make personnel calls off a one-ticket baseline — re-examine passes/ticket after two more tickets before any corps change.
 - 2026-06-17: Unit Memory established. Officers now read this protocol before acting.
 <!-- SCRIBE:END -->

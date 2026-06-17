@@ -375,30 +375,30 @@ def project_selector(cfg, app: Optional[str]) -> str:
 
 
 def health_pill(h: dict) -> str:
-    if h.get("healthy"):
-        w = h.get("warnings") or 0
-        extra = f" · {w} warning{'s' if w != 1 else ''}" if w else ""
-        return f'<span class="hpill ok" title="all critical checks passed">&#9679; System healthy{extra}</span>'
-    n = h.get("problems") or 0
-    return f'<span class="hpill bad" title="fix before starting work">&#9679; {n} problem{"s" if n != 1 else ""}</span>'
+    probs = [c for c in h.get("checks", []) if c["status"] == "bad"]
+    warns = [c for c in h.get("checks", []) if c["status"] == "warn"]
+    healthy = h.get("healthy")
+    cls = "ok" if healthy else "bad"
+    n = len(probs)
+    label = "&#9679; System healthy" if healthy else f"&#9679; {n} problem" + ("s" if n != 1 else "")
+    if healthy and warns:
+        label += f" · {len(warns)} warning" + ("s" if len(warns) != 1 else "")
+    items = probs + warns
+    if not items:
+        return f'<span class="hpill {cls}">{label}</span>'
+    rows = "".join(
+        f'<div class=hpi><span class="tag {c["status"]}">{"fix" if c["status"] == "bad" else "warn"}</span> '
+        f'{_esc(c["name"])}{(" — " + _esc(c["detail"])) if c["detail"] else ""}</div>' for c in items)
+    return (f'<details class="hd {cls}"><summary class="hpill {cls}">{label}</summary>'
+            f'<div class=hpanel>{rows}'
+            '<button class=recheck type=button onclick="location.reload()">Re-check</button></div></details>')
 
 
 def health_banner(h: dict) -> str:
-    recheck = '<button class=hbbtn type=button onclick="location.reload()">Re-check</button>'
+    # Only shown when something is actually wrong — when healthy, the header pill is enough,
+    # so the cockpit stays calm (warnings live behind the pill).
     if h.get("healthy"):
-        w = h.get("warnings") or 0
-        title = ("System is healthy — all critical checks passed"
-                 + (f" ({w} warning{'s' if w != 1 else ''})" if w else ""))
-        warns = [c for c in h.get("checks", []) if c["status"] == "warn"]
-        extra = ""
-        if warns:
-            extra = "<ul class=hbissues>" + "".join(
-                f'<li><span class="tag warn">warn</span> {_esc(c["name"])}'
-                f'{(" — " + _esc(c["detail"])) if c["detail"] else ""}</li>' for c in warns) + "</ul>"
-        return (f'<div class="healthbar ok"><div class=hbrow>'
-                f'<div class=hbtitle><span class=hbdot></span>{title}</div>'
-                f'<div class=hbactions><span class=models>officers on {_esc(h.get("models", {}).get("builder", "?"))}</span>'
-                f'{recheck}</div></div>{extra}</div>')
+        return ""
     bad = [c for c in h.get("checks", []) if c["status"] == "bad"]
     items = "".join(
         f'<li><span class="tag bad">fix</span> {_esc(c["name"])}'
@@ -406,7 +406,8 @@ def health_banner(h: dict) -> str:
     return (f'<div class="healthbar bad"><div class=hbrow>'
             f'<div class=hbtitle><span class=hbdot></span>'
             f'{len(bad)} problem{"s" if len(bad) != 1 else ""} to fix before the unit can work tickets</div>'
-            f'<div class=hbactions>{recheck}</div></div><ul class=hbissues>{items}</ul></div>')
+            '<div class=hbactions><button class=hbbtn type=button onclick="location.reload()">Re-check</button>'
+            f'</div></div><ul class=hbissues>{items}</ul></div>')
 
 
 def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
@@ -466,6 +467,13 @@ padding:8px 12px;font:inherit;cursor:pointer}
 .hpill{font-size:12px;font-weight:700;padding:6px 13px;border-radius:99px}
 .hpill.ok{color:var(--ok);background:var(--okbg);border:1px solid #1c5238}
 .hpill.bad{color:var(--bad);background:var(--badbg);border:1px solid #5a1f22}
+.hd{position:relative}.hd>summary{list-style:none;cursor:pointer}
+.hd>summary::-webkit-details-marker{display:none}
+.hpanel{position:absolute;top:calc(100% + 8px);right:0;z-index:40;min-width:320px;background:var(--panel);
+border:1px solid var(--line2);border-radius:12px;padding:10px;box-shadow:0 16px 40px rgba(0,0,0,.55)}
+.hpi{font-size:12.5px;color:var(--dim);padding:5px 4px}
+.recheck{margin-top:9px;background:#1b2230;border:1px solid var(--line2);color:var(--ink);border-radius:8px;
+padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer}
 /* autopilot switch */
 .apsw{display:flex;align-items:center;gap:9px;margin:0;padding:5px 6px 5px 13px;border:1px solid var(--line2);
 border-radius:99px;background:#0d1119}
@@ -564,6 +572,11 @@ letter-spacing:0;font-size:12px;font-weight:600;color:var(--faint)}
 <script>
 var APP="{{APP}}";
 function proj(v){APP=v;location.search="?app="+encodeURIComponent(v);}
+document.addEventListener("click",function(e){
+  document.querySelectorAll("details[open]").forEach(function(d){
+    if(!d.contains(e.target)) d.removeAttribute("open");
+  });
+});
 async function tick(){
   try{
     var r=await fetch("/api/board?app="+encodeURIComponent(APP),{cache:"no-store"});

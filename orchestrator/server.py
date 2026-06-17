@@ -42,53 +42,98 @@ def _charged() -> bool:
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
+    app0 = current_app or (cfg.apps[0].name if cfg.apps else "")
     apps = "".join(
         f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
         f"{html.escape(a.name)}</option>" for a in cfg.apps)
     effort = "".join(f"<option value='{e}'>{e}</option>"
                      for e in ("low", "medium", "high", "xhigh", "max"))
+    run_dis = "disabled" if (_state["active"] or not healthy) else ""
     if _state["active"]:
-        status = '<span class="b warn">● run in progress — reload to refresh</span>'
-    elif _state["last_msg"]:
-        status = f'<span class="b bad">{html.escape(_state["last_msg"])}</span>'
+        status = '<span class="tbnote run">&#9679; run in progress…</span>'
+    elif _state.get("last_msg"):
+        status = f'<span class="tbnote bad">{html.escape(_state["last_msg"])}</span>'
     else:
-        status = '<span class="muted" style="font-size:12px">idle</span>'
+        status = ""
+
+    def busy(k):
+        return "disabled" if _state.get(k) else ""
+
     return f"""
 <style>
-.controlbar{{padding:14px 30px;border-bottom:1px solid #1e222b;background:#11151d;display:flex;gap:10px;align-items:center;flex-wrap:wrap}}
-.controlbar select,.controlbar input[type=text]{{background:#0d0f14;border:1px solid #232936;color:#e8eaed;border-radius:8px;padding:8px 10px}}
-.controlbar input[type=text]{{min-width:340px}}
-.controlbar button{{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 16px;font-weight:650;cursor:pointer}}
-.controlbar label{{font-size:13px;color:#c4c9d2}}
-.pill{{background:#1b2230;border:1px solid #2a3650;color:#cfe0ff;border-radius:8px;padding:8px 12px;font-size:13px;text-decoration:none;cursor:pointer}}
+.tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid #1f2531;background:#0e1219}}
+.tbar .btn{{display:inline-flex;align-items:center;gap:7px;background:#161b25;border:1px solid #2a3343;color:#e9ecf1;border-radius:9px;padding:9px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap}}
+.tbar .btn:hover{{background:#1b2230}}
+.tbar .btn.primary{{background:#3b6cff;border-color:#3b6cff;color:#fff}}
+.tbar .btn.primary:hover{{background:#2f5ce0}}
+.tbar details.menu{{position:relative}}
+.tbar details.menu>summary{{list-style:none}}
+.tbar details.menu>summary::-webkit-details-marker{{display:none}}
+.tbar details.menu>summary::after{{content:" \\25BE";color:#8a929f;font-size:10px}}
+.tbar details[open]>summary{{background:#1b2230;border-color:#3b6cff}}
+.tbar .panel{{position:absolute;top:calc(100% + 7px);left:0;z-index:30;min-width:212px;background:#12161f;border:1px solid #2a3343;border-radius:12px;padding:6px;display:flex;flex-direction:column;gap:2px;box-shadow:0 16px 40px rgba(0,0,0,.5)}}
+.tbar .panel.right{{left:auto;right:0}}
+.tbar .panel a,.tbar .panel form>button{{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:none;border:0;color:#e9ecf1;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;white-space:nowrap}}
+.tbar .panel a:hover,.tbar .panel form>button:hover{{background:#1b2230}}
+.tbar .panel form{{margin:0}}
+.tbar .panel.form{{min-width:312px;gap:9px;padding:13px}}
+.tbar .panel.form select,.tbar .panel.form input[type=text]{{background:#0d1119;border:1px solid #2a3343;color:#e9ecf1;border-radius:8px;padding:8px 10px;font:inherit;width:100%}}
+.tbar .panel.form .row{{display:flex;gap:8px;align-items:center}}
+.tbar .panel.form button{{display:block;width:100%;background:#3b6cff;color:#fff;border:0;border-radius:8px;padding:9px;font-weight:650;cursor:pointer}}
+.tbar .panel.form button:disabled{{background:#222a37;color:#5c6573;cursor:not-allowed}}
+.tbar .panel .sep{{height:1px;background:#1f2531;margin:5px 4px}}
+.tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#5c6573;padding:6px 11px 3px}}
+.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}
+.tbar .grow{{flex:1}}
 </style>
-<div class=controlbar>
-  <form method=post action=/api/run style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0">
-    <select name=app title=app>{apps}</select>
-    <select name=kind title=mode>
-      <option value=task>task (free text)</option>
-      <option value=ticket>ticket key(s)</option>
-      <option value=drain>drain my Jira</option>
-    </select>
-    <input type=text name=text placeholder="description — or 'AUTO-1 AUTO-2' — or blank for drain">
-    <select name=effort title=effort><option value=''>effort: default</option>{effort}</select>
-    <label><input type=checkbox name=live> live</label>
-    <button {"disabled" if _state["active"] or not healthy else ""} title="{'fix health problems first' if not healthy else 'run'}">&#9654; Run</button>
-  </form>
+<div class=tbar>
+  <a class="btn primary" href="/tickets?app={html.escape(app0)}">&#127915; Choose a ticket</a>
+
+  <details class=menu>
+    <summary class=btn>&#43; Free task</summary>
+    <div class="panel form">
+      <form method=post action=/api/run>
+        <input type=hidden name=kind value=task>
+        <div class=ph>Describe a bug or feature</div>
+        <input type=text name=text placeholder="e.g. fix the cut-off column on /leads">
+        <div class=row>
+          <select name=app title=project style="flex:1">{apps}</select>
+          <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
+        </div>
+        <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=live> live (build + merge to DEV)</label>
+        <button {run_dis}>&#9654; Run</button>
+      </form>
+    </div>
+  </details>
+
+  <details class=menu>
+    <summary class=btn>&#9881; Unit</summary>
+    <div class=panel>
+      <div class=ph>Convene the officers</div>
+      <form method=post action=/api/council><button {busy('councilling')}>&#128172; Hold council</button></form>
+      <a href="/meeting">&#127908; Convene a meeting</a>
+      <form method=post action=/api/ship-review><input type=hidden name=app value="{html.escape(app0)}"><button {busy('shipreview')}>&#128640; Ship review</button></form>
+      <div class=sep></div>
+      <form method=post action=/api/drill><button {busy('drilling')}>&#127894; Run drill</button></form>
+      <form method=post action=/api/scribe><button {busy('scribing')}>&#128221; Update memory</button></form>
+    </div>
+  </details>
+
+  <details class=menu>
+    <summary class=btn>&#9776; Views</summary>
+    <div class="panel right">
+      <a href="/tasks">&#128203; Task log</a>
+      <a href="/council">&#128172; Councils &amp; meetings</a>
+      <a href="/memory">&#128221; Unit memory</a>
+      <a href="/standup">&#129303; Daily standup</a>
+      <a href="/drill">&#127894; Last drill</a>
+      <div class=sep></div>
+      <a href="/report">&#128030; Report a problem</a>
+    </div>
+  </details>
+
+  <span class=grow></span>
   {status}
-  &nbsp;<a class=pill href="/report">&#128030; Report a problem</a>
-  <a class=pill href="/standup">&#129303; Daily standup</a>
-  <form method=post action=/api/drill style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("drilling") else ""}>&#127894; Drill</button></form>
-  <a class=pill href="/drill">last drill</a>
-  <form method=post action=/api/council style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("councilling") else ""}>&#128172; Council</button></form>
-  <a class=pill href="/tickets?app={html.escape(current_app or (cfg.apps[0].name if cfg.apps else ''))}">&#127915; Choose tickets</a>
-  <a class=pill href="/council">councils</a>
-  <a class=pill href="/meeting">&#127908; Meeting</a>
-  <form method=post action=/api/ship-review style="display:inline;margin:0"><input type=hidden name=app value="{html.escape(current_app or (cfg.apps[0].name if cfg.apps else ''))}"><button class=pill {"disabled" if _state.get("shipreview") else ""}>&#128640; Ship review</button></form>
-  <form method=post action=/api/scribe style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("scribing") else ""}>&#128221; Scribe</button></form>
-  <a class=pill href="/memory">&#128221; Unit memory</a>
-  <a class=pill href="/tasks">&#128203; Task log</a>
-  &nbsp;<a href="/" style="font-size:12px">&#8635; reload</a>
 </div>"""
 
 
