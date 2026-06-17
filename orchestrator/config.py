@@ -82,8 +82,12 @@ class AppConfig:
 class Config:
     apps: list[AppConfig]
 
-    # --- models (role asymmetry: a strong reviewer is worth it) ---
-    builder_model: str = "claude-sonnet-4-6"
+    # --- models (default: all-Opus across the unit) ---
+    # builder_model drives the Builder + the council round-table; reviewer_model drives the
+    # Reviewer + every verifier/staff officer (Scout, Provost, Quartermaster, Adjutant,
+    # Drillmaster, the General/chair). Both default to Opus. On Opus, the "xhigh"/ultra effort
+    # tier is real (it falls back to high only on non-Opus models).
+    builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
 
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
