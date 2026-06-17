@@ -1,53 +1,41 @@
 #!/bin/zsh
-# The General — refresh the War Room cockpit.
-# Stops any running cockpit on :8787, re-runs the health check, and relaunches
-# serve so it picks up the latest code (Flask does not hot-reload). Double-click it,
-# or run it from a Terminal.
-#
-# Canonical copy lives here in the repo. Install/refresh the Desktop shortcut with:
-#   cp ~/Projects/General/scripts/Refresh-General.command ~/Desktop/Refresh-General.command
-#   chmod +x ~/Desktop/Refresh-General.command
+# The General — refresh & run the War Room in your browser.
+# Double-click any time: it stops the old cockpit, starts serve on the latest code,
+# waits until it's actually listening, then opens your browser. Ctrl-C in this window stops it.
 
-set -e
+REPO="$HOME/Projects/General"
 PORT=8787
+URL="http://localhost:$PORT"
 
-cd "$HOME/Projects/General" || { echo "General repo not found at ~/Projects/General"; exit 1; }
+# GUI-launched scripts get a minimal PATH — add the usual tool locations.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-# Match what ./general does: activate the venv, load secrets from .env
+cd "$REPO" || { echo "General repo not found at ~/Projects/General"; exit 1; }
 [[ -f .venv/bin/activate ]] && source .venv/bin/activate
 [[ -f .env ]] && { set -a; source .env; set +a; }
 
 echo "★ Refreshing the War Room…"
 
-# 1) Stop any cockpit already bound to the port
-PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
+# 1) Stop any cockpit already on the port (this is the "refresh")
+PIDS=$(lsof -ti tcp:$PORT 2>/dev/null)
 if [[ -n "$PIDS" ]]; then
   echo "  stopping old cockpit (pid: $PIDS)"
-  kill $PIDS 2>/dev/null || true
-  sleep 1
-  PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
-  [[ -n "$PIDS" ]] && { echo "  forcing stop"; kill -9 $PIDS 2>/dev/null || true; }
-else
-  echo "  no cockpit running — fresh start"
+  kill $PIDS 2>/dev/null; sleep 1
+  PIDS=$(lsof -ti tcp:$PORT 2>/dev/null)
+  [[ -n "$PIDS" ]] && kill -9 $PIDS 2>/dev/null
 fi
 
-# 2) Preflight health check
+# 2) Quick pre-flight (health is also shown inside the dashboard)
 echo
 ./general doctor
 echo
 
-# 3) Relaunch the cockpit and open it like an app (chromeless window if Chrome/Edge is present)
-open_app() {
-  local url="http://localhost:$PORT"
-  if [[ -d "/Applications/Google Chrome.app" ]]; then
-    open -na "Google Chrome" --args --app="$url" --new-window
-  elif [[ -d "/Applications/Microsoft Edge.app" ]]; then
-    open -na "Microsoft Edge" --args --app="$url" --new-window
-  else
-    open "$url"
-  fi
-}
+# 3) Open the browser as soon as the server is actually listening (up to ~30s)
+( for i in {1..60}; do
+    curl -s -o /dev/null "$URL" 2>/dev/null && { open "$URL"; break; }
+    sleep 0.5
+  done ) &
 
-echo "★ Launching cockpit → http://localhost:$PORT   (Ctrl-C to stop)"
-( sleep 2; open_app ) &
+# 4) Run the cockpit in the foreground (output here; Ctrl-C stops it)
+echo "★ Cockpit → $URL   (Ctrl-C to stop)"
 exec ./general serve

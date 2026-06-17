@@ -1,34 +1,44 @@
 #!/bin/zsh
 # Elite War Room — the cockpit as a Dock app.
-# Stops any old cockpit, relaunches serve, and opens it as a chromeless app window.
-# Health is shown INSIDE the dashboard (green/red banner), so no Terminal is needed.
-# Full server output is logged to ~/Projects/General/cockpit.log for debugging.
+# Starts serve, WAITS until it's actually listening, then opens the window.
+# If serve fails, opens the log so you can see why (instead of silently doing nothing).
 
 REPO="$HOME/Projects/General"
 PORT=8787
+LOG="$REPO/cockpit.log"
+URL="http://localhost:$PORT"
 
-cd "$REPO" || { open "https://example.invalid/general-not-found"; exit 1; }
+# GUI-launched apps get a minimal PATH — add the usual tool locations.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+cd "$REPO" 2>/dev/null || { osascript -e 'display alert "Elite War Room" message "Repo not found at ~/Projects/General"'; exit 1; }
 [[ -f .venv/bin/activate ]] && source .venv/bin/activate
 [[ -f .env ]] && { set -a; source .env; set +a; }
 
-# Stop any cockpit already bound to the port (so this is also a "refresh")
-PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
-[[ -n "$PIDS" ]] && { kill $PIDS 2>/dev/null || true; sleep 1; }
-PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
-[[ -n "$PIDS" ]] && { kill -9 $PIDS 2>/dev/null || true; }
+{ echo; echo "=== $(date '+%Y-%m-%d %H:%M:%S') launching cockpit ==="; } >> "$LOG" 2>&1
 
-# Open the cockpit as a standalone app window once the server is up
-open_app() {
-  local url="http://localhost:$PORT"
-  if [[ -d "/Applications/Google Chrome.app" ]]; then
-    open -na "Google Chrome" --args --app="$url" --new-window
-  elif [[ -d "/Applications/Microsoft Edge.app" ]]; then
-    open -na "Microsoft Edge" --args --app="$url" --new-window
-  else
-    open "$url"
+# Stop any cockpit already bound to the port (this doubles as "refresh")
+PIDS=$(lsof -ti tcp:$PORT 2>/dev/null)
+[[ -n "$PIDS" ]] && { kill $PIDS 2>/dev/null; sleep 1; PIDS=$(lsof -ti tcp:$PORT 2>/dev/null); [[ -n "$PIDS" ]] && kill -9 $PIDS 2>/dev/null; }
+
+# Start the cockpit in the background, logging everything
+./general serve >> "$LOG" 2>&1 &
+SERVE_PID=$!
+
+# Wait until it's actually listening (up to ~30s). If serve dies, show the log.
+for i in {1..60}; do
+  if curl -s -o /dev/null "$URL" 2>/dev/null; then break; fi
+  if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+    osascript -e 'display alert "Elite War Room failed to start" message "Opening cockpit.log so you can see the error."' 2>/dev/null
+    open -a TextEdit "$LOG"
+    exit 1
   fi
-}
-( sleep 2; open_app ) &
+  sleep 0.5
+done
 
-# Run the cockpit in the foreground so the app stays alive (Quit = stop the cockpit)
-exec ./general serve >> "$REPO/cockpit.log" 2>&1
+# Open the cockpit. Plain `open` is the most reliable — it uses your default browser and
+# always produces a window (the chromeless-window trick was the thing that silently failed).
+open "$URL"
+
+# Keep the app alive while the cockpit runs (Quit the app = stop the cockpit)
+wait "$SERVE_PID"

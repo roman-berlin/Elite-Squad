@@ -11,6 +11,16 @@ import subprocess
 from shutil import which
 from typing import Any
 
+# GUI-launched apps inherit a minimal PATH, so `which` alone can miss Homebrew/bun tools
+# (e.g. gh). Also look in the common bin locations.
+_EXTRA_BINS = ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.bun/bin"))
+
+
+def _has(cmd: str) -> bool:
+    if which(cmd):
+        return True
+    return any(os.path.exists(os.path.join(p, cmd)) for p in _EXTRA_BINS)
+
 
 def _git_ref(repo_path: str, ref: str) -> bool:
     try:
@@ -36,9 +46,9 @@ def checks(cfg) -> list[dict[str, str]]:
         add("Agent SDK", "ok", "importable")
     except Exception:  # noqa: BLE001
         add("Agent SDK", "bad", "not installed — pip install -r requirements.txt")
-    add("git", "ok" if which("git") else "bad", "" if which("git") else "not found on PATH")
-    add("gh CLI", "ok" if which("gh") else "warn",
-        "present" if which("gh") else "missing — PRs will be skipped")
+    add("git", "ok" if _has("git") else "bad", "" if _has("git") else "not found on PATH")
+    add("gh CLI", "ok" if _has("gh") else "warn",
+        "present" if _has("gh") else "missing — PRs will be skipped")
 
     from . import notify
     add("Telegram", "ok" if notify.configured() else "warn",
