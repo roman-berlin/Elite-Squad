@@ -7,6 +7,13 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **War Room chat** — a messaging view (toolbar **💬 Chat**, with a red unread badge) to talk
+  with the unit. Pending decisions — the reviewer's product questions, escalations, and Builder
+  **halts** — appear as cards you answer inline; below them is a free-form thread with The
+  General. Your reply runs the same `route_message` backend as a Telegram reply, so it
+  **resolves the decision and resumes the parked ticket** (or gets the General's answer), and
+  Telegram + dashboard stay in sync.
+
 - **Smarter run outcomes** — when the Builder *deliberately halts* on a failed precondition
   (e.g. a missing prior migration phase) and makes no edits, that's now surfaced as
   **"needs you" + the Builder's full report** (Telegram + dashboard + parked so Autopilot

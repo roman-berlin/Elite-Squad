@@ -90,6 +90,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     def busy(k):
         return "disabled" if _state.get(k) else ""
 
+    try:
+        from . import decisions
+        _npend = len(decisions.load(cfg))
+    except Exception:  # noqa: BLE001
+        _npend = 0
+    chat_badge = f'<span class=cbadge>{_npend}</span>' if _npend else ""
+
     return f"""
 <style>
 .tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid #1f2531;background:#0e1219}}
@@ -116,9 +123,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#5c6573;padding:6px 11px 3px}}
 .tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}
 .tbar .grow{{flex:1}}
+.tbar .chatbtn{{display:inline-flex;align-items:center;gap:6px}}
+.tbar .cbadge{{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px}}
 </style>
 <div class=tbar>
   <a class="btn primary" href="/tickets?app={html.escape(app0)}">&#127915; Choose a ticket</a>
+  <a class="btn chatbtn" href="/chat">&#128172; Chat{chat_badge}</a>
 
   <details class=menu>
     <summary class=btn>&#43; Free task</summary>
@@ -166,6 +176,56 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <span class=grow></span>
   {status}
 </div>"""
+
+
+def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
+    """Parse the commander-notes log ('Q: …' / 'A (General): …') into chat bubbles."""
+    out: list[tuple[str, str]] = []
+    for raw in (notes or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("Q:"):
+            out.append(("you", s[2:].strip()))
+        elif "A (General):" in s:
+            out.append(("unit", s.split("A (General):", 1)[1].strip()))
+        elif out:
+            out[-1] = (out[-1][0], (out[-1][1] + " " + s).strip())
+        else:
+            out.append(("unit", s))
+    return out
+
+
+def _chat_inner(cfg: Config) -> str:
+    from . import council, decisions
+    try:
+        pend = decisions.load(cfg)
+    except Exception:  # noqa: BLE001
+        pend = []
+    cards = ""
+    for d in pend:
+        tid = html.escape(str(d.get("id", "")))
+        q = html.escape((d.get("question") or d.get("summary") or "").strip())[:1600]
+        cards += (f'<div class=pcard><div class=ph2>&#128681; {tid} · the unit needs your call</div>'
+                  f'<div class=pq>{q}</div>'
+                  '<form class=preply method=post action=/api/chat>'
+                  f'<input type=hidden name=ticket value="{tid}">'
+                  f'<input type=text name=text placeholder="your decision for {tid}…" autocomplete=off>'
+                  '<button>Send</button></form></div>')
+    pending_html = f'<div class=pending>{cards}</div>' if cards else ""
+    try:
+        notes = council.recent_commander_notes(cfg, lines=240)
+    except Exception:  # noqa: BLE001
+        notes = ""
+    bubbles = ""
+    for who, text in _chat_bubbles(notes):
+        label = "You" if who == "you" else "The General"
+        bubbles += (f'<div class="msg {who}"><div class=who>{label}</div>'
+                    f'<div class=bub>{html.escape(text)}</div></div>')
+    if not bubbles and not cards:
+        bubbles = ('<div class=cempty>No messages yet. When an officer needs a decision it shows '
+                   'up here — or send the General a message below.</div>')
+    return pending_html + f'<div class=thread>{bubbles}</div>'
 
 
 def create_app(cfg: Config):
@@ -487,6 +547,56 @@ def create_app(cfg: Config):
                     _state["shipreview"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
+
+    @app.get("/chat")
+    def chat_page():
+        style = ("<style>"
+                 ".chat{max-width:780px;margin:0 auto}"
+                 ".pcard{background:#1a160f;border:1px solid #3a2f12;border-radius:14px;padding:14px 16px;margin-bottom:12px}"
+                 ".pcard .ph2{color:#f7b955;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
+                 ".pcard .pq{color:#e9ecf1;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:ui-monospace,Menlo,monospace;line-height:1.5}"
+                 ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
+                 ".thread{display:flex;flex-direction:column;gap:9px;margin:16px 0 96px}"
+                 ".msg{display:flex;flex-direction:column;max-width:80%}"
+                 ".msg.you{align-self:flex-end;align-items:flex-end}.msg.unit{align-self:flex-start}"
+                 ".who{font-size:10px;color:#5c6573;margin:0 6px 2px}"
+                 ".bub{padding:9px 13px;border-radius:14px;font-size:13px;line-height:1.5;white-space:pre-wrap}"
+                 ".msg.unit .bub{background:#161b25;border:1px solid #232b38;border-bottom-left-radius:4px}"
+                 ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
+                 ".cempty{color:#8a929f;padding:30px 8px;text-align:center;font-size:13px}"
+                 ".composer{position:fixed;bottom:0;left:0;right:0;background:#0d0f14;border-top:1px solid #1e222b;padding:12px 30px}"
+                 ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
+                 "</style>")
+        body = (style + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
+                '<div class=composer><form method=post action=/api/chat>'
+                '<input type=text name=text autocomplete=off autofocus '
+                'placeholder="Message the unit…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
+                '<script>window.scrollTo(0,document.body.scrollHeight);'
+                'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
+                'if(r.ok){document.getElementById("cinner").innerHTML=await r.text();}}catch(e){}},5000);'
+                '</script>')
+        return _wrap("Chat with the unit", body)
+
+    @app.get("/api/chat-thread")
+    def chat_thread_api():
+        from flask import Response
+        return Response(_chat_inner(cfg), mimetype="text/html")
+
+    @app.post("/api/chat")
+    def chat_api():
+        text = (request.form.get("text") or "").strip()
+        tid = (request.form.get("ticket") or "").strip()
+        if text:
+            msg = f"{tid}: {text}" if tid else text
+
+            def _bg():
+                try:
+                    from . import decisions
+                    decisions.route_message(cfg, audit, msg)
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"chat failed: {exc}"
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/chat")
 
     @app.get("/report")
     def report_form():

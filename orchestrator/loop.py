@@ -178,6 +178,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
         if not git.has_changes():
             if _is_deliberate_halt(build.summary or build.raw):
                 report = (build.summary or build.raw or "(no report)").strip()
+                decisions.add(cfg, ticket, app.name, report[:1500])   # so you can answer it
                 audit.record("needs_human", ticket_id=ticket.id, iteration=iteration,
                              question=report[:1500], reason="builder halted — precondition/blocker")
                 _notify(cfg, f"🛑 {ticket.id} — the Field Engineer HALTED before any write "
