@@ -251,9 +251,11 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     ts = _scope(tasks, app)
     if not ts:
         return None
-    running = [t for t in ts if not t.get("outcome")]
-    t = running[0] if running else ts[0]   # tasks are newest-first
-    live = bool(running) or active
+    # "live" means a run is genuinely in flight (a manual Run or Autopilot), NOT merely
+    # that an old audit row lacks a terminal event (e.g. an interrupted ticket). Otherwise a
+    # stopped attempt would show as forever-running.
+    t = ts[0]                               # newest task (newest-first) = current or last run
+    live = bool(active)
     # Approximate phase from what's been recorded so far.
     has_build = any(d.get("build_summary") or d.get("tools") for d in t.get("passes_list", []))
     has_review = t.get("verdict") is not None
@@ -343,7 +345,7 @@ def _feed_html(items: list[dict]) -> str:
 
 def render_board(cfg, app: Optional[str], state: dict) -> str:
     """Inner board (everything that updates on the poll)."""
-    active = bool(state.get("active"))
+    active = bool(state.get("active")) or bool((state.get("autopilot") or {}).get("on"))
     tasks = D.load_tasks(cfg.audit_path)
     k = _kpi_html(kpis(cfg, tasks, app))
     run = _run_html(active_run(cfg, tasks, app, active))

@@ -81,6 +81,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/drill style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("drilling") else ""}>&#127894; Drill</button></form>
   <a class=pill href="/drill">last drill</a>
   <form method=post action=/api/council style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("councilling") else ""}>&#128172; Council</button></form>
+  <a class=pill href="/tickets?app={html.escape(current_app or (cfg.apps[0].name if cfg.apps else ''))}">&#127915; Choose tickets</a>
   <a class=pill href="/council">councils</a>
   <form method=post action=/api/scribe style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("scribing") else ""}>&#128221; Scribe</button></form>
   <a class=pill href="/memory">&#128221; Unit memory</a>
@@ -147,6 +148,78 @@ def create_app(cfg: Config):
     def tasks_page():
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged())
         return page.replace("</header>", "</header>" + _control_bar(cfg), 1)
+
+    @app.get("/tickets")
+    def tickets_page():
+        app_name = request.args.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        style = ("<style>.tlist{margin:10px 0;border:1px solid #232936;border-radius:10px;overflow:hidden}"
+                 ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid #1a1f29;cursor:pointer}"
+                 ".trow:first-child{border-top:0}.trow:hover{background:#151a23}"
+                 ".trow input{margin-top:3px}.tkey{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6aa9ff;white-space:nowrap}"
+                 ".tsum{color:#e8eaed}.trun{display:flex;gap:14px;align-items:center;margin-top:14px;flex-wrap:wrap}"
+                 ".trun button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 18px;font-weight:650;cursor:pointer}"
+                 ".hint{color:#8a909c;font-size:13px}</style>")
+        try:
+            items = intake.from_drain(cfg, app_name, 30)
+        except Exception as exc:  # noqa: BLE001
+            return _wrap("Choose tickets", f"<p class=hint>Couldn't load tickets for "
+                         f"<b>{html.escape(app_name)}</b>: {html.escape(str(exc))}</p>")
+        if not items:
+            return _wrap("Choose tickets", "<p class=hint>Nothing assigned to you in "
+                         f"<b>{html.escape(app_name)}</b> (In Progress / To Do). Clear queue.</p>")
+        rows = "".join(
+            f'<label class=trow><input type=checkbox name=ticket value="{html.escape(t.id)}">'
+            f'<span class=tkey>{html.escape(t.id)}</span>'
+            f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span></label>'
+            for _, t in items)
+        effort = "".join(f"<option value='{e}'>{e}</option>"
+                         for e in ("low", "medium", "high", "xhigh", "max"))
+        body = (style
+                + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
+                  "Tick the ones to develop, then Run.</p>"
+                  '<form method=post action=/api/run-selected>'
+                  f'<input type=hidden name=app value="{html.escape(app_name)}">'
+                  f'<div class=tlist>{rows}</div>'
+                  '<div class=trun>'
+                  '<label><input type=checkbox name=live> live (build + merge to DEV)</label>'
+                  f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
+                  '<button>&#9654; Develop selected</button>'
+                  '<span class=hint>leave “live” off for a safe dry-run first</span>'
+                  '</div></form>')
+        return _wrap(f"Choose tickets — {app_name}", body)
+
+    @app.post("/api/run-selected")
+    def run_selected_api():
+        if _state["active"]:
+            return redirect("/")
+        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        keys = request.form.getlist("ticket")
+        if not keys:
+            return redirect(f"/tickets?app={app_name}")
+        if not health.summary(cfg)["healthy"]:
+            _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            return redirect("/")
+        cfg.dry_run = request.form.get("live") != "on"
+        effort = request.form.get("effort") or None
+        if effort:
+            cfg.builder_effort = normalize_effort(effort)
+            cfg.adaptive_effort = False
+        try:
+            worklist = intake.from_tickets(cfg, app_name, keys)
+        except Exception as exc:  # noqa: BLE001
+            _state["last_msg"] = f"could not start: {exc}"
+            return redirect("/")
+
+        def _bg():
+            _state["active"], _state["last_msg"] = True, ""
+            try:
+                asyncio.run(run_loop(cfg, worklist, audit))
+            except Exception as exc:  # noqa: BLE001
+                _state["last_msg"] = str(exc)
+            finally:
+                _state["active"] = False
+        threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/")
 
     @app.post("/api/run")
     def run_api():
