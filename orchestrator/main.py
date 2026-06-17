@@ -79,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     mtg.add_argument("--officers", help="comma-separated officer names/keys to attend (default: all relevant)")
     mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
     sub.add_parser("smalltalk", help="a corridor exchange between two officers (flavor; sometimes a real insight)")
+    sr = sub.add_parser("ship-review", help="ready-to-prod review: QM certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
+    sr.add_argument("app", nargs="?", help="app to review (default: first configured)")
     adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
@@ -261,6 +263,13 @@ async def _main(argv: list[str]) -> int:
         from . import council
         from .audit import AuditLog
         print(await council.small_talk(cfg, audit=AuditLog(cfg.audit_path)))
+        return 0
+
+    if args.command == "ship-review":
+        from . import council
+        from .audit import AuditLog
+        print(await council.ship_review(cfg, getattr(args, "app", None),
+                                        audit=AuditLog(cfg.audit_path)))
         return 0
 
     if args.command == "scribe":

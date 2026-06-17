@@ -112,6 +112,19 @@ _MEETING_CHAIR_SYSTEM = (
     "irreversible, no safe default). One question per line ending in '?', else 'None.'"
 )
 
+_SHIP_REVIEW_CHAIR_SYSTEM = (
+    "You are THE GENERAL, chairing a SHIP-REVIEW: is DEV ready to promote to MAIN (production)? "
+    "You have the Quartermaster's readiness report and the officers' debate. CRITICAL: the unit "
+    "NEVER promotes to MAIN — that is the Commander's (Roman's) call alone. You only recommend. "
+    "Output exactly this markdown shape and nothing else:\n\n"
+    "**VERDICT** — GO / NO-GO / GO WITH CAVEATS (one blunt line).\n\n"
+    "**BLOCKERS** — bullets: anything that must be fixed before prod (build, types, migrations, "
+    "deps, env/secrets, security, known defects). Write 'None' only if truly clean.\n\n"
+    "**PRE-FLIGHT** — bullets: what the Commander should verify or run before promoting.\n\n"
+    "**FOR THE COMMANDER** — end with the go/no-go, framed as his decision: 'Promote DEV→MAIN? "
+    "Your call.' (Only you promote to prod.)"
+)
+
 
 # --------------------------------------------------------------------------- #
 # storage (kept beside the audit log, OUTSIDE every target repo)
@@ -337,6 +350,55 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     except Exception as exc:  # noqa: BLE001
         print(f"  Scribe skipped: {exc}", flush=True)
     print(f"\n  meeting saved → {saved}\n", flush=True)
+    return decision
+
+
+async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> str:
+    """A 'ready to prod?' review: the Quartermaster certifies deploy-readiness, then QM + Provost
+    + Inspector debate it, and the General issues a GO / NO-GO recommendation. The unit NEVER
+    promotes to MAIN — this only tells the Commander whether it's safe; the promotion is his."""
+    app = cfg.app(app_name) if app_name else (cfg.apps[0] if getattr(cfg, "apps", None) else None)
+    name = app.name if app else (app_name or "the app")
+    cwd = _general_root()
+
+    print(f"\n🎖️  Ship-review — {name}: is DEV ready for MAIN?\n", flush=True)
+    qm_report = ""
+    try:
+        from . import quartermaster
+        print("  · Quartermaster certifying deploy-readiness…", flush=True)
+        qm_report = await quartermaster.inspect(cfg, name)
+    except Exception as exc:  # noqa: BLE001
+        qm_report = f"(Quartermaster check unavailable: {exc})"
+
+    digest = format_signals(collect_signals(cfg))
+    notes = recent_commander_notes(cfg)
+    context = digest + "\n\nQuartermaster readiness report:\n" + (qm_report or "(none)")[:3500]
+    topic = f"Is {name}'s DEV ready to promote to MAIN (production)?"
+    roster = _select_officers(["quartermaster", "provost", "inspector"])
+    said = await discuss(cfg, roster, context, notes, topic, rounds=1)
+
+    chair_prompt = "\n".join([
+        f"Ship-review for {name}. The unit's record:", "", digest, "",
+        "Quartermaster readiness report:", "", (qm_report or "(none)")[:3500], "",
+        "The officers debated:", "", *[f"### {who}\n{what}\n" for who, what in said],
+        "Now write the recommendation. Remember: only the Commander promotes to MAIN.",
+    ])
+    chair = await run_agent(chair_prompt, ClaudeAgentOptions(
+        model=cfg.reviewer_model, system_prompt=memory.preamble() + _SHIP_REVIEW_CHAIR_SYSTEM, cwd=cwd,
+        permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        max_turns=6, effort="high"), tag="the-general")
+    decision = (chair.final or chair.text or "(no recommendation)").strip()
+
+    saved = _save_transcript(cfg, f"ship-review: {name}", context, said, decision)
+    notify.send(f"🚀 *Ship-review — {name}*\n\n{decision[:3500]}\n\n_Promotion to MAIN is yours, Commander._")
+    if audit is not None:
+        audit.record("ship_review", app=name, transcript=saved.name)
+    try:
+        print(f"  {await memory.scribe(cfg)}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Scribe skipped: {exc}", flush=True)
+    print(f"\n  ship-review saved → {saved}\n", flush=True)
     return decision
 
 

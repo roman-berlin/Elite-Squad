@@ -22,7 +22,9 @@ Last updated: 2026-06-16.
   Any officer can request a focused **MEETING:** on a problem; you (or the General) convene one
   with `general meeting --topic "…" [--officers …]` or the War-Room **Meeting** button — the
   relevant officers debate, the General writes a decision record, and the Scribe folds the
-  outcome into Unit Memory. *(Auto-triggering meetings from events is Next — "proactive autonomy".)*
+  outcome into Unit Memory. Includes a **ship-review** (`general ship-review` / War-Room button):
+  the Quartermaster certifies deploy-readiness, QM + Provost + Inspector debate, and the General
+  issues a **GO / NO-GO** — but the unit **never promotes to MAIN; that's the Commander's call.**
 
 - **Unit Memory (living protocol)** — `memory/UNIT.md`, the unit's shared company memory:
   Mission, Commander **Standing Orders**, and per-app notes (human-owned), plus a
@@ -81,7 +83,7 @@ Last updated: 2026-06-16.
    its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
    chain of command execute, and extends task-adaptive effort down to the soldiers.
 3. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
-4. **Proactive autonomy — remaining pieces** (core triggers + small-talk shipped): a **"going to prod"** ship-review meeting (wire to the Quartermaster's READY verdict), auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
+4. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
 5. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes

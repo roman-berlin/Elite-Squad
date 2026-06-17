@@ -84,6 +84,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <a class=pill href="/tickets?app={html.escape(current_app or (cfg.apps[0].name if cfg.apps else ''))}">&#127915; Choose tickets</a>
   <a class=pill href="/council">councils</a>
   <a class=pill href="/meeting">&#127908; Meeting</a>
+  <form method=post action=/api/ship-review style="display:inline;margin:0"><input type=hidden name=app value="{html.escape(current_app or (cfg.apps[0].name if cfg.apps else ''))}"><button class=pill {"disabled" if _state.get("shipreview") else ""}>&#128640; Ship review</button></form>
   <form method=post action=/api/scribe style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("scribing") else ""}>&#128221; Scribe</button></form>
   <a class=pill href="/memory">&#128221; Unit memory</a>
   <a class=pill href="/tasks">&#128203; Task log</a>
@@ -387,6 +388,22 @@ def create_app(cfg: Config):
                     _state["last_msg"] = f"meeting failed: {exc}"
                 finally:
                     _state["meeting"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/council")
+
+    @app.post("/api/ship-review")
+    def ship_review_api():
+        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        if not _state.get("shipreview"):
+            def _bg():
+                _state["shipreview"] = True
+                try:
+                    from . import council
+                    asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"ship-review failed: {exc}"
+                finally:
+                    _state["shipreview"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
 
