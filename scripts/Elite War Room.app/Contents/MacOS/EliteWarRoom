@@ -1,0 +1,34 @@
+#!/bin/zsh
+# Elite War Room — the cockpit as a Dock app.
+# Stops any old cockpit, relaunches serve, and opens it as a chromeless app window.
+# Health is shown INSIDE the dashboard (green/red banner), so no Terminal is needed.
+# Full server output is logged to ~/Projects/General/cockpit.log for debugging.
+
+REPO="$HOME/Projects/General"
+PORT=8787
+
+cd "$REPO" || { open "https://example.invalid/general-not-found"; exit 1; }
+[[ -f .venv/bin/activate ]] && source .venv/bin/activate
+[[ -f .env ]] && { set -a; source .env; set +a; }
+
+# Stop any cockpit already bound to the port (so this is also a "refresh")
+PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
+[[ -n "$PIDS" ]] && { kill $PIDS 2>/dev/null || true; sleep 1; }
+PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
+[[ -n "$PIDS" ]] && { kill -9 $PIDS 2>/dev/null || true; }
+
+# Open the cockpit as a standalone app window once the server is up
+open_app() {
+  local url="http://localhost:$PORT"
+  if [[ -d "/Applications/Google Chrome.app" ]]; then
+    open -na "Google Chrome" --args --app="$url" --new-window
+  elif [[ -d "/Applications/Microsoft Edge.app" ]]; then
+    open -na "Microsoft Edge" --args --app="$url" --new-window
+  else
+    open "$url"
+  fi
+}
+( sleep 2; open_app ) &
+
+# Run the cockpit in the foreground so the app stays alive (Quit = stop the cockpit)
+exec ./general serve >> "$REPO/cockpit.log" 2>&1
