@@ -96,6 +96,9 @@ class Config:
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
 
+    # --- council / meetings ---
+    council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
+
     # --- loop bounds / cost ---
     max_iterations: int = 4
     max_cost_usd: float = 0.0           # 0 = no cap (subscription). Set a number only for API billing.

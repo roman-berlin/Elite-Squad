@@ -41,7 +41,12 @@ _OFFICER_RULES = (
     "escalate to the Commander ONLY when the call is genuinely his — product direction, "
     "business/strategy, or an irreversible decision with no safe default. When (and only when) "
     "such a decision truly exists, put it on its own line prefixed exactly 'FOR THE COMMANDER:'. "
-    "Most days there is none. Do not write or edit files."
+    "Most days there is none. Do not write or edit files.\n"
+    "This is a real round-table: in later rounds you will see what your fellow officers said — "
+    "RESPOND to them, by name, when it touches your lens: agree and build, or push back with a "
+    "reason. If you have nothing to add this round, reply with exactly 'PASS'. If a specific "
+    "problem genuinely needs a focused cross-officer huddle, end with a line prefixed exactly "
+    "'MEETING:' naming the topic and which officers should attend."
 )
 
 COUNCIL = [
@@ -92,6 +97,19 @@ _CHAIR_SYSTEM = (
     "business/strategy, or an irreversible call with no safe default. NOT technical or process "
     "choices the unit should make itself. Hold a high bar — most days this is 'None.' One "
     "question per line ending in '?', or write 'None.' Never invent questions to fill space."
+)
+
+_MEETING_CHAIR_SYSTEM = (
+    "You are THE GENERAL, chairing a focused meeting of the Elite Unit on a single topic. You "
+    "have heard the officers debate. Produce a tight decision record in disciplined tone, in "
+    "this exact markdown shape and nothing else:\n\n"
+    "**TOPIC** — one line.\n\n"
+    "**DECISION** — what the unit will do, who owns it, and the one-line why. Resolve the debate "
+    "and take a clear position; do not fence-sit.\n\n"
+    "**ACTIONS** — 1–4 bullets: concrete next steps (file a ticket, propose a drill, add a "
+    "check, draft a hire). Name the officer who owns each.\n\n"
+    "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product / strategy / "
+    "irreversible, no safe default). One question per line ending in '?', else 'None.'"
 )
 
 
@@ -166,40 +184,77 @@ def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
     )
 
 
-def _officer_prompt(rank: str, lens_role: str, digest: str, notes: str,
-                    topic: str | None, said: list[tuple[str, str]]) -> str:
-    parts = [
-        f"You are the {rank} ({lens_role}). The Elite Unit's recent record:",
-        "", digest, "",
-    ]
+def _officer_key(rank: str) -> str:
+    return rank.lower().replace(" ", "-")
+
+
+def _select_officers(keys):
+    """Pick council officers by key or name (case-insensitive substring). Falsy -> all."""
+    if not keys:
+        return list(COUNCIL)
+    out = []
+    for o in COUNCIL:
+        hay = (_officer_key(o[0]) + " " + o[0].lower())
+        if any(str(q).lower().strip() in hay for q in keys):
+            out.append(o)
+    return out or list(COUNCIL)
+
+
+def _discuss_prompt(rank, lens_role, digest, notes, topic, transcript, rnd, rounds) -> str:
+    parts = [f"You are the {rank} ({lens_role}). The Elite Unit's recent record:", "", digest, ""]
     if notes:
         parts += ["Standing guidance from the Commander (recent):", notes, ""]
     if topic:
-        parts += [f"Today's muster is focused on: {topic}", ""]
-    if said:
-        parts += ["Officers who have already spoken:",
-                  *[f"— {who}: {what}" for who, what in said], ""]
-    parts += ["Give your statement now."]
+        parts += [f"This session is focused on: {topic}", ""]
+    if transcript:
+        parts += ["The discussion so far:", *[f"— {who}: {what}" for who, what in transcript], ""]
+    if rnd == 1:
+        parts += ["Give your opening statement now."]
+    else:
+        parts += [f"Round {rnd} of {rounds}. Respond to your fellow officers where it touches "
+                  "your lens — agree and build, or push back with a reason. Reply with exactly "
+                  "'PASS' if you have nothing to add."]
     return "\n".join(parts)
 
 
+_SKIP = {"pass", "nothing to add", "none", "no comment", "no further comment"}
+
+
+async def discuss(cfg: Config, officers, digest: str, notes: str,
+                  topic: str | None, rounds: int) -> list[tuple[str, str]]:
+    """Multi-round round-table: officers see the discussion so far and respond. Returns the
+    transcript as list[(speaker, statement)]. Converges early if a whole round passes."""
+    cwd = _general_root()
+    transcript: list[tuple[str, str]] = []
+    rounds = max(1, int(rounds or 1))
+    for rnd in range(1, rounds + 1):
+        spoke = 0
+        for rank, lens_role, voice in officers:
+            run = await run_agent(
+                _discuss_prompt(rank, lens_role, digest, notes, topic, transcript, rnd, rounds),
+                _officer_options(cfg, voice, cwd), tag=_officer_key(rank))
+            statement = (run.final or run.text or "").strip()
+            if not statement or statement.lower().rstrip(".!").strip() in _SKIP:
+                continue
+            label = rank if rnd == 1 else f"{rank} · r{rnd}"
+            transcript.append((label, statement))
+            spoke += 1
+            print(f"  · {label} spoke", flush=True)
+        if rnd > 1 and spoke == 0:
+            break   # the debate has converged — nobody had more to add
+    return transcript
+
+
 async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str:
-    """Run the muster: each officer speaks, the General chairs. Returns the briefing,
+    """Run the muster as a multi-round debate; the General chairs. Returns the briefing,
     saves the full transcript, and sends the briefing to Telegram."""
     sig = collect_signals(cfg)
     digest = format_signals(sig)
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
 
-    print("\n🎖️  Daily Council — officers mustering…\n", flush=True)
-    said: list[tuple[str, str]] = []
-    for rank, lens_role, voice in COUNCIL:
-        print(f"  · {rank} has the floor…", flush=True)
-        run = await run_agent(
-            _officer_prompt(rank, lens_role, digest, notes, topic, said),
-            _officer_options(cfg, voice, cwd), tag=rank.lower().replace(" ", "-"))
-        statement = (run.final or run.text or "(no statement)").strip()
-        said.append((rank, statement))
+    print("\n🎖️  Daily Council — officers in session…\n", flush=True)
+    said = await discuss(cfg, COUNCIL, digest, notes, topic, getattr(cfg, "council_rounds", 2))
 
     # The General chairs and synthesizes the briefing.
     print("  · The General sums up…", flush=True)
@@ -237,6 +292,52 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         print(f"  Scribe skipped: {exc}", flush=True)
     print(f"\n  council saved → {saved}\n", flush=True)
     return briefing
+
+
+async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,
+                       audit=None) -> str:
+    """An ad-hoc meeting: the relevant officers debate ONE topic, the General decides, and the
+    outcome is logged to Unit Memory + Telegram. `officers` is a list of names/keys (None = all);
+    any officer can request one by ending a council turn with a 'MEETING:' line."""
+    sig = collect_signals(cfg)
+    digest = format_signals(sig)
+    notes = recent_commander_notes(cfg)
+    cwd = _general_root()
+    roster = _select_officers(officers)
+    rounds = rounds or getattr(cfg, "council_rounds", 2)
+
+    print(f"\n🎖️  Meeting — {topic}\n   attending: {', '.join(o[0] for o in roster)}\n", flush=True)
+    said = await discuss(cfg, roster, digest, notes, topic, rounds)
+
+    chair_prompt = "\n".join([
+        f"Meeting topic: {topic}", "", "The unit's record:", "", digest, "",
+        *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
+        "The officers debated:", "",
+        *[f"### {who}\n{what}\n" for who, what in said],
+        "Now write the decision record.",
+    ])
+    chair = await run_agent(chair_prompt, ClaudeAgentOptions(
+        model=cfg.reviewer_model, system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM, cwd=cwd,
+        permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        max_turns=6, effort="high"), tag="the-general")
+    decision = (chair.final or chair.text or "(no decision)").strip()
+
+    saved = _save_transcript(cfg, f"meeting: {topic}", digest, said, decision)
+    questions = _commander_questions(decision)
+    notify.send(f"🎖️ *Meeting — {topic}*\n\n{decision[:3500]}")
+    if questions:
+        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                    + "\n\nReply here and I'll log it as standing guidance.")
+    if audit is not None:
+        audit.record("meeting", topic=topic, officers=[o[0] for o in roster],
+                     questions=len(questions), transcript=saved.name)
+    try:
+        print(f"  {await memory.scribe(cfg)}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Scribe skipped: {exc}", flush=True)
+    print(f"\n  meeting saved → {saved}\n", flush=True)
+    return decision
 
 
 async def respond_to_commander(cfg: Config, message: str) -> str:

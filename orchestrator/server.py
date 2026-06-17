@@ -83,6 +83,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/council style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("councilling") else ""}>&#128172; Council</button></form>
   <a class=pill href="/tickets?app={html.escape(current_app or (cfg.apps[0].name if cfg.apps else ''))}">&#127915; Choose tickets</a>
   <a class=pill href="/council">councils</a>
+  <a class=pill href="/meeting">&#127908; Meeting</a>
   <form method=post action=/api/scribe style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("scribing") else ""}>&#128221; Scribe</button></form>
   <a class=pill href="/memory">&#128221; Unit memory</a>
   <a class=pill href="/tasks">&#128203; Task log</a>
@@ -348,6 +349,46 @@ def create_app(cfg: Config):
                if _state.get("scribing") else "")
         body = top + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
         return _wrap("Unit Memory", body)
+
+    @app.get("/meeting")
+    def meeting_form():
+        from . import council
+        names = [o[0] for o in council.COUNCIL]
+        checks = "".join(
+            f'<label class=mrow><input type=checkbox name=officer value="{html.escape(n)}"> {html.escape(n)}</label>'
+            for n in names)
+        body = (
+            "<style>.mrow{display:flex;gap:9px;align-items:center;padding:6px 0;font-size:14px}"
+            "input[type=text]{width:480px;max-width:90%}.hint{color:#8a909c;font-size:13px}</style>"
+            "<form method=post action=/api/meeting>"
+            "<p>What's the meeting about?<br>"
+            "<input type=text name=topic placeholder='e.g. how to close the superadmin authz gap'></p>"
+            "<p class=hint>Attending — leave all unchecked for the whole council:</p>"
+            f"<div>{checks}</div>"
+            "<p><button>Convene meeting</button></p></form>"
+            "<p class=hint>The officers debate, the General decides, and the outcome is written to "
+            "Unit Memory. Watch it appear under <a href='/council'>councils</a>.</p>")
+        return _wrap("Call a meeting", body)
+
+    @app.post("/api/meeting")
+    def meeting_api():
+        topic = (request.form.get("topic") or "").strip()
+        if not topic:
+            return redirect("/meeting")
+        if not _state.get("meeting"):
+            officers = request.form.getlist("officer") or None
+
+            def _bg():
+                _state["meeting"] = True
+                try:
+                    from . import council
+                    asyncio.run(council.hold_meeting(cfg, topic, officers=officers, audit=audit))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"meeting failed: {exc}"
+                finally:
+                    _state["meeting"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/council")
 
     @app.get("/report")
     def report_form():

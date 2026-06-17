@@ -74,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     sub.add_parser("scribe", help="Scribe: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
+    mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the General decides)")
+    mtg.add_argument("--topic", required=True, help="what the meeting is about")
+    mtg.add_argument("--officers", help="comma-separated officer names/keys to attend (default: all relevant)")
+    mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
     adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
@@ -240,6 +244,16 @@ async def _main(argv: list[str]) -> int:
         briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None),
                                               audit=AuditLog(cfg.audit_path))
         print("\n" + briefing)
+        return 0
+
+    if args.command == "meeting":
+        from . import council
+        from .audit import AuditLog
+        officers = [s.strip() for s in (args.officers or "").split(",") if s.strip()] or None
+        decision = await council.hold_meeting(cfg, args.topic, officers=officers,
+                                              rounds=getattr(args, "rounds", None),
+                                              audit=AuditLog(cfg.audit_path))
+        print("\n" + decision)
         return 0
 
     if args.command == "scribe":

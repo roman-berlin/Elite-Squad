@@ -7,6 +7,14 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **Free-form council + ad-hoc meetings** — the council is now a real **multi-round debate**:
+  officers read each other and respond by name (agree / push back / add), can reply `PASS`,
+  and the round-table converges early when no one has more to say (`council_rounds`, default 2).
+  Any officer can request a focused **MEETING:** on a problem; you (or the General) convene one
+  with `general meeting --topic "…" [--officers …]` or the War-Room **Meeting** button — the
+  relevant officers debate, the General writes a decision record, and the Scribe folds the
+  outcome into Unit Memory. *(Auto-triggering meetings from events is Next — "proactive autonomy".)*
+
 - **Unit Memory (living protocol)** — `memory/UNIT.md`, the unit's shared company memory:
   Mission, Commander **Standing Orders**, and per-app notes (human-owned), plus a
   Scribe-maintained **Lessons & Decisions** log. Every officer reads it before acting (the
@@ -64,7 +72,7 @@ Last updated: 2026-06-16.
    its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
    chain of command execute, and extends task-adaptive effort down to the soldiers.
 3. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
-4. **Free-form officer discussion + ad-hoc meetings** — upgrade the council from one-statement-each to a real multi-round debate; officers can call a meeting to resolve a topic.
+4. **Proactive autonomy** — make the unit act without being told: event triggers (after merge → Scout smoke-test; after a security block → Provost+Engineer huddle; after N parks → Drillmaster meeting), auto-convene meetings from officer `MEETING:` requests, and have meeting decisions spawn concrete actions (drill / hire / ticket). Builds on the multi-round council + meetings just shipped.
 5. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes
