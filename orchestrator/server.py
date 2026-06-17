@@ -16,7 +16,7 @@ from . import dashboard as D
 from . import intake
 from . import warroom
 from .audit import AuditLog
-from .config import Config
+from .config import Config, normalize_effort
 from .loop import run as run_loop
 
 _state = {"active": False, "last_msg": "", "drilling": False}
@@ -43,7 +43,8 @@ def _control_bar(cfg: Config, current_app: str | None = None) -> str:
     apps = "".join(
         f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
         f"{html.escape(a.name)}</option>" for a in cfg.apps)
-    effort = "".join(f"<option value='{e}'>{e}</option>" for e in ("low", "medium", "high", "max"))
+    effort = "".join(f"<option value='{e}'>{e}</option>"
+                     for e in ("low", "medium", "high", "xhigh", "max"))
     if _state["active"]:
         status = '<span class="b warn">● run in progress — reload to refresh</span>'
     elif _state["last_msg"]:
@@ -115,7 +116,8 @@ def create_app(cfg: Config):
         effort = request.form.get("effort") or None
         cfg.dry_run = request.form.get("live") != "on"
         if effort:
-            cfg.builder_effort = effort
+            cfg.builder_effort = normalize_effort(effort)
+            cfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
         try:
             if kind == "task":
                 worklist = intake.from_text(cfg, app_name, text or "(no description)", [])

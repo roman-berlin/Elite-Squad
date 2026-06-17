@@ -12,7 +12,7 @@ import re
 from claude_agent_sdk import ClaudeAgentOptions
 
 from .agent import run_agent
-from .config import AppConfig, Config
+from .config import AppConfig, Config, normalize_effort
 from .contracts import QualityIssue, ReviewResult, Ticket, Verdict
 
 REVIEWER_SYSTEM = """\
@@ -90,7 +90,7 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config) -> Revi
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
         setting_sources=["project"],
         max_turns=30,
-        effort=cfg.reviewer_effort if cfg.reviewer_effort in ("low", "medium", "high", "max") else "high",
+        effort=normalize_effort(cfg.reviewer_effort),
     )
     run = await run_agent(_prompt(diff, ticket), options, tag="reviewer")
     result = _parse(run.final or run.text)

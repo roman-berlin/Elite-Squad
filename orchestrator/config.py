@@ -13,6 +13,43 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+# --------------------------------------------------------------------------- #
+# Effort (model reasoning depth) — single source of truth.
+# The SDK's EffortLevel = Literal["low","medium","high","xhigh","max"].
+#   xhigh = extended reasoning, Opus-only (falls back to "high" on other models).
+#   max   = maximum, model-agnostic — the top tier the Builder sizes/escalates to.
+# We size + escalate on the model-agnostic ladder; xhigh is honoured if explicitly
+# chosen (config/label) but never auto-picked, since the Builder runs on Sonnet.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")   # every value the SDK accepts
+EFFORT_LADDER = ["low", "medium", "high", "max"]            # sizing + retry-escalation ladder
+_EFFORT_ALIASES = {
+    "min": "low", "lo": "low", "l": "low",
+    "med": "medium", "mid": "medium", "m": "medium", "normal": "medium", "default": "medium",
+    "hi": "high", "h": "high",
+    "ultra": "xhigh", "ultracode": "xhigh", "ultrathink": "xhigh", "extended": "xhigh",
+    "vhigh": "xhigh", "veryhigh": "xhigh", "xh": "xhigh",
+    "maximum": "max", "ultramax": "max", "top": "max",
+}
+
+
+def normalize_effort(value: Any, default: str = "high") -> str:
+    """Map any human spelling of an effort level to a valid SDK EffortLevel.
+    e.g. 'ultra'/'ultracode' -> 'xhigh', 'maximum' -> 'max'. Unknown -> default."""
+    if value is None:
+        return default
+    v = str(value).strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    if v in EFFORT_LEVELS:
+        return v
+    return _EFFORT_ALIASES.get(v, default)
+
+
+def effort_step_index(effort: str) -> int:
+    """Index of an effort on the escalation ladder. xhigh sits with 'high' (it falls
+    back to high off-Opus), so a retry from xhigh climbs toward max."""
+    if effort == "xhigh":
+        return EFFORT_LADDER.index("high")
+    return EFFORT_LADDER.index(effort) if effort in EFFORT_LADDER else EFFORT_LADDER.index("high")
+
 
 @dataclass
 class AppConfig:
@@ -49,9 +86,10 @@ class Config:
     builder_model: str = "claude-sonnet-4-6"
     reviewer_model: str = "claude-opus-4-8"
 
-    # --- effort (thinking depth): low | medium | high | max ---
-    builder_effort: str = "high"
+    # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
+    builder_effort: str = "high"            # default / fallback base when sizing is off
     reviewer_effort: str = "high"
+    adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
 
     # --- loop bounds / cost ---

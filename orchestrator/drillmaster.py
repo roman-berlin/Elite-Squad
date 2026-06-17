@@ -68,7 +68,7 @@ def collect_signals(cfg: Config) -> dict:
         if t["passes"] > 1:
             sig["retried_tasks"] += 1
         for d in t["passes_list"]:
-            if d.get("effort") == "max":
+            if d.get("effort") in ("max", "xhigh"):
                 sig["max_effort_hits"] += 1
             for iss in d.get("issues", []) or []:
                 sig["issue_areas"][iss.get("area", "?")] += 1

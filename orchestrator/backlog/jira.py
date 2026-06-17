@@ -52,7 +52,7 @@ class JiraAdapter(BacklogAdapter):
         return f"{self.base_url}/rest/api/3/{path.lstrip('/')}"
 
     def _fields(self) -> list[str]:
-        fields = ["summary", "description", "status", "comment"]
+        fields = ["summary", "description", "status", "comment", "labels", "issuetype"]
         if self.ac_field:
             fields.append(self.ac_field)
         return fields
@@ -196,6 +196,8 @@ class JiraAdapter(BacklogAdapter):
             acceptance_criteria=ac,
             url=f"{self.base_url}/browse/{issue['key']}",
             app=self.app_name,
+            labels=list(f.get("labels") or []),
+            issue_type=((f.get("issuetype") or {}) or {}).get("name"),
         )
 
 

@@ -26,6 +26,8 @@ class Ticket:
     url: Optional[str] = None
     app: Optional[str] = None     # which configured app this belongs to
     ephemeral: bool = False       # ad-hoc (not in a backlog) -> skip status writes
+    labels: list[str] = field(default_factory=list)   # Jira labels (complexity + effort override)
+    issue_type: Optional[str] = None                  # "Bug" | "Story" | "Epic" | ...
 
     def slug(self) -> str:
         import re

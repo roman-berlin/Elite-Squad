@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import intake
 from .audit import AuditLog
-from .config import Config
+from .config import Config, normalize_effort
 from .contracts import Outcome
 
 
@@ -36,8 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", help="disable dry-run: push, merge to dev, write to Jira")
     p.add_argument("--max-tickets", type=int, default=None, help="override max_tickets_per_run")
     p.add_argument("--max-iterations", type=int, default=None, help="override max_iterations")
-    p.add_argument("--effort", choices=["low", "medium", "high", "max"], default=None,
-                   help="override the Builder's effort for this run (low|medium|high|max)")
+    p.add_argument("--effort", default=None,
+                   help="override the Builder's effort for this run, bypassing auto-sizing "
+                        "(low|medium|high|xhigh/ultra|max)")
     sub = p.add_subparsers(dest="command", required=True)
 
     t = sub.add_parser("task", help="work a free-text bug/feature (no Jira needed)")
@@ -104,7 +105,8 @@ def _apply_overrides(cfg: Config, args) -> None:
     if args.max_iterations is not None:
         cfg.max_iterations = args.max_iterations
     if getattr(args, "effort", None):
-        cfg.builder_effort = args.effort
+        cfg.builder_effort = normalize_effort(args.effort)
+        cfg.adaptive_effort = False        # an explicit --effort pins it, bypassing auto-sizing
 
 
 async def _run_work(cfg: Config, worklist) -> int:

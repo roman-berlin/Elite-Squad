@@ -7,6 +7,18 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **Task-adaptive Builder effort** — the Field Engineer now sizes its thinking depth from
+  the ticket (XS→low · S/M→medium · L→high · XL→max) using acceptance-criteria count,
+  description depth, issue type, labels, and keyword signals (refactor / migration /
+  security / schema = heavier; typo / copy / rename / css = lighter). The full SDK ladder is
+  honoured — `low · medium · high · xhigh · max` (`xhigh` = "ultra", Opus-only, falls back to
+  high off-Opus). A Jira `effort-ultra` / `effort-max` label (or an `[effort:ultra]` marker)
+  pins any tier and bypasses sizing — synonyms like "ultra"/"ultracode" normalize to `xhigh`;
+  an explicit `--effort` / War-Room pick does the same. A rejected pass still escalates one
+  level per retry. Effort ladder is centralized (one source of truth) and the chosen
+  effort + reason are logged to the audit. Off-switch: `adaptive_effort` (default on).
+  *(Soldier/sub-agent effort awaits the delegation feature — see Next.)*
+
 - **War Room cockpit (v1)** — `general serve` now opens the command view: KPI strip
   (merged today, merged total, needs-you, avg passes/ticket, parked, security blocks),
   the **active run** with a Build→Gate→Review→Security→Land phase bar, the **8-officer
@@ -28,13 +40,14 @@ Last updated: 2026-06-16.
 
 ## Next — in priority order
 
-1. **War Room cockpit** (the big one) — full-screen, served via `general serve`:
-   - Live run streaming (SSE) — phases + officer tool-calls in real time.
-   - Officer roster & activity — who's doing what, what each raised.
-   - Metrics — passes/ticket trend, escalation rate, throughput, security-block rate, cost.
-   - **Multi-project Jira selector** — switch which project/app you're driving (separate projects).
-   - UX/UI excellence — best-practice, responsive, genuinely useful. (Roman iterates later.)
-2. **Unit Memory** — living `memory/UNIT.md` (this roadmap is its first artifact): mission, per-app state, decisions, standing guidance, learned conventions, gotchas. Injected into every officer; a Scribe step appends after each council; git = audit trail.
+1. **War Room — live streaming (SSE)** — the one remaining cockpit piece: stream each
+   officer's phases + tool-calls into the active-run panel in real time (needs the loop to
+   emit an event stream). Everything else in the War Room shipped in v1.
+2. **Soldier / sub-agent delegation** — let the Field Engineer (and other majors) actually
+   dispatch subtasks to their soldiers (`.claude/agents` sub-agents) — each soldier sized to
+   its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
+   chain of command execute, and extends task-adaptive effort down to the soldiers.
+3. **Unit Memory** — living `memory/UNIT.md` (this roadmap is its first artifact): mission, per-app state, decisions, standing guidance, learned conventions, gotchas. Injected into every officer; a Scribe step appends after each council; git = audit trail.
 3. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
 4. **Free-form officer discussion + ad-hoc meetings** — upgrade the council from one-statement-each to a real multi-round debate; officers can call a meeting to resolve a topic.
 5. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).

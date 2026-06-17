@@ -146,10 +146,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
             return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                 notes="cost budget exceeded")
 
-        # 1) BUILD
-        print(f"  build · pass {iteration}/{cfg.max_iterations} (effort "
-              f"{builder_mod.effort_for(cfg, iteration)}) — builder working "
-              f"(can take a few minutes)…", flush=True)
+        # 1) BUILD  — effort is sized from the ticket (XS→low … XL→max), then escalates on retry
+        eff, eff_reason = builder_mod.effort_plan(cfg, iteration, ticket)
+        print(f"  build · pass {iteration}/{cfg.max_iterations} (effort {eff} — {eff_reason}) "
+              f"— builder working (can take a few minutes)…", flush=True)
         _bar(0, active=0)
         req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration)
         build = await builder_mod.build(req, app, cfg)
@@ -157,7 +157,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
         budget.add(build.cost_usd)
         audit.record("build", ticket_id=ticket.id, iteration=iteration, ok=build.ok,
                      cost_usd=build.cost_usd, turns=build.num_turns,
-                     effort=builder_mod.effort_for(cfg, iteration),
+                     effort=eff, effort_reason=eff_reason,
                      tools=build.tools, summary=(build.summary or "")[:1000])
         if not build.ok:
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
