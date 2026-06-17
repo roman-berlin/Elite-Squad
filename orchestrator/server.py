@@ -10,6 +10,7 @@ import asyncio
 import html
 import os
 import threading
+import time
 from pathlib import Path
 
 from . import dashboard as D
@@ -21,7 +22,8 @@ from .audit import AuditLog
 from .config import Config, normalize_effort
 from .loop import run as run_loop
 
-_state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None}
+_state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None,
+          "last_activity": None, "run_started": None}
 
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
@@ -44,6 +46,7 @@ class _Tee:
             t = line.rstrip()
             if t and "/api/board" not in t and "GET /api/" not in t:
                 _LOG.append(t)
+                _state["last_activity"] = time.time()   # heartbeat — proves the unit is alive
 
     def flush(self):
         self._real.flush()
@@ -291,6 +294,7 @@ def create_app(cfg: Config):
 
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
+            _state["run_started"] = _state["last_activity"] = time.time()
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit))
             except Exception as exc:  # noqa: BLE001
@@ -331,6 +335,7 @@ def create_app(cfg: Config):
 
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
+            _state["run_started"] = _state["last_activity"] = time.time()
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit))
             except Exception as exc:  # noqa: BLE001
@@ -530,6 +535,7 @@ def create_app(cfg: Config):
 
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
+            _state["run_started"] = _state["last_activity"] = time.time()
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit))
             except Exception as exc:  # noqa: BLE001

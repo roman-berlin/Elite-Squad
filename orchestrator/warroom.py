@@ -368,6 +368,24 @@ def _feed_html(items: list[dict]) -> str:
     return "".join(out)
 
 
+def _liveness(state: dict, active: bool) -> str:
+    """A heartbeat chip: green while the unit is printing steps, amber/red if it goes quiet —
+    so you can tell 'working' from 'stuck' at a glance."""
+    if not active:
+        return ""
+    la = state.get("last_activity")
+    if not la:
+        return '<span class="lv work">&#9679; working</span>'
+    idle = max(0.0, datetime.now().timestamp() - la)
+    if idle < 120:
+        secs = int(idle)
+        return f'<span class="lv work">&#9679; working · last step {secs}s ago</span>'
+    m = max(1, int(idle // 60))
+    if idle < 360:
+        return f'<span class="lv quiet">&#9680; quiet for {m}m</span>'
+    return f'<span class="lv stuck">&#9888; no step for {m}m — may be stuck</span>'
+
+
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
     ap_on = bool((state.get("autopilot") or {}).get("on"))
@@ -383,7 +401,8 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     fd = _feed_html(feed(cfg, tasks, app))
     log_panel = ""
     if log_lines is not None:
-        log_panel = f'<section class=panel><div class=ph>Live feed</div>{_log_html(log_lines)}</section>'
+        log_panel = (f'<section class=panel><div class=ph>Live feed{_liveness(state, active)}</div>'
+                     f'{_log_html(log_lines)}</section>')
     return (
         f'<div class=kpis>{k}</div>'
         '<div class=cols>'
@@ -609,6 +628,13 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 margin:0;padding:13px 16px;max-height:170px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
 .logempty{padding:16px;color:var(--faint);font-size:12.5px}
+.lv{margin-left:auto;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.03em;
+padding:3px 9px;border-radius:6px;text-transform:none}
+.lv.work{color:var(--ok);background:var(--okbg)}
+.lv.work::after{content:"";display:inline-block;width:6px;height:6px;border-radius:99px;background:var(--ok);
+margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pulse2 1.4s infinite}
+.lv.quiet{color:var(--warn);background:var(--warnbg)}
+.lv.stuck{color:var(--bad);background:var(--badbg)}
 @media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}}
 @media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
