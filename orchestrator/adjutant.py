@@ -15,6 +15,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import Config
 from .drillmaster import collect_signals, format_signals
@@ -81,7 +82,7 @@ async def propose(cfg: Config) -> str:
     cwd = str(Path(__file__).resolve().parent.parent)   # the General's repo root
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
-        system_prompt=ADJUTANT_SYSTEM,
+        system_prompt=memory.preamble() + ADJUTANT_SYSTEM,
         cwd=cwd,
         permission_mode="default",
         allowed_tools=["Read", "Grep", "Glob"],
@@ -125,7 +126,7 @@ async def apply(cfg: Config) -> str:
     backup = snapshot_doctrine(cfg)
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
-        system_prompt=ADJUTANT_APPLY_SYSTEM,
+        system_prompt=memory.preamble() + ADJUTANT_APPLY_SYSTEM,
         cwd=root,
         permission_mode="bypassPermissions",   # unattended write; originals are snapshotted first
         allowed_tools=["Read", "Grep", "Glob", "Edit", "Write"],

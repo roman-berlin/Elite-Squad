@@ -7,6 +7,14 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **Unit Memory (living protocol)** — `memory/UNIT.md`, the unit's shared company memory:
+  Mission, Commander **Standing Orders**, and per-app notes (human-owned), plus a
+  Scribe-maintained **Lessons & Decisions** log. Every officer reads it before acting (the
+  preamble is injected into all eight officers' prompts). The **Scribe** folds each council's
+  lessons in automatically — and on demand via `general scribe` or the War-Room button —
+  writing ONLY between protected markers, so your hand-edits are never clobbered; every write
+  is backed up and git tracks the evolution. View/curate at `/memory` or `general memory`.
+
 - **Task-adaptive Builder effort** — the Field Engineer now sizes its thinking depth from
   the ticket (XS→low · S/M→medium · L→high · XL→max) using acceptance-criteria count,
   description depth, issue type, labels, and keyword signals (refactor / migration /
@@ -47,7 +55,6 @@ Last updated: 2026-06-16.
    dispatch subtasks to their soldiers (`.claude/agents` sub-agents) — each soldier sized to
    its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
    chain of command execute, and extends task-adaptive effort down to the soldiers.
-3. **Unit Memory** — living `memory/UNIT.md` (this roadmap is its first artifact): mission, per-app state, decisions, standing guidance, learned conventions, gotchas. Injected into every officer; a Scribe step appends after each council; git = audit trail.
 3. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
 4. **Free-form officer discussion + ad-hoc meetings** — upgrade the council from one-statement-each to a real multi-round debate; officers can call a meeting to resolve a topic.
 5. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).

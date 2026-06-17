@@ -11,6 +11,7 @@ import re
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import AppConfig, Config, normalize_effort
 from .contracts import QualityIssue, ReviewResult, Ticket, Verdict
@@ -83,7 +84,7 @@ def _prompt(diff: str, ticket: Ticket) -> str:
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config) -> ReviewResult:
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
-        system_prompt=REVIEWER_SYSTEM,
+        system_prompt=memory.preamble() + REVIEWER_SYSTEM,
         cwd=app.workdir or app.repo_path,   # the isolated worktree when enabled
         permission_mode="default",
         allowed_tools=["Read", "Grep", "Glob"],

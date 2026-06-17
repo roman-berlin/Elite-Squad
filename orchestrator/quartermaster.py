@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
@@ -56,7 +57,7 @@ async def inspect(cfg: Config, app_name: str) -> str:
     app = cfg.app(app_name)
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
-        system_prompt=QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE,
+        system_prompt=memory.preamble() + QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE,
         cwd=app.repo_path,
         # Unattended so it never stalls on the repo's Bash ask-gate. Read-only: Write/Edit
         # disallowed; the repo's deny rules (rm -rf, force-push) still hold.

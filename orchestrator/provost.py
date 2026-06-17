@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
@@ -53,7 +54,7 @@ async def inspect(cfg: Config, app_name: str) -> str:
     app = cfg.app(app_name)
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,            # security judgment — use the strong model
-        system_prompt=PROVOST_SYSTEM + TICKET_BLOCK_RULE,
+        system_prompt=memory.preamble() + PROVOST_SYSTEM + TICKET_BLOCK_RULE,
         cwd=app.repo_path,
         # Unattended so it never stalls on the repo's Bash ask-gate. Still read-only: Write/Edit
         # are disallowed outright, and the repo's deny rules (rm -rf, force-push) still hold.
@@ -86,7 +87,7 @@ async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
     """Security-gate a diff before merge. Returns (passed, report). BLOCK only on CRITICAL/HIGH."""
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
-        system_prompt=PROVOST_GATE_SYSTEM,
+        system_prompt=memory.preamble() + PROVOST_GATE_SYSTEM,
         cwd=app.workdir or app.repo_path,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob", "Bash"],

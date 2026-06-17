@@ -5,6 +5,7 @@ import re
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import (AppConfig, Config, EFFORT_LADDER, effort_step_index,
                      normalize_effort)
@@ -181,7 +182,7 @@ async def build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildResult:
     # still apply — BUILDER_SYSTEM tells it to read CLAUDE.md + .claude/rules and follow them.
     options = ClaudeAgentOptions(
         model=cfg.builder_model,
-        system_prompt=BUILDER_SYSTEM,
+        system_prompt=memory.preamble() + BUILDER_SYSTEM,
         cwd=workdir,                   # the isolated worktree when enabled
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],

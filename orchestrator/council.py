@@ -21,6 +21,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import Config
 from .drillmaster import collect_signals, format_signals
@@ -154,7 +155,7 @@ def transcript_text(cfg: Config, filename: str) -> str:
 def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         model=cfg.builder_model,          # Sonnet for the round-table (lean); Opus chairs
-        system_prompt=f"{_OFFICER_RULES}\n\n{system}",
+        system_prompt=memory.preamble() + f"{_OFFICER_RULES}\n\n{system}",
         cwd=cwd,
         permission_mode="default",
         allowed_tools=["Read", "Grep", "Glob"],
@@ -211,7 +212,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         "Now write the briefing.",
     ])
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=_CHAIR_SYSTEM, cwd=cwd,
+        model=cfg.reviewer_model, system_prompt=memory.preamble() + _CHAIR_SYSTEM, cwd=cwd,
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
@@ -229,6 +230,11 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     if audit is not None:
         audit.record("council", topic=topic or "daily", officers=[r for r, _, _ in COUNCIL],
                      questions=len(questions), transcript=saved.name)
+    # The Scribe folds this council's lessons into Unit Memory (best-effort — never break the muster).
+    try:
+        print(f"  {await memory.scribe(cfg)}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Scribe skipped: {exc}", flush=True)
     print(f"\n  council saved → {saved}\n", flush=True)
     return briefing
 
@@ -252,7 +258,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         f"The Commander says: {message}", "", "Answer him now.",
     ])
     run = await run_agent(prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=system, cwd=_general_root(),
+        model=cfg.reviewer_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=8, effort="medium"), tag="the-general")

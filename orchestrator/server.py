@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import dashboard as D
 from . import intake
+from . import memory
 from . import warroom
 from .audit import AuditLog
 from .config import Config, normalize_effort
@@ -80,6 +81,8 @@ def _control_bar(cfg: Config, current_app: str | None = None) -> str:
   <a class=pill href="/drill">last drill</a>
   <form method=post action=/api/council style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("councilling") else ""}>&#128172; Council</button></form>
   <a class=pill href="/council">councils</a>
+  <form method=post action=/api/scribe style="display:inline;margin:0"><button class=pill {"disabled" if _state.get("scribing") else ""}>&#128221; Scribe</button></form>
+  <a class=pill href="/memory">&#128221; Unit memory</a>
   <a class=pill href="/tasks">&#128203; Task log</a>
   &nbsp;<a href="/" style="font-size:12px">&#8635; reload</a>
 </div>"""
@@ -204,6 +207,28 @@ def create_app(cfg: Config):
                 + html.escape(transcript) + "</pre></div>"
                 "<div style='width:300px'><h3>Recent councils</h3><ul>" + items + "</ul></div></div>")
         return _wrap("Daily Council", body)
+
+    @app.post("/api/scribe")
+    def scribe_api():
+        if not _state.get("scribing"):
+            def _bg():
+                _state["scribing"] = True
+                try:
+                    asyncio.run(memory.scribe(cfg))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"scribe failed: {exc}"
+                finally:
+                    _state["scribing"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/memory")
+
+    @app.get("/memory")
+    def memory_page():
+        memory.ensure()
+        top = ("<p>📝 The Scribe is updating Unit Memory… reload shortly.</p>"
+               if _state.get("scribing") else "")
+        body = top + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
+        return _wrap("Unit Memory", body)
 
     @app.get("/report")
     def report_form():

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from . import memory
 from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
@@ -53,7 +54,7 @@ async def recon(cfg: Config, app_name: str, url: str | None = None) -> str:
     app = cfg.app(app_name)
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,            # an independent verifier — use the strong model
-        system_prompt=SCOUT_SYSTEM + TICKET_BLOCK_RULE,
+        system_prompt=memory.preamble() + SCOUT_SYSTEM + TICKET_BLOCK_RULE,
         cwd=app.repo_path,                   # the checkout with deps installed (can run the app)
         # Unattended so it never stalls on the repo's Bash ask-gate. Still read-only: Write/Edit
         # are disallowed outright, and the repo's deny rules (rm -rf, force-push) still hold.

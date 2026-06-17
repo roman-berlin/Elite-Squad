@@ -72,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--apply", action="store_true", help="EXECUTE the approved drill (writes the officer/squad edits; originals backed up first)")
     cnl = sub.add_parser("council", help="hold the Elite Unit's daily council (officers muster, brief you)")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
+    sub.add_parser("scribe", help="Scribe: fold recent council + runs into Unit Memory (memory/UNIT.md)")
+    sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
     adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
@@ -283,6 +285,17 @@ async def _main(argv: list[str]) -> int:
         briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None),
                                               audit=AuditLog(cfg.audit_path))
         print("\n" + briefing)
+        return 0
+
+    if args.command == "scribe":
+        from . import memory
+        print(await memory.scribe(cfg))
+        return 0
+
+    if args.command == "memory":
+        from . import memory
+        memory.ensure()
+        print(memory.load() or "(no Unit Memory yet)")
         return 0
 
     if args.command == "scout":
