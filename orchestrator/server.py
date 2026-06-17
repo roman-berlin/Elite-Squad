@@ -199,13 +199,15 @@ def create_app(cfg: Config):
         if not health.summary(cfg)["healthy"]:
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
-        cfg.dry_run = request.form.get("live") != "on"
+        import copy
+        rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
+        rcfg.dry_run = request.form.get("live") != "on"
         effort = request.form.get("effort") or None
         if effort:
-            cfg.builder_effort = normalize_effort(effort)
-            cfg.adaptive_effort = False
+            rcfg.builder_effort = normalize_effort(effort)
+            rcfg.adaptive_effort = False
         try:
-            worklist = intake.from_tickets(cfg, app_name, keys)
+            worklist = intake.from_tickets(rcfg, app_name, keys)
         except Exception as exc:  # noqa: BLE001
             _state["last_msg"] = f"could not start: {exc}"
             return redirect("/")
@@ -213,7 +215,7 @@ def create_app(cfg: Config):
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
             try:
-                asyncio.run(run_loop(cfg, worklist, audit))
+                asyncio.run(run_loop(rcfg, worklist, audit))
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = str(exc)
             finally:
@@ -232,17 +234,19 @@ def create_app(cfg: Config):
         kind = request.form.get("kind", "task")
         text = (request.form.get("text") or "").strip()
         effort = request.form.get("effort") or None
-        cfg.dry_run = request.form.get("live") != "on"
+        import copy
+        rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
+        rcfg.dry_run = request.form.get("live") != "on"
         if effort:
-            cfg.builder_effort = normalize_effort(effort)
-            cfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
+            rcfg.builder_effort = normalize_effort(effort)
+            rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
         try:
             if kind == "task":
-                worklist = intake.from_text(cfg, app_name, text or "(no description)", [])
+                worklist = intake.from_text(rcfg, app_name, text or "(no description)", [])
             elif kind == "ticket":
-                worklist = intake.from_tickets(cfg, app_name, text.split())
+                worklist = intake.from_tickets(rcfg, app_name, text.split())
             else:
-                worklist = intake.from_drain(cfg, app_name or None, cfg.max_tickets_per_run)
+                worklist = intake.from_drain(rcfg, app_name or None, rcfg.max_tickets_per_run)
         except Exception as exc:  # noqa: BLE001
             _state["last_msg"] = f"could not start: {exc}"
             return redirect("/")
@@ -250,7 +254,7 @@ def create_app(cfg: Config):
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
             try:
-                asyncio.run(run_loop(cfg, worklist, audit))
+                asyncio.run(run_loop(rcfg, worklist, audit))
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = str(exc)
             finally:
@@ -363,9 +367,14 @@ def create_app(cfg: Config):
     def report_api():
         if _state["active"]:
             return redirect("/")
+        if not health.summary(cfg)["healthy"]:
+            _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            return redirect("/")
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         text = (request.form.get("text") or "").strip()
-        cfg.dry_run = request.form.get("live") != "on"
+        import copy
+        rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
+        rcfg.dry_run = request.form.get("live") != "on"
         desc = f"Fix this problem found during QA on DEV:\n{text or '(no description)'}"
         f = request.files.get("screenshot")
         if f and f.filename:
@@ -379,7 +388,7 @@ def create_app(cfg: Config):
             desc += f"\n\nScreenshot of the problem (open and view it to understand the bug): {path}"
         title = (text.splitlines()[0][:60] if text else "QA bug report")
         try:
-            worklist = intake.from_text(cfg, app_name, title, [], description=desc)
+            worklist = intake.from_text(rcfg, app_name, title, [], description=desc)
         except Exception as exc:  # noqa: BLE001
             _state["last_msg"] = f"could not start: {exc}"
             return redirect("/")
@@ -387,7 +396,7 @@ def create_app(cfg: Config):
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
             try:
-                asyncio.run(run_loop(cfg, worklist, audit))
+                asyncio.run(run_loop(rcfg, worklist, audit))
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = str(exc)
             finally:
