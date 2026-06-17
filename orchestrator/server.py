@@ -515,11 +515,16 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         app = create_app(cfg)
     except ImportError:
         raise SystemExit("Flask is required for the control panel. Run: pip install -r requirements.txt")
+    # Quiet the per-request access log (the dashboard polls GET /api/board every 5s). Without this
+    # the terminal is flooded and the unit's real progress is lost in the noise.
+    import logging
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
     # Two-way decisions: watch Telegram for replies that resume paused tickets.
     from . import decisions, notify
     if notify.configured():
         threading.Thread(target=decisions.poll_loop, args=(cfg, AuditLog(cfg.audit_path)),
                          daemon=True).start()
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
-    print(f"★ Control panel: http://{host}:{port}   (Ctrl-C to stop)")
+    print(f"★ War Room: http://{host}:{port}   (Ctrl-C to stop)")
+    print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
     app.run(host=host, port=port)

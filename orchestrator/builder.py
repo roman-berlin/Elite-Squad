@@ -37,7 +37,10 @@ Resource safety (the dev machine has limited RAM — respect it):
 - Prefer fast checks (tsc --noEmit, eslint on changed files) over full runs.
 - Never start watch mode or dev servers (no `vitest` watch, no `vite`/`npm run dev`).
 
-Git: do NOT commit, push, switch branches, or touch history — the orchestrator owns git.
+Git: the orchestrator owns git and has ALREADY placed you on the correct branch in an isolated
+worktree (your cwd is the repo root). Do NOT run git at all — no fetch, status, rev-parse,
+worktree, log, diff — and never commit, push, switch branches, or touch history. Spend your
+turns on the code, not on inspecting the repo.
 
 Finish with a short plain-text summary: what you changed, which file(s), and which
 acceptance criterion each change satisfies.
