@@ -153,73 +153,28 @@ async def _run_work(cfg: Config, worklist) -> int:
 
 
 def _doctor(cfg_path: str) -> int:
-    ok, warn = "  ✓", "  ⚠"
-    bad = "  ✗"
-    problems = 0
+    from . import health
+    glyph = {"ok": "  ✓", "warn": "  ⚠", "bad": "  ✗"}
     print(f"Config: {cfg_path}")
     try:
         cfg = Config.load(cfg_path)
     except Exception as exc:  # noqa: BLE001
-        print(f"{bad} could not load config: {exc}")
+        print(f"  ✗ could not load config: {exc}")
         return 1
-    print(f"{ok} config loaded ({len(cfg.apps)} app(s): {', '.join(a.name for a in cfg.apps)})")
-
-    print("Secrets / tooling:")
-    auth = cfg.detected_auth()
-    if auth:
-        print(f"{ok} auth: {auth}")
+    print(f"  ✓ config loaded ({len(cfg.apps)} app(s): {', '.join(a.name for a in cfg.apps)})")
+    s = health.summary(cfg)
+    print(f"  ✓ models: builder {s['models']['builder']} · reviewer {s['models']['reviewer']}")
+    for c in s["checks"]:
+        line = f"{glyph.get(c['status'], '  ?')} {c['name']}"
+        if c["detail"]:
+            line += f" — {c['detail']}"
+        print(line)
+    if s["healthy"]:
+        print(f"\nAll good.{' (' + str(s['warnings']) + ' warning(s))' if s['warnings'] else ''}")
     else:
-        print(f"{warn} no auth detected (no env var, no `claude` login found) — run `claude` then /login "
-              f"(or `claude setup-token` for headless). Set ANTHROPIC_API_KEY only for per-token API billing.")
-    try:
-        import claude_agent_sdk  # noqa: F401
-        print(f"{ok} claude-agent-sdk importable")
-    except Exception:  # noqa: BLE001
-        print(f"{bad} claude-agent-sdk not installed (pip install -r requirements.txt)"); problems += 1
-    if _which("git"):
-        print(f"{ok} git present")
-    else:
-        print(f"{bad} git not found"); problems += 1
-    print(f"{ok if _which('gh') else warn} gh CLI "
-          f"{'present' if _which('gh') else 'missing (PRs will be skipped)'}")
-    from . import notify
-    print(f"{ok if notify.configured() else warn} Telegram "
-          f"{'configured' if notify.configured() else 'not configured (status alerts off) — see .env.example'}")
-
-    for app in cfg.apps:
-        print(f"App '{app.name}':")
-        if not os.path.isdir(os.path.join(os.path.expanduser(app.repo_path), ".git")):
-            print(f"{bad} repo_path is not a git repo: {app.repo_path}"); problems += 1
-            continue
-        print(f"{ok} repo at {app.repo_path}")
-        for br, required in ((app.base_branch, True), (app.protected_branch, False)):
-            if _branch_exists(app.repo_path, br):
-                print(f"{ok} branch '{br}' exists")
-            elif required:
-                print(f"{bad} base branch '{br}' missing"); problems += 1
-            else:
-                print(f"{warn} protected branch '{br}' not found locally")
-        print(f"{ok if app.gate_commands else warn} gate_commands "
-              f"{app.gate_commands if app.gate_commands else 'empty (no tests will run!)'}")
-        if getattr(cfg, "use_worktree", False):
-            import subprocess as _sp
-            ref_ok = _sp.run(["git", "rev-parse", "--verify", "--quiet", f"origin/{app.base_branch}"],
-                             cwd=os.path.expanduser(app.repo_path),
-                             capture_output=True, text=True).returncode == 0
-            if ref_ok:
-                print(f"{ok} worktree isolation ready (origin/{app.base_branch} resolves)")
-            else:
-                print(f"{warn} worktree isolation will fall back to in-tree "
-                      f"(origin/{app.base_branch} not found — push '{app.base_branch}' or add an origin remote)")
-        if app.backlog_backend == "jira":
-            have = os.environ.get("JIRA_EMAIL") and os.environ.get("JIRA_API_TOKEN")
-            print(f"{ok if have else bad} Jira creds (JIRA_EMAIL/JIRA_API_TOKEN) "
-                  f"{'set' if have else 'missing'}")
-            if not have:
-                problems += 1
-
-    print("\n" + ("All good." if problems == 0 else f"{problems} problem(s) to fix."))
-    return 0 if problems == 0 else 1
+        print(f"\n{s['problems']} problem(s) to fix"
+              + (f", {s['warnings']} warning(s)." if s['warnings'] else "."))
+    return 0 if s["healthy"] else 1
 
 
 def _which(cmd: str) -> bool:

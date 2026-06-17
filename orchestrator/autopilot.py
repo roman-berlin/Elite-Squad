@@ -29,6 +29,15 @@ from .loop import run as run_loop
 _PARKED = (Outcome.ESCALATED, Outcome.PR_OPENED, Outcome.ERRORED)
 
 
+def _sleep(seconds: float, stop_event=None) -> None:
+    """Sleep, but wake immediately if asked to stop (so the cockpit toggle is responsive)."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if stop_event is not None and stop_event.is_set():
+            return
+        time.sleep(min(1.0, max(0.0, end - time.time())))
+
+
 def _blocked_file(cfg: Config) -> Path:
     return Path(cfg.audit_path).with_name("blocked_tickets.json")
 
@@ -63,7 +72,7 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
 
 
 async def autopilot(cfg: Config, app_name: str | None = None,
-                    once: bool = False, interval: int = 60) -> None:
+                    once: bool = False, interval: int = 60, stop_event=None) -> None:
     audit = AuditLog(cfg.audit_path)
     blocked = load_blocked(cfg)
     cap = max(1, cfg.max_tickets_per_run)
@@ -86,6 +95,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     audit.record("autopilot_start", mode=mode, app=app_name, once=once)
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
+                break
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
             worklist = intake.from_drain(cfg, app_name, cap + len(blocked) + 5)
             worklist = [(a, t) for (a, t) in worklist if t.id not in blocked][:cap]
@@ -95,7 +107,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                       + (f" (parked: {', '.join(sorted(blocked))})" if blocked else ""), flush=True)
                 if once:
                     break
-                time.sleep(max(5, interval))
+                _sleep(max(5, interval), stop_event)
                 continue
 
             ids = ", ".join(t.id for _, t in worklist)
@@ -110,7 +122,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                             + "\nReply /unblock <id> once handled and I'll retry it.")
             if once:
                 break
-            time.sleep(3)   # brief breath, then look for the next ticket
+            _sleep(3, stop_event)   # brief breath, then look for the next ticket
     except KeyboardInterrupt:
         print("\n🛸 Autopilot stood down. Nothing left mid-flight.", flush=True)
     audit.record("autopilot_stop")

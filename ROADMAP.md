@@ -27,6 +27,14 @@ Last updated: 2026-06-16.
   effort + reason are logged to the audit. Off-switch: `adaptive_effort` (default on).
   *(Soldier/sub-agent effort awaits the delegation feature — see Next.)*
 
+- **Health-gated cockpit + Autopilot switch** — opening the War Room runs a full health
+  check (Claude login, Agent SDK, git, and per-app repo / base-branch / Jira-creds) and shows
+  a big green **"System healthy"** banner, or **red** with the exact failing checks. Work is
+  gated: **Run and Autopilot are disabled until healthy**. A header **Autopilot ON/OFF switch**
+  starts/stops the always-on loop in-process (live, scoped to the selected project,
+  interruptible). The `Refresh-General.command` launcher stops the old cockpit, re-runs
+  `doctor`, relaunches, and opens it as a **chromeless app window**.
+
 - **War Room cockpit (v1)** — `general serve` now opens the command view: KPI strip
   (merged today, merged total, needs-you, avg passes/ticket, parked, security blocks),
   the **active run** with a Build→Gate→Review→Security→Land phase bar, the **8-officer

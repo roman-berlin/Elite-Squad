@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 from . import dashboard as D
+from . import health
 from . import intake
 from . import memory
 from . import warroom
@@ -40,7 +41,7 @@ def _charged() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _control_bar(cfg: Config, current_app: str | None = None) -> str:
+def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
     apps = "".join(
         f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
         f"{html.escape(a.name)}</option>" for a in cfg.apps)
@@ -72,7 +73,7 @@ def _control_bar(cfg: Config, current_app: str | None = None) -> str:
     <input type=text name=text placeholder="description — or 'AUTO-1 AUTO-2' — or blank for drain">
     <select name=effort title=effort><option value=''>effort: default</option>{effort}</select>
     <label><input type=checkbox name=live> live</label>
-    <button {"disabled" if _state["active"] else ""}>&#9654; Run</button>
+    <button {"disabled" if _state["active"] or not healthy else ""} title="{'fix health problems first' if not healthy else 'run'}">&#9654; Run</button>
   </form>
   {status}
   &nbsp;<a class=pill href="/report">&#128030; Report a problem</a>
@@ -96,7 +97,45 @@ def create_app(cfg: Config):
     @app.get("/")
     def index():
         appq = request.args.get("app")
-        return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq))
+        h = health.summary(cfg)
+        return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq, h["healthy"]), h)
+
+    @app.get("/api/health")
+    def health_api():
+        from flask import jsonify
+        return jsonify(health.summary(cfg))
+
+    @app.post("/api/autopilot")
+    def autopilot_api():
+        import copy
+        from . import autopilot as ap
+        cur = _state.get("autopilot") or {}
+        action = request.form.get("action", "toggle")
+        want_on = action == "start" or (action == "toggle" and not cur.get("on"))
+        if want_on and not cur.get("on"):
+            if not health.summary(cfg)["healthy"]:
+                _state["last_msg"] = "autopilot blocked — fix the health problems first"
+                return redirect("/")
+            app_name = (request.form.get("app") or "").strip() or None
+            ev = threading.Event()
+            ap_cfg = copy.copy(cfg)
+            ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
+
+            def _bg():
+                try:
+                    asyncio.run(ap.autopilot(ap_cfg, app_name, once=False, stop_event=ev))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"autopilot error: {exc}"
+                finally:
+                    st = _state.get("autopilot")
+                    if st:
+                        st["on"] = False
+            _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "all projects"}
+            threading.Thread(target=_bg, daemon=True).start()
+        elif cur.get("on") and cur.get("stop"):
+            cur["stop"].set()
+            cur["on"] = False
+        return redirect("/")
 
     @app.get("/api/board")
     def board_api():
@@ -112,6 +151,9 @@ def create_app(cfg: Config):
     @app.post("/api/run")
     def run_api():
         if _state["active"]:
+            return redirect("/")
+        if not health.summary(cfg)["healthy"]:
+            _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         kind = request.form.get("kind", "task")

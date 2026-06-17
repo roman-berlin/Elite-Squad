@@ -372,19 +372,67 @@ def project_selector(cfg, app: Optional[str]) -> str:
             f'{"".join(opts)}</select>')
 
 
-def render_page(cfg, app: Optional[str], state: dict, control_bar: str) -> str:
-    active = bool(state.get("active"))
-    pill = ('<span class="statuspill live">● autopilot live</span>' if active
-            else '<span class="statuspill idle">○ idle</span>')
-    board = render_board(cfg, app, state)
-    proj = project_selector(cfg, app)
-    appq = _esc(app or "*")
+def health_pill(h: dict) -> str:
+    if h.get("healthy"):
+        w = h.get("warnings") or 0
+        extra = f" · {w} warning{'s' if w != 1 else ''}" if w else ""
+        return f'<span class="hpill ok" title="all critical checks passed">&#9679; System healthy{extra}</span>'
+    n = h.get("problems") or 0
+    return f'<span class="hpill bad" title="fix before starting work">&#9679; {n} problem{"s" if n != 1 else ""}</span>'
+
+
+def health_banner(h: dict) -> str:
+    recheck = '<button class=hbbtn type=button onclick="location.reload()">Re-check</button>'
+    if h.get("healthy"):
+        w = h.get("warnings") or 0
+        title = ("System is healthy — all critical checks passed"
+                 + (f" ({w} warning{'s' if w != 1 else ''})" if w else ""))
+        warns = [c for c in h.get("checks", []) if c["status"] == "warn"]
+        extra = ""
+        if warns:
+            extra = "<ul class=hbissues>" + "".join(
+                f'<li><span class="tag warn">warn</span> {_esc(c["name"])}'
+                f'{(" — " + _esc(c["detail"])) if c["detail"] else ""}</li>' for c in warns) + "</ul>"
+        return (f'<div class="healthbar ok"><div class=hbrow>'
+                f'<div class=hbtitle><span class=hbdot></span>{title}</div>'
+                f'<div class=hbactions><span class=models>officers on {_esc(h.get("models", {}).get("builder", "?"))}</span>'
+                f'{recheck}</div></div>{extra}</div>')
+    bad = [c for c in h.get("checks", []) if c["status"] == "bad"]
+    items = "".join(
+        f'<li><span class="tag bad">fix</span> {_esc(c["name"])}'
+        f'{(" — " + _esc(c["detail"])) if c["detail"] else ""}</li>' for c in bad)
+    return (f'<div class="healthbar bad"><div class=hbrow>'
+            f'<div class=hbtitle><span class=hbdot></span>'
+            f'{len(bad)} problem{"s" if len(bad) != 1 else ""} to fix before the unit can work tickets</div>'
+            f'<div class=hbactions>{recheck}</div></div><ul class=hbissues>{items}</ul></div>')
+
+
+def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
+    ap = (state or {}).get("autopilot") or {}
+    if ap.get("on"):
+        scope = _esc(ap.get("app") or "all projects")
+        return ('<form method=post action=/api/autopilot class="apsw on">'
+                '<input type=hidden name=action value=stop>'
+                f'<span class="apdot on"></span><span class=aplabel>Autopilot&nbsp;<b>ON</b> · {scope}</span>'
+                '<button class="apbtn stop">Stop</button></form>')
+    appq = _esc(app if app and app != "*" else "")
+    dis = "" if healthy else "disabled"
+    return ('<form method=post action=/api/autopilot class=apsw>'
+            '<input type=hidden name=action value=start>'
+            f'<input type=hidden name=app value="{appq}">'
+            f'<span class="apdot off"></span><span class=aplabel>Autopilot&nbsp;<b>off</b></span>'
+            f'<button class="apbtn start" {dis}>Start</button></form>')
+
+
+def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: dict) -> str:
     return (_PAGE
-            .replace("{{PROJ}}", proj)
-            .replace("{{PILL}}", pill)
+            .replace("{{PROJ}}", project_selector(cfg, app))
+            .replace("{{AUTOPILOT}}", autopilot_switch(state, app, health.get("healthy", False)))
+            .replace("{{HEALTHPILL}}", health_pill(health))
+            .replace("{{HEALTHBAR}}", health_banner(health))
             .replace("{{BAR}}", control_bar)
-            .replace("{{BOARD}}", board)
-            .replace("{{APP}}", appq)
+            .replace("{{BOARD}}", render_board(cfg, app, state))
+            .replace("{{APP}}", _esc(app or "*"))
             .replace("{{GEN}}", datetime.now().strftime("%H:%M:%S")))
 
 
@@ -393,31 +441,64 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <title>Elite Unit — War Room</title>
 <style>
 :root{color-scheme:dark;
---bg:#0b0d12;--panel:#12161f;--panel2:#151a24;--line:#1f2531;--line2:#2a3343;
+--bg:#0a0c11;--panel:#12161f;--panel2:#161b25;--line:#1f2531;--line2:#2a3343;
 --ink:#e9ecf1;--dim:#8a929f;--faint:#5c6573;
---ok:#3ad17f;--okbg:#0f2e1f;--warn:#f7b955;--warnbg:#2e2510;--bad:#f0676b;--badbg:#2e1416;
+--ok:#3ad17f;--okbg:#102a1d;--warn:#f7b955;--warnbg:#2e2510;--bad:#f0676b;--badbg:#2a1416;
 --info:#6aa9ff;--accent:#3b6cff}
 *{box-sizing:border-box}
-body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
 a{color:var(--info);text-decoration:none}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:.85em}
 .muted{color:var(--dim)}
+button{font:inherit}
 /* header */
-header{display:flex;align-items:center;gap:16px;padding:16px 26px;border-bottom:1px solid var(--line);
-background:linear-gradient(180deg,#10141d,#0b0d12);position:sticky;top:0;z-index:5}
-.brand{font-size:16px;font-weight:700;letter-spacing:.3px;white-space:nowrap}
+header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--line);
+background:linear-gradient(180deg,#11151e,#0a0c11);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+.brand{font-size:16px;font-weight:750;letter-spacing:.2px;white-space:nowrap}
 .brand b{color:var(--accent)}
 header select{background:#0d1119;border:1px solid var(--line2);color:var(--ink);border-radius:9px;
 padding:8px 12px;font:inherit;cursor:pointer}
 .spacer{flex:1}
-.statuspill{font-size:12px;font-weight:650;padding:6px 12px;border-radius:99px;border:1px solid var(--line2)}
-.statuspill.live{color:var(--ok);background:var(--okbg);border-color:#1c5238}
-.statuspill.idle{color:var(--dim)}
 .gen{font-size:11px;color:var(--faint)}
+/* health pill */
+.hpill{font-size:12px;font-weight:700;padding:6px 13px;border-radius:99px}
+.hpill.ok{color:var(--ok);background:var(--okbg);border:1px solid #1c5238}
+.hpill.bad{color:var(--bad);background:var(--badbg);border:1px solid #5a1f22}
+/* autopilot switch */
+.apsw{display:flex;align-items:center;gap:9px;margin:0;padding:5px 6px 5px 13px;border:1px solid var(--line2);
+border-radius:99px;background:#0d1119}
+.apsw.on{border-color:#1c5238;background:var(--okbg)}
+.apdot{width:8px;height:8px;border-radius:99px;background:var(--faint)}
+.apdot.on{background:var(--ok);animation:pulse2 1.3s infinite}
+.aplabel{font-size:12px;color:var(--ink)}
+.apbtn{border:0;border-radius:99px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
+.apbtn.start{background:var(--accent);color:#fff}
+.apbtn.start:disabled{background:#222a37;color:var(--faint);cursor:not-allowed}
+.apbtn.stop{background:var(--bad);color:#fff}
+/* health banner */
+.healthbar{padding:13px 26px}
+.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid #15351f}
+.healthbar.bad{background:linear-gradient(180deg,rgba(42,20,22,.6),transparent);border-bottom:1px solid #3a1a1c}
+.hbrow{display:flex;align-items:center;gap:14px}
+.hbtitle{display:flex;align-items:center;gap:11px;font-weight:650;font-size:14px;flex:1}
+.healthbar.ok .hbtitle{color:#9be7bd}.healthbar.bad .hbtitle{color:#f3a6a8}
+.hbdot{width:11px;height:11px;border-radius:99px;flex:none}
+.healthbar.ok .hbdot{background:var(--ok);box-shadow:0 0 0 4px rgba(58,209,127,.13)}
+.healthbar.bad .hbdot{background:var(--bad);animation:pulse3 1.4s infinite}
+@keyframes pulse3{0%,100%{box-shadow:0 0 0 0 rgba(240,103,107,.45)}50%{box-shadow:0 0 0 8px rgba(240,103,107,0)}}
+.hbactions{display:flex;align-items:center;gap:12px}
+.models{font-size:11px;color:var(--faint)}
+.hbbtn{background:#1b2230;border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:6px 13px;
+font-size:12px;font-weight:600;cursor:pointer}
+.hbissues{margin:11px 0 2px;padding:0;list-style:none;display:grid;gap:6px}
+.hbissues li{font-size:12.5px;color:var(--dim)}
+.tag{font-size:10px;font-weight:800;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
+.tag.bad{background:var(--badbg);color:var(--bad)}.tag.warn{background:var(--warnbg);color:var(--warn)}
 /* kpis */
 .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;padding:20px 26px 6px}
-.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px 16px}
-.kpi .kv{font-size:27px;font-weight:700;line-height:1;letter-spacing:-.5px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px 16px;
+box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
+.kpi .kv{font-size:27px;font-weight:720;line-height:1;letter-spacing:-.6px}
 .kpi .kl{font-size:12px;color:var(--ink);margin-top:7px;font-weight:600}
 .kpi .kh{font-size:11px;color:var(--faint);margin-top:2px}
 .kpi.ok .kv{color:var(--ok)}.kpi.warn .kv{color:var(--warn)}.kpi.bad .kv{color:var(--bad)}
@@ -435,8 +516,7 @@ padding:13px 17px;border-bottom:1px solid var(--line)}
 .phasebar{display:flex;gap:8px}
 .phasebar .ph{display:flex;align-items:center;gap:7px;flex:1;border:0;padding:0;text-transform:none;
 letter-spacing:0;font-size:12px;font-weight:600;color:var(--faint)}
-.phasebar .ph span{width:9px;height:9px;border-radius:99px;background:#222a37;flex:none;
-border:2px solid #222a37}
+.phasebar .ph span{width:9px;height:9px;border-radius:99px;background:#222a37;flex:none;border:2px solid #222a37}
 .phasebar .ph.done{color:var(--ink)}
 .phasebar .ph.done span{background:var(--ok);border-color:var(--ok)}
 .phasebar .ph.now{color:var(--warn)}
@@ -466,15 +546,17 @@ border:2px solid #222a37}
 .fd.info{background:var(--info)}.fd.muted{background:var(--faint)}
 .fbody{font-size:13px;min-width:0}.fmeta{font-size:11px;color:var(--faint);margin-top:2px}
 @media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}}
-@media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
 </style></head><body>
 <header>
   <div class=brand>&#9733; Elite Unit <b>·</b> War Room</div>
   {{PROJ}}
   <div class=spacer></div>
-  {{PILL}}
+  {{AUTOPILOT}}
+  {{HEALTHPILL}}
   <span class=gen>updated {{GEN}}</span>
 </header>
+{{HEALTHBAR}}
 {{BAR}}
 <div id=board>{{BOARD}}</div>
 <script>
