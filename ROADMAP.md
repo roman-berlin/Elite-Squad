@@ -7,6 +7,13 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **Smarter run outcomes** — when the Builder *deliberately halts* on a failed precondition
+  (e.g. a missing prior migration phase) and makes no edits, that's now surfaced as
+  **"needs you" + the Builder's full report** (Telegram + dashboard + parked so Autopilot
+  won't retry it forever) instead of a confusing "errored". And auto-sizing **caps at high** —
+  `max`/`xhigh` only via an explicit `effort-max`/`effort-ultra` pin (or retry-escalation after
+  a real rejection) — so a small ticket can't burn max effort over-exploring.
+
 - **Proactive autonomy (the unit acts on its own)** — between Autopilot cycles the officers
   convene *themselves*, throttled by a cooldown so they never spam: a **security block** pulls
   Provost + Field Engineer + Inspector into a huddle; **repeated parks** trigger a "why are we

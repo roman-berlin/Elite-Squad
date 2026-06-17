@@ -27,6 +27,19 @@ def _notify(cfg: Config, text: str) -> None:
     notify.send(("[DRY-RUN] " if cfg.dry_run else "") + text)
 
 
+_HALT_MARKERS = ("halt", "stop", "do not proceed", "precondition", "made no writes",
+                 "no files were written", "no files written", "will not edit", "will not proceed",
+                 "cannot proceed", "refuse", "abort", "needs your", "for the commander", "holding for")
+
+
+def _is_deliberate_halt(text: str | None) -> bool:
+    """A 'no changes' result is a DELIBERATE halt — the Builder verified a precondition and
+    reported a blocker, not a failure — when its summary carries clear halt language. Requiring
+    two markers avoids false positives on ordinary 'nothing to do' summaries."""
+    t = (text or "").lower()
+    return sum(1 for m in _HALT_MARKERS if m in t) >= 2
+
+
 _PHASES = ("Build", "Gate", "Review", "Land")
 
 
@@ -163,6 +176,16 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                 notes="builder process errored")
         if not git.has_changes():
+            if _is_deliberate_halt(build.summary or build.raw):
+                report = (build.summary or build.raw or "(no report)").strip()
+                audit.record("needs_human", ticket_id=ticket.id, iteration=iteration,
+                             question=report[:1500], reason="builder halted — precondition/blocker")
+                _notify(cfg, f"🛑 {ticket.id} — the Field Engineer HALTED before any write "
+                             f"(precondition / blocker). Your call:\n\n{report[:1500]}")
+                print(f"  🛑 {ticket.id}: Builder halted (precondition/blocker) — escalated to you.",
+                      flush=True)
+                return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                    notes="Builder halted (precondition/blocker) — awaiting Commander")
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                 notes="builder produced no changes")

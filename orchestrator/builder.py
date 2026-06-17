@@ -116,16 +116,18 @@ def size_ticket(ticket) -> tuple[str, str, str]:
     if "epic" in labels or itype == "epic":
         score += 2; reasons.append("epic")
 
-    # 2) map score -> effort
+    # 2) map score -> effort. Auto-sizing tops out at "high": max/xhigh burn a lot of thinking
+    # and over-explore, so they're reserved for an explicit `effort-max`/`effort-ultra` pin (or
+    # the retry-escalation ladder after a real rejection). Heaviest auto bucket = "high".
     if score <= -2:
-        eff = "low"
+        eff, size = "low", "XS"
     elif score <= 0:
-        eff = "medium"
+        eff, size = "medium", "S/M"
     elif score <= 2:
-        eff = "high"
+        eff, size = "high", "L"
     else:
-        eff = "max"
-    return _SIZE_NAME[eff], eff, "; ".join(reasons) or "no strong signals"
+        eff, size = "high", "XL"
+    return size, eff, "; ".join(reasons) or "no strong signals"
 
 
 def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
