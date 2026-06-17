@@ -21,7 +21,35 @@ from .audit import AuditLog
 from .config import Config, normalize_effort
 from .loop import run as run_loop
 
-_state = {"active": False, "last_msg": "", "drilling": False}
+_state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None}
+
+# Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
+# the implementation steps in the dashboard, not just the terminal.
+import collections as _collections  # noqa: E402
+_LOG: "_collections.deque[str]" = _collections.deque(maxlen=600)
+
+
+def recent_log(n: int = 60) -> list[str]:
+    return list(_LOG)[-n:]
+
+
+class _Tee:
+    """Mirror stdout to the real terminal AND the ring buffer (skips the noisy poll line)."""
+    def __init__(self, real):
+        self._real = real
+
+    def write(self, s: str):
+        self._real.write(s)
+        for line in s.splitlines():
+            t = line.rstrip()
+            if t and "/api/board" not in t and "GET /api/" not in t:
+                _LOG.append(t)
+
+    def flush(self):
+        self._real.flush()
+
+    def isatty(self):
+        return getattr(self._real, "isatty", lambda: False)()
 
 
 def _wrap(title: str, inner: str) -> str:
@@ -146,7 +174,8 @@ def create_app(cfg: Config):
     def index():
         appq = request.args.get("app")
         h = health.summary(cfg)
-        return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq, h["healthy"]), h)
+        return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq, h["healthy"]), h,
+                                   log_lines=recent_log())
 
     @app.get("/api/health")
     def health_api():
@@ -189,7 +218,7 @@ def create_app(cfg: Config):
     def board_api():
         from flask import Response
         appq = request.args.get("app")
-        return Response(warroom.render_board(cfg, appq, _state), mimetype="text/html")
+        return Response(warroom.render_board(cfg, appq, _state, recent_log()), mimetype="text/html")
 
     @app.get("/tasks")
     def tasks_page():
@@ -249,6 +278,7 @@ def create_app(cfg: Config):
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("live") != "on"
+        _state["dry_run"] = rcfg.dry_run
         effort = request.form.get("effort") or None
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
@@ -284,6 +314,7 @@ def create_app(cfg: Config):
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("live") != "on"
+        _state["dry_run"] = rcfg.dry_run
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
@@ -478,6 +509,7 @@ def create_app(cfg: Config):
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("live") != "on"
+        _state["dry_run"] = rcfg.dry_run
         desc = f"Fix this problem found during QA on DEV:\n{text or '(no description)'}"
         f = request.files.get("screenshot")
         if f and f.filename:
@@ -519,6 +551,10 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
     # the terminal is flooded and the unit's real progress is lost in the noise.
     import logging
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    # Mirror the unit's progress output into the dashboard's Live feed.
+    import sys
+    if not isinstance(sys.stdout, _Tee):
+        sys.stdout = _Tee(sys.stdout)
     # Two-way decisions: watch Telegram for replies that resume paused tickets.
     from . import decisions, notify
     if notify.configured():

@@ -299,7 +299,7 @@ def _kpi_html(cards: list[dict]) -> str:
     return "".join(out)
 
 
-def _run_html(run: Optional[dict]) -> str:
+def _run_html(run: Optional[dict], mode: Optional[str] = None) -> str:
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
                 'No runs yet for this project. Launch one from the bar above.</div>')
@@ -307,16 +307,41 @@ def _run_html(run: Optional[dict]) -> str:
     for i, ph in enumerate(run["phases"]):
         state = "done" if i < run["reached"] else ("now" if i == run["reached"] and run["live"] else "")
         bar.append(f'<div class="ph {state}"><span></span>{_esc(ph)}</div>')
-    tag = ('<span class="b live">● live</span>' if run["live"]
-           else '<span class="b muted">last run</span>')
+    status = ('<span class="b live">● running</span>' if run["live"]
+              else '<span class="b muted">last run</span>')
+    chip = ""
+    if run["live"] and mode == "live":
+        chip = '<span class="b mode">live → DEV</span>'
+    elif run["live"] and mode == "dry":
+        chip = '<span class="b dry">dry-run · no changes</span>'
     verdict = (f'<span class=meta>verdict <b>{_esc(run["verdict"])}</b></span>'
                if run["verdict"] else "")
     return (
         f'<div class=runhead><div><span class=mono>{_esc(run["ticket"])}</span> '
-        f'<span class=muted>{_esc(run["app"])}</span></div>{tag}</div>'
+        f'<span class=muted>{_esc(run["app"])}</span></div>'
+        f'<div style="display:flex;gap:7px;align-items:center">{chip}{status}</div></div>'
         f'<div class=phasebar>{"".join(bar)}</div>'
         f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
         f'{verdict}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>')
+
+
+def _log_html(lines) -> str:
+    if not lines:
+        return ('<div class=logempty>No live output yet — start a run and the unit\'s '
+                'steps stream here (same as the terminal, minus the noise).</div>')
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        low = s.lower()
+        cls = ""
+        if "merged" in low or "✓" in s or " pass" in low or "ready" in low:
+            cls = "lg-ok"
+        elif any(w in low for w in ("error", "fail", "park", "block", "✗", "reject")):
+            cls = "lg-b"
+        elif s.startswith("·") or "builder:" in low or "reviewer:" in low:
+            cls = "lg-dim"
+        out.append(f'<span class="{cls}">{_esc(ln)}</span>')
+    return '<pre class=logbox id=logbox>' + "\n".join(out) + '</pre>'
 
 
 def _roster_html(rows: list[dict]) -> str:
@@ -343,19 +368,28 @@ def _feed_html(items: list[dict]) -> str:
     return "".join(out)
 
 
-def render_board(cfg, app: Optional[str], state: dict) -> str:
+def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
-    active = bool(state.get("active")) or bool((state.get("autopilot") or {}).get("on"))
+    ap_on = bool((state.get("autopilot") or {}).get("on"))
+    active = bool(state.get("active")) or ap_on
+    dry = state.get("dry_run")
+    mode = None
+    if active:
+        mode = "live" if (ap_on or dry is False) else ("dry" if dry is True else None)
     tasks = D.load_tasks(cfg.audit_path)
     k = _kpi_html(kpis(cfg, tasks, app))
-    run = _run_html(active_run(cfg, tasks, app, active))
+    run = _run_html(active_run(cfg, tasks, app, active), mode)
     ros = _roster_html(roster(cfg, tasks, active))
     fd = _feed_html(feed(cfg, tasks, app))
+    log_panel = ""
+    if log_lines is not None:
+        log_panel = f'<section class=panel><div class=ph>Live feed</div>{_log_html(log_lines)}</section>'
     return (
         f'<div class=kpis>{k}</div>'
         '<div class=cols>'
         f'<div class=col-main>'
         f'<section class=panel><div class=ph>Active run</div><div class=run>{run}</div></section>'
+        f'{log_panel}'
         f'<section class=panel><div class=ph>Activity</div><div class=feed>{fd}</div></section>'
         '</div>'
         f'<div class=col-side>'
@@ -427,14 +461,15 @@ def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
             f'<button class="apbtn start" {dis}>Start</button></form>')
 
 
-def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: dict) -> str:
+def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: dict,
+                log_lines=None) -> str:
     return (_PAGE
             .replace("{{PROJ}}", project_selector(cfg, app))
             .replace("{{AUTOPILOT}}", autopilot_switch(state, app, health.get("healthy", False)))
             .replace("{{HEALTHPILL}}", health_pill(health))
             .replace("{{HEALTHBAR}}", health_banner(health))
             .replace("{{BAR}}", control_bar)
-            .replace("{{BOARD}}", render_board(cfg, app, state))
+            .replace("{{BOARD}}", render_board(cfg, app, state, log_lines))
             .replace("{{APP}}", _esc(app or "*"))
             .replace("{{GEN}}", datetime.now().strftime("%H:%M:%S")))
 
@@ -444,25 +479,27 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <title>Elite Unit — War Room</title>
 <style>
 :root{color-scheme:dark;
---bg:#0a0c11;--panel:#12161f;--panel2:#161b25;--line:#1f2531;--line2:#2a3343;
---ink:#e9ecf1;--dim:#8a929f;--faint:#5c6573;
---ok:#3ad17f;--okbg:#102a1d;--warn:#f7b955;--warnbg:#2e2510;--bad:#f0676b;--badbg:#2a1416;
---info:#6aa9ff;--accent:#3b6cff}
+--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;
+--ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;
+--ok:#34d399;--okbg:#0e2a1e;--warn:#f5b34a;--warnbg:#2c2410;--bad:#f0676b;--badbg:#2a1417;
+--info:#6aa9ff;--accent:#4d7cff;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box}
-body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;margin:0;color:var(--ink);
+background:radial-gradient(1100px 440px at 80% -10%,rgba(77,124,255,.10),transparent 60%),
+radial-gradient(820px 320px at 4% -6%,rgba(52,211,153,.045),transparent 55%),var(--bg);background-attachment:fixed}
 a{color:var(--info);text-decoration:none}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:.85em}
+.mono{font-family:var(--mono);font-size:.85em}
 .muted{color:var(--dim)}
 button{font:inherit}
 /* header */
 header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--line);
 background:linear-gradient(180deg,#11151e,#0a0c11);position:sticky;top:0;z-index:5;flex-wrap:wrap}
-.brand{font-size:16px;font-weight:750;letter-spacing:.2px;white-space:nowrap}
+.brand{font-size:15px;font-weight:750;letter-spacing:.4px;white-space:nowrap;text-transform:uppercase}
 .brand b{color:var(--accent)}
 header select{background:#0d1119;border:1px solid var(--line2);color:var(--ink);border-radius:9px;
 padding:8px 12px;font:inherit;cursor:pointer}
 .spacer{flex:1}
-.gen{font-size:11px;color:var(--faint)}
+.gen{font-family:var(--mono);font-size:11px;color:var(--faint);letter-spacing:.02em}
 /* health pill */
 .hpill{font-size:12px;font-weight:700;padding:6px 13px;border-radius:99px}
 .hpill.ok{color:var(--ok);background:var(--okbg);border:1px solid #1c5238}
@@ -502,51 +539,63 @@ border-radius:99px;background:#0d1119}
 font-size:12px;font-weight:600;cursor:pointer}
 .hbissues{margin:11px 0 2px;padding:0;list-style:none;display:grid;gap:6px}
 .hbissues li{font-size:12.5px;color:var(--dim)}
-.tag{font-size:10px;font-weight:800;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
+.tag{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
 .tag.bad{background:var(--badbg);color:var(--bad)}.tag.warn{background:var(--warnbg);color:var(--warn)}
 /* kpis */
-.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;padding:20px 26px 6px}
-.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px 16px;
-box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
-.kpi .kv{font-size:27px;font-weight:720;line-height:1;letter-spacing:-.6px}
-.kpi .kl{font-size:12px;color:var(--ink);margin-top:7px;font-weight:600}
-.kpi .kh{font-size:11px;color:var(--faint);margin-top:2px}
-.kpi.ok .kv{color:var(--ok)}.kpi.warn .kv{color:var(--warn)}.kpi.bad .kv{color:var(--bad)}
+.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;padding:22px 24px 8px}
+.kpi{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:16px 17px;
+overflow:hidden;transition:border-color .15s,transform .15s}
+.kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:#2a3342}
+.kpi:hover{transform:translateY(-1px);border-color:var(--line2)}
+.kpi .kv{font-family:var(--mono);font-size:30px;font-weight:600;line-height:1;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+.kpi .kl{font-size:11.5px;color:var(--ink);margin-top:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.kpi .kh{font-size:11px;color:var(--faint);margin-top:3px}
+.kpi.ok::before{background:var(--ok)}.kpi.ok .kv{color:var(--ok)}
+.kpi.warn::before{background:var(--warn)}.kpi.warn .kv{color:var(--warn)}
+.kpi.bad::before{background:var(--bad)}.kpi.bad .kv{color:var(--bad)}
 /* layout */
 .cols{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:14px 26px 40px}
 .col-main{display:flex;flex-direction:column;gap:16px;min-width:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-.ph{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);
-padding:13px 17px;border-bottom:1px solid var(--line)}
+.ph{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--dim);
+padding:13px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.ph::before{content:"";width:6px;height:6px;border-radius:2px;background:var(--accent)}
 /* active run */
-.run{padding:17px}
-.runhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
-.b{font-size:11px;font-weight:700;padding:3px 10px;border-radius:99px}
-.b.live{color:var(--ok);background:var(--okbg)}.b.muted{color:var(--dim);background:#171c26}
-.phasebar{display:flex;gap:8px}
-.phasebar .ph{display:flex;align-items:center;gap:7px;flex:1;border:0;padding:0;text-transform:none;
-letter-spacing:0;font-size:12px;font-weight:600;color:var(--faint)}
-.phasebar .ph span{width:9px;height:9px;border-radius:99px;background:#222a37;flex:none;border:2px solid #222a37}
+.run{padding:18px}
+.runhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:10px}
+.runhead .mono{font-size:15px;color:var(--ink);font-weight:600}
+.b{font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;text-transform:uppercase;letter-spacing:.06em}
+.b.live{color:var(--warn);background:var(--warnbg)}.b.muted{color:var(--dim);background:#141a25}
+.b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px #1c4d39 inset}
+.b.dry{color:var(--info);background:#0f1c30;box-shadow:0 0 0 1px #1e3457 inset}
+.phasebar{display:flex;gap:0;position:relative}
+.phasebar .ph{display:flex;flex-direction:column;align-items:center;gap:9px;flex:1;border:0;padding:0;text-transform:none;
+letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);position:relative}
+.phasebar .ph::before{display:none}
+.phasebar .ph::after{content:"";position:absolute;top:6px;left:50%;width:100%;height:2px;background:#222b39;z-index:0}
+.phasebar .ph:last-child::after{display:none}
+.phasebar .ph span{width:13px;height:13px;border-radius:99px;background:var(--bg);flex:none;border:2px solid #2b3543;z-index:1;position:relative}
 .phasebar .ph.done{color:var(--ink)}
-.phasebar .ph.done span{background:var(--ok);border-color:var(--ok)}
+.phasebar .ph.done span{background:var(--ok);border-color:var(--ok);box-shadow:0 0 8px rgba(52,211,153,.5)}
+.phasebar .ph.done::after{background:var(--ok)}
 .phasebar .ph.now{color:var(--warn)}
-.phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.3s infinite}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(247,185,85,.5)}50%{box-shadow:0 0 0 5px rgba(247,185,85,0)}}
-.runmeta{display:flex;gap:20px;margin-top:15px;padding-top:13px;border-top:1px solid var(--line)}
-.meta{font-size:12px;color:var(--dim)}.meta b{color:var(--ink);font-weight:650}
+.phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(245,179,74,.28)}50%{box-shadow:0 0 0 8px rgba(245,179,74,0)}}
+.runmeta{display:flex;gap:24px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);flex-wrap:wrap}
+.meta{font-size:12px;color:var(--dim)}.meta b{color:var(--ink);font-weight:600;font-family:var(--mono)}
 .runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
 .dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}
 /* roster */
 .roster{padding:6px 0}
-.offrow{display:flex;align-items:center;gap:11px;padding:9px 17px}
-.offrow:hover{background:var(--panel2)}
-.d{width:9px;height:9px;border-radius:99px;flex:none;background:#39424f}
-.d.live{background:var(--ok);animation:pulse2 1.3s infinite}
+.offrow{display:flex;align-items:center;gap:12px;padding:10px 18px;border-left:2px solid transparent}
+.offrow:hover{background:var(--panel2);border-left-color:var(--line2)}
+.d{width:8px;height:8px;border-radius:99px;flex:none;background:#39424f}
+.d.live{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse2 1.4s infinite}
 .d.recent{background:var(--info)}.d.idle{background:#39424f}
-@keyframes pulse2{0%,100%{box-shadow:0 0 0 0 rgba(58,209,127,.5)}50%{box-shadow:0 0 0 5px rgba(58,209,127,0)}}
+@keyframes pulse2{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}50%{box-shadow:0 0 0 5px rgba(52,211,153,0)}}
 .offmain{flex:1;min-width:0}.offname{font-weight:600;font-size:13px}
-.offrole{font-size:11px;color:var(--faint)}
-.offlast{font-size:11px;color:var(--dim);white-space:nowrap}
+.offrole{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
+.offlast{font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap}
 /* feed */
 .feed{padding:5px 0;max-height:430px;overflow:auto}
 .fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid #161b24}
@@ -554,9 +603,16 @@ letter-spacing:0;font-size:12px;font-weight:600;color:var(--faint)}
 .fd{width:7px;height:7px;border-radius:99px;margin-top:6px;flex:none;background:var(--faint)}
 .fd.ok{background:var(--ok)}.fd.warn{background:var(--warn)}.fd.bad{background:var(--bad)}
 .fd.info{background:var(--info)}.fd.muted{background:var(--faint)}
-.fbody{font-size:13px;min-width:0}.fmeta{font-size:11px;color:var(--faint);margin-top:2px}
+.fbody{font-size:13px;min-width:0}.fmeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:3px}
+/* live log */
+.logbox{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#b9c2cf;background:#070a0e;
+margin:0;padding:13px 16px;max-height:170px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
+.logempty{padding:16px;color:var(--faint);font-size:12.5px}
 @media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}}
 @media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#222b39;border-radius:8px}
 </style></head><body>
 <header>
   <div class=brand>&#9733; Elite Unit <b>·</b> War Room</div>
@@ -577,12 +633,14 @@ document.addEventListener("click",function(e){
     if(!d.contains(e.target)) d.removeAttribute("open");
   });
 });
+function scrollLog(){var lb=document.getElementById("logbox");if(lb)lb.scrollTop=lb.scrollHeight;}
 async function tick(){
   try{
     var r=await fetch("/api/board?app="+encodeURIComponent(APP),{cache:"no-store"});
-    if(r.ok){document.getElementById("board").innerHTML=await r.text();}
+    if(r.ok){document.getElementById("board").innerHTML=await r.text();scrollLog();}
   }catch(e){}
 }
+scrollLog();
 setInterval(tick,5000);
 </script>
 </body></html>"""
