@@ -7,6 +7,15 @@ Last updated: 2026-06-16.
 
 ## Shipped
 
+- **Proactive autonomy (the unit acts on its own)** — between Autopilot cycles the officers
+  convene *themselves*, throttled by a cooldown so they never spam: a **security block** pulls
+  Provost + Field Engineer + Inspector into a huddle; **repeated parks** trigger a "why are we
+  stuck" meeting; on a quiet queue there's a configurable chance of a **spontaneous meeting** or
+  **corridor small-talk** (two officers, in character — flavour that sometimes lands a real
+  insight). Every outcome logs to Unit Memory. Knobs: `autonomy_enabled`, `autonomy_cooldown_min`,
+  `meeting_on_security_block`, `parks_meeting_threshold`, `smalltalk_prob`, `random_meeting_prob`.
+  Fires only under Autopilot (manual runs stay quiet); test on demand with `general smalltalk`.
+
 - **Free-form council + ad-hoc meetings** — the council is now a real **multi-round debate**:
   officers read each other and respond by name (agree / push back / add), can reply `PASS`,
   and the round-table converges early when no one has more to say (`council_rounds`, default 2).
@@ -72,7 +81,7 @@ Last updated: 2026-06-16.
    its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
    chain of command execute, and extends task-adaptive effort down to the soldiers.
 3. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
-4. **Proactive autonomy** — make the unit act without being told: event triggers (after merge → Scout smoke-test; after a security block → Provost+Engineer huddle; after N parks → Drillmaster meeting), auto-convene meetings from officer `MEETING:` requests, and have meeting decisions spawn concrete actions (drill / hire / ticket). Builds on the multi-round council + meetings just shipped.
+4. **Proactive autonomy — remaining pieces** (core triggers + small-talk shipped): a **"going to prod"** ship-review meeting (wire to the Quartermaster's READY verdict), auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
 5. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes

@@ -99,6 +99,14 @@ class Config:
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
 
+    # --- autonomy (officers convene themselves between autopilot cycles) ---
+    autonomy_enabled: bool = True
+    autonomy_cooldown_min: int = 45         # min minutes between auto-convened sessions (anti-spam)
+    meeting_on_security_block: bool = True   # a security block -> Provost + Engineer + Inspector huddle
+    parks_meeting_threshold: int = 3         # this many parked tickets -> a "why are we stuck" meeting
+    smalltalk_prob: float = 0.15             # chance of corridor small-talk on a quiet cycle
+    random_meeting_prob: float = 0.06        # chance of a spontaneous meeting on a quiet cycle
+
     # --- loop bounds / cost ---
     max_iterations: int = 4
     max_cost_usd: float = 0.0           # 0 = no cap (subscription). Set a number only for API billing.

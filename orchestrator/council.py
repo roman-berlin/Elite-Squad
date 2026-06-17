@@ -340,6 +340,50 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     return decision
 
 
+_SMALLTALK_SYSTEM = (
+    "You are an officer of an elite autonomous software unit, caught in a brief CORRIDOR "
+    "exchange with a fellow officer — not a formal meeting. Speak in character, 1–3 sentences, "
+    "informal but professional. React to what's actually going on in the unit's record; be wry "
+    "or human if it fits, and if a genuinely useful observation surfaces, land it plainly. No "
+    "headers, no markdown — just talk. Do not write or edit files."
+)
+
+
+async def small_talk(cfg: Config, audit=None) -> str:
+    """A light, in-character corridor exchange between two officers — flavor, occasionally a real
+    insight. Cheap (two short turns). Saved like a council so it shows up in history."""
+    import random
+    pair = random.sample(COUNCIL, 2)
+    digest = format_signals(collect_signals(cfg))
+    cwd = _general_root()
+    convo: list[tuple[str, str]] = []
+    for i, (rank, lens_role, voice) in enumerate(pair):
+        if i == 0:
+            prompt = "\n".join([
+                f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
+                f"You run into the {pair[1][0]} in the corridor. Open with a casual remark about how "
+                "things are going — something real from the record.",
+            ])
+        else:
+            prompt = "\n".join([
+                f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
+                f'The {pair[0][0]} just said: "{convo[0][1]}"', "",
+                "Reply in kind — a sentence or two. Banter is welcome; land a real point if you have one.",
+            ])
+        run = await run_agent(prompt, ClaudeAgentOptions(
+            model=cfg.builder_model, system_prompt=memory.preamble() + _SMALLTALK_SYSTEM, cwd=cwd,
+            permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+            disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+            max_turns=4, effort="low"), tag="smalltalk")
+        convo.append((rank, (run.final or run.text or "…").strip()))
+    saved = _save_transcript(cfg, f"corridor: {pair[0][0]} & {pair[1][0]}", digest, convo,
+                             "(corridor small-talk — no decision)")
+    if audit is not None:
+        audit.record("smalltalk", officers=[p[0] for p in pair], transcript=saved.name)
+    print(f"  · corridor: {pair[0][0]} & {pair[1][0]}", flush=True)
+    return "\n".join(f"{who}: {what}" for who, what in convo)
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The General answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs

@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import intake, notify
+from . import events, intake, notify
 from .audit import AuditLog
 from .config import Config
 from .contracts import Outcome
@@ -107,6 +107,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                       + (f" (parked: {', '.join(sorted(blocked))})" if blocked else ""), flush=True)
                 if once:
                     break
+                await events.after_cycle(cfg, [], audit, blocked)   # quiet cycle — room for life
                 _sleep(max(5, interval), stop_event)
                 continue
 
@@ -120,6 +121,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 save_blocked(cfg, blocked)
                 notify.send("⏸️ Parked (need you): " + ", ".join(newly)
                             + "\nReply /unblock <id> once handled and I'll retry it.")
+            await events.after_cycle(cfg, reports, audit, blocked)   # the unit may convene itself
             if once:
                 break
             _sleep(3, stop_event)   # brief breath, then look for the next ticket
