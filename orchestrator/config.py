@@ -93,6 +93,7 @@ class Config:
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
     builder_effort: str = "high"            # default / fallback base when sizing is off
     reviewer_effort: str = "high"
+    builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
 

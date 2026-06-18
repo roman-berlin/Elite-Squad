@@ -7,6 +7,13 @@ Last updated: 2026-06-18.
 
 ## Shipped
 
+- **Turn-budget scaling + "too big" surfacing** — the build turn budget now scales with effort
+  (`builder_max_turns` base 60 → high ~96 → max ~144, configurable) so a deep ticket doesn't error
+  out mid-implementation; and if a build does hit the cap, it's surfaced as an actionable
+  **🛑 needs you — "ticket too big: split it or raise the budget"** (a Chat decision), not a
+  confusing "errored." Soldiers get the same scaling. (From the AUTO-13 E2E test, which is a
+  6-phase epic that blew the old fixed 60-turn cap.) Verified 12/12.
+
 - **Proactive autonomy — the unit acts on its own deliberations** — three pieces close the
   autonomy loop: (1) **auto-convened meetings** — when an officer ends a council turn with a
   `MEETING:` request, the event reactor convenes that huddle on the next cycle (once, then marks

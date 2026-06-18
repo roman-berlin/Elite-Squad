@@ -163,6 +163,7 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
 
 
 async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, idx: int, total: int):
+    from .builder import turns_for
     cwd = app.workdir or app.repo_path
     label, focus = SQUAD[st.role]
     options = ClaudeAgentOptions(
@@ -170,7 +171,7 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
         system_prompt=memory.preamble() + _SOLDIER_SYSTEM.format(label=label, focus=focus),
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-        setting_sources=[], max_turns=45, effort=st.effort())
+        setting_sources=[], max_turns=turns_for(cfg, st.effort()), effort=st.effort())
     return await run_agent(_soldier_prompt(st, req, idx, total), options, tag=f"soldier·{st.role}")
 
 

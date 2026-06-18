@@ -40,6 +40,39 @@ def _is_deliberate_halt(text: str | None) -> bool:
     return sum(1 for m in _HALT_MARKERS if m in t) >= 2
 
 
+_TURN_LIMIT_MARKERS = ("maximum number of turns", "max turns", "max_turns")
+
+
+def _is_turn_limit(text: str | None) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _TURN_LIMIT_MARKERS)
+
+
+def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exception,
+                      audit: AuditLog) -> TicketReport:
+    """Turn a ticket-level exception into a report. A turn-limit blow-out is NOT a real failure —
+    the ticket was simply too big to finish in one pass — so surface it as an actionable 'needs
+    you' (split it / raise the budget), not a confusing 'errored'."""
+    msg = str(exc)
+    if _is_turn_limit(msg):
+        note = (f"{ticket.id} ran out of turns before finishing — this ticket is likely too big for "
+                "a single pass. Split it into smaller tickets, or raise the turn budget "
+                "(builder_max_turns). Nothing was merged.")
+        try:
+            decisions.add(cfg, ticket, app.name, note)
+        except Exception:  # noqa: BLE001 - never let the escalation path itself crash the run
+            pass
+        audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=note)
+        _notify(cfg, f"🛑 {ticket.id} — ran out of turns (too big to finish in one pass). "
+                     "Split it, or raise builder_max_turns.")
+        print(f"  🛑 {ticket.id}: ran out of turns — ticket too big; escalated to you.", flush=True)
+        return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name,
+                            notes="ran out of turns — ticket too big for one pass")
+    audit.record("ticket_exception", ticket_id=ticket.id, app=app.name, error=msg)
+    _notify(cfg, f"❌ {ticket.id} — error: {msg[:200]}")
+    return TicketReport(ticket.id, Outcome.ERRORED, 0, 0.0, app.name, notes=msg)
+
+
 _PHASES = ("Build", "Gate", "Review", "Land")
 
 
@@ -127,9 +160,7 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                 ensured.add(app.name)
             report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
         except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
-            audit.record("ticket_exception", ticket_id=ticket.id, app=app.name, error=str(exc))
-            _notify(cfg, f"❌ {ticket.id} — error: {str(exc)[:200]}")
-            report = TicketReport(ticket.id, Outcome.ERRORED, 0, 0.0, app=app.name, notes=str(exc))
+            report = _exception_report(cfg, ticket, app, exc, audit)
         reports.append(report)
     return reports
 

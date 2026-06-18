@@ -154,6 +154,17 @@ def effort_for(cfg: Config, iteration: int, ticket=None) -> str:
     return effort_plan(cfg, iteration, ticket)[0]
 
 
+# Heavier effort = bigger task = more turns before it's "stuck". Scales the base budget so a deep
+# ticket doesn't error out at the turn cap mid-implementation (e.g. base 60 -> high 96 -> max 144).
+_TURN_SCALE = {"low": 1.0, "medium": 1.0, "high": 1.6, "xhigh": 2.4, "max": 2.4}
+
+
+def turns_for(cfg: Config, effort: str) -> int:
+    """Max build turns for this effort: the configured base, scaled up for high/max."""
+    base = int(getattr(cfg, "builder_max_turns", 60) or 60)
+    return max(base, int(base * _TURN_SCALE.get(effort, 1.0)))
+
+
 def _prompt(req: BuildRequest) -> str:
     ac = "\n".join(f"  - {c}" for c in req.ticket.acceptance_criteria) or "  (none specified)"
     parts = [
@@ -200,6 +211,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
     # by construction: the builder works ONLY inside an isolated git worktree, the read-only
     # Reviewer + the gate validate before any merge, and MAIN is never touched. Repo conventions
     # still apply — BUILDER_SYSTEM tells it to read CLAUDE.md + .claude/rules and follow them.
+    eff = effort_for(cfg, req.iteration, req.ticket)
     options = ClaudeAgentOptions(
         model=cfg.builder_model,
         system_prompt=memory.preamble() + BUILDER_SYSTEM,
@@ -207,8 +219,8 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         setting_sources=[],            # no settings files -> no ask/deny gate at any level
-        max_turns=60,
-        effort=effort_for(cfg, req.iteration, req.ticket),
+        max_turns=turns_for(cfg, eff),
+        effort=eff,
     )
     run = await run_agent(_prompt(req), options, tag="builder")
     return BuildResult(
