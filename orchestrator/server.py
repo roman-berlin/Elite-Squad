@@ -23,7 +23,8 @@ from .config import Config, normalize_effort
 from .loop import run as run_loop
 
 _state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None,
-          "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0}
+          "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
+          "approving": None}
 
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
@@ -98,6 +99,45 @@ def _charged() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
+    """A single on-page officer-action button (POST form). These actions used to live in the
+    'Unit' toolbar menu; they now sit on the page that shows their result, so each activity
+    appears exactly once."""
+    hidden = f'<input type=hidden name=app value="{html.escape(app)}">' if app else ""
+    onsub = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
+    return (f"<form method=post action={action} style='margin:0'{onsub}>{hidden}"
+            f"<button class=actbtn>{label}</button></form>")
+
+
+def _actbar(*items: str) -> str:
+    """A row of on-page officer-action controls."""
+    return ("<style>.actbar{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}"
+            ".actbtn{background:#161b25;border:1px solid #2a3343;color:#e9ecf1;border-radius:9px;"
+            "padding:9px 14px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;"
+            "text-decoration:none;display:inline-block}.actbtn:hover{background:#1b2230}</style>"
+            "<div class=actbar>" + "".join(items) + "</div>")
+
+
+def _bug_title(text: str) -> str:
+    return (text.splitlines()[0][:60] if text.strip() else "QA bug report")
+
+
+def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
+    """Frame a bug report for the unit (and save an optional screenshot beside the audit log).
+    Single source of truth for both the '+ New task → Bug' panel and the legacy /report form."""
+    desc = f"Fix this problem found during QA on DEV:\n{text or '(no description)'}"
+    if screenshot is not None and getattr(screenshot, "filename", ""):
+        import re
+        import time as _t
+        qa = Path(cfg.audit_path).resolve().parent / "qa-reports"
+        qa.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", screenshot.filename)
+        path = qa / f"{int(_t.time())}-{safe}"
+        screenshot.save(str(path))
+        desc += f"\n\nScreenshot of the problem (open and view it to understand the bug): {path}"
+    return desc
+
+
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
     app0 = current_app or (cfg.apps[0].name if cfg.apps else "")
     apps = "".join(
@@ -117,11 +157,33 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         return "disabled" if _state.get(k) else ""
 
     try:
-        from . import decisions
-        _npend = len(decisions.load(cfg))
+        from . import needs
+        _nneeds = needs.count(cfg)
     except Exception:  # noqa: BLE001
-        _npend = 0
-    chat_badge = f'<span class=cbadge>{_npend}</span>' if _npend else ""
+        _nneeds = 0
+    needs_badge = f'<span class=cbadge>{_nneeds}</span>' if _nneeds else ""
+
+    # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
+    from . import warroom as _wr
+    _base = Path(cfg.audit_path)
+
+    def _fresh(dt) -> str:
+        return f' <span class=mfresh>· {html.escape(_wr._rel(dt))}</span>' if dt else ""
+
+    try:
+        _tk = D.load_tasks(cfg.audit_path)
+        _tkdt = (_tk[0].get("ended") or _tk[0].get("started")) if _tk else None
+    except Exception:  # noqa: BLE001
+        _tkdt = None
+    fr_tasks = _fresh(_tkdt)
+    fr_council = _fresh(_wr._last_council(cfg))
+    fr_standup = _fresh(_wr._mtime(_base.with_name("last-standup.md")))
+    fr_drill = _fresh(_wr._mtime(_base.with_name("drill-report.md")))
+    try:
+        from . import memory as _mem
+        fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
+    except Exception:  # noqa: BLE001
+        fr_mem = ""
 
     return f"""
 <style>
@@ -151,18 +213,31 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .grow{{flex:1}}
 .tbar .chatbtn{{display:inline-flex;align-items:center;gap:6px}}
 .tbar .cbadge{{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px}}
+.tbar form.tbf{{margin:0;display:inline-flex}}
+.tbar .btn:disabled{{opacity:.5;cursor:not-allowed}}
+.tbar .panel a{{display:flex;align-items:center}}
+.tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:#5c6573;font-size:11px;font-weight:400}}
+@media(max-width:820px){{
+.tbar{{gap:7px;padding:10px 14px}}
+.tbar .btn{{padding:8px 10px;font-size:12px}}
+.tbar .tbnote{{order:99;flex-basis:100%;margin:4px 0 0}}
+.tbar .panel.form{{min-width:0;width:min(320px,92vw)}}
+}}
 </style>
 <div class=tbar>
   <a class="btn primary" href="/tickets?app={html.escape(app0)}">&#127915; Choose a ticket</a>
-  <a class="btn chatbtn" href="/chat">&#128172; Chat{chat_badge}</a>
 
   <details class=menu>
-    <summary class=btn>&#43; Free task</summary>
+    <summary class=btn>&#43; New task</summary>
     <div class="panel form">
-      <form method=post action=/api/run onsubmit="return !this.live.checked||confirm('Run LIVE — build and MERGE to DEV. Continue?')">
+      <form method=post action=/api/run enctype=multipart/form-data onsubmit="return !this.live.checked||confirm('Run LIVE — build and MERGE to DEV. Continue?')">
         <input type=hidden name=kind value=task>
-        <div class=ph>Describe a bug or feature</div>
-        <input type=text name=text placeholder="e.g. fix the cut-off column on /leads">
+        <div class=row style="gap:16px;margin-bottom:3px">
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
+        </div>
+        <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
+        <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
         <div class=row>
           <select name=app title=project style="flex:1">{apps}</select>
           <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
@@ -173,31 +248,18 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     </div>
   </details>
 
-  <details class=menu>
-    <summary class=btn>&#9881; Unit</summary>
-    <div class=panel>
-      <div class=ph>Convene the officers</div>
-      <form method=post action=/api/council><button {busy('councilling')}>&#128172; Hold council</button></form>
-      <a href="/meeting">&#127908; Convene a meeting</a>
-      <form method=post action=/api/ship-review><input type=hidden name=app value="{html.escape(app0)}"><button {busy('shipreview')}>&#128640; Ship review</button></form>
-      <form method=post action=/api/patrol onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button {busy('patrolling')}>&#128225; Run patrol</button></form>
-      <div class=sep></div>
-      <form method=post action=/api/drill><button {busy('drilling')}>&#127894; Run drill</button></form>
-      <form method=post action=/api/scribe><button {busy('scribing')}>&#128221; Update memory</button></form>
-    </div>
-  </details>
+  <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
+  <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
+  <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
 
   <details class=menu>
-    <summary class=btn>&#9776; Views</summary>
+    <summary class=btn>&#128202; Reports</summary>
     <div class="panel right">
-      <a href="/tasks">&#128203; Task log</a>
-      <a href="/council">&#128172; Councils &amp; meetings</a>
-      <a href="/group">&#128101; Group room</a>
-      <a href="/memory">&#128221; Unit memory</a>
-      <a href="/standup">&#129303; Daily standup</a>
-      <a href="/drill">&#127894; Last drill</a>
-      <div class=sep></div>
-      <a href="/report">&#128030; Report a problem</a>
+      <a href="/tasks">&#128203; Task log{fr_tasks}</a>
+      <a href="/council">&#128172; Councils &amp; meetings{fr_council}</a>
+      <a href="/standup">&#129303; Daily standup{fr_standup}</a>
+      <a href="/memory">&#128221; Unit memory{fr_mem}</a>
+      <a href="/drill">&#127894; Last drill{fr_drill}</a>
     </div>
   </details>
 
@@ -392,9 +454,10 @@ def create_app(cfg: Config):
     @app.post("/api/dismiss")
     def dismiss_api():
         tid = (request.form.get("ticket") or "").strip()
+        back = (request.form.get("back") or "/tasks").strip()
         if tid:
             D.dismiss(cfg.audit_path, tid)
-        return redirect("/tasks")
+        return redirect(back if back in ("/tasks", "/needs") else "/tasks")
 
     @app.get("/tickets")
     def tickets_page():
@@ -486,6 +549,7 @@ def create_app(cfg: Config):
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         kind = request.form.get("kind", "task")
         text = (request.form.get("text") or "").strip()
+        ttype = (request.form.get("type") or "feature").strip()
         effort = request.form.get("effort") or None
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
@@ -495,7 +559,10 @@ def create_app(cfg: Config):
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
         try:
-            if kind == "task":
+            if kind == "task" and ttype == "bug":
+                worklist = intake.from_text(rcfg, app_name, _bug_title(text), [],
+                                            description=_bug_desc(cfg, text, request.files.get("screenshot")))
+            elif kind == "task":
                 worklist = intake.from_text(rcfg, app_name, text or "(no description)", [])
             elif kind == "ticket":
                 worklist = intake.from_tickets(rcfg, app_name, text.split())
@@ -580,10 +647,14 @@ def create_app(cfg: Config):
         rep = Path(cfg.audit_path).with_name("drill-report.md")
         if _state.get("drilling"):
             body = _working("Drillmaster is reviewing the unit's record and proposing officer upgrades…")
-        elif rep.exists():
-            body = "<pre class=rep>" + html.escape(rep.read_text(encoding="utf-8")) + "</pre>"
         else:
-            body = "<p>No drill report yet — click 🎖️ Drill on the cockpit.</p>"
+            act = _actbar(_actbtn("/api/drill", "&#127894; Run drill"))
+            if rep.exists():
+                body = act + "<pre class=rep>" + html.escape(rep.read_text(encoding="utf-8")) + "</pre>"
+            else:
+                body = act + ("<p style='color:#8a909c'>No drill yet. Run one — the Drillmaster reviews "
+                              "the unit's record and proposes officer upgrades, which you Approve in the "
+                              "<a href='/approvals'>Approvals</a> inbox.</p>")
         return _wrap("Drillmaster report", body)
 
     @app.post("/api/council")
@@ -606,15 +677,20 @@ def create_app(cfg: Config):
         from . import council
         hist = council.history(cfg, limit=25)
         top = _working("The officers are in session — reading the record and debating…") if _state.get("councilling") else ""
+        acts = "" if _state.get("councilling") else _actbar(
+            _actbtn("/api/council", "&#128172; Hold a council now"))
+        intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The officers hold a council "
+                 "automatically each day — you don't need to call it. To brainstorm with them yourself, "
+                 "use the <a href='/group'>Group room</a>.</p>")
         if not hist:
-            return _wrap("Daily Council", top + "<p>No councils yet — press &#128172; Council on "
-                         "the cockpit, or run <code>general council</code>.</p>")
+            return _wrap("Daily Council", acts + intro + top
+                         + "<p style='color:#8a909c'>No councils yet.</p>")
         want = request.args.get("f") or hist[0]["file"]
         transcript = council.transcript_text(cfg, want) or "(transcript missing)"
         items = "".join(
             f"<li><a href='/council?f={html.escape(h['file'])}'>{html.escape(h['ts'][:16])} — "
             f"{html.escape(h['summary'])}</a></li>" for h in hist)
-        body = (top + "<div style='display:flex;gap:24px;align-items:flex-start'>"
+        body = (acts + intro + top + "<div style='display:flex;gap:24px;align-items:flex-start'>"
                 "<div style='flex:1;min-width:0'><h3>Transcript</h3><pre class=rep>"
                 + html.escape(transcript) + "</pre></div>"
                 "<div style='width:300px'><h3>Recent councils</h3><ul>" + items + "</ul></div></div>")
@@ -639,7 +715,8 @@ def create_app(cfg: Config):
         memory.ensure()
         top = (_working("The Scribe is folding recent lessons into Unit Memory…")
                if _state.get("scribing") else "")
-        body = top + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
+        act = "" if _state.get("scribing") else _actbar(_actbtn("/api/scribe", "&#128221; Update memory"))
+        body = act + top + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
         return _wrap("Unit Memory", body)
 
     @app.get("/meeting")
@@ -713,6 +790,133 @@ def create_app(cfg: Config):
                     _state["patrolling"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
+
+    @app.get("/approvals")
+    def approvals_page():
+        from . import approvals
+        pend = approvals.pending(cfg)
+        if _state.get("approving"):
+            inner = _working(f"Applying the {_state.get('approving')} recommendation — editing officer "
+                             "doctrine, then committing + pushing…")
+        elif not pend:
+            inner = ("<p style='color:#8a909c'>No pending recommendations. When the Drillmaster or "
+                     "Adjutant proposes something (after a drill or council), it lands here for your "
+                     "Approve / Disapprove — Approve applies it and pushes the doctrine.</p>")
+        else:
+            style = ("<style>.apcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 16px;margin:12px 0}"
+                     ".aphead{font-weight:650;color:#fbbf24;margin-bottom:8px}"
+                     ".aprow{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}"
+                     ".apok{background:#10371f;border:1px solid #1c5238;color:#56d98a;border-radius:8px;padding:9px 14px;font-weight:650;cursor:pointer}"
+                     ".apno{background:#23191a;border:1px solid #3a2f12;color:#f0676b;border-radius:8px;padding:9px 14px;cursor:pointer}</style>")
+            cards = ""
+            for it in pend:
+                cards += (
+                    "<div class=apcard>"
+                    f"<div class=aphead>{html.escape(it['label'])}</div>"
+                    f"<pre class=rep>{html.escape(it['body'])}</pre><div class=aprow>"
+                    f"<form method=post action=/api/approve style='margin:0' "
+                    "onsubmit=\"return confirm('Approve — the unit will apply this and push the doctrine. Continue?')\">"
+                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
+                    "<button class=apok>&#9989; Approve — apply &amp; push</button></form>"
+                    "<form method=post action=/api/disapprove style='display:flex;gap:6px;margin:0;flex:1'>"
+                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
+                    "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)' style='flex:1'>"
+                    "<button class=apno>Disapprove</button></form></div></div>")
+            inner = style + cards
+        return _wrap("Approvals — officer recommendations", inner)
+
+    @app.post("/api/approve")
+    def approve_api():
+        kind = (request.form.get("kind") or "").strip()
+        if kind and not _state.get("approving"):
+            def _bg():
+                _state["approving"] = kind
+                try:
+                    from . import approvals
+                    asyncio.run(approvals.approve(cfg, kind))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"approve failed: {exc}"
+                finally:
+                    _state["approving"] = None
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/approvals")
+
+    @app.post("/api/disapprove")
+    def disapprove_api():
+        kind = (request.form.get("kind") or "").strip()
+        reason = (request.form.get("reason") or "").strip()
+        if kind:
+            from . import approvals
+            approvals.disapprove(cfg, kind, reason)
+        return redirect("/approvals")
+
+    @app.get("/needs")
+    def needs_page():
+        from . import needs as _needs
+        s = _needs.summary(cfg)
+        style = (
+            "<style>"
+            ".nsec{margin:4px 0 24px}.nsec h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;"
+            "color:#8a929f;margin:0 0 10px;font-weight:700}"
+            ".ncard{background:#12161f;border:1px solid #232936;border-radius:11px;padding:13px 15px;margin:9px 0}"
+            ".ncard .q{color:#e9ecf1;margin-bottom:6px}.ncard .meta{color:#6b7480;font-size:12px;"
+            "font-family:ui-monospace,Menlo,monospace}"
+            ".nrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}"
+            ".nrow input[type=text]{flex:1;min-width:200px;background:#0d1119;border:1px solid #2a3343;"
+            "color:#e9ecf1;border-radius:8px;padding:8px 10px;font:inherit}"
+            ".nbtn{border:0;border-radius:8px;padding:8px 13px;font-weight:650;cursor:pointer;font:inherit;"
+            "text-decoration:none;display:inline-block}"
+            ".nbtn.ok{background:#10371f;border:1px solid #1c5238;color:#56d98a}.nbtn.send{background:#3b6cff;color:#fff}"
+            ".nbtn.no{background:#23191a;border:1px solid #3a2f12;color:#f0676b}"
+            ".nbtn.x{background:#1a1f2a;border:1px solid #2a3343;color:#8a929f}"
+            ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
+        if not s["total"]:
+            return _wrap("Needs you", style
+                         + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
+        out = [style]
+        if s["decisions"]:
+            out.append(f"<div class=nsec><h3>&#128172; Questions from the General · {len(s['decisions'])}</h3>")
+            for d in s["decisions"]:
+                tid = html.escape(str(d.get("id") or ""))
+                q = html.escape(str(d.get("question") or d.get("summary") or "(question)"))
+                out.append(
+                    f"<div class=ncard><div class=q>{q}</div><div class=meta>{tid} · {html.escape(str(d.get('app') or ''))}</div>"
+                    "<form method=post action=/api/chat class=nrow>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    "<input type=text name=text placeholder='Your decision — e.g. use DD/MM'>"
+                    "<button class='nbtn send'>Reply</button></form></div>")
+            out.append("</div>")
+        if s["approvals"]:
+            out.append(f"<div class=nsec><h3>&#9989; Officer recommendations · {len(s['approvals'])}</h3>")
+            for it in s["approvals"]:
+                out.append(
+                    f"<div class=ncard><div class=q>{html.escape(it['label'])}</div>"
+                    f"<pre class=rep style='max-height:220px;overflow:auto;margin:6px 0 0'>{html.escape(it['body'])}</pre>"
+                    "<div class=nrow>"
+                    "<form method=post action=/api/approve style='margin:0' "
+                    "onsubmit=\"return confirm('Approve — apply and push the doctrine. Continue?')\">"
+                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
+                    "<button class='nbtn ok'>&#9989; Approve</button></form>"
+                    "<form method=post action=/api/disapprove class=nrow style='flex:1;margin:0'>"
+                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
+                    "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)'>"
+                    "<button class='nbtn no'>Disapprove</button></form></div></div>")
+            out.append("</div>")
+        if s["tasks"]:
+            out.append(f"<div class=nsec><h3>&#9888;&#65039; Runs that need you · {len(s['tasks'])}</h3>")
+            for t in s["tasks"]:
+                tid = html.escape(str(t.get("ticket_id") or ""))
+                oc = html.escape(str(t.get("outcome") or ""))
+                note = html.escape(str(t.get("note") or "")[:140])
+                out.append(
+                    f"<div class=ncard><div class=q><span class=meta>{tid}</span> &nbsp;{oc}</div>"
+                    + (f"<div class=meta>{note}</div>" if note else "")
+                    + "<div class=nrow><a class='nbtn send' href='/chat'>Discuss with the General</a>"
+                    "<form method=post action=/api/dismiss style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
+                    "<button class='nbtn x'>Dismiss</button></form></div></div>")
+            out.append("</div>")
+        return _wrap("Needs you", "".join(out))
 
     @app.get("/chat")
     def chat_page():
@@ -830,18 +1034,8 @@ def create_app(cfg: Config):
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("live") != "on"
         _state["dry_run"] = rcfg.dry_run
-        desc = f"Fix this problem found during QA on DEV:\n{text or '(no description)'}"
-        f = request.files.get("screenshot")
-        if f and f.filename:
-            import re
-            import time as _t
-            qa = Path(cfg.audit_path).resolve().parent / "qa-reports"
-            qa.mkdir(parents=True, exist_ok=True)
-            safe = re.sub(r"[^A-Za-z0-9._-]", "_", f.filename)
-            path = qa / f"{int(_t.time())}-{safe}"
-            f.save(str(path))
-            desc += f"\n\nScreenshot of the problem (open and view it to understand the bug): {path}"
-        title = (text.splitlines()[0][:60] if text else "QA bug report")
+        desc = _bug_desc(cfg, text, request.files.get("screenshot"))
+        title = _bug_title(text)
         try:
             worklist = intake.from_text(rcfg, app_name, title, [], description=desc)
         except Exception as exc:  # noqa: BLE001

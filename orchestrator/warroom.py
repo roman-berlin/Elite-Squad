@@ -399,6 +399,59 @@ def _roster_html(rows: list[dict]) -> str:
     return "".join(out)
 
 
+def _hero_html(run: Optional[dict], elapsed: Optional[str], mode: Optional[str]) -> str:
+    """Full-width headline shown only while a run is live — the most important thing, biggest."""
+    if not run or not run.get("live"):
+        return ""
+    phases, reached = run["phases"], run["reached"]
+    phase = phases[reached] if reached < len(phases) else phases[-1]
+    modechip = ('<span class="hgchip live">live → DEV</span>' if mode == "live"
+                else '<span class="hgchip dry">dry-run · no changes</span>' if mode == "dry" else "")
+    stats = [f'<div class=hgstat><div class=hgk>elapsed</div><div class=hgv>{_esc(elapsed or "—")}</div></div>',
+             f'<div class=hgstat><div class=hgk>pass</div><div class=hgv>{_esc(run["passes"])}</div></div>']
+    if run.get("cost") and os.environ.get("ANTHROPIC_API_KEY"):
+        stats.append(f'<div class=hgstat><div class=hgk>cost</div><div class=hgv>${run["cost"]:.2f}</div></div>')
+    return (
+        '<div class=hero><div class=hgrow>'
+        '<div class=hgleft><span class=hgdot></span><div>'
+        f'<div class=hgtitle><span class=mono>{_esc(run["ticket"])}</span> '
+        f'<span class=hgapp>{_esc(run["app"])}</span></div>'
+        f'<div class=hgsub>Working · <b>{_esc(phase)}</b> &nbsp;{modechip}</div></div></div>'
+        f'<div class=hgstats>{"".join(stats)}</div>'
+        '</div></div>')
+
+
+def _needs_side_html(ns: dict) -> str:
+    """The Needs-you panel body for the cockpit's side column — a compact preview of the inbox."""
+    if not ns.get("total"):
+        return ('<a class=needsok href="/needs"><span class=nok>&#10003;</span> '
+                'All clear — nothing needs you</a>')
+    rows = []
+    for d in ns.get("decisions", [])[:4]:
+        q = _esc(str(d.get("question") or d.get("summary") or "question"))[:64]
+        rows.append(f'<a class=needrow href="/needs"><span class="nd warn"></span>'
+                    f'<div class=ndmain><div class=ndt>{q}</div>'
+                    f'<div class=ndr>question · {_esc(str(d.get("id") or ""))}</div></div></a>')
+    for a in ns.get("approvals", [])[:4]:
+        rows.append(f'<a class=needrow href="/needs"><span class="nd ok"></span>'
+                    f'<div class=ndmain><div class=ndt>{_esc(a.get("label") or "recommendation")}</div>'
+                    f'<div class=ndr>approval</div></div></a>')
+    for t in ns.get("tasks", [])[:4]:
+        rows.append(f'<a class=needrow href="/needs"><span class="nd bad"></span>'
+                    f'<div class=ndmain><div class=ndt>{_esc(str(t.get("ticket_id") or ""))} — '
+                    f'{_esc(str(t.get("outcome") or ""))}</div><div class=ndr>run</div></div></a>')
+    return "".join(rows) + '<a class=needall href="/needs">Open inbox &#8594;</a>'
+
+
+_TALK_HTML = (
+    '<div class=talk>'
+    '<a class=talkbtn href="/chat"><span class=tki>&#128172;</span>'
+    '<div><b>General</b><i>ask the orchestrator 1:1</i></div></a>'
+    '<a class=talkbtn href="/group"><span class=tki>&#128101;</span>'
+    '<div><b>Group room</b><i>convene all the officers</i></div></a>'
+    '</div>')
+
+
 def _feed_html(items: list[dict]) -> str:
     if not items:
         return '<div class=muted style="padding:14px">No activity yet.</div>'
@@ -445,16 +498,24 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         elapsed = _fmt_dur(datetime.now().timestamp() - rs)
     manual = bool(state.get("active")) and not ap_on
     tasks = D.load_tasks(cfg.audit_path)
+    run_obj = active_run(cfg, tasks, app, active)
     k = _kpi_html(kpis(cfg, tasks, app))
-    run = _run_html(active_run(cfg, tasks, app, active), mode, elapsed, manual)
-    ros_rows = roster(cfg, tasks, active)
-    ros = _roster_html(ros_rows)
+    run = _run_html(run_obj, mode, elapsed, manual)
+    hero = _hero_html(run_obj, elapsed, mode)
     fd = _feed_html(feed(cfg, tasks, app))
+    try:
+        from . import needs as _needs
+        ns = _needs.summary(cfg)
+    except Exception:  # noqa: BLE001
+        ns = {"total": 0, "decisions": [], "approvals": [], "tasks": []}
+    needs_body = _needs_side_html(ns)
+    ncount = f' · {ns["total"]}' if ns.get("total") else ""
     log_panel = ""
     if log_lines is not None:
         log_panel = (f'<section class=panel><div class=ph>Live feed{_liveness(state, active)}</div>'
                      f'{_log_html(log_lines)}</section>')
     return (
+        f'{hero}'
         f'<div class=kpis>{k}</div>'
         '<div class=cols>'
         f'<div class=col-main>'
@@ -463,7 +524,9 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         f'<section class=panel><div class=ph>Activity</div><div class=feed>{fd}</div></section>'
         '</div>'
         f'<div class=col-side>'
-        f'<section class=panel><div class=ph>Roster · {len(ros_rows)} officers</div><div class=roster>{ros}</div></section>'
+        f'<section class="panel needspanel"><div class=ph>Needs you{ncount}</div>'
+        f'<div class=needs>{needs_body}</div></section>'
+        f'<section class=panel><div class=ph>Talk to the unit</div>{_TALK_HTML}</section>'
         '</div>'
         '</div>')
 
@@ -703,7 +766,38 @@ padding:3px 9px;border-radius:6px;text-transform:none}
 margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pulse2 1.4s infinite}
 .lv.quiet{color:var(--warn);background:var(--warnbg)}
 .lv.stuck{color:var(--bad);background:var(--badbg)}
-@media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}}
+/* hero — the live-run headline (biggest thing when a run is in flight) */
+.hero{margin:18px 24px 0;padding:16px 20px;border:1px solid #243049;border-radius:14px;
+background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));position:relative;overflow:hidden}
+.hgrow{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}
+.hgleft{display:flex;align-items:center;gap:14px;min-width:0}
+.hgdot{width:13px;height:13px;border-radius:99px;background:var(--warn);animation:pulse 1.5s infinite;flex:none}
+.hgtitle{font-size:22px;font-weight:700;letter-spacing:-.3px}
+.hgtitle .hgapp{font-size:13px;color:var(--dim);font-weight:500;margin-left:6px}
+.hgsub{font-size:13px;color:var(--dim);margin-top:2px}.hgsub b{color:var(--warn)}
+.hgchip{font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;text-transform:uppercase;letter-spacing:.05em}
+.hgchip.live{color:var(--ok);background:var(--okbg)}.hgchip.dry{color:var(--info);background:#0f1c30}
+.hgstats{display:flex;gap:26px}
+.hgstat{text-align:right}.hgk{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+.hgv{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+/* needs-you side panel + talk-to-the-unit */
+.needs{padding:6px 0}
+.needsok{display:flex;align-items:center;gap:9px;padding:14px 18px;color:var(--ok);text-decoration:none;font-size:13px}
+.nok{font-weight:800}
+.needrow{display:flex;align-items:flex-start;gap:11px;padding:10px 18px;text-decoration:none;color:inherit;border-left:2px solid transparent}
+.needrow:hover{background:var(--panel2);border-left-color:var(--line2)}
+.nd{width:8px;height:8px;border-radius:99px;margin-top:5px;flex:none;background:var(--faint)}
+.nd.ok{background:var(--ok)}.nd.warn{background:var(--warn)}.nd.bad{background:var(--bad)}
+.ndmain{min-width:0}.ndt{font-size:13px;font-weight:600;color:var(--ink)}
+.ndr{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;margin-top:1px}
+.needall{display:block;padding:11px 18px;font-size:12px;font-weight:650;color:var(--info);border-top:1px solid var(--line)}
+.needspanel .ph::before{background:var(--warn)}
+.talk{padding:10px;display:flex;flex-direction:column;gap:8px}
+.talkbtn{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line2);border-radius:11px;
+background:#0d1119;text-decoration:none;color:inherit}
+.talkbtn:hover{border-color:var(--accent);background:var(--panel2)}
+.tki{font-size:20px}.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
+@media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
 @media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#222b39;border-radius:8px}
