@@ -58,6 +58,7 @@ class AppConfig:
     base_branch: str = "dev"            # features branch off (and merge back to) dev
     protected_branch: str = "main"      # NEVER touched by the pipeline
     branch_prefix: str = "autodev"
+    qa_url: Optional[str] = None         # base URL where this app's DEV is testable; shown on merge -> QA
     gate_commands: list[str] = field(default_factory=list)   # tests/lint/typecheck
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)

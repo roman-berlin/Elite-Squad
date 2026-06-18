@@ -6,6 +6,7 @@ bounds, the cost budget, every backlog transition, and the keep-dev-green merge.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,25 @@ from .git_ops import Git, GitError
 def _notify(cfg: Config, text: str) -> None:
     """Telegram notify with a [DRY-RUN] prefix when not live. Safe no-op if unset."""
     notify.send(("[DRY-RUN] " if cfg.dry_run else "") + text)
+
+
+def _test_url(app: AppConfig, build_summary: str | None) -> str:
+    """Where the Commander should test this change on DEV: the builder's 'TEST: <route>' line,
+    resolved against the app's qa_url. Returns a full URL, a bare route, or '' if neither exists."""
+    base = (getattr(app, "qa_url", None) or "").rstrip("/")
+    route = ""
+    m = re.search(r"^\s*TEST:\s*(.+?)\s*$", build_summary or "", re.IGNORECASE | re.MULTILINE)
+    if m:
+        route = m.group(1).strip()
+    if route.lower().startswith("(no ui"):          # builder declared no UI — show the hint as-is
+        return route
+    if route.lower().startswith("http"):
+        return route
+    if base and route.startswith("/"):
+        return base + route
+    if base:
+        return base + (("/" + route.lstrip("/")) if route else "")
+    return route
 
 
 _HALT_MARKERS = ("halt", "stop", "do not proceed", "precondition", "made no writes",
@@ -365,18 +385,21 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         if sync:
             print(f"  land · {sync}", flush=True)
         _bar(4)
+        turl = _test_url(app, build.summary)
+        ctest = f" Test: {turl}." if turl else ""
         if not ticket.ephemeral:
             if cfg.mark_done_on_merge:
                 backlog.set_status(ticket, "Done")
-                backlog.add_comment(ticket, f"Merged to {app.base_branch} and marked Done. {review.summary}")
+                backlog.add_comment(ticket, f"Merged to {app.base_branch} and marked Done.{ctest} {review.summary}")
             else:
                 backlog.set_status(ticket, "QA")   # your QA column; you move it Done or back To Do
-                backlog.add_comment(ticket, f"Merged to {app.base_branch}; moved to QA for your review. {review.summary}")
+                backlog.add_comment(ticket, f"Merged to {app.base_branch}; moved to QA for your review.{ctest} {review.summary}")
         if ticket.ephemeral:
             done = ""   # ad-hoc task: no Jira ticket to move
         else:
             done = " · marked Done" if cfg.mark_done_on_merge else " · moved to QA"
-        _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}")
+        test_line = f"\n🔗 Test on {app.base_branch}: {turl}" if turl else ""
+        _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"

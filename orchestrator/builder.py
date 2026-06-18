@@ -43,7 +43,10 @@ worktree, log, diff — and never commit, push, switch branches, or touch histor
 turns on the code, not on inspecting the repo.
 
 Finish with a short plain-text summary: what you changed, which file(s), and which
-acceptance criterion each change satisfies.
+acceptance criterion each change satisfies. End with a line EXACTLY in this form:
+  TEST: <the single page/route to verify this on DEV, e.g. /leads — or a full URL>
+so the Commander knows exactly where to check. If the change has no UI (pure backend/config),
+write 'TEST: (no UI — <how to verify, e.g. an endpoint/command>)'.
 """
 
 
