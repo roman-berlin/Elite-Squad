@@ -30,9 +30,32 @@ echo
 ./general doctor
 echo
 
-# 3) Open the browser as soon as the server is actually listening (up to ~30s)
+# 3) Close any stale War Room tab(s), then open ONE fresh tab once the server is listening.
+#    (First run prompts once to allow controlling the browser: System Settings > Privacy > Automation.)
+close_old_tabs() {
+  /usr/bin/osascript >/dev/null 2>&1 <<'OSA'
+on closeIn(appName)
+  tell application "System Events"
+    if not (exists (processes whose name is appName)) then return
+  end tell
+  tell application appName
+    repeat with w in windows
+      try
+        set k to (count of tabs of w)
+        repeat while k > 0
+          if (URL of tab k of w) contains "localhost:8787" then close tab k of w
+          set k to k - 1
+        end repeat
+      end try
+    end repeat
+  end tell
+end closeIn
+closeIn("Google Chrome")
+closeIn("Safari")
+OSA
+}
 ( for i in {1..60}; do
-    curl -s -o /dev/null "$URL" 2>/dev/null && { open "$URL"; break; }
+    curl -s -o /dev/null "$URL" 2>/dev/null && { close_old_tabs; open "$URL"; break; }
     sleep 0.5
   done ) &
 
