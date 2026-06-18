@@ -3,9 +3,18 @@
 The durable plan. The live task list in Cowork mirrors this, but this file is the source of
 truth (version-controlled, reviewable on GitHub). Update it as we ship.
 
-Last updated: 2026-06-16.
+Last updated: 2026-06-18.
 
 ## Shipped
+
+- **Run controls & guardrails (QA pass)** — three safety/visibility fixes from a War-Room QA
+  sweep: (1) **confirm before anything live** — a LIVE free-task run, a LIVE ticket-develop, and
+  **Start Autopilot** now pop a confirm (dry-runs never prompt), so one stray click can't spend
+  Opus or merge to DEV; (2) a **Stop control** on the active-run panel that cooperatively halts a
+  manual run at the next safe checkpoint (before the next build pass / before the merge — **DEV is
+  never left half-merged**), wired through `loop.run` via a `stop_event`; (3) **run telemetry** —
+  the active run shows **elapsed time + est. cost** alongside the live→DEV chip and heartbeat. Chat
+  also auto-scrolls to new messages. Verified by the dashboard QA harness (48/48).
 
 - **War Room chat** — a messaging view (toolbar **💬 Chat**, with a red unread badge) to talk
   with the unit. Pending decisions — the reviewer's product questions, escalations, and Builder

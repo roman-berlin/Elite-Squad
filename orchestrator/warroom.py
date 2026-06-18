@@ -276,9 +276,17 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         "passes": t.get("passes") or 0,
         "verdict": t.get("verdict") or "",
         "outcome": t.get("outcome") or "running",
+        "cost": t.get("cost") or 0,
         "phases": phases,
         "reached": reached,
     }
+
+
+def _fmt_dur(secs: float) -> str:
+    secs = int(max(0, secs))
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60:02d}s"
+    return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
 
 
 # --------------------------------------------------------------------------- #
@@ -299,7 +307,8 @@ def _kpi_html(cards: list[dict]) -> str:
     return "".join(out)
 
 
-def _run_html(run: Optional[dict], mode: Optional[str] = None) -> str:
+def _run_html(run: Optional[dict], mode: Optional[str] = None,
+              elapsed: Optional[str] = None, manual: bool = False) -> str:
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
                 'No runs yet for this project. Launch one from the bar above.</div>')
@@ -309,6 +318,12 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None) -> str:
         bar.append(f'<div class="ph {state}"><span></span>{_esc(ph)}</div>')
     status = ('<span class="b live">● running</span>' if run["live"]
               else '<span class="b muted">last run</span>')
+    # Stop is offered only for a manual run in flight — Autopilot has its own Stop in the header.
+    stop = ('<form method=post action=/api/stop-run class=stoprun '
+            'onsubmit="return confirm(\'Stop this run? It halts at the next safe checkpoint — '
+            'no merge, nothing left half-applied.\')">'
+            '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
+            '</form>') if (run["live"] and manual) else ""
     chip = ""
     if run["live"] and mode == "live":
         chip = '<span class="b mode">live → DEV</span>'
@@ -316,13 +331,18 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None) -> str:
         chip = '<span class="b dry">dry-run · no changes</span>'
     verdict = (f'<span class=meta>verdict <b>{_esc(run["verdict"])}</b></span>'
                if run["verdict"] else "")
+    extra = ""
+    if run["live"] and elapsed:
+        extra += f'<span class=meta>elapsed <b>{_esc(elapsed)}</b></span>'
+    if run.get("cost"):
+        extra += f'<span class=meta>cost <b>${run["cost"]:.2f}</b></span>'
     return (
         f'<div class=runhead><div><span class=mono>{_esc(run["ticket"])}</span> '
         f'<span class=muted>{_esc(run["app"])}</span></div>'
-        f'<div style="display:flex;gap:7px;align-items:center">{chip}{status}</div></div>'
+        f'<div style="display:flex;gap:7px;align-items:center">{chip}{status}{stop}</div></div>'
         f'<div class=phasebar>{"".join(bar)}</div>'
         f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
-        f'{verdict}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>')
+        f'{verdict}{extra}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>')
 
 
 def _log_html(lines) -> str:
@@ -394,9 +414,15 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     mode = None
     if active:
         mode = "live" if (ap_on or dry is False) else ("dry" if dry is True else None)
+    # Elapsed on the live run; Stop only for a manual run (Autopilot stops from the header).
+    elapsed = None
+    rs = state.get("run_started")
+    if active and rs:
+        elapsed = _fmt_dur(datetime.now().timestamp() - rs)
+    manual = bool(state.get("active")) and not ap_on
     tasks = D.load_tasks(cfg.audit_path)
     k = _kpi_html(kpis(cfg, tasks, app))
-    run = _run_html(active_run(cfg, tasks, app, active), mode)
+    run = _run_html(active_run(cfg, tasks, app, active), mode, elapsed, manual)
     ros = _roster_html(roster(cfg, tasks, active))
     fd = _feed_html(feed(cfg, tasks, app))
     log_panel = ""
@@ -473,7 +499,9 @@ def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
                 '<button class="apbtn stop">Stop</button></form>')
     appq = _esc(app if app and app != "*" else "")
     dis = "" if healthy else "disabled"
-    return ('<form method=post action=/api/autopilot class=apsw>'
+    confirm = ('onsubmit="return confirm(\'Start Autopilot? The unit will work the queue '
+               'LIVE — building and merging to DEV until you press Stop.\')"')
+    return (f'<form method=post action=/api/autopilot class=apsw {confirm}>'
             '<input type=hidden name=action value=start>'
             f'<input type=hidden name=app value="{appq}">'
             f'<span class="apdot off"></span><span class=aplabel>Autopilot&nbsp;<b>off</b></span>'
@@ -604,6 +632,10 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .meta{font-size:12px;color:var(--dim)}.meta b{color:var(--ink);font-weight:600;font-family:var(--mono)}
 .runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
 .dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}
+.stoprun{margin:0;display:inline}
+.stopbtn{background:var(--badbg);color:var(--bad);border:1px solid #5a1f22;border-radius:6px;
+padding:4px 11px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}
+.stopbtn:hover{background:#3a181b}
 /* roster */
 .roster{padding:6px 0}
 .offrow{display:flex;align-items:center;gap:12px;padding:10px 18px;border-left:2px solid transparent}

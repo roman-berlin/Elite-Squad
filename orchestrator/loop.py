@@ -96,7 +96,7 @@ class Budget:
 
 
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
-              audit: AuditLog) -> list[TicketReport]:
+              audit: AuditLog, stop_event=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     gits: dict[str, Git] = {}
@@ -104,6 +104,10 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     ensured: set[str] = set()
 
     for app, ticket in worklist:
+        if stop_event is not None and stop_event.is_set():
+            audit.record("run_stopped", reason="commander stop (before ticket)")
+            print("  ■ stopped by Commander — remaining tickets skipped.", flush=True)
+            break
         if budget.exceeded():
             audit.record("budget_stop", spent=budget.spent)
             break
@@ -121,7 +125,7 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
             if app.name not in ensured:
                 git.ensure_clean()
                 ensured.add(app.name)
-            report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget)
+            report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
         except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
             audit.record("ticket_exception", ticket_id=ticket.id, app=app.name, error=str(exc))
             _notify(cfg, f"❌ {ticket.id} — error: {str(exc)[:200]}")
@@ -130,7 +134,7 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     return reports
 
 
-async def process_ticket(ticket, app, cfg, git, backlog, audit, budget) -> TicketReport:
+async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event=None) -> TicketReport:
     branch = ticket.branch_name(app.branch_prefix)
     audit.record("ticket_start", ticket_id=ticket.id, app=app.name, branch=branch,
                  dry_run=cfg.dry_run, ephemeral=ticket.ephemeral)
@@ -143,17 +147,22 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget) -> Ticke
 
     report: TicketReport | None = None
     try:
-        report = await _attempt(ticket, app, cfg, git, backlog, audit, budget, branch)
+        report = await _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event)
         return report
     finally:
         _cleanup(cfg, git, audit, report)
 
 
-async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> TicketReport:
+async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
     cost = 0.0
     last_changes: list[str] = []
 
     for iteration in range(1, cfg.max_iterations + 1):
+        if stop_event is not None and stop_event.is_set():
+            audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-build")
+            print(f"  ■ {ticket.id}: stopped by Commander — no merge.", flush=True)
+            return TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
+                                notes="stopped by Commander")
         if budget.exceeded():
             audit.record("budget_exceeded", ticket_id=ticket.id, spent=budget.spent)
             return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
@@ -245,6 +254,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch) -> Tic
 
         # 4) DECIDE
         if review.is_ship_ready():
+            if stop_event is not None and stop_event.is_set():
+                audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-merge")
+                print(f"  ■ {ticket.id}: stopped before merge by Commander — DEV untouched.", flush=True)
+                return TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
+                                    notes="stopped by Commander before merge")
             security_block = None
             if getattr(cfg, "security_gate", False):
                 print("  security · Provost gating the diff…", flush=True)

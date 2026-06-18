@@ -23,7 +23,7 @@ from .config import Config, normalize_effort
 from .loop import run as run_loop
 
 _state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None,
-          "last_activity": None, "run_started": None}
+          "last_activity": None, "run_started": None, "stop_event": None}
 
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
@@ -133,7 +133,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <details class=menu>
     <summary class=btn>&#43; Free task</summary>
     <div class="panel form">
-      <form method=post action=/api/run>
+      <form method=post action=/api/run onsubmit="return !this.live.checked||confirm('Run LIVE — build and MERGE to DEV. Continue?')">
         <input type=hidden name=kind value=task>
         <div class=ph>Describe a bug or feature</div>
         <input type=text name=text placeholder="e.g. fix the cut-off column on /leads">
@@ -316,7 +316,8 @@ def create_app(cfg: Config):
         body = (style
                 + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
                   "Tick the ones to develop, then Run.</p>"
-                  '<form method=post action=/api/run-selected>'
+                  '<form method=post action=/api/run-selected '
+                  'onsubmit="return !this.live.checked||confirm(\'Run LIVE — build and MERGE to DEV. Continue?\')">'
                   f'<input type=hidden name=app value="{html.escape(app_name)}">'
                   f'<div class=tlist>{rows}</div>'
                   '<div class=trun>'
@@ -355,12 +356,15 @@ def create_app(cfg: Config):
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
             _state["run_started"] = _state["last_activity"] = time.time()
+            ev = threading.Event()
+            _state["stop_event"] = ev
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit))
+                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = str(exc)
             finally:
                 _state["active"] = False
+                _state["stop_event"] = None
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -396,13 +400,24 @@ def create_app(cfg: Config):
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
             _state["run_started"] = _state["last_activity"] = time.time()
+            ev = threading.Event()
+            _state["stop_event"] = ev
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit))
+                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = str(exc)
             finally:
                 _state["active"] = False
+                _state["stop_event"] = None
         threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/")
+
+    @app.post("/api/stop-run")
+    def stop_run_api():
+        ev = _state.get("stop_event")
+        if ev is not None:
+            ev.set()
+            _state["last_msg"] = "stopping after the current step — DEV untouched, no merge"
         return redirect("/")
 
     @app.get("/standup")
@@ -573,7 +588,9 @@ def create_app(cfg: Config):
                 'placeholder="Message the unit…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
                 'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
-                'if(r.ok){document.getElementById("cinner").innerHTML=await r.text();}}catch(e){}},5000);'
+                'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
+                'document.getElementById("cinner").innerHTML=await r.text();'
+                'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},5000);'
                 '</script>')
         return _wrap("Chat with the unit", body)
 
@@ -646,12 +663,15 @@ def create_app(cfg: Config):
         def _bg():
             _state["active"], _state["last_msg"] = True, ""
             _state["run_started"] = _state["last_activity"] = time.time()
+            ev = threading.Event()
+            _state["stop_event"] = ev
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit))
+                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = str(exc)
             finally:
                 _state["active"] = False
+                _state["stop_event"] = None
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
