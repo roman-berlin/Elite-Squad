@@ -248,9 +248,15 @@ async def _main(argv: list[str]) -> int:
     if args.command == "council":
         from . import council
         from .audit import AuditLog
-        briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None),
-                                              audit=AuditLog(cfg.audit_path))
+        audit = AuditLog(cfg.audit_path)
+        briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None), audit=audit)
         print("\n" + briefing)
+        # The daily 10:00 muster also runs the officers' stand-up (Yesterday/Today/Blockers) — fully
+        # automatic, no Commander needed. A failure here never breaks the council.
+        try:
+            await council.hold_standup(cfg, audit=audit)
+        except Exception as exc:  # noqa: BLE001
+            print(f"(stand-up skipped: {exc})")
         return 0
 
     if args.command == "meeting":
