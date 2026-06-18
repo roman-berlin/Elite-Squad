@@ -39,6 +39,7 @@ class JiraAdapter(BacklogAdapter):
         self.jql_override = b.get("jql")
         self.ac_field = b.get("acceptance_criteria_field")
         self.status_map = b.get("status_map", {})
+        self.fetch_images = b.get("fetch_images", True)   # download ticket image attachments for the Builder
         # Queue order: resume In Progress first, then pull the ready column (To Do),
         # each ordered by board Rank (top first). Override with `queue_statuses:` in config.
         self.queue_statuses = b.get("queue_statuses") or ["In Progress", self.ready_status]
@@ -52,7 +53,7 @@ class JiraAdapter(BacklogAdapter):
         return f"{self.base_url}/rest/api/3/{path.lstrip('/')}"
 
     def _fields(self) -> list[str]:
-        fields = ["summary", "description", "status", "comment", "labels", "issuetype"]
+        fields = ["summary", "description", "status", "comment", "labels", "issuetype", "attachment"]
         if self.ac_field:
             fields.append(self.ac_field)
         return fields
@@ -171,6 +172,35 @@ class JiraAdapter(BacklogAdapter):
             return None
         return None
 
+    def _download_images(self, key: str, attachments: list[dict[str, Any]]) -> list[str]:
+        """Download image attachments to a local cache so the Builder's Read tool can view them.
+        Best-effort: any failure (no creds, network, odd mime) is skipped, never raised."""
+        if not getattr(self, "fetch_images", True) or not attachments:
+            return []
+        import re
+        import tempfile
+        from pathlib import Path
+        dest = Path(tempfile.gettempdir()) / "general-ticket-images" / key
+        out: list[str] = []
+        for a in attachments:
+            if not str(a.get("mimeType") or "").lower().startswith("image/"):
+                continue
+            url = a.get("content")
+            if not url:
+                continue
+            fname = re.sub(r"[^A-Za-z0-9._-]", "_", str(a.get("filename") or a.get("id") or "image"))
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                p = dest / fname
+                if not p.exists() or p.stat().st_size == 0:
+                    r = self.session.get(url, timeout=30)
+                    r.raise_for_status()
+                    p.write_bytes(r.content)
+                out.append(str(p))
+            except Exception:  # noqa: BLE001 - image fetch is best-effort
+                continue
+        return out
+
     # -- parsing ---------------------------------------------------------- #
     def _to_ticket(self, issue: dict[str, Any]) -> Ticket:
         f = issue.get("fields", {})
@@ -180,14 +210,21 @@ class JiraAdapter(BacklogAdapter):
             ac = _split_criteria(_adf_to_text(f[self.ac_field]))
         if not ac:
             ac = _criteria_from_description(description)
-        # Bring the Commander's latest comments into context (skip the General's own).
+        # Bring ALL of the Commander's comments into context (skip the General's own) — these carry
+        # the QA feedback when a ticket bounces back from QA to To Do.
         feedback = []
         for c in (f.get("comment", {}) or {}).get("comments", []) or []:
             txt = _adf_to_text(c.get("body"))
-            if txt and not txt.startswith("[General]"):
-                feedback.append(txt)
+            if txt and not txt.strip().startswith("[General]"):
+                feedback.append(txt.strip())
         if feedback:
-            description += "\n\nLatest feedback from the Commander:\n" + "\n---\n".join(feedback[-2:])
+            description += ("\n\nCommander's comments (oldest -> newest) — read ALL of these; they "
+                           "include QA feedback on what to fix:\n" + "\n---\n".join(feedback))[:8000]
+        # Download image attachments so the Builder can SEE the mockups/screenshots, not guess.
+        imgs = self._download_images(issue["key"], f.get("attachment") or [])
+        if imgs:
+            description += ("\n\nTicket images — OPEN and VIEW each (they show the desired design / "
+                           "the bug); do not guess at visuals:\n" + "\n".join(f"- {p}" for p in imgs))
         return Ticket(
             id=issue["key"],
             key=issue["key"],

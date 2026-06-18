@@ -20,6 +20,10 @@ at the repo root and the relevant files under .claude/rules/ (e.g. Bun-only — 
 tenant-isolation / zero-trust; TypeScript conventions). They override generic habits.
 
 Approach, in order:
+0. CONTEXT: read the WHOLE ticket — description, acceptance criteria, AND the Commander's
+   comments (on a re-opened ticket they carry the QA feedback on exactly what to fix). If the
+   ticket lists image paths (mockups/screenshots), Read each image to SEE the intended design or
+   the bug before you start — never guess at visuals.
 1. LOCATE: grep/glob for the specific files and functions the ticket touches. Do not
    read the whole repo.
 2. PLAN: choose the smallest change that fully satisfies the acceptance criteria.
