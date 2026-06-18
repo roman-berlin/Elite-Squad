@@ -17,6 +17,7 @@ import html
 import json
 import os
 from datetime import datetime
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Optional
 
@@ -160,7 +161,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok",
          "href": "/tasks"},
         {"label": "Needs you", "value": len(needs), "hint": "PR · escalated · errored",
-         "tone": "warn" if needs else None, "href": "/chat"},          # -> respond to the decisions
+         "tone": "warn" if needs else None, "href": "/tasks"},          # -> the tickets that need you
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
         {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
          "tone": "warn" if blocked else None, "href": "/tasks"},
@@ -192,6 +193,10 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
     # An active run means the Builder/Reviewer are on duty right now.
     on_duty = {"builder", "reviewer"} if active else set()
 
+    # roster key -> the officer's council name (so a click consults that exact officer).
+    group_name = {"adjutant": "Adjutant", "builder": "Field Engineer", "reviewer": "Inspector General",
+                  "scout": "Scout", "provost": "Provost Marshal", "quartermaster": "Quartermaster",
+                  "drill": "Drillmaster"}
     out = []
     for key, name, role in _OFFICERS:
         dt = seen.get(key)
@@ -201,7 +206,9 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
             dot = "recent"
         else:
             dot = "idle"
-        out.append({"name": name, "role": role, "dot": dot, "last": _rel(dt)})
+        # The General is your 1:1 chat; every other officer opens a focused consult with just them.
+        href = "/chat" if key == "general" else "/group?officer=" + quote(group_name.get(key, name))
+        out.append({"name": name, "role": role, "dot": dot, "last": _rel(dt), "href": href})
     return out
 
 
@@ -381,11 +388,13 @@ def _log_html(lines) -> str:
 def _roster_html(rows: list[dict]) -> str:
     out = []
     for r in rows:
+        href = r.get("href")
+        tag, attr = ("a", f' href="{href}"') if href else ("div", "")
         out.append(
-            f'<div class=offrow><span class="d {r["dot"]}"></span>'
+            f'<{tag} class=offrow{attr}><span class="d {r["dot"]}"></span>'
             f'<div class=offmain><div class=offname>{_esc(r["name"])}</div>'
             f'<div class=offrole>{_esc(r["role"])}</div></div>'
-            f'<div class=offlast>{_esc(r["last"])}</div></div>')
+            f'<div class=offlast>{_esc(r["last"])}</div></{tag}>')
     return "".join(out)
 
 
@@ -665,6 +674,7 @@ padding:4px 11px;font-size:10px;font-weight:700;text-transform:uppercase;letter-
 .roster{padding:6px 0}
 .offrow{display:flex;align-items:center;gap:12px;padding:10px 18px;border-left:2px solid transparent}
 .offrow:hover{background:var(--panel2);border-left-color:var(--line2)}
+a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .d{width:8px;height:8px;border-radius:99px;flex:none;background:#39424f}
 .d.live{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse2 1.4s infinite}
 .d.recent{background:var(--info)}.d.idle{background:#39424f}

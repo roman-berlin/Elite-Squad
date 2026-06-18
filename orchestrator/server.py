@@ -243,6 +243,7 @@ _CHAT_STYLE = ("<style>"
                ".ctab{padding:9px 14px;color:#8a929f;font-size:13px;font-weight:600;border-bottom:2px solid transparent;text-decoration:none}"
                ".ctab.on{color:#e9ecf1;border-bottom-color:#3b6cff}.ctab:hover{color:#e9ecf1}"
                ".cbadge{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px;margin-left:5px}"
+               ".aim{max-width:780px;margin:0 auto 10px;color:#9be7bd;font-size:13px}.aim a{color:#6aa9ff}"
                ".pcard{background:#1a160f;border:1px solid #3a2f12;border-radius:14px;padding:14px 16px;margin-bottom:12px}"
                ".pcard .ph2{color:#f7b955;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
                ".pcard .pq{color:#e9ecf1;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:ui-monospace,Menlo,monospace;line-height:1.5}"
@@ -708,13 +709,19 @@ def create_app(cfg: Config):
 
     @app.get("/group")
     def group_page():
+        officer = (request.args.get("officer") or "").strip()
         busy = ('<div class=cempty>&#128225; the unit is weighing in… replies appear below.</div>'
                 if _state.get("grouping") else "")
+        aim = (f'<div class=aim>Consulting <b>{html.escape(officer)}</b> directly — only they answer. '
+               '<a href="/group">ask the whole unit instead</a></div>') if officer else ""
+        oin = f'<input type=hidden name=officer value="{html.escape(officer)}">' if officer else ""
+        ph = (f"Ask {html.escape(officer)} something…" if officer
+              else "Ask the unit / brainstorm with the officers…")
         body = (_CHAT_STYLE + _chat_tabs("group")
-                + '<div class=chat>' + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
-                '<div class=composer><form method=post action=/api/group>'
-                '<input type=text name=text autocomplete=off autofocus '
-                'placeholder="Ask the unit / brainstorm with the officers…"><button>Send</button></form></div>'
+                + '<div class=chat>' + aim + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
+                '<div class=composer><form method=post action=/api/group>' + oin
+                + f'<input type=text name=text autocomplete=off autofocus '
+                f'placeholder="{ph}"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
                 'setInterval(async function(){try{var r=await fetch("/api/group-thread",{cache:"no-store"});'
                 'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
@@ -730,20 +737,23 @@ def create_app(cfg: Config):
 
     @app.post("/api/group")
     def group_api():
+        from urllib.parse import quote
         text = (request.form.get("text") or "").strip()
+        officer = (request.form.get("officer") or "").strip() or None
         if text and not _state.get("grouping"):
             from . import council
             council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
             def _bg():
                 _state["grouping"] = True
                 try:
-                    asyncio.run(council.group_chat(cfg, text, audit=audit, echo=False))
+                    asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
+                                                   audit=audit, echo=False))
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"group chat failed: {exc}"
                 finally:
                     _state["grouping"] = False
             threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/group")
+        return redirect("/group?officer=" + quote(officer) if officer else "/group")
 
     @app.get("/api/chat-thread")
     def chat_thread_api():
