@@ -81,9 +81,11 @@ COUNCIL = [
      "deploy config. Name the single biggest thing standing between DEV and a clean promotion, "
      "and the one readiness check to add. If readiness is unknown, say what to verify."),
     ("Drillmaster", "Doctrine & Training",
-     "Your lens is improvement — the unit studies every day. From recurring weaknesses, name "
-     "the ONE drill (a precise edit to an officer's Identity/Knowledge/Skills file) that yields "
-     "the most compounding gain tomorrow."),
+     "Your lens is improvement and training — the unit studies every day. From recurring "
+     "weaknesses, name the ONE drill (a precise edit to an officer's Identity/Knowledge/Skills "
+     "file) that yields the most compounding gain tomorrow. You also own onboarding for any "
+     "newly recruited officer/soldier and refresher drills for existing ones — flag if anyone is "
+     "due one."),
 ]
 
 _CHAIR_SYSTEM = (
@@ -473,6 +475,170 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     notify.send(f"🎖️ {answer[:3500]}")
     add_commander_note(cfg, f"Q: {message}\n  A (General): {answer}")
     return answer
+
+
+# --------------------------------------------------------------------------- #
+# Group chat — the Commander consults the whole unit (brainstorm). The relevant
+# officers answer; others may add a short comment; off-lane officers PASS. The
+# General is NOT in this room — the Commander talks to the General 1:1 in /chat.
+# --------------------------------------------------------------------------- #
+_GROUP_SYSTEM = (
+    "You are an officer of an ELITE autonomous software unit in a GROUP CHAT with the Commander "
+    "(Roman) — he is consulting the unit / brainstorming, not filing a ticket. Speak in character, "
+    "plainly, no markdown. If the question is squarely in your lens, ANSWER him directly (2–5 "
+    "sentences) with a concrete, useful take. If it only partly touches your lane, add a short "
+    "comment (1–2 sentences). If it is not your lane at all, reply with exactly 'PASS'. Build on "
+    "what fellow officers already said — agree and extend, or disagree with a reason; never repeat "
+    "them. Ground every claim in the unit's record and the files you can read; no invention. Do "
+    "not write or edit files."
+)
+
+
+def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
+    return ClaudeAgentOptions(
+        model=cfg.builder_model,           # Sonnet — a group brainstorm is many cheap turns
+        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
+        cwd=cwd, permission_mode="default",
+        allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        setting_sources=["project"], max_turns=5, effort="low")
+
+
+def _group_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("group_chat.jsonl")
+
+
+def group_messages(cfg: Config, limit: int = 200) -> list[tuple[str, str]]:
+    """The group thread as [(who, text)] — 'you' is the Commander, else an officer rank."""
+    p = _group_file(cfg)
+    if not p.exists():
+        return []
+    out: list[tuple[str, str]] = []
+    for line in p.read_text(encoding="utf-8").splitlines()[-limit:]:
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out.append((r.get("who", ""), r.get("text", "")))
+    return out
+
+
+def _append_group(cfg: Config, who: str, text: str) -> None:
+    with _group_file(cfg).open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                            "who": who, "text": text.strip()}) + "\n")
+
+
+def _group_tail(cfg: Config, n: int = 12) -> str:
+    label = {"you": "Commander"}
+    return "\n".join(f"{label.get(w, w)}: {t}" for w, t in group_messages(cfg, limit=n))
+
+
+async def group_chat(cfg: Config, message: str, officers=None, audit=None,
+                     echo: bool = True) -> list[tuple[str, str]]:
+    """The Commander consults the unit. Each relevant officer replies (others PASS). Persists the
+    exchange to group_chat.jsonl and returns the officers' replies as [(rank, text)]. `echo=False`
+    when the caller already recorded the Commander's message (so the web UI can echo instantly)."""
+    digest = format_signals(collect_signals(cfg))
+    notes = recent_commander_notes(cfg)
+    tail = _group_tail(cfg, 12)
+    roster = _select_officers(officers)
+    cwd = _general_root()
+    if echo:
+        _append_group(cfg, "you", message)        # the Commander's message leads the thread
+    replies: list[tuple[str, str]] = []
+    for rank, lens_role, voice in roster:
+        prompt = "\n".join([
+            f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
+            *([f"Standing guidance from the Commander:\n{notes}\n"] if notes else []),
+            *([f"Recent group chat:\n{tail}\n"] if tail else []),
+            *(["Fellow officers have already replied to this message:\n"
+               + "\n".join(f"— {w}: {t}" for w, t in replies) + "\n"] if replies else []),
+            f'The Commander says to the group: "{message}"', "",
+            "Reply per your rules: answer if it's your lane, a short comment if it partly is, else 'PASS'.",
+        ])
+        run = await run_agent(prompt, _group_options(cfg, voice, cwd),
+                              tag="group-" + _officer_key(rank))
+        s = (run.final or run.text or "").strip()
+        if not s or s.lower().rstrip(".!").strip() in _SKIP:
+            continue
+        replies.append((rank, s))
+        _append_group(cfg, rank, s)
+        print(f"  · {rank} weighed in", flush=True)
+    if audit is not None:
+        audit.record("group_chat", officers=[r for r, _ in replies])
+    return replies
+
+
+# --------------------------------------------------------------------------- #
+# Daily stand-up — each officer reports Yesterday / Today / Blockers from the
+# real record and flags hand-offs ('need <Officer>'). Assembled deterministically
+# (no extra chair call) and saved for the cockpit.
+# --------------------------------------------------------------------------- #
+_STANDUP_SYSTEM = (
+    "You are an officer of an ELITE autonomous software unit at the daily STAND-UP, reporting to "
+    "THE GENERAL. Report ONLY from your lens, grounded in the unit's record — no invention. Output "
+    "exactly three labelled lines and nothing else:\n"
+    "Yesterday: <what you or your squad actually did — or 'quiet'>\n"
+    "Today: <the one thing you'll focus on>\n"
+    "Blockers: <'none', or the blocker; if you need another officer, append 'need <Officer>: <why>'>"
+)
+
+
+def _standup_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("last-standup.md")
+
+
+def last_standup(cfg: Config) -> str:
+    p = _standup_file(cfg)
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+def _standup_handoffs(rows: list[tuple[str, str]]) -> list[str]:
+    """Pull 'need <Officer>: why' hand-off requests out of the officers' Blockers lines."""
+    import re
+    out: list[str] = []
+    for rank, rep in rows:
+        for m in re.finditer(r"need\s+([A-Za-z][A-Za-z .]+?)\s*:\s*([^\n]+)", rep, re.IGNORECASE):
+            out.append(f"{rank} → {m.group(1).strip()}: {m.group(2).strip()}")
+    return out
+
+
+async def hold_standup(cfg: Config, audit=None) -> str:
+    """Each officer gives Yesterday/Today/Blockers from the record; 'need <Officer>' hand-offs are
+    collected into a cross-officer section. Saved to last-standup.md and the council history."""
+    digest = format_signals(collect_signals(cfg))
+    notes = recent_commander_notes(cfg)
+    cwd = _general_root()
+    print("\n🫡  Stand-up — officers reporting…\n", flush=True)
+    rows: list[tuple[str, str]] = []
+    for rank, lens_role, voice in COUNCIL:
+        prompt = "\n".join([
+            f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
+            *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
+            "Give your stand-up now — three lines, grounded in the record.",
+        ])
+        run = await run_agent(prompt, ClaudeAgentOptions(
+            model=cfg.builder_model,
+            system_prompt=memory.preamble() + f"{_STANDUP_SYSTEM}\n\nYour lens — {voice}",
+            cwd=cwd, permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+            disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"], setting_sources=["project"],
+            max_turns=5, effort="low"), tag="standup-" + _officer_key(rank))
+        rows.append((rank, (run.final or run.text or "(no report)").strip()))
+        print(f"  · {rank} reported", flush=True)
+
+    handoffs = _standup_handoffs(rows)
+    body = [f"🫡 Stand-up — {time.strftime('%Y-%m-%d %H:%M')}", ""]
+    for rank, rep in rows:
+        body += [f"### {rank}", rep, ""]
+    body += ["### Hand-offs & blockers", *([f"- {h}" for h in handoffs] or ["- none"])]
+    text = "\n".join(body)
+    _standup_file(cfg).write_text(text, encoding="utf-8")
+    _save_transcript(cfg, "stand-up", digest, rows, "Daily stand-up — see the round-table below.")
+    notify.send("🫡 *Daily stand-up*\n\n" + text[:3200])
+    if audit is not None:
+        audit.record("standup", officers=[r for r, _ in rows], handoffs=len(handoffs))
+    return text
 
 
 def _save_transcript(cfg: Config, topic, digest, said, briefing) -> Path:

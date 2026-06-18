@@ -36,6 +36,7 @@ echo
     sleep 0.5
   done ) &
 
-# 4) Run the cockpit in the foreground (output here; Ctrl-C stops it)
-echo "★ Cockpit → $URL   (Ctrl-C to stop)"
-exec ./general serve
+# 4) Run the cockpit in the foreground, under caffeinate so the Mac doesn't idle-sleep
+#    while it's open — that keeps the scheduled 10:00 council alive. (Output here; Ctrl-C stops.)
+echo "★ Cockpit → $URL   (Ctrl-C to stop; Mac stays awake while this is open)"
+exec caffeinate -i ./general serve

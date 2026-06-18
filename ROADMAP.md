@@ -7,6 +7,19 @@ Last updated: 2026-06-18.
 
 ## Shipped
 
+- **The unit talks — group room, real stand-up, training charter** — three "live like a real
+  unit" additions: (1) a **Group room** in the chat (tab next to your 1:1 General chat) where you
+  consult the whole unit / brainstorm — your message goes to every officer, the **relevant ones
+  answer in character, others add a short comment, off-lane officers stay quiet (PASS)**, each
+  building on the last; the thread persists. (2) A **real officer stand-up** — `/standup` keeps the
+  instant snapshot *and* adds a **Hold stand-up** button that has every officer report **Yesterday /
+  Today / Blockers** from the actual record and flag **hand-offs** ('need <Officer>: why'), which
+  are collected into a cross-officer section (this is *on top of* the council, where officers
+  already debate each other by name and can call a `MEETING:`). (3) The **Drillmaster** charter now
+  explicitly owns **onboarding** new officers/soldiers and **refresher** drills for existing ones —
+  the unit's training officer. Plus the Mac launcher now runs under `caffeinate` so the scheduled
+  10:00 council isn't skipped by sleep. Verified by the dashboard QA harness (59/59).
+
 - **Run controls & guardrails (QA pass)** — three safety/visibility fixes from a War-Room QA
   sweep: (1) **confirm before anything live** — a LIVE free-task run, a LIVE ticket-develop, and
   **Start Autopilot** now pop a confirm (dry-runs never prompt), so one stray click can't spend

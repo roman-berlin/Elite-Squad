@@ -165,6 +165,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <div class="panel right">
       <a href="/tasks">&#128203; Task log</a>
       <a href="/council">&#128172; Councils &amp; meetings</a>
+      <a href="/group">&#128101; Group room</a>
       <a href="/memory">&#128221; Unit memory</a>
       <a href="/standup">&#129303; Daily standup</a>
       <a href="/drill">&#127894; Last drill</a>
@@ -226,6 +227,52 @@ def _chat_inner(cfg: Config) -> str:
         bubbles = ('<div class=cempty>No messages yet. When an officer needs a decision it shows '
                    'up here — or send the General a message below.</div>')
     return pending_html + f'<div class=thread>{bubbles}</div>'
+
+
+_CHAT_STYLE = ("<style>"
+               ".chat{max-width:780px;margin:0 auto}"
+               ".ctabs{max-width:780px;margin:0 auto 14px;display:flex;gap:6px;border-bottom:1px solid #1e222b}"
+               ".ctab{padding:9px 14px;color:#8a929f;font-size:13px;font-weight:600;border-bottom:2px solid transparent;text-decoration:none}"
+               ".ctab.on{color:#e9ecf1;border-bottom-color:#3b6cff}.ctab:hover{color:#e9ecf1}"
+               ".cbadge{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px;margin-left:5px}"
+               ".pcard{background:#1a160f;border:1px solid #3a2f12;border-radius:14px;padding:14px 16px;margin-bottom:12px}"
+               ".pcard .ph2{color:#f7b955;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
+               ".pcard .pq{color:#e9ecf1;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:ui-monospace,Menlo,monospace;line-height:1.5}"
+               ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
+               ".thread{display:flex;flex-direction:column;gap:9px;margin:16px 0 96px}"
+               ".msg{display:flex;flex-direction:column;max-width:80%}"
+               ".msg.you{align-self:flex-end;align-items:flex-end}.msg.unit{align-self:flex-start}"
+               ".who{font-size:10px;color:#5c6573;margin:0 6px 2px}"
+               ".bub{padding:9px 13px;border-radius:14px;font-size:13px;line-height:1.5;white-space:pre-wrap}"
+               ".msg.unit .bub{background:#161b25;border:1px solid #232b38;border-bottom-left-radius:4px}"
+               ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
+               ".cempty{color:#8a929f;padding:30px 8px;text-align:center;font-size:13px}"
+               ".composer{position:fixed;bottom:0;left:0;right:0;background:#0d0f14;border-top:1px solid #1e222b;padding:12px 30px}"
+               ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
+               "</style>")
+
+
+def _chat_tabs(active: str, npend: int = 0) -> str:
+    badge = f'<span class=cbadge>{npend}</span>' if npend else ""
+    g = "on" if active == "general" else ""
+    gr = "on" if active == "group" else ""
+    return (f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; The General{badge}</a>'
+            f'<a class="ctab {gr}" href="/group">&#128101; Group room</a></div>')
+
+
+def _group_inner(cfg: Config) -> str:
+    from . import council
+    msgs = council.group_messages(cfg, limit=200)
+    if not msgs:
+        return ('<div class=cempty>No messages yet. Ask the unit anything — the relevant officers '
+                'weigh in, others can add a comment. (The General is your 1:1 chat.)</div>')
+    out = ""
+    for who, text in msgs:
+        side = "you" if who == "you" else "unit"
+        label = "You" if who == "you" else html.escape(who)
+        out += (f'<div class="msg {side}"><div class=who>{label}</div>'
+                f'<div class=bub>{html.escape(text)}</div></div>')
+    return f'<div class=thread>{out}</div>'
 
 
 def create_app(cfg: Config):
@@ -422,7 +469,34 @@ def create_app(cfg: Config):
 
     @app.get("/standup")
     def standup_page():
-        return _wrap("Daily standup", "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>")
+        from . import council
+        snap = "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>"
+        btn = ('<form method=post action=/api/standup style="margin:14px 0">'
+               '<button>&#129303; Hold stand-up (officers report)</button></form>')
+        if _state.get("standuping"):
+            rep = "<p>&#129303; Officers are reporting… reload shortly.</p>"
+        else:
+            last = council.last_standup(cfg)
+            rep = ("<pre class=rep>" + html.escape(last) + "</pre>" if last
+                   else "<p style='color:#8a909c'>No officer stand-up yet — press the button above. "
+                        "Each officer reports Yesterday / Today / Blockers and flags who they need.</p>")
+        return _wrap("Daily standup",
+                     "<h3>Snapshot</h3>" + snap + btn + "<h3>Officer stand-up</h3>" + rep)
+
+    @app.post("/api/standup")
+    def standup_api():
+        if not _state.get("standuping"):
+            def _bg():
+                _state["standuping"] = True
+                try:
+                    from . import council
+                    asyncio.run(council.hold_standup(cfg, audit=audit))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"standup failed: {exc}"
+                finally:
+                    _state["standuping"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/standup")
 
     @app.post("/api/drill")
     def drill_api():
@@ -565,34 +639,62 @@ def create_app(cfg: Config):
 
     @app.get("/chat")
     def chat_page():
-        style = ("<style>"
-                 ".chat{max-width:780px;margin:0 auto}"
-                 ".pcard{background:#1a160f;border:1px solid #3a2f12;border-radius:14px;padding:14px 16px;margin-bottom:12px}"
-                 ".pcard .ph2{color:#f7b955;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
-                 ".pcard .pq{color:#e9ecf1;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:ui-monospace,Menlo,monospace;line-height:1.5}"
-                 ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
-                 ".thread{display:flex;flex-direction:column;gap:9px;margin:16px 0 96px}"
-                 ".msg{display:flex;flex-direction:column;max-width:80%}"
-                 ".msg.you{align-self:flex-end;align-items:flex-end}.msg.unit{align-self:flex-start}"
-                 ".who{font-size:10px;color:#5c6573;margin:0 6px 2px}"
-                 ".bub{padding:9px 13px;border-radius:14px;font-size:13px;line-height:1.5;white-space:pre-wrap}"
-                 ".msg.unit .bub{background:#161b25;border:1px solid #232b38;border-bottom-left-radius:4px}"
-                 ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
-                 ".cempty{color:#8a929f;padding:30px 8px;text-align:center;font-size:13px}"
-                 ".composer{position:fixed;bottom:0;left:0;right:0;background:#0d0f14;border-top:1px solid #1e222b;padding:12px 30px}"
-                 ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
-                 "</style>")
-        body = (style + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
+        try:
+            from . import decisions
+            npend = len(decisions.load(cfg))
+        except Exception:  # noqa: BLE001
+            npend = 0
+        body = (_CHAT_STYLE + _chat_tabs("general", npend)
+                + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
                 '<div class=composer><form method=post action=/api/chat>'
                 '<input type=text name=text autocomplete=off autofocus '
-                'placeholder="Message the unit…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
+                'placeholder="Message the General…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
                 'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
                 'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
                 'document.getElementById("cinner").innerHTML=await r.text();'
                 'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},5000);'
                 '</script>')
-        return _wrap("Chat with the unit", body)
+        return _wrap("Chat with the General", body)
+
+    @app.get("/group")
+    def group_page():
+        busy = ('<div class=cempty>&#128225; the unit is weighing in… replies appear below.</div>'
+                if _state.get("grouping") else "")
+        body = (_CHAT_STYLE + _chat_tabs("group")
+                + '<div class=chat>' + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
+                '<div class=composer><form method=post action=/api/group>'
+                '<input type=text name=text autocomplete=off autofocus '
+                'placeholder="Ask the unit / brainstorm with the officers…"><button>Send</button></form></div>'
+                '<script>window.scrollTo(0,document.body.scrollHeight);'
+                'setInterval(async function(){try{var r=await fetch("/api/group-thread",{cache:"no-store"});'
+                'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
+                'document.getElementById("ginner").innerHTML=await r.text();'
+                'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},4000);'
+                '</script>')
+        return _wrap("Group room — the unit", body)
+
+    @app.get("/api/group-thread")
+    def group_thread_api():
+        from flask import Response
+        return Response(_group_inner(cfg), mimetype="text/html")
+
+    @app.post("/api/group")
+    def group_api():
+        text = (request.form.get("text") or "").strip()
+        if text and not _state.get("grouping"):
+            from . import council
+            council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
+            def _bg():
+                _state["grouping"] = True
+                try:
+                    asyncio.run(council.group_chat(cfg, text, audit=audit, echo=False))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"group chat failed: {exc}"
+                finally:
+                    _state["grouping"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/group")
 
     @app.get("/api/chat-thread")
     def chat_thread_api():
