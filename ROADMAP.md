@@ -7,6 +7,17 @@ Last updated: 2026-06-18.
 
 ## Shipped
 
+- **Proactive autonomy — the unit acts on its own deliberations** — three pieces close the
+  autonomy loop: (1) **auto-convened meetings** — when an officer ends a council turn with a
+  `MEETING:` request, the event reactor convenes that huddle on the next cycle (once, then marks
+  it actioned), so the unit follows up on its own calls; (2) **meetings auto-spawn tickets** —
+  with `meeting_autospawn` on, a meeting's decision FILES the Jira tickets it proposes (de-duped,
+  assigned to you) — drills and hires deliberately stay proposal-only (your approval); (3)
+  **after-merge Scout** — with `scout_after_merge` on, the Scout smoke-tests the running DEV app
+  right after each live merge and files any runtime/UX/a11y regression. All gated + fail-safe (an
+  autonomy hiccup never breaks the autopilot). Verified by a dedicated harness (17/17); dashboard
+  66/66, patrol + squad still green.
+
 - **Scheduled patrols (find → file, unprompted)** — `general patrol <app>` sends the three recon
   officers — **Scout** (runtime/UX/a11y), **Provost** (security), **Quartermaster** (deploy
   readiness) — to sweep DEV and **file their ticket-worthy findings as Jira tickets** (de-duped,
@@ -141,8 +152,7 @@ Last updated: 2026-06-18.
 
 ## Next — in priority order
 
-1. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
-2. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
+1. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes
 

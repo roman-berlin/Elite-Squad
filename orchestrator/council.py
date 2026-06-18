@@ -16,6 +16,7 @@ The Adjutant only *proposes* hires/retirements — you approve and apply.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -309,6 +310,47 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     return briefing
 
 
+_MEETING_REQ = re.compile(r"^\s*MEETING:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+
+
+def extract_meeting_requests(text: str) -> list[str]:
+    """Pull officer-raised 'MEETING: <topic>' requests out of a transcript (trimmed, de-duped)."""
+    out: list[str] = []
+    for m in _MEETING_REQ.finditer(text or ""):
+        topic = m.group(1).strip()
+        topic = re.split(r"\b(attendees?|officers?)\s*:", topic, maxsplit=1, flags=re.IGNORECASE)[0]
+        topic = topic.strip().rstrip(" ,.;:—-").strip()
+        if len(topic) > 4 and topic.lower() not in (t.lower() for t in out):
+            out.append(topic)
+    return out
+
+
+def pending_meeting_requests(cfg: Config) -> tuple[str, list[str]]:
+    """(latest council/meeting file, the MEETING: topics raised in it). ('', []) when none."""
+    hist = history(cfg, limit=1)
+    if not hist:
+        return "", []
+    f = hist[0]["file"]
+    return f, extract_meeting_requests(transcript_text(cfg, f))
+
+
+def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None) -> tuple[str, str]:
+    """Strip any ticket block from a meeting decision; if `meeting_autospawn` is on, FILE those
+    tickets (de-duped, to the primary app) and return a note. Drills/hires stay proposal-only —
+    only the Commander approves those. Returns (clean_decision, note)."""
+    from . import filing
+    proposals, clean = filing.parse_tickets(decision_raw)
+    if not proposals:
+        return clean, ""
+    if not getattr(cfg, "meeting_autospawn", False) or not getattr(cfg, "apps", None):
+        listed = "\n".join(f"  • [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
+        return clean, "\n\n📋 Proposed tickets (set meeting_autospawn to file these):\n" + listed
+    filed = filing.file_findings(cfg.apps[0], "meeting", decision_raw)
+    if audit is not None:
+        audit.record("meeting_autospawn", filed=sum(1 for f in filed if f.startswith("✓")))
+    return clean, "\n\n🗂️ Auto-filed by the unit:\n" + "\n".join(filed)
+
+
 async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,
                        audit=None) -> str:
     """An ad-hoc meeting: the relevant officers debate ONE topic, the General decides, and the
@@ -331,12 +373,17 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
         *[f"### {who}\n{what}\n" for who, what in said],
         "Now write the decision record.",
     ])
+    from .filing import TICKET_BLOCK_RULE
+    autospawn = getattr(cfg, "meeting_autospawn", False)
+    chair_system = _MEETING_CHAIR_SYSTEM + (TICKET_BLOCK_RULE if autospawn else "")
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM, cwd=cwd,
+        model=cfg.reviewer_model, system_prompt=memory.preamble() + chair_system, cwd=cwd,
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
-    decision = (chair.final or chair.text or "(no decision)").strip()
+    decision_raw = (chair.final or chair.text or "(no decision)").strip()
+    decision_clean, spawn_note = _autospawn_tickets(cfg, decision_raw, audit)
+    decision = decision_clean + spawn_note
 
     saved = _save_transcript(cfg, f"meeting: {topic}", digest, said, decision)
     questions = _commander_questions(decision)

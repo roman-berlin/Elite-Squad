@@ -111,6 +111,8 @@ class Config:
     parks_meeting_threshold: int = 3         # this many parked tickets -> a "why are we stuck" meeting
     smalltalk_prob: float = 0.15             # chance of corridor small-talk on a quiet cycle
     random_meeting_prob: float = 0.06        # chance of a spontaneous meeting on a quiet cycle
+    meeting_autospawn: bool = False          # a meeting may FILE the tickets it proposes (de-duped); drills/hires stay proposal-only
+    scout_after_merge: bool = False          # after a live merge, Scout smoke-tests DEV (extra cost; off by default)
 
     # --- loop bounds / cost ---
     max_iterations: int = 4

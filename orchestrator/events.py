@@ -51,6 +51,16 @@ def _spontaneous_topic(cfg: Config) -> str:
     return "where is the unit weakest right now, and the one thing to improve this week?"
 
 
+def _meeting_request(cfg: Config, st: dict):
+    """The latest council/meeting's first un-actioned 'MEETING:' request, or None. The unit acts
+    on its own deliberations — an officer asking for a huddle gets one (once)."""
+    from . import council
+    src, topics = council.pending_meeting_requests(cfg)
+    if topics and st.get("acted_council") != src:
+        return topics[0], src
+    return None
+
+
 async def after_cycle(cfg: Config, reports, audit=None, blocked=None) -> str | None:
     """Maybe convene a session based on the cycle just finished. Returns the kind fired, or None.
     Never raises into the caller — autonomy must never break the autopilot."""
@@ -74,6 +84,11 @@ async def after_cycle(cfg: Config, reports, audit=None, blocked=None) -> str | N
                 cfg, f"security block on {tid} — how do we close it cleanly?",
                 officers=["provost", "field", "inspector"], rounds=1, audit=audit)
             fired = "security-huddle"
+        elif (mr := _meeting_request(cfg, st)):
+            topic, src = mr
+            await council.hold_meeting(cfg, topic, rounds=1, audit=audit)
+            st["acted_council"] = src      # don't re-convene the same request next cycle
+            fired = "officer-requested-meeting"
         elif blocked_n >= getattr(cfg, "parks_meeting_threshold", 3):
             await council.hold_meeting(
                 cfg, f"{blocked_n} tickets are parked — what's the root cause and the fix?",

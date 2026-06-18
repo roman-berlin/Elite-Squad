@@ -270,8 +270,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     security_block = sec_report
                 else:
                     print("  security · Provost PASS ✓", flush=True)
-            return _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
-                         security_block=security_block)
+            result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
+                           review, security_block=security_block)
+            if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
+                await _after_merge_scout(cfg, app, ticket, audit)
+            return result
 
         last_changes = review.required_changes or review.spec_gaps or [
             q.detail for q in review.blocking_issues]
@@ -366,6 +369,24 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     audit.record("pr_opened", ticket_id=ticket.id, reason=reason, pr_url=pr_url)
     return TicketReport(ticket.id, Outcome.PR_OPENED, iteration, cost, app.name, branch,
                         pr_url=pr_url, notes=reason)
+
+
+async def _after_merge_scout(cfg, app, ticket, audit) -> None:
+    """Opt-in: right after a live merge, the Scout smoke-tests the running DEV app and (live) files
+    any runtime/UX/a11y regressions it finds. Never raises — recon must not break the run."""
+    try:
+        from . import filing, scout
+        print(f"  scout · smoke-testing {app.base_branch} after {ticket.id}…", flush=True)
+        report = await scout.recon(cfg, app.name)
+        _proposals, clean = filing.parse_tickets(report)
+        _clean, block = filing.present(report, app, "scout", do_file=not cfg.dry_run)
+        Path(cfg.audit_path).with_name("scout-report.md").write_text(clean, encoding="utf-8")
+        if audit is not None:
+            audit.record("scout_smoke", ticket_id=ticket.id, app=app.name)
+        _notify(cfg, f"🛰️ Scout smoke after {ticket.id} on {app.base_branch}:\n{clean[:700]}"
+                + (("\n\n" + block) if block else ""))
+    except Exception as exc:  # noqa: BLE001 - after-merge recon must never break the run
+        print(f"  scout smoke skipped: {exc}", flush=True)
 
 
 def _cleanup(cfg, git, audit, report) -> None:
