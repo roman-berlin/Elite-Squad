@@ -148,7 +148,9 @@ def _notes_file(cfg: Config) -> Path:
     return Path(cfg.audit_path).with_name("commander_notes.md")
 
 
-def recent_commander_notes(cfg: Config, lines: int = 30) -> str:
+def recent_commander_notes(cfg: Config, lines: int = 12) -> str:
+    """The last few decisions/guidance, one note per line. Bounded so old chatter doesn't pile up
+    in every officer's prompt and pull the General back toward report-mode."""
     p = _notes_file(cfg)
     if not p.exists():
         return ""
@@ -157,11 +159,13 @@ def recent_commander_notes(cfg: Config, lines: int = 30) -> str:
 
 
 def add_commander_note(cfg: Config, text: str) -> None:
-    """Append a free-text note/answer from the Commander (captured from Telegram)."""
+    """Append one note from the Commander/General exchange. Collapsed to a single bounded line so a
+    long answer can never become a wall of 'standing guidance' that feeds back into later prompts."""
     p = _notes_file(cfg)
     stamp = time.strftime("%Y-%m-%d %H:%M")
+    one_line = " ".join(text.split()).strip()[:240]
     with p.open("a", encoding="utf-8") as f:
-        f.write(f"- [{stamp}] {text.strip()}\n")
+        f.write(f"- [{stamp}] {one_line}\n")
 
 
 def history(cfg: Config, limit: int = 20) -> list[dict]:
@@ -548,7 +552,8 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         max_turns=6, effort="low"), tag="the-general")
     answer = (run.final or run.text or "(the General had no answer)").strip()
     notify.send(f"🎖️ {answer[:3500]}")
-    add_commander_note(cfg, f"Q: {message}\n  A (General): {answer}")
+    # Log compactly — a colleague chat, not a briefing to be replayed verbatim into future prompts.
+    add_commander_note(cfg, f"Q: {message[:120]} → A: {answer[:200]}")
     return answer
 
 
