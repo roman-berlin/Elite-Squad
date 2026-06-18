@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -316,31 +317,40 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     for i, ph in enumerate(run["phases"]):
         state = "done" if i < run["reached"] else ("now" if i == run["reached"] and run["live"] else "")
         bar.append(f'<div class="ph {state}"><span></span>{_esc(ph)}</div>')
-    status = ('<span class="b live">● running</span>' if run["live"]
-              else '<span class="b muted">last run</span>')
     # Stop is offered only for a manual run in flight — Autopilot has its own Stop in the header.
     stop = ('<form method=post action=/api/stop-run class=stoprun '
             'onsubmit="return confirm(\'Stop this run? It halts at the next safe checkpoint — '
             'no merge, nothing left half-applied.\')">'
             '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
             '</form>') if (run["live"] and manual) else ""
-    chip = ""
-    if run["live"] and mode == "live":
-        chip = '<span class="b mode">live → DEV</span>'
-    elif run["live"] and mode == "dry":
-        chip = '<span class="b dry">dry-run · no changes</span>'
+    if run["live"]:
+        status = '<span class="b live">● running</span>'
+        chip = ('<span class="b mode">live → DEV</span>' if mode == "live"
+                else '<span class="b dry">dry-run · no changes</span>' if mode == "dry" else "")
+    else:
+        # Idle: this is the LAST run, not a live one. Show its real outcome and a muted bar so it
+        # never reads as "in progress".
+        status = '<span class="b muted">last run</span>'
+        oc = run.get("outcome") or ""
+        otone = {"merged→dev": "ok", "errored": "bad", "awaiting decision": "warn",
+                 "escalated": "warn", "PR / needs you": "warn"}.get(oc, "muted")
+        olabel = {"merged→dev": "merged → DEV", "errored": "errored", "escalated": "escalated",
+                  "PR / needs you": "PR — needs you", "awaiting decision": "needs you",
+                  "running": "interrupted"}.get(oc, oc or "—")
+        chip = f'<span class="b {otone}">{_esc(olabel)}</span>'
     verdict = (f'<span class=meta>verdict <b>{_esc(run["verdict"])}</b></span>'
                if run["verdict"] else "")
     extra = ""
     if run["live"] and elapsed:
         extra += f'<span class=meta>elapsed <b>{_esc(elapsed)}</b></span>'
-    if run.get("cost"):
+    # $ cost is meaningless on the Max plan — only show it when actually billing via an API key.
+    if run.get("cost") and os.environ.get("ANTHROPIC_API_KEY"):
         extra += f'<span class=meta>cost <b>${run["cost"]:.2f}</b></span>'
     return (
         f'<div class=runhead><div><span class=mono>{_esc(run["ticket"])}</span> '
         f'<span class=muted>{_esc(run["app"])}</span></div>'
         f'<div style="display:flex;gap:7px;align-items:center">{chip}{status}{stop}</div></div>'
-        f'<div class=phasebar>{"".join(bar)}</div>'
+        f'<div class="phasebar{"" if run["live"] else " idle"}">{"".join(bar)}</div>'
         f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
         f'{verdict}{extra}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>')
 
@@ -423,7 +433,8 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     tasks = D.load_tasks(cfg.audit_path)
     k = _kpi_html(kpis(cfg, tasks, app))
     run = _run_html(active_run(cfg, tasks, app, active), mode, elapsed, manual)
-    ros = _roster_html(roster(cfg, tasks, active))
+    ros_rows = roster(cfg, tasks, active)
+    ros = _roster_html(ros_rows)
     fd = _feed_html(feed(cfg, tasks, app))
     log_panel = ""
     if log_lines is not None:
@@ -438,7 +449,7 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         f'<section class=panel><div class=ph>Activity</div><div class=feed>{fd}</div></section>'
         '</div>'
         f'<div class=col-side>'
-        f'<section class=panel><div class=ph>Roster · 8 officers</div><div class=roster>{ros}</div></section>'
+        f'<section class=panel><div class=ph>Roster · {len(ros_rows)} officers</div><div class=roster>{ros}</div></section>'
         '</div>'
         '</div>')
 
@@ -618,6 +629,7 @@ padding:13px 18px;border-bottom:1px solid var(--line);display:flex;align-items:c
 .b.live{color:var(--warn);background:var(--warnbg)}.b.muted{color:var(--dim);background:#141a25}
 .b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px #1c4d39 inset}
 .b.dry{color:var(--info);background:#0f1c30;box-shadow:0 0 0 1px #1e3457 inset}
+.b.ok{color:var(--ok);background:var(--okbg)}.b.bad{color:var(--bad);background:var(--badbg)}.b.warn{color:var(--warn);background:var(--warnbg)}
 .phasebar{display:flex;gap:0;position:relative}
 .phasebar .ph{display:flex;flex-direction:column;align-items:center;gap:9px;flex:1;border:0;padding:0;text-transform:none;
 letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);position:relative}
@@ -628,6 +640,10 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .phasebar .ph.done{color:var(--ink)}
 .phasebar .ph.done span{background:var(--ok);border-color:var(--ok);box-shadow:0 0 8px rgba(52,211,153,.5)}
 .phasebar .ph.done::after{background:var(--ok)}
+/* idle = a finished 'last run', not live -> grey the bar so it never reads as in-progress */
+.phasebar.idle .ph.done{color:var(--dim)}
+.phasebar.idle .ph.done span{background:#39424f;border-color:#39424f;box-shadow:none}
+.phasebar.idle .ph.done::after{background:#2b3543}
 .phasebar .ph.now{color:var(--warn)}
 .phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(245,179,74,.28)}50%{box-shadow:0 0 0 8px rgba(245,179,74,0)}}
