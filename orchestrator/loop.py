@@ -174,7 +174,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
               f"— builder working (can take a few minutes)…", flush=True)
         _bar(0, active=0)
         req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration)
-        build = await builder_mod.build(req, app, cfg)
+        build = await builder_mod.build(req, app, cfg, audit=audit)
         cost += build.cost_usd
         budget.add(build.cost_usd)
         audit.record("build", ticket_id=ticket.id, iteration=iteration, ok=build.ok,

@@ -177,7 +177,22 @@ def _prompt(req: BuildRequest) -> str:
     return "\n".join(parts)
 
 
-async def build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildResult:
+async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None) -> BuildResult:
+    """Implement the ticket. For a sized-big ticket on its first pass (and only when delegation is
+    armed), the Field Engineer splits it across sized soldiers; otherwise a single focused builder
+    pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build."""
+    from . import squad
+    if squad.should_delegate(cfg, req):
+        try:
+            result, n = await squad.build_delegated(req, app, cfg, audit=audit)
+            if result is not None and n >= 2:
+                return result
+        except Exception as exc:  # noqa: BLE001 - delegation must never break a run
+            print(f"  · delegation off ({str(exc).splitlines()[0][:80]}); building solo", flush=True)
+    return await _solo_build(req, app, cfg)
+
+
+async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildResult:
     workdir = app.workdir or app.repo_path
     # Fully unattended: load NO filesystem settings (setting_sources=[]) so the repo's
     # `ask: [Edit/Write]` permission rules — at the root OR nested under a subdir like backend/ —

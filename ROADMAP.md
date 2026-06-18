@@ -7,6 +7,18 @@ Last updated: 2026-06-18.
 
 ## Shipped
 
+- **Squad delegation (the chain of command executes)** — for a sized-big ticket (L/XL or many
+  acceptance criteria), the **Field Engineer now splits the work** into a few non-overlapping
+  subtasks and dispatches each to the right **soldier** — Vanguard FE (frontend) · Ordnance BE
+  (backend) · Logistics DB (migrations/RLS) · DevOps · Sapper (generalist) — **each sized to its
+  own slice** (task-adaptive effort, now extended down to the soldiers). Soldiers run sequentially
+  on the same isolated branch; the existing gate + review + keep-DEV-green merge still validate the
+  combined result, and MAIN is untouched. With the new SSE feed you watch each soldier work live
+  (`· soldier·ordnance-be: Edit …`). **Fail-safe**: a thin plan (<2 subtasks), an atomic ticket, a
+  retry pass, or any planning hiccup falls back to the normal solo build. **Off by default** — arm
+  with `delegation_enabled: true` (knobs: `delegation_min_ac`, `delegation_max_soldiers`). Verified
+  by a dedicated harness (23/23); dashboard suite still green (64/64).
+
 - **War Room — live streaming (SSE)** — the cockpit now updates in **real time**: a
   `/api/stream` Server-Sent-Events endpoint pushes a freshly-rendered board the instant the unit
   prints a step (≤0.5s) instead of the old 5-second poll — so each officer's phases *and*
@@ -89,7 +101,7 @@ Last updated: 2026-06-18.
   an explicit `--effort` / War-Room pick does the same. A rejected pass still escalates one
   level per retry. Effort ladder is centralized (one source of truth) and the chosen
   effort + reason are logged to the audit. Off-switch: `adaptive_effort` (default on).
-  *(Soldier/sub-agent effort awaits the delegation feature — see Next.)*
+  *(Now extended down to the soldiers — see Squad delegation above.)*
 
 - **Health-gated cockpit + Autopilot switch** — opening the War Room runs a full health
   check (Claude login, Agent SDK, git, and per-app repo / base-branch / Jira-creds) and shows
@@ -119,13 +131,9 @@ Last updated: 2026-06-18.
 
 ## Next — in priority order
 
-1. **Soldier / sub-agent delegation** — let the Field Engineer (and other majors) actually
-   dispatch subtasks to their soldiers (`.claude/agents` sub-agents) — each soldier sized to
-   its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
-   chain of command execute, and extends task-adaptive effort down to the soldiers.
-2. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
-3. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
-4. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
+1. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
+2. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
+3. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes
 
