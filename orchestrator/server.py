@@ -75,6 +75,25 @@ def _wrap(title: str, inner: str) -> str:
             f"<p><a href='/'>&larr; cockpit</a></p><h2>{html.escape(title)}</h2>{inner}")
 
 
+def _working(msg: str, secs: int = 5) -> str:
+    """A live 'working…' panel: spinner + indeterminate progress bar + auto-refresh, so a long
+    officer task (drill/council/scribe/standup) shows progress instead of a dead 'reload later'."""
+    return (
+        "<style>.wk{display:flex;flex-direction:column;gap:13px;align-items:flex-start;max-width:560px}"
+        ".wkrow{display:flex;align-items:center;gap:12px}"
+        ".spin{width:24px;height:24px;border:3px solid #232936;border-top-color:#3b6cff;border-radius:50%;"
+        "animation:sp .9s linear infinite;flex:none}@keyframes sp{to{transform:rotate(360deg)}}"
+        ".wkmsg{font-size:15px}.wkhint{color:#8a909c;font-size:12px}"
+        ".wkbar{width:100%;height:6px;background:#1a1f29;border-radius:99px;overflow:hidden}"
+        ".wkfill{width:36%;height:100%;background:linear-gradient(90deg,#2b5cff,#6aa9ff);border-radius:99px;"
+        "animation:wksl 1.5s ease-in-out infinite}"
+        "@keyframes wksl{0%{margin-left:-36%}100%{margin-left:100%}}</style>"
+        f"<div class=wk><div class=wkrow><div class=spin></div><div class=wkmsg>{html.escape(msg)}</div></div>"
+        "<div class=wkbar><div class=wkfill></div></div>"
+        "<div class=wkhint>Working… this page refreshes itself — no need to reload.</div></div>"
+        f"<script>setTimeout(function(){{location.reload()}},{secs * 1000})</script>")
+
+
 def _charged() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
@@ -366,8 +385,16 @@ def create_app(cfg: Config):
 
     @app.get("/tasks")
     def tasks_page():
-        page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged())
+        page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
+                             dismissed=D.load_dismissed(cfg.audit_path))
         return page.replace("</header>", "</header>" + _control_bar(cfg), 1)
+
+    @app.post("/api/dismiss")
+    def dismiss_api():
+        tid = (request.form.get("ticket") or "").strip()
+        if tid:
+            D.dismiss(cfg.audit_path, tid)
+        return redirect("/tasks")
 
     @app.get("/tickets")
     def tickets_page():
@@ -508,7 +535,7 @@ def create_app(cfg: Config):
         btn = ('<form method=post action=/api/standup style="margin:14px 0">'
                '<button>&#129303; Hold stand-up (officers report)</button></form>')
         if _state.get("standuping"):
-            rep = "<p>&#129303; Officers are reporting… reload shortly.</p>"
+            rep = _working("The officers are reporting — Yesterday / Today / Blockers…")
         else:
             last = council.last_standup(cfg)
             rep = ("<pre class=rep>" + html.escape(last) + "</pre>" if last
@@ -552,7 +579,7 @@ def create_app(cfg: Config):
     def drill_page():
         rep = Path(cfg.audit_path).with_name("drill-report.md")
         if _state.get("drilling"):
-            body = "<p>🎖️ Drillmaster is reviewing the unit… reload in a minute.</p>"
+            body = _working("Drillmaster is reviewing the unit's record and proposing officer upgrades…")
         elif rep.exists():
             body = "<pre class=rep>" + html.escape(rep.read_text(encoding="utf-8")) + "</pre>"
         else:
@@ -578,7 +605,7 @@ def create_app(cfg: Config):
     def council_page():
         from . import council
         hist = council.history(cfg, limit=25)
-        top = "<p>🎖️ The officers are in session… reload shortly.</p>" if _state.get("councilling") else ""
+        top = _working("The officers are in session — reading the record and debating…") if _state.get("councilling") else ""
         if not hist:
             return _wrap("Daily Council", top + "<p>No councils yet — press &#128172; Council on "
                          "the cockpit, or run <code>general council</code>.</p>")
@@ -610,7 +637,7 @@ def create_app(cfg: Config):
     @app.get("/memory")
     def memory_page():
         memory.ensure()
-        top = ("<p>📝 The Scribe is updating Unit Memory… reload shortly.</p>"
+        top = (_working("The Scribe is folding recent lessons into Unit Memory…")
                if _state.get("scribing") else "")
         body = top + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
         return _wrap("Unit Memory", body)

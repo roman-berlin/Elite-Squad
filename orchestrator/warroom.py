@@ -149,7 +149,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    needs = [t for t in ts if t.get("outcome") in D._NEEDS_YOU]
+    _dismissed = D.load_dismissed(cfg.audit_path)
+    needs = [t for t in ts if t.get("outcome") in D._NEEDS_YOU and not D._is_dismissed(t, _dismissed)]
     passes = [t["passes"] for t in merged if t.get("passes")]
     avg_passes = round(sum(passes) / len(passes), 1) if passes else 0
     blocked = _load_blocked(cfg)

@@ -122,6 +122,42 @@ def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
+# Dismissals — the Commander can clear a 'needs you' item once handled. Per-ticket with a
+# timestamp, so a LATER run of the same ticket that fails again reappears.
+def _dismissed_file(audit_path: str | Path) -> Path:
+    return Path(audit_path).with_name("dismissed.json")
+
+
+def load_dismissed(audit_path: str | Path) -> dict[str, str]:
+    try:
+        data = json.loads(_dismissed_file(audit_path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def dismiss(audit_path: str | Path, ticket_id: str) -> None:
+    import time
+    d = load_dismissed(audit_path)
+    d[str(ticket_id)] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    try:
+        _dismissed_file(audit_path).write_text(json.dumps(d), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _is_dismissed(t: dict[str, Any], dismissed: dict | None) -> bool:
+    """A needs-you task is hidden if it (or an older run) was dismissed — but a newer run shows."""
+    if not dismissed:
+        return False
+    da = dismissed.get(str(t.get("ticket_id")))
+    if not da:
+        return False
+    dt, st = _parse_ts(da), t.get("started")
+    return (st <= dt) if (dt and st) else True
+
+
+# --------------------------------------------------------------------------- #
 def _badge(outcome: Optional[str]) -> str:
     cls = {"merged→dev": "ok", "dry-run": "muted", "PR / needs you": "warn",
            "escalated": "warn", "errored": "bad"}.get(outcome or "", "muted")
@@ -155,13 +191,13 @@ def _detail_html(t: dict[str, Any]) -> str:
     return '<div class=det>' + "".join(blocks) + '</div>'
 
 
-def render_html(tasks: list[dict[str, Any]], show_cost: bool = True) -> str:
+def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None) -> str:
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
-    needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU]
-    cards = [("Tasks", total), ("Merged → dev", merged), ("Needs you", len(needs))]
+    needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
+    cards = [("Tasks", total, "all"), ("Merged → dev", merged, "merged"), ("Needs you", len(needs), "needs")]
     if show_cost:
-        cards.append(("Est. cost", f"${sum(t['cost'] for t in tasks):.2f}"))
+        cards.append(("Est. cost", f"${sum(t['cost'] for t in tasks):.2f}", None))
 
     head = ["<th></th>", "<th>Status</th>", "<th>Ticket</th>", "<th>App</th>", "<th>Branch</th>",
             "<th>Started</th>", "<th>Dur</th>", "<th class=num>Passes</th>", "<th class=num>Turns</th>"]
@@ -191,16 +227,22 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True) -> str:
     panel = ""
     if needs:
         items = "".join(
-            f'<div class=need><span class=mono>{html.escape(str(t["ticket_id"]))}</span> '
-            f'{_badge(t["outcome"])} <span class=muted>{html.escape(t.get("note") or "")}</span>'
-            + (f' <a href="{html.escape(t["pr_url"])}" target=_blank>PR ↗</a>' if t.get("pr_url") else "")
-            + '</div>'
+            '<div class=need>'
+            f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
+            f'<span class=mono>{html.escape(str(t["ticket_id"]))}</span> {_badge(t["outcome"])} '
+            f'<span class=muted>{html.escape(t.get("note") or "")}</span></span>'
+            + (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR ↗</a>' if t.get("pr_url") else "")
+            + '<form method=post action=/api/dismiss class=dismiss>'
+            f'<input type=hidden name=ticket value="{html.escape(str(t["ticket_id"]))}">'
+            '<button class=x title="Dismiss — clear this from Needs you">✕</button></form>'
+            '</div>'
             for t in needs)
         panel = f'<div class=panel><div class=ph>Needs your attention ({len(needs)})</div>{items}</div>'
 
     cards_html = "".join(
-        f'<div class=card><div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
-        for l, v in cards)
+        (f'<div class="card clk" onclick="kfilter(\'{kind}\')">' if kind else '<div class=card>')
+        + f'<div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
+        for l, v, kind in cards)
     rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>No tasks yet — run the General.</td></tr>'
     return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{PANEL}}", panel)
             .replace("{{HEAD}}", "".join(head)).replace("{{ROWS}}", rows_html)
@@ -218,9 +260,12 @@ h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:#8a909c;font-size:12px
 .cards{display:flex;gap:14px;padding:20px 30px 6px;flex-wrap:wrap}
 .card{background:#151a23;border:1px solid #232936;border-radius:12px;padding:14px 20px;min-width:120px}
 .card .k{font-size:24px;font-weight:650}.card .l{color:#8a909c;font-size:12px;margin-top:2px}
+.card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:#3b6cff}
 .panel{margin:14px 30px;background:#1a160f;border:1px solid #3a2f12;border-radius:12px;padding:14px 18px}
 .ph{color:#fbbf24;font-weight:650;font-size:13px;margin-bottom:8px}
-.need{padding:5px 0;border-top:1px solid #2a2410;font-size:13px}.need:first-of-type{border-top:0}
+.need{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid #2a2410;font-size:13px}.need:first-of-type{border-top:0}
+.needmain{flex:1;cursor:pointer}.needmain:hover{text-decoration:underline}
+.dismiss{margin:0}.x{background:none;border:1px solid #3a2f12;color:#8a909c;border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:#2a2410;color:#f97a7a}
 .wrap{padding:8px 30px 50px}
 input{background:#151a23;border:1px solid #232936;color:#e8eaed;border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -252,6 +297,12 @@ function flt(){var q=document.getElementById('f').value.toLowerCase();
 document.querySelectorAll('#t tbody tr.row').forEach(function(r){
 var m=r.innerText.toLowerCase().includes(q);r.style.display=m?'':'none';
 var d=r.nextElementSibling;if(d)d.style.display='none';});}
+function kfilter(kind){document.getElementById('f').value='';
+document.querySelectorAll('#t tbody tr.row').forEach(function(r){
+var st=(r.children[1]?r.children[1].innerText:'').toLowerCase();
+var show=kind==='all'||(kind==='merged'&&st.indexOf('merged')>=0)||(kind==='needs'&&(st.indexOf('error')>=0||st.indexOf('escal')>=0||st.indexOf('pr')>=0));
+r.style.display=show?'':'none';var d=r.nextElementSibling;if(d)d.style.display='none';});}
+function kpick(id){var f=document.getElementById('f');f.value=id;flt();f.scrollIntoView({behavior:'smooth'});}
 </script></body></html>"""
 
 
