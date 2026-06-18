@@ -53,8 +53,16 @@ def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
     path = Path(audit_path)
     if not path.exists():
         return []
-    tasks: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
+    def _new(tid: str, ev: dict) -> dict[str, Any]:
+        return {"ticket_id": tid, "app": ev.get("app"), "branch": ev.get("branch"),
+                "started": None, "ended": None, "passes": 0, "turns": 0, "cost": 0.0,
+                "verdict": None, "outcome": None, "pr_url": None, "dry_run": None,
+                "note": "", "detail": {}}
+
+    # Each `ticket_start` begins a SEPARATE run — so a re-run of the same ticket (e.g. a dry-run
+    # then a live run) does NOT merge the earlier run's phases/verdict into the new one.
+    runs: list[dict[str, Any]] = []
+    cur: dict[str, dict[str, Any]] = {}     # ticket_id -> its currently-open run
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -66,22 +74,21 @@ def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
         tid = ev.get("ticket_id")
         if not tid:
             continue
-        t = tasks.get(tid)
-        if t is None:
-            t = {"ticket_id": tid, "app": ev.get("app"), "branch": ev.get("branch"),
-                 "started": None, "ended": None, "passes": 0, "turns": 0, "cost": 0.0,
-                 "verdict": None, "outcome": None, "pr_url": None, "dry_run": None,
-                 "note": "", "detail": {}}
-            tasks[tid] = t
-            order.append(tid)
         kind = ev.get("event")
         ts = _parse_ts(ev.get("ts", ""))
         if kind == "ticket_start":
+            t = _new(tid, ev)
             t["started"] = ts
-            t["app"] = ev.get("app", t["app"])
-            t["branch"] = ev.get("branch", t["branch"])
             t["dry_run"] = ev.get("dry_run")
-        elif kind == "build":
+            runs.append(t)
+            cur[tid] = t
+            continue
+        t = cur.get(tid)
+        if t is None:                       # an event with no preceding ticket_start (legacy/partial)
+            t = _new(tid, ev)
+            runs.append(t)
+            cur[tid] = t
+        if kind == "build":
             it = ev.get("iteration", 0)
             t["passes"] = max(t["passes"], it)
             t["turns"] += ev.get("turns", 0) or 0
@@ -105,16 +112,13 @@ def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
             t["pr_url"] = ev.get("pr_url", t["pr_url"])
             t["note"] = (ev.get("note") or ev.get("reason") or ev.get("error")
                          or ev.get("question") or t["note"])
-    out = []
-    for tid in order:
-        t = tasks[tid]
+    for t in runs:
         t["duration"] = ((t["ended"] - t["started"]).total_seconds()
                          if t["started"] and t["ended"] else None)
         t["passes_list"] = [dict(d, n=k) for k, d in sorted(t["detail"].items())]
-        out.append(t)
-    # sort by timestamp (tz-safe: avoids comparing aware vs naive datetimes)
-    out.sort(key=lambda x: x["started"].timestamp() if x["started"] else 0.0, reverse=True)
-    return out
+    # newest run first (tz-safe: avoids comparing aware vs naive datetimes)
+    runs.sort(key=lambda x: x["started"].timestamp() if x["started"] else 0.0, reverse=True)
+    return runs
 
 
 # --------------------------------------------------------------------------- #
