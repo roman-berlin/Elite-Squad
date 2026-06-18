@@ -480,6 +480,10 @@ async def small_talk(cfg: Config, audit=None) -> str:
                 f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
                 f'The {pair[0][0]} just said: "{convo[0][1]}"', "",
                 "Reply in kind — a sentence or two. Banter is welcome; land a real point if you have one.",
+                "",
+                "If — and ONLY if — this exchange surfaced a genuinely useful, actionable idea worth the "
+                "Commander's attention, add a final line starting exactly 'INSIGHT:' with a one-sentence "
+                "summary. Most corridor chats won't have one — that's fine, leave it off.",
             ])
         run = await run_agent(prompt, ClaudeAgentOptions(
             model=cfg.builder_model, system_prompt=memory.preamble() + _SMALLTALK_SYSTEM, cwd=cwd,
@@ -487,12 +491,30 @@ async def small_talk(cfg: Config, audit=None) -> str:
             disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
             max_turns=4, effort="low"), tag="smalltalk")
         convo.append((rank, (run.final or run.text or "…").strip()))
+    insight = _corridor_insight(convo)
     saved = _save_transcript(cfg, f"corridor: {pair[0][0]} & {pair[1][0]}", digest, convo,
-                             "(corridor small-talk — no decision)")
+                             f"(corridor small-talk — {'insight surfaced' if insight else 'no decision'})")
+    if insight:
+        # Most corridor chats are flavor; when a real idea lands, ping the Commander on Telegram.
+        notify.send(f"💡 *Corridor insight* — {pair[0][0]} & {pair[1][0]}:\n{insight}")
     if audit is not None:
-        audit.record("smalltalk", officers=[p[0] for p in pair], transcript=saved.name)
-    print(f"  · corridor: {pair[0][0]} & {pair[1][0]}", flush=True)
+        audit.record("smalltalk", officers=[p[0] for p in pair], transcript=saved.name,
+                     insight=bool(insight))
+    print(f"  · corridor: {pair[0][0]} & {pair[1][0]}" + ("  💡 insight → Telegram" if insight else ""),
+          flush=True)
     return "\n".join(f"{who}: {what}" for who, what in convo)
+
+
+def _corridor_insight(convo: list[tuple[str, str]]) -> str:
+    """Pull a single actionable 'INSIGHT: …' if the corridor exchange produced one — tolerant of
+    the marker on its own line or inline. Returns the text up to the end of that line."""
+    for _who, what in convo:
+        idx = what.upper().rfind("INSIGHT:")
+        if idx != -1:
+            rest = what[idx + len("INSIGHT:"):]
+            first = rest.splitlines()[0] if rest.strip() else ""
+            return first.strip()
+    return ""
 
 
 async def respond_to_commander(cfg: Config, message: str) -> str:
