@@ -547,6 +547,9 @@ header select{background:#0d1119;border:1px solid var(--line2);color:var(--ink);
 padding:8px 12px;font:inherit;cursor:pointer}
 .spacer{flex:1}
 .gen{font-family:var(--mono);font-size:11px;color:var(--faint);letter-spacing:.02em}
+.sdot{display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--faint);margin-right:5px;vertical-align:middle}
+.sdot.on{background:var(--ok);box-shadow:0 0 7px var(--ok);animation:pulse2 1.6s infinite}
+.sdot.off{background:var(--warn)}
 /* health pill */
 .hpill{font-size:12px;font-weight:700;padding:6px 13px;border-radius:99px}
 .hpill.ok{color:var(--ok);background:var(--okbg);border:1px solid #1c5238}
@@ -678,7 +681,7 @@ margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pul
   <div class=spacer></div>
   {{AUTOPILOT}}
   {{HEALTHPILL}}
-  <span class=gen>updated {{GEN}}</span>
+  <span class=gen><span id=streamdot class="sdot off" title="live stream"></span>live · {{GEN}}</span>
 </header>
 {{HEALTHBAR}}
 {{BAR}}
@@ -692,13 +695,27 @@ document.addEventListener("click",function(e){
   });
 });
 function scrollLog(){var lb=document.getElementById("logbox");if(lb)lb.scrollTop=lb.scrollHeight;}
+function applyBoard(html){var b=document.getElementById("board");if(b){b.innerHTML=html;scrollLog();}}
 async function tick(){
   try{
     var r=await fetch("/api/board?app="+encodeURIComponent(APP),{cache:"no-store"});
-    if(r.ok){document.getElementById("board").innerHTML=await r.text();scrollLog();}
+    if(r.ok)applyBoard(await r.text());
   }catch(e){}
 }
+function setDot(s){var d=document.getElementById("streamdot");if(d)d.className="sdot "+s;}
+// Real-time: push board frames over SSE; fall back to the 5s poll if the stream drops.
+var _es=null,_poll=null;
+function fallback(){if(!_poll)_poll=setInterval(tick,5000);}
+function startStream(){
+  if(typeof(EventSource)==="undefined"){setDot("off");fallback();return;}
+  try{
+    _es=new EventSource("/api/stream?app="+encodeURIComponent(APP));
+    _es.addEventListener("board",function(e){applyBoard(e.data);setDot("on");});
+    _es.onopen=function(){setDot("on");if(_poll){clearInterval(_poll);_poll=null;}};
+    _es.onerror=function(){setDot("off");if(_es){_es.close();_es=null;}fallback();setTimeout(startStream,4000);};
+  }catch(e){setDot("off");fallback();}
+}
 scrollLog();
-setInterval(tick,5000);
+startStream();
 </script>
 </body></html>"""

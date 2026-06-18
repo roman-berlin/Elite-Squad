@@ -23,7 +23,7 @@ from .config import Config, normalize_effort
 from .loop import run as run_loop
 
 _state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None,
-          "last_activity": None, "run_started": None, "stop_event": None}
+          "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0}
 
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
@@ -33,6 +33,12 @@ _LOG: "_collections.deque[str]" = _collections.deque(maxlen=600)
 
 def recent_log(n: int = 60) -> list[str]:
     return list(_LOG)[-n:]
+
+
+def _sse(event: str, data: str) -> str:
+    """Format one Server-Sent Event. Multi-line `data` is split into the required `data:` lines."""
+    body = "".join("data: " + ln + "\n" for ln in data.replace("\r", "").split("\n"))
+    return f"event: {event}\n{body}\n"
 
 
 class _Tee:
@@ -47,6 +53,7 @@ class _Tee:
             if t and "/api/board" not in t and "GET /api/" not in t:
                 _LOG.append(t)
                 _state["last_activity"] = time.time()   # heartbeat — proves the unit is alive
+                _state["log_seq"] = _state.get("log_seq", 0) + 1   # wake SSE streamers (real-time push)
 
     def flush(self):
         self._real.flush()
@@ -329,6 +336,31 @@ def create_app(cfg: Config):
         from flask import Response
         appq = request.args.get("app")
         return Response(warroom.render_board(cfg, appq, _state, recent_log()), mimetype="text/html")
+
+    @app.get("/api/stream")
+    def stream_api():
+        """Server-Sent Events: push a freshly-rendered board the moment the unit prints a step
+        (sub-second), and at least every 2s (keeps the elapsed timer + heartbeat alive). The
+        browser swaps #board on each frame; it falls back to the 5s poll if the stream drops."""
+        from flask import Response
+        appq = request.args.get("app")
+
+        def gen():
+            last_seq = None
+            last_emit = 0.0
+            while True:
+                seq = _state.get("log_seq", 0)
+                now = time.time()
+                if seq != last_seq or now - last_emit >= 2.0:
+                    last_seq, last_emit = seq, now
+                    try:
+                        yield _sse("board", warroom.render_board(cfg, appq, _state, recent_log()))
+                    except Exception:  # noqa: BLE001 - never let a render error kill the stream
+                        yield ": render-error\n\n"
+                time.sleep(0.5)
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/tasks")
     def tasks_page():
@@ -801,4 +833,5 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
     print(f"★ War Room: http://{host}:{port}   (Ctrl-C to stop)")
     print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
-    app.run(host=host, port=port)
+    # threaded: the SSE stream holds a long-lived request — without this it would block the cockpit.
+    app.run(host=host, port=port, threaded=True)

@@ -7,6 +7,15 @@ Last updated: 2026-06-18.
 
 ## Shipped
 
+- **War Room — live streaming (SSE)** — the cockpit now updates in **real time**: a
+  `/api/stream` Server-Sent-Events endpoint pushes a freshly-rendered board the instant the unit
+  prints a step (≤0.5s) instead of the old 5-second poll — so each officer's phases *and*
+  per-tool-call lines (`· builder: Edit foo.tsx`) stream into the Live feed and active-run panel
+  as they happen. A green **live** dot in the header shows the stream is connected; if it drops,
+  the page falls back to the 5s poll and auto-reconnects. (`threaded=True` so the long-lived
+  stream never blocks the cockpit.) Verified end-to-end — a printed step reached the browser in
+  ~0.5s (dashboard QA 64/64 + a live push test).
+
 - **The unit talks — group room, real stand-up, training charter** — three "live like a real
   unit" additions: (1) a **Group room** in the chat (tab next to your 1:1 General chat) where you
   consult the whole unit / brainstorm — your message goes to every officer, the **relevant ones
@@ -94,9 +103,8 @@ Last updated: 2026-06-18.
   (merged today, merged total, needs-you, avg passes/ticket, parked, security blocks),
   the **active run** with a Build→Gate→Review→Security→Land phase bar, the **8-officer
   roster** with live/recent/idle status dots, and the unit **activity feed** — all
-  scoped by a **project switcher** in the header (multi-project). Auto-refreshes every
-  5s. Detailed transcript table moved to `/tasks`. (Live per-event SSE streaming is the
-  remaining war-room piece — see Next.)
+  scoped by a **project switcher** in the header (multi-project). Updates **live over SSE**
+  (≤0.5s, with a 5s-poll fallback). Detailed transcript table moved to `/tasks`.
 
 - **Autonomous pipeline** — build → gate → review → **security gate (Provost)** → land on DEV → QA, on an isolated git worktree; MAIN never touched.
 - **Seven officers** — Adjutant (S-1/HR) · Field Engineer (Builder) · Inspector General (Reviewer) · Scout (S-2/QA) · Provost Marshal (Security) · Quartermaster (S-4/DevOps) · Drillmaster (Doctrine).
@@ -111,16 +119,13 @@ Last updated: 2026-06-18.
 
 ## Next — in priority order
 
-1. **War Room — live streaming (SSE)** — the one remaining cockpit piece: stream each
-   officer's phases + tool-calls into the active-run panel in real time (needs the loop to
-   emit an event stream). Everything else in the War Room shipped in v1.
-2. **Soldier / sub-agent delegation** — let the Field Engineer (and other majors) actually
+1. **Soldier / sub-agent delegation** — let the Field Engineer (and other majors) actually
    dispatch subtasks to their soldiers (`.claude/agents` sub-agents) — each soldier sized to
    its subtask. Today soldiers are roster/doctrine only; the Builder runs solo. This makes the
    chain of command execute, and extends task-adaptive effort down to the soldiers.
-3. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
-4. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
-5. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
+2. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
+3. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
+4. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes
 
