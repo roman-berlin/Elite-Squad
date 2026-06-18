@@ -155,15 +155,17 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     sec_blocks = _scan(cfg.audit_path)["count"].get("security_block", 0)
 
     cards = [
-        {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA"},
-        {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok"},
+        {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
+         "href": "/tasks"},
+        {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok",
+         "href": "/tasks"},
         {"label": "Needs you", "value": len(needs), "hint": "PR · escalated · errored",
-         "tone": "warn" if needs else None},
+         "tone": "warn" if needs else None, "href": "/chat"},          # -> respond to the decisions
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
         {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
-         "tone": "warn" if blocked else None},
+         "tone": "warn" if blocked else None, "href": "/tasks"},
         {"label": "Security blocks", "value": sec_blocks, "hint": "Provost gate (all time)",
-         "tone": "bad" if sec_blocks else None},
+         "tone": "bad" if sec_blocks else None, "href": "/council"},
     ]
     return cards
 
@@ -301,10 +303,12 @@ def _kpi_html(cards: list[dict]) -> str:
     out = []
     for c in cards:
         tone = c.get("tone") or ""
+        href = c.get("href")
+        tag, attr, link = ("a", f' href="{href}"', " link") if href else ("div", "", "")
         out.append(
-            f'<div class="kpi {tone}"><div class=kv>{_esc(c["value"])}</div>'
+            f'<{tag} class="kpi {tone}{link}"{attr}><div class=kv>{_esc(c["value"])}</div>'
             f'<div class=kl>{_esc(c["label"])}</div>'
-            f'<div class=kh>{_esc(c["hint"])}</div></div>')
+            f'<div class=kh>{_esc(c["hint"])}</div></{tag}>')
     return "".join(out)
 
 
@@ -608,6 +612,8 @@ font-size:12px;font-weight:600;cursor:pointer}
 overflow:hidden;transition:border-color .15s,transform .15s}
 .kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:#2a3342}
 .kpi:hover{transform:translateY(-1px);border-color:var(--line2)}
+a.kpi{display:block;text-decoration:none;color:inherit;cursor:pointer}
+a.kpi:hover{border-color:var(--accent)}
 .kpi .kv{font-family:var(--mono);font-size:30px;font-weight:600;line-height:1;letter-spacing:-1px;font-variant-numeric:tabular-nums}
 .kpi .kl{font-size:11.5px;color:var(--ink);margin-top:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 .kpi .kh{font-size:11px;color:var(--faint);margin-top:3px}
