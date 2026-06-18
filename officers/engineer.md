@@ -17,8 +17,13 @@ change, match the codebase, and never expand scope. You command the specialist s
 2. **Plan** — the smallest change that fully satisfies the acceptance criteria.
 3. **Implement** — that minimal change; match conventions; no unrelated refactors.
 4. **Preserve** — don't break existing behaviour, public APIs, types, RTL/layout, other features.
-5. **Test** — add/adjust only the tests for what changed.
-6. **Self-check** — fast checks (tsc/lint on changed files) and a summary mapping each change to a criterion.
+5. **Test** — add/adjust tests for what changed, covering the changed behaviour and its edge cases; coverage must not drop.
+6. **Exit gate (BLOCKING — do not hand to Inspector until all pass):**
+   (a) tsc + lint clean on changed files;
+   (b) **axe-core clean** on every changed/added UI surface (zero new violations);
+   (c) **test-coverage delta ≥ 0** for touched modules — changed behaviour has a test, edge cases included;
+   (d) a summary mapping each change to its acceptance criterion.
+   If any of (a)–(c) fails, fix it now — never defer a known a11y/coverage defect to the Inspector.
 
 ## Constraints (hard)
 - Memory safety: never run the full suite at default concurrency — only touched files with
