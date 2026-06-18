@@ -525,21 +525,27 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     context = transcript_text(cfg, latest[0]["file"]) if latest else format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
     system = (
-        "You are THE GENERAL of an elite autonomous software unit, answering the Commander "
-        "(Roman) directly on Telegram. Be brief and disciplined (a few sentences). Give your "
-        "best-practice recommendation with a one-line rationale; if it is a decision, state "
-        "plainly what the unit will do and which officer owns it. Ground on the latest council "
-        "and the unit's record; you may Read files. No filler, no restating the question.")
+        "You are THE GENERAL of an elite autonomous software unit, talking 1:1 with the Commander "
+        "(Roman) — like a sharp, trusted colleague, NOT writing a report. Talk naturally and SHORT: "
+        "2–4 sentences, plain language, no headers, no bullet lists, no status dumps, no restating "
+        "his message. If he's just greeting you or making conversation, chat back like a human and "
+        "let him steer. Raise AT MOST ONE thing — and only when it genuinely needs him: a real "
+        "decision that's his to make, or a problem the unit can't resolve itself. Otherwise do not "
+        "manufacture orders or briefings — the unit runs its own work and the daily council already "
+        "covers status. You may quietly Read a file to ground a point. Always reply in the same "
+        "language the Commander is using.")
     prompt = "\n".join([
-        "Latest council / record:", "", context[:4000], "",
-        *([f"Standing guidance so far:\n{notes}\n"] if notes else []),
-        f"The Commander says: {message}", "", "Answer him now.",
+        *([f"Background you may lean on if relevant — do NOT recite or summarize it:\n{context[:1200]}\n"]
+          if context else []),
+        *([f"What you've already discussed with him:\n{notes}\n"] if notes else []),
+        f"The Commander says: {message}", "",
+        "Reply like a colleague — short and natural.",
     ])
     run = await run_agent(prompt, ClaudeAgentOptions(
         model=cfg.reviewer_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
-        max_turns=8, effort="medium"), tag="the-general")
+        max_turns=6, effort="low"), tag="the-general")
     answer = (run.final or run.text or "(the General had no answer)").strip()
     notify.send(f"🎖️ {answer[:3500]}")
     add_commander_note(cfg, f"Q: {message}\n  A (General): {answer}")
@@ -553,13 +559,14 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
 # --------------------------------------------------------------------------- #
 _GROUP_SYSTEM = (
     "You are an officer of an ELITE autonomous software unit in a GROUP CHAT with the Commander "
-    "(Roman) — he is consulting the unit / brainstorming, not filing a ticket. Speak in character, "
-    "plainly, no markdown. If the question is squarely in your lens, ANSWER him directly (2–5 "
-    "sentences) with a concrete, useful take. If it only partly touches your lane, add a short "
-    "comment (1–2 sentences). If it is not your lane at all, reply with exactly 'PASS'. Build on "
-    "what fellow officers already said — agree and extend, or disagree with a reason; never repeat "
-    "them. Ground every claim in the unit's record and the files you can read; no invention. Do "
-    "not write or edit files."
+    "(Roman) — he is consulting the unit / brainstorming or just talking, not filing a ticket. Speak "
+    "in character, plainly, no markdown, conversationally — short. If the question touches your lens, "
+    "ANSWER directly (2–4 sentences) with a concrete, useful take. If it only partly touches your "
+    "lane, add a brief comment. Reply with exactly 'PASS' ONLY when another officer is clearly better "
+    "placed and you'd add nothing — NEVER for a greeting, a general or social message, or small talk, "
+    "where a short friendly in-character reply is exactly right. Build on what fellow officers already "
+    "said — agree and extend, or disagree with a reason; never repeat them. Ground claims in the "
+    "unit's record and the files you can read; no invention. Do not write or edit files."
 )
 
 
@@ -634,6 +641,22 @@ async def group_chat(cfg: Config, message: str, officers=None, audit=None,
         replies.append((rank, s))
         _append_group(cfg, rank, s)
         print(f"  · {rank} weighed in", flush=True)
+    if not replies:
+        # Nobody claimed it (a greeting / small talk / off-lane aside) — the room must never look
+        # dead. The host officer answers warmly so the Commander always gets a reply.
+        rank, lens_role, voice = roster[0]
+        prompt = "\n".join([
+            f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
+            *([f"Recent group chat:\n{tail}\n"] if tail else []),
+            f'The Commander says to the group: "{message}"', "",
+            "No formal lane owns this. Reply warmly and briefly in character (1–3 sentences) — and if "
+            "it helps, gently point him to what the unit can take on. Do NOT say PASS.",
+        ])
+        run = await run_agent(prompt, _group_options(cfg, voice, cwd), tag="group-host")
+        s = (run.final or run.text or "").strip()
+        if s and s.lower().rstrip(".!").strip() not in _SKIP:
+            replies.append((rank, s))
+            _append_group(cfg, rank, s)
     if audit is not None:
         audit.record("group_chat", officers=[r for r, _ in replies])
     return replies
