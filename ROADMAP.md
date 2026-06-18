@@ -7,6 +7,16 @@ Last updated: 2026-06-18.
 
 ## Shipped
 
+- **Scheduled patrols (find → file, unprompted)** — `general patrol <app>` sends the three recon
+  officers — **Scout** (runtime/UX/a11y), **Provost** (security), **Quartermaster** (deploy
+  readiness) — to sweep DEV and **file their ticket-worthy findings as Jira tickets** (de-duped,
+  assigned to you, To Do), so with Autopilot armed the unit continuously finds → files → fixes.
+  One officer failing never aborts the patrol; `--no-file` makes it propose-only, `--officers`
+  picks a subset. Trigger on demand from the War Room (**Unit → Run patrol**, with a confirm since
+  it files tickets), or on a cadence via the included launchd plist (weekly Mon 09:00 —
+  `scripts/com.roman.general.patrol.plist` + `run-patrol.sh`, not auto-loaded; you `launchctl load`
+  it when ready). Verified by a dedicated harness (13/13); dashboard suite 66/66.
+
 - **Squad delegation (the chain of command executes)** — for a sized-big ticket (L/XL or many
   acceptance criteria), the **Field Engineer now splits the work** into a few non-overlapping
   subtasks and dispatches each to the right **soldier** — Vanguard FE (frontend) · Ordnance BE
@@ -131,9 +141,8 @@ Last updated: 2026-06-18.
 
 ## Next — in priority order
 
-1. **Scheduled patrols** — Scout/Provost/Quartermaster on a cadence with `--file`, so the unit continuously finds → files → fixes unprompted.
-2. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
-3. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
+1. **Proactive autonomy — remaining pieces** (event triggers, small-talk, and ship-review shipped): auto-convening a meeting from an officer's `MEETING:` request, after-merge Scout smoke-tests, and **meetings that auto-spawn actions** (a decision files a drill / hire / ticket without you).
+2. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
 
 ## Notes
 

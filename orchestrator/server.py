@@ -161,6 +161,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       <form method=post action=/api/council><button {busy('councilling')}>&#128172; Hold council</button></form>
       <a href="/meeting">&#127908; Convene a meeting</a>
       <form method=post action=/api/ship-review><input type=hidden name=app value="{html.escape(app0)}"><button {busy('shipreview')}>&#128640; Ship review</button></form>
+      <form method=post action=/api/patrol onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button {busy('patrolling')}>&#128225; Run patrol</button></form>
       <div class=sep></div>
       <form method=post action=/api/drill><button {busy('drilling')}>&#127894; Run drill</button></form>
       <form method=post action=/api/scribe><button {busy('scribing')}>&#128221; Update memory</button></form>
@@ -668,6 +669,22 @@ def create_app(cfg: Config):
                     _state["shipreview"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
+
+    @app.post("/api/patrol")
+    def patrol_api():
+        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        if not _state.get("patrolling"):
+            def _bg():
+                _state["patrolling"] = True
+                try:
+                    from . import patrol as patrol_mod
+                    asyncio.run(patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"patrol failed: {exc}"
+                finally:
+                    _state["patrolling"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/")
 
     @app.get("/chat")
     def chat_page():

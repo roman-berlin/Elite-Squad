@@ -97,6 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     qm.add_argument("app")
     qm.add_argument("--telegram", action="store_true", help="also send the readiness report to Telegram")
     qm.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
+    ptl = sub.add_parser("patrol", help="Scheduled patrol: Scout + Provost + Quartermaster sweep DEV and file findings")
+    ptl.add_argument("app")
+    ptl.add_argument("--officers", default=None, help="comma subset (scout,provost,quartermaster); default all three")
+    ptl.add_argument("--no-file", action="store_true", help="propose-only — don't create Jira tickets")
     apc = sub.add_parser("autopilot", help="always-on: resume In Progress, else take the top To Do -> QA, continuously")
     apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
     apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
@@ -311,6 +315,15 @@ async def _main(argv: list[str]) -> int:
         Path(cfg.audit_path).with_name("quartermaster-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
             notify.send("📦 Quartermaster — deploy readiness:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
+        return 0
+
+    if args.command == "patrol":
+        from . import patrol as patrol_mod
+        from .audit import AuditLog
+        officers = [s.strip().lower() for s in (args.officers or "").split(",") if s.strip()] or None
+        await patrol_mod.patrol(cfg, args.app, officers=officers,
+                                do_file=not getattr(args, "no_file", False),
+                                audit=AuditLog(cfg.audit_path))
         return 0
 
     if args.command == "autopilot":
