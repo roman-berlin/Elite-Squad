@@ -224,7 +224,7 @@ async def scribe(cfg) -> str:
     ])
 
     options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
+        model=cfg.discussion_model,        # summarization, not implementation — keep it off Opus
         system_prompt=SCRIBE_SYSTEM,
         cwd=str(_ROOT),
         permission_mode="bypassPermissions",

@@ -192,7 +192,7 @@ def transcript_text(cfg: Config, filename: str) -> str:
 # --------------------------------------------------------------------------- #
 def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
-        model=cfg.builder_model,          # Sonnet for the round-table (lean); Opus chairs
+        model=cfg.discussion_model,          # Sonnet — discussions are cheap; Opus stays for implementation
         system_prompt=memory.preamble() + f"{_OFFICER_RULES}\n\n{system}",
         cwd=cwd,
         permission_mode="default",
@@ -273,8 +273,19 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
 
-    print("\n🎖️  Daily Council — officers in session…\n", flush=True)
-    said = await discuss(cfg, COUNCIL, digest, notes, topic, getattr(cfg, "council_rounds", 2))
+    if topic:
+        print("\n🎖️  Muster — officers in session…\n", flush=True)
+        said = await discuss(cfg, COUNCIL, digest, notes, topic, getattr(cfg, "council_rounds", 2))
+        handoffs: list[str] = []
+    else:
+        # The DAILY muster IS the stand-up + the General's briefing — council and stand-up merged into
+        # one daily. Each officer reports Yesterday/Today/Blockers; the General synthesises from it.
+        print("\n🎖️  Daily muster — officers reporting; the General will brief…\n", flush=True)
+        _sd, said, handoffs = await _gather_standup(cfg)
+        try:
+            _standup_file(cfg).write_text(_standup_text(said, handoffs), encoding="utf-8")
+        except OSError:
+            pass
 
     # The General chairs and synthesizes the briefing.
     print("  · The General sums up…", flush=True)
@@ -282,16 +293,19 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         "The Elite Unit's record:", "", digest, "",
         *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
         *([f"Muster focus: {topic}\n"] if topic else []),
-        "The council said:", "",
+        "The council said:" if topic else "The officers' stand-up (Yesterday / Today / Blockers):", "",
         *[f"### {who}\n{what}\n" for who, what in said],
+        *([f"Hand-offs needing coordination: {'; '.join(handoffs)}\n"] if handoffs else []),
         "Now write the briefing.",
     ])
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=memory.preamble() + _CHAIR_SYSTEM, cwd=cwd,
+        model=cfg.discussion_model, system_prompt=memory.preamble() + _CHAIR_SYSTEM, cwd=cwd,
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     briefing = (chair.final or chair.text or "(no briefing)").strip()
+    from . import governor
+    governor.note_call(cfg, len(said) + 1)
 
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
@@ -381,7 +395,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     autospawn = getattr(cfg, "meeting_autospawn", False)
     chair_system = _MEETING_CHAIR_SYSTEM + (TICKET_BLOCK_RULE if autospawn else "")
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=memory.preamble() + chair_system, cwd=cwd,
+        model=cfg.discussion_model, system_prompt=memory.preamble() + chair_system, cwd=cwd,
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
@@ -437,7 +451,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
         "Now write the recommendation. Remember: only the Commander promotes to MAIN.",
     ])
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=memory.preamble() + _SHIP_REVIEW_CHAIR_SYSTEM, cwd=cwd,
+        model=cfg.discussion_model, system_prompt=memory.preamble() + _SHIP_REVIEW_CHAIR_SYSTEM, cwd=cwd,
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
@@ -468,6 +482,10 @@ async def small_talk(cfg: Config, audit=None) -> str:
     """A light, in-character corridor exchange between two officers — flavor, occasionally a real
     insight. Cheap (two short turns). Saved like a council so it shows up in history."""
     import random
+    from . import governor
+    if not governor.under_budget(cfg):
+        print("  · corridor small-talk skipped (hourly usage cap reached)", flush=True)
+        return ""
     pair = random.sample(COUNCIL, 2)
     digest = format_signals(collect_signals(cfg))
     cwd = _general_root()
@@ -490,11 +508,12 @@ async def small_talk(cfg: Config, audit=None) -> str:
                 "summary. Most corridor chats won't have one — that's fine, leave it off.",
             ])
         run = await run_agent(prompt, ClaudeAgentOptions(
-            model=cfg.builder_model, system_prompt=memory.preamble() + _SMALLTALK_SYSTEM, cwd=cwd,
+            model=cfg.smalltalk_model, system_prompt=memory.preamble() + _SMALLTALK_SYSTEM, cwd=cwd,
             permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
             disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
             max_turns=4, effort="low"), tag="smalltalk")
         convo.append((rank, (run.final or run.text or "…").strip()))
+    governor.note_call(cfg, len(convo))
     insight = _corridor_insight(convo)
     saved = _save_transcript(cfg, f"corridor: {pair[0][0]} & {pair[1][0]}", digest, convo,
                              f"(corridor small-talk — {'insight surfaced' if insight else 'no decision'})")
@@ -546,7 +565,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "Reply like a colleague — short and natural.",
     ])
     run = await run_agent(prompt, ClaudeAgentOptions(
-        model=cfg.reviewer_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
+        model=cfg.discussion_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="low"), tag="the-general")
@@ -577,7 +596,7 @@ _GROUP_SYSTEM = (
 
 def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
-        model=cfg.builder_model,           # Sonnet — a group brainstorm is many cheap turns
+        model=cfg.discussion_model,           # Sonnet — a group brainstorm is many cheap turns
         system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
         cwd=cwd, permission_mode="default",
         allowed_tools=["Read", "Grep", "Glob"],
@@ -701,9 +720,9 @@ def _standup_handoffs(rows: list[tuple[str, str]]) -> list[str]:
     return out
 
 
-async def hold_standup(cfg: Config, audit=None) -> str:
-    """Each officer gives Yesterday/Today/Blockers from the record; 'need <Officer>' hand-offs are
-    collected into a cross-officer section. Saved to last-standup.md and the council history."""
+async def _gather_standup(cfg: Config) -> tuple[str, list[tuple[str, str]], list[str]]:
+    """Each officer's Yesterday/Today/Blockers from the record + the cross-officer hand-offs.
+    Returns (digest, rows, handoffs). No side effects — shared by the daily muster and /standup."""
     digest = format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
@@ -716,23 +735,33 @@ async def hold_standup(cfg: Config, audit=None) -> str:
             "Give your stand-up now — three lines, grounded in the record.",
         ])
         run = await run_agent(prompt, ClaudeAgentOptions(
-            model=cfg.builder_model,
+            model=cfg.discussion_model,
             system_prompt=memory.preamble() + f"{_STANDUP_SYSTEM}\n\nYour lens — {voice}",
             cwd=cwd, permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
             disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"], setting_sources=["project"],
             max_turns=5, effort="low"), tag="standup-" + _officer_key(rank))
         rows.append((rank, (run.final or run.text or "(no report)").strip()))
         print(f"  · {rank} reported", flush=True)
+    return digest, rows, _standup_handoffs(rows)
 
-    handoffs = _standup_handoffs(rows)
+
+def _standup_text(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
     body = [f"🫡 Stand-up — {time.strftime('%Y-%m-%d %H:%M')}", ""]
     for rank, rep in rows:
         body += [f"### {rank}", rep, ""]
     body += ["### Hand-offs & blockers", *([f"- {h}" for h in handoffs] or ["- none"])]
-    text = "\n".join(body)
+    return "\n".join(body)
+
+
+async def hold_standup(cfg: Config, audit=None) -> str:
+    """On-demand stand-up (the daily one now runs inside the muster). Saves last-standup.md + notifies."""
+    from . import governor
+    digest, rows, handoffs = await _gather_standup(cfg)
+    text = _standup_text(rows, handoffs)
     _standup_file(cfg).write_text(text, encoding="utf-8")
     _save_transcript(cfg, "stand-up", digest, rows, "Daily stand-up — see the round-table below.")
     notify.send("🫡 *Daily stand-up*\n\n" + text[:3200])
+    governor.note_call(cfg, len(rows))
     if audit is not None:
         audit.record("standup", officers=[r for r, _ in rows], handoffs=len(handoffs))
     return text

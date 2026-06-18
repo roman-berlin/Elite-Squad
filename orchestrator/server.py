@@ -275,8 +275,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <summary class=btn>&#128202; Reports</summary>
     <div class="panel right">
       <a href="/tasks">&#128203; Task log{fr_tasks}</a>
-      <a href="/council">&#128172; Councils &amp; meetings{fr_council}</a>
-      <a href="/standup">&#129303; Daily standup{fr_standup}</a>
+      <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
       <a href="/memory">&#128221; Unit memory{fr_mem}</a>
       <a href="/drill">&#127894; Last drill{fr_drill}</a>
     </div>
@@ -627,10 +626,10 @@ def create_app(cfg: Config):
     def standup_page():
         from . import council
         snap = "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>"
-        intro = ("<p style='color:#8a909c;margin:-4px 0 14px'>Runs automatically at 10:00 with the daily "
-                 "council — you don't initiate it. The officers post anything actionable to "
-                 "<a href='/needs'>Needs you</a> and ping you on Telegram if they're blocked. "
-                 "The button is only here if you want an extra one on demand.</p>")
+        intro = ("<p style='color:#8a909c;margin:-4px 0 14px'>The stand-up now runs inside the daily "
+                 "muster — see <a href='/council'>Daily muster &amp; meetings</a>. You don't initiate "
+                 "it; officers post anything actionable to <a href='/needs'>Needs you</a> and ping you "
+                 "on Telegram if blocked. The button below is only for an on-demand extra.</p>")
         btn = ('<form method=post action=/api/standup style="margin:14px 0">'
                '<button>&#129303; Run an extra stand-up now</button></form>')
         if _state.get("standuping"):

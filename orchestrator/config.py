@@ -91,6 +91,12 @@ class Config:
     builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
 
+    # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
+    # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
+    # always-on box stays light against the Max limit and never competes with your own Opus coding.
+    discussion_model: str = "claude-sonnet-4-6"            # council / stand-up / meetings / group / General chat
+    smalltalk_model: str = "claude-haiku-4-5-20251001"     # corridor small-talk — cheapest
+
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
     builder_effort: str = "high"            # default / fallback base when sizing is off
     reviewer_effort: str = "high"
@@ -105,6 +111,9 @@ class Config:
 
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
+
+    # --- usage governor (server frugality) ---
+    usage_cap_per_hour: int = 40            # cap discretionary officer-discussion calls / rolling hour; 0 = off
 
     # --- autonomy (officers convene themselves between autopilot cycles) ---
     autonomy_enabled: bool = True

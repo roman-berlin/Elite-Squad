@@ -9,12 +9,13 @@
     <string>/bin/zsh</string>
     <string>/Users/romanberlin/Projects/General/scripts/run-council.sh</string>
   </array>
+  <!-- Off-peak (06:30) so the muster's model burst doesn't overlap your own daytime Opus coding. -->
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
-    <integer>10</integer>
+    <integer>6</integer>
     <key>Minute</key>
-    <integer>0</integer>
+    <integer>30</integer>
   </dict>
   <key>StandardOutPath</key>
   <string>/Users/romanberlin/Projects/General/council/launchd.out.log</string>
