@@ -275,7 +275,8 @@ async def _main(argv: list[str]) -> int:
         from . import sync
         r = sync.git_sync(cfg)
         peers = ", ".join(r["hosts"]) or "(none yet)"
-        line = f"sync[{r['host']}] pulled={r['pulled']} pushed={r['pushed']} peers={peers}"
+        pushed = "read-only" if r["pushed"] is None else r["pushed"]
+        line = f"sync[{r['host']}] pulled={r['pulled']} pushed={pushed} peers={peers}"
         print(line + (f"  error: {r['error']}" if r["error"] else ""))
         return 0 if not r["error"] else 1
 

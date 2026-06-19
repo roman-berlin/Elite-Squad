@@ -189,12 +189,15 @@ crontab -e
 Add (the council now runs the stand-up too; small-talk gets random jitter so it isn't clockwork):
 ```cron
 # m  h  dom mon dow   command
- 30  6   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server ./general sync >> council/cron.log 2>&1  # freshen Mac state right before the muster
+ 30  6   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1  # freshen Mac state right before the muster
  30  6   *   *   *    cd $HOME/General && ./general council   >> council/cron.log 2>&1   # daily muster (council + stand-up), off-peak
   0 11,14,16 *  *  *  bash -c 'sleep $((RANDOM % 2100)); cd $HOME/General && ./general smalltalk >> council/cron.log 2>&1'
   0  9   *   *   1    cd $HOME/General && ./general patrol    >> council/cron.log 2>&1
-*/15 *   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server ./general sync >> council/cron.log 2>&1   # Mac<->server state sync
+*/15 *   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1   # Mac<->server state sync (read-only)
 ```
+`GENERAL_SYNC_PULL_ONLY=1` tells this box (which has read-only git access) to pull the Mac's audit but
+not attempt a push — so sync exits clean instead of logging a 403 every run. Drop the flag only if you
+give the box git **write** credentials (then it pushes its own councils back for the Mac to see).
 
 **Frugality (so you never hit the Max limit):** the server's discussions run on **Sonnet**, and corridor
 small-talk on **Haiku** — Opus is reserved for *implementation* on your Mac. A usage governor caps
@@ -231,14 +234,34 @@ The-General repo:
   local audit **plus** every other host's file, so the server reflects what the Mac ships (you'll see a
   `↔ synced: mac, server` badge under the KPI row). Single-writer files = no merge conflicts; it's
   best-effort, so a git hiccup just no-ops.
-  - **VPS:** the `*/15` cron above (set `GENERAL_HOST_ID=server`). Pull-only is enough to see the Mac;
-    pushing the server's own councils back also works if this box has git push credentials.
+  - **VPS:** the `*/15` cron above (`GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1`). Pull-only is all
+    the server needs to see the Mac; it skips the push so there's no 403 noise. Give the box git write
+    credentials and drop the flag if you want its councils pushed back for the Mac to see too.
   - **Mac:** `export GENERAL_HOST_ID=mac`, then load the launchd pair (every 15 min):
     ```bash
     cp scripts/com.roman.general.sync.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.roman.general.sync.plist
     ```
   - First run from the machine that has push auth (your Mac) — it bootstraps the `unit-state` branch.
+
+## Step 9 — Auto-deploy: push to `main` → the server updates itself
+
+So you never hand-deploy again, the box self-updates: a cron checks `origin/main` every 15 min and, only
+when it actually moved, does `git reset --hard origin/main` + restarts the service — the same ritual you'd
+run by hand. Your whole workflow becomes: develop on `dev`, promote to `main` on the **Mac**, done.
+
+Install both the sync cron and the self-updater in one shot (no `crontab -e`):
+```bash
+cd ~/General
+bash scripts/install-server-cron.sh
+```
+That's idempotent — re-run it any time; it replaces the unit's own cron lines and leaves your others alone.
+
+The restart needs passwordless sudo for that one service. Oracle's `ubuntu` user has full NOPASSWD sudo by
+default, so it just works. If `scripts/self-update.sh` ever logs a password prompt, scope it explicitly:
+```bash
+echo "ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart general.service" | sudo tee /etc/sudoers.d/general-restart
+```
 
 ---
 

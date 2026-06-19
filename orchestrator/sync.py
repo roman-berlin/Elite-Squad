@@ -50,6 +50,14 @@ def host_id(cfg: Config | None = None) -> str:
     return safe or "host"
 
 
+def pull_only() -> bool:
+    """A read-only consumer (e.g. the VPS without git write access): pull peers' audits but never try
+    to push our own. Set ``GENERAL_SYNC_PULL_ONLY=1`` on that box so sync exits clean instead of 403-ing
+    every run. The box's own audit is still read locally by ``dashboard.audit_lines`` — only the
+    publish-back is skipped."""
+    return os.environ.get("GENERAL_SYNC_PULL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _repo_root(cfg: Config) -> Path:
     """The General repo root — audit.jsonl lives at the repo root, so its parent is the root."""
     return Path(cfg.audit_path).resolve().parent
@@ -158,6 +166,13 @@ def git_sync(cfg: Config) -> dict[str, Any]:
             # may be missing/stale. FETCH_HEAD is exactly what we just fetched — always the right tip.
             _git(sd, "reset", "--hard", "FETCH_HEAD")
             out["pulled"] = True
+
+        if pull_only():
+            # Read-only consumer: we've pulled the peers' audits — never attempt a push (no recurring
+            # 403, clean exit 0). Our own audit is still read locally by dashboard.audit_lines.
+            out["hosts"] = [p.stem for p in shared_files(cfg)]
+            out["pushed"] = None
+            return out
 
         # 2) Publish our own audit and stage it.
         publish(cfg, sd)
