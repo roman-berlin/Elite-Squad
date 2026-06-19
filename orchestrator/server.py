@@ -163,6 +163,24 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         _nneeds = 0
     needs_badge = f'<span class=cbadge>{_nneeds}</span>' if _nneeds else ""
 
+    # Deploy DEV -> main — only on a cockpit allowed to push (the Mac, via GENERAL_COCKPIT_PROMOTE).
+    # Shows how far DEV is ahead of main = approved changes not yet on the 24/7 server.
+    promote_html = ""
+    try:
+        from . import sync as _sync
+        if _sync.can_promote():
+            _ahead = _sync.promote_status(cfg).get("ahead", 0)
+            if _ahead:
+                promote_html = (
+                    '<form method=post action=/api/promote class=tbf '
+                    f'''onsubmit="return confirm('Deploy {_ahead} commit(s) DEV \\u2192 main? The 24/7 server self-updates within ~15 min.')">'''
+                    f'<button class="btn deploy" {busy("promoting")}>&#9650; Deploy'
+                    f'<span class=cbadge>{_ahead}</span> &rarr; main</button></form>')
+            else:
+                promote_html = '<span class="tbnote ok" title="DEV and main are in sync — nothing to deploy">&#10003; deployed</span>'
+    except Exception:  # noqa: BLE001
+        promote_html = ""
+
     # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
     from . import warroom as _wr
     _base = Path(cfg.audit_path)
@@ -209,7 +227,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .panel.form button:disabled{{background:#222a37;color:#5c6573;cursor:not-allowed}}
 .tbar .panel .sep{{height:1px;background:#1f2531;margin:5px 4px}}
 .tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#5c6573;padding:6px 11px 3px}}
-.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}
+.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}.tbar .tbnote.ok{{color:#52b788;font-weight:600}}
+.tbar .btn.deploy{{background:#1f7a45;border-color:#2c9a5f;color:#fff}}.tbar .btn.deploy:hover{{background:#1a6b3c}}.tbar .btn.deploy .cbadge{{background:#0c3a22}}
 .tbar .grow{{flex:1}}
 .tbar .chatbtn{{display:inline-flex;align-items:center;gap:6px}}
 .tbar .cbadge{{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px}}
@@ -251,6 +270,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
+  {promote_html}
 
   <details class=menu>
     <summary class=btn>&#128202; Reports</summary>
@@ -778,6 +798,32 @@ def create_app(cfg: Config):
                     _state["shipreview"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
+
+    @app.post("/api/promote")
+    def promote_api():
+        """Promote DEV -> main from the cockpit (the server auto-deploys main). Mac-only + ff-only."""
+        from . import sync
+        if not sync.can_promote():
+            return Response("Deploy is disabled on this cockpit (read-only box).", status=403)
+        if _state.get("active"):
+            _state["last_msg"] = "finish the active run before deploying DEV → main"
+            return redirect("/")
+        if not _state.get("promoting"):
+            def _bg():
+                _state["promoting"] = True
+                try:
+                    r = sync.promote(cfg)
+                    if r.get("ok"):
+                        n = r.get("ahead_before", 0)
+                        _state["last_msg"] = f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
+                    else:
+                        _state["last_msg"] = "Deploy failed: " + (r.get("error") or "unknown")
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"Deploy error: {exc}"
+                finally:
+                    _state["promoting"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/")
 
     @app.post("/api/patrol")
     def patrol_api():

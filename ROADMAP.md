@@ -7,6 +7,15 @@ Last updated: 2026-06-19.
 
 ## Shipped
 
+- **Cockpit "Deploy → main" button + dev-ahead indicator** — promote DEV→main from the War Room instead
+  of the terminal. The top bar shows how far DEV is ahead of main (= approved changes not yet on the
+  24/7 server) as a count badge; one click (with confirm) fast-forwards main and pushes, and the server
+  auto-deploys it. Mac-only by construction (gated on `GENERAL_COCKPIT_PROMOTE=1`, which only the Mac
+  launcher sets — the read-only server never shows it); ff-only (reports instead of forcing on
+  divergence), always returns the working tree to DEV, blocks while a build is active. Also a header
+  machine-name label (`mac` / `server`) so the two cockpits are tellable apart. Tests: gate + ahead-count
+  + ff-merge/push + return-to-dev + idempotency (**10/10**); full sweep **177/177**.
+
 - **Mac ↔ server state sync (`general sync`)** — the server's cockpit + councils now reflect what the
   Mac ships, and vice-versa. Each machine publishes its `audit.jsonl` to a single-writer
   `shared/<host>.jsonl` on a dedicated **orphan `unit-state` branch** (a separate gitignored

@@ -13,6 +13,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/
 cd "$REPO" || { echo "General repo not found at ~/Projects/General"; exit 1; }
 [[ -f .venv/bin/activate ]] && source .venv/bin/activate
 [[ -f .env ]] && { set -a; source .env; set +a; }
+export GENERAL_HOST_ID="${GENERAL_HOST_ID:-mac}"   # labels this cockpit "mac" in the header
+export GENERAL_COCKPIT_PROMOTE=1                    # this cockpit may Deploy DEV -> main (the Mac has push access)
 
 echo "★ Refreshing the War Room…"
 

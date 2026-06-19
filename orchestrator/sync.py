@@ -195,3 +195,65 @@ def git_sync(cfg: Config) -> dict[str, Any]:
     except (subprocess.SubprocessError, OSError) as e:
         out["error"] = str(e)[:200]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Promote DEV -> main from the cockpit (the "Deploy" button).
+# ---------------------------------------------------------------------------
+
+def can_promote() -> bool:
+    """Only a cockpit explicitly allowed to push DEV->main shows the Deploy button. The Mac launcher
+    sets ``GENERAL_COCKPIT_PROMOTE=1``; the read-only server never does, so its cockpit can't promote
+    (and a push there would 403 anyway)."""
+    return os.environ.get("GENERAL_COCKPIT_PROMOTE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def promote_status(cfg: Config) -> dict[str, Any]:
+    """How far ``dev`` is ahead of ``main`` — i.e. changes approved/merged to DEV but not yet deployed
+    to the server. ``{ahead, subjects, error}``; ``ahead == 0`` means the server is current."""
+    repo = _repo_root(cfg)
+    out: dict[str, Any] = {"ahead": 0, "subjects": [], "error": None}
+    try:
+        r = _git(repo, "rev-list", "--count", "main..dev")
+        out["ahead"] = int((r.stdout or "0").strip() or "0") if r.returncode == 0 else 0
+        if out["ahead"]:
+            log = _git(repo, "log", "--oneline", "-8", "main..dev")
+            out["subjects"] = [ln.strip() for ln in log.stdout.splitlines() if ln.strip()]
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+def promote(cfg: Config) -> dict[str, Any]:
+    """Promote ``dev`` -> ``main`` and push; the server auto-deploys ``main``. **Fast-forward only** —
+    if dev and main have diverged it reports instead of forcing a merge. Always returns the working
+    tree to ``dev``. ``{ok, ahead_before, pushed, error}``."""
+    repo = _repo_root(cfg)
+    out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None}
+    if not can_promote():
+        out["error"] = "promote not allowed on this cockpit"
+        return out
+    cur = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "dev"
+    out["ahead_before"] = promote_status(cfg).get("ahead", 0)
+    if out["ahead_before"] == 0:
+        out["ok"] = True   # already in sync — nothing to deploy
+        return out
+    try:
+        co = _git(repo, "checkout", "main")
+        if co.returncode != 0:
+            out["error"] = "checkout main failed (uncommitted changes on the working tree?): " + (co.stderr or "").strip()[:150]
+            return out
+        mg = _git(repo, "merge", "--ff-only", "dev")
+        if mg.returncode != 0:
+            out["error"] = "fast-forward failed — dev and main diverged; resolve in a terminal: " + (mg.stderr or "").strip()[:140]
+            return out
+        ps = _git(repo, "push", "origin", "main")
+        out["pushed"] = ps.returncode == 0
+        out["ok"] = ps.returncode == 0
+        if not out["pushed"]:
+            out["error"] = "push to origin/main failed: " + ((ps.stderr or ps.stdout) or "").strip()[:150]
+    except (subprocess.SubprocessError, OSError) as e:
+        out["error"] = str(e)[:200]
+    finally:
+        _git(repo, "checkout", cur if cur != "main" else "dev")   # always leave the tree on DEV
+    return out
