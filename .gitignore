@@ -22,6 +22,12 @@ quartermaster-report.md
 council/*.log
 backups/
 blocked_tickets.json
+# runtime state — regenerated as the unit runs; never version it (avoids churn + Mac/server pull conflicts)
+usage.jsonl
+approvals.json
+dismissed.json
+group_chat.jsonl
+last-standup.md
 # macOS
 .DS_Store
 cockpit.log
