@@ -65,10 +65,16 @@ def from_tickets(cfg: Config, app_name: str, keys: list[str],
 
 
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
+    """Pull ready tickets. With ``app_name=None`` this spans EVERY app that has a backlog — i.e. all
+    connected Jiras — so Autopilot works across several Jira accounts at once. One connection failing
+    (bad creds, network, a renamed project) is skipped, never fatal — the other Jiras still drain."""
     apps = [cfg.app(app_name)] if app_name else [a for a in cfg.apps if a.backlog_backend != "none"]
     items: list[WorkItem] = []
     for app in apps:
-        backlog = make_backlog(app)
-        for ticket in backlog.get_ready_tasks(limit):
-            items.append((app, ticket))
+        try:
+            backlog = make_backlog(app)
+            for ticket in backlog.get_ready_tasks(limit):
+                items.append((app, ticket))
+        except Exception as exc:  # noqa: BLE001 - one Jira/connection must not abort the others
+            print(f"  · backlog '{app.name}' skipped this cycle: {str(exc)[:160]}", flush=True)
     return items

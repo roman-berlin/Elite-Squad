@@ -1,10 +1,14 @@
 """Jira Cloud backlog adapter (REST API v3).
 
-Auth is HTTP basic with an Atlassian email + API token from the environment
-(JIRA_EMAIL, JIRA_API_TOKEN). Per-app settings come from the app's `backlog:` block:
+Auth is HTTP basic with an Atlassian email + API token. By default these come from
+JIRA_EMAIL / JIRA_API_TOKEN, but each app names its own env vars (email_env / token_env)
+so SEVERAL Jira sites/accounts can run side by side — one per app/project. Per-app settings
+come from the app's `backlog:` block:
 
   base_url:        https://your-domain.atlassian.net
   project_key:     AUTO
+  email_env:       JIRA_EMAIL          # which env var holds this connection's email (default)
+  token_env:       JIRA_API_TOKEN      # which env var holds this connection's API token (default)
   ready_status:    "To Do"            # status marking a ticket ready for autodev
   label:           autodev            # only pick tickets carrying this label
   jql:             "<override>"        # optional full JQL, overrides the above
@@ -44,7 +48,19 @@ class JiraAdapter(BacklogAdapter):
         # each ordered by board Rank (top first). Override with `queue_statuses:` in config.
         self.queue_statuses = b.get("queue_statuses") or ["In Progress", self.ready_status]
         self.session = requests.Session()
-        self.session.auth = (os.environ["JIRA_EMAIL"], os.environ["JIRA_API_TOKEN"])
+        # Per-app credentials, so several Jira sites/accounts run side by side: each app's backlog
+        # names its env vars (default JIRA_EMAIL / JIRA_API_TOKEN — the primary connection). A second
+        # Jira just sets e.g. `email_env: OTHER_JIRA_EMAIL` + `token_env: OTHER_JIRA_TOKEN`.
+        email_env = b.get("email_env", "JIRA_EMAIL")
+        token_env = b.get("token_env", "JIRA_API_TOKEN")
+        try:
+            self.session.auth = (os.environ[email_env], os.environ[token_env])
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Jira credentials for app '{self.app_name}' are not set — missing env var {exc}. "
+                f"Set {email_env} and {token_env} (this app's backlog references them via "
+                "email_env / token_env)."
+            ) from exc
         self.session.headers.update({"Accept": "application/json",
                                      "Content-Type": "application/json"})
 
