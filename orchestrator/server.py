@@ -249,7 +249,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <details class=menu>
     <summary class=btn>&#43; New task</summary>
     <div class="panel form">
-      <form method=post action=/api/run enctype=multipart/form-data onsubmit="return !this.live.checked||confirm('Run LIVE — build and MERGE to DEV. Continue?')">
+      <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
         <input type=hidden name=kind value=task>
         <div class=row style="gap:16px;margin-bottom:3px">
           <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
@@ -261,7 +261,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
           <select name=app title=project style="flex:1">{apps}</select>
           <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
         </div>
-        <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=live> live (build + merge to DEV)</label>
+        <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
         <button {run_dis}>&#9654; Run</button>
       </form>
     </div>
@@ -507,20 +507,21 @@ def create_app(cfg: Config):
                 + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
                   "Tick the ones to develop, then Run.</p>"
                   '<form method=post action=/api/run-selected '
-                  'onsubmit="return !this.live.checked||confirm(\'Run LIVE — build and MERGE to DEV. Continue?\')">'
+                  'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
                   f'<input type=hidden name=app value="{html.escape(app_name)}">'
                   f'<div class=tlist>{rows}</div>'
                   '<div class=trun>'
-                  '<label><input type=checkbox name=live> live (build + merge to DEV)</label>'
+                  '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
                   f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
                   '<button>&#9654; Develop selected</button>'
-                  '<span class=hint>leave “live” off for a safe dry-run first</span>'
+                  '<span class=hint>default builds + merges to DEV — tick “dry run” to build only</span>'
                   '</div></form>')
         return _wrap(f"Choose tickets — {app_name}", body)
 
     @app.post("/api/run-selected")
     def run_selected_api():
         if _state["active"]:
+            _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
             return redirect("/")
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         keys = request.form.getlist("ticket")
@@ -531,7 +532,7 @@ def create_app(cfg: Config):
             return redirect("/")
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
-        rcfg.dry_run = request.form.get("live") != "on"
+        rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
         _state["dry_run"] = rcfg.dry_run
         effort = request.form.get("effort") or None
         if effort:
@@ -555,12 +556,15 @@ def create_app(cfg: Config):
             finally:
                 _state["active"] = False
                 _state["stop_event"] = None
+                _state["dry_run"] = None        # clear the dry/live flag so the cockpit shows no stale tag
+                _state["run_started"] = None
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
     @app.post("/api/run")
     def run_api():
         if _state["active"]:
+            _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
@@ -572,7 +576,7 @@ def create_app(cfg: Config):
         effort = request.form.get("effort") or None
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
-        rcfg.dry_run = request.form.get("live") != "on"
+        rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
         _state["dry_run"] = rcfg.dry_run
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
@@ -603,6 +607,8 @@ def create_app(cfg: Config):
             finally:
                 _state["active"] = False
                 _state["stop_event"] = None
+                _state["dry_run"] = None        # clear the dry/live flag so the cockpit shows no stale tag
+                _state["run_started"] = None
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -1067,13 +1073,14 @@ def create_app(cfg: Config):
             "<textarea name=text rows=6 cols=72 placeholder='On /leads the long column gets "
             "cut off; expected it to scroll to the last card…'></textarea></p>"
             "<p>Screenshot (optional): <input type=file name=screenshot accept='image/*'></p>"
-            "<p><label><input type=checkbox name=live> live (build + merge to DEV)</label></p>"
+            "<p><label><input type=checkbox name=dryrun> dry run (build only — no merge)</label></p>"
             "<p><button>Send to the General</button></p></form>")
         return _wrap("Report a problem", form)
 
     @app.post("/api/report")
     def report_api():
         if _state["active"]:
+            _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
@@ -1082,7 +1089,7 @@ def create_app(cfg: Config):
         text = (request.form.get("text") or "").strip()
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
-        rcfg.dry_run = request.form.get("live") != "on"
+        rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
         _state["dry_run"] = rcfg.dry_run
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
@@ -1104,6 +1111,8 @@ def create_app(cfg: Config):
             finally:
                 _state["active"] = False
                 _state["stop_event"] = None
+                _state["dry_run"] = None        # clear the dry/live flag so the cockpit shows no stale tag
+                _state["run_started"] = None
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
