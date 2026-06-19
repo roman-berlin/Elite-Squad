@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
     sub.add_parser("smalltalk", help="a corridor exchange between two officers (flavor; sometimes a real insight)")
     sub.add_parser("sync", help="exchange the audit log with the other machine (Mac<->server) so both cockpits agree")
+    pmp = sub.add_parser("pm", help="Product Manager (S-5): decide a product/IA question, or escalate a critical one to you")
+    pmp.add_argument("app")
+    pmp.add_argument("ticket")
+    pmp.add_argument("question", nargs="?", default="")
+    pmp.add_argument("--telegram", action="store_true", help="also send an ESCALATE proposal to Telegram")
     sr = sub.add_parser("ship-review", help="ready-to-prod review: QM certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
     sr.add_argument("app", nargs="?", help="app to review (default: first configured)")
     adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
@@ -279,6 +284,19 @@ async def _main(argv: list[str]) -> int:
         line = f"sync[{r['host']}] pulled={r['pulled']} pushed={pushed} peers={peers}"
         print(line + (f"  error: {r['error']}" if r["error"] else ""))
         return 0 if not r["error"] else 1
+
+    if args.command == "pm":
+        from . import pm
+        r = await pm.review(cfg, args.app, args.ticket, getattr(args, "question", "") or "")
+        if r["verdict"] == "DECIDE":
+            print(f"\n🧭 PM DECISION — {args.ticket}\n\n{r['body']}\n")
+        else:
+            msg = f"🧭 PM → your call on {args.ticket} (ESCALATE)\n\n{r['body']}"
+            print("\n" + msg + "\n")
+            if getattr(args, "telegram", False):
+                from . import notify
+                notify.send(msg[:3500])
+        return 0
 
     if args.command == "ship-review":
         from . import council

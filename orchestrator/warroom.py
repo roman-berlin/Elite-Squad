@@ -28,6 +28,7 @@ from . import dashboard as D
 _OFFICERS = [
     ("general",       "The General",     "Orchestrator"),
     ("adjutant",      "Adjutant",        "S-1 · personnel"),
+    ("pm",            "Product Manager", "S-5 · product"),
     ("builder",       "Field Engineer",  "Builder"),
     ("reviewer",      "Inspector General", "Reviewer"),
     ("scout",         "Scout",           "S-2 · QA / recon"),
