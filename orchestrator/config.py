@@ -104,10 +104,12 @@ class Config:
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
 
-    # --- squad delegation (Field Engineer splits a sized-big ticket across soldiers) ---
-    delegation_enabled: bool = False        # OFF by default — flip true to arm squad delegation
-    delegation_min_ac: int = 3              # delegate if >= this many acceptance criteria (or size L/XL)
-    delegation_max_soldiers: int = 4        # cap subtasks dispatched per ticket
+    # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
+    #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether
+    #     to recruit soldiers or run solo). See squad.py (build) and recon.py (recon). ---
+    delegation_enabled: bool = False        # OFF by default — flip true to arm all squad delegation
+    delegation_min_ac: int = 3              # Field Engineer: delegate if >= this many AC (or size L/XL)
+    delegation_max_soldiers: int = 4        # cap soldiers per ticket (build) / per inspection (recon)
 
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)

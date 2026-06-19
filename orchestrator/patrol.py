@@ -23,15 +23,15 @@ PATROL_OFFICERS = [
 ]
 
 
-async def _inspect(key: str, cfg: Config, app_name: str) -> str:
+async def _inspect(key: str, cfg: Config, app_name: str, audit=None) -> str:
     if key == "scout":
         from . import scout
-        return await scout.recon(cfg, app_name)
+        return await scout.recon(cfg, app_name, audit=audit)
     if key == "provost":
         from . import provost
-        return await provost.inspect(cfg, app_name)
+        return await provost.inspect(cfg, app_name, audit=audit)
     from . import quartermaster
-    return await quartermaster.inspect(cfg, app_name)
+    return await quartermaster.inspect(cfg, app_name, audit=audit)
 
 
 def _first_line(text: str) -> str:
@@ -53,7 +53,7 @@ async def patrol(cfg: Config, app_name: str, officers=None, do_file: bool = True
     lines, total = [], 0
     for key, label, fname in roster:
         try:
-            report = await _inspect(key, cfg, app_name)
+            report = await _inspect(key, cfg, app_name, audit)
             proposals, _ = filing.parse_tickets(report)
             clean, _block = filing.present(report, app, key, do_file)
             Path(cfg.audit_path).with_name(fname).write_text(clean, encoding="utf-8")

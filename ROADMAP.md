@@ -7,6 +7,17 @@ Last updated: 2026-06-19.
 
 ## Shipped
 
+- **Recon squads — officers recruit soldiers autonomously** — the read-only patrol officers (Scout,
+  Provost Marshal, Quartermaster) can now do what the Field Engineer already did: when a surface is
+  big enough, field a squad of read-only SOLDIERS (one per area) and synthesize a single report in the
+  officer's own format. Each officer **decides for itself** — a cheap read-only planning pass returns
+  `SOLO` for a small/atomic surface (no soldiers spent) or a non-overlapping split for a big one;
+  fewer than 2 slices ⇒ solo. New `recon.py` mirrors `squad.py`'s discipline: **solo is the default**,
+  the **same `delegation_enabled` switch** arms both the build squad and the recon squads, **fail-safe**
+  degrades to solo on any planning/soldier hiccup, soldiers are read-only + sequential. Per-ticket
+  Reviewer/security-gate stay solo (per-ticket cost). Tests: parse + solo + delegated + autonomy +
+  fail-safe (**13/13**); full sweep **197/197**.
+
 - **Cockpit "Deploy → main" button + dev-ahead indicator** — promote DEV→main from the War Room instead
   of the terminal. The top bar shows how far DEV is ahead of main (= approved changes not yet on the
   24/7 server) as a count badge; one click (with confirm) fast-forwards main and pushes, and the server

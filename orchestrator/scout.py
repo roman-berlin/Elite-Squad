@@ -11,10 +11,6 @@ application source — it verifies, it does not build.
 """
 from __future__ import annotations
 
-from claude_agent_sdk import ClaudeAgentOptions
-
-from . import memory
-from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
 
@@ -50,20 +46,14 @@ def _prompt(app, url: str | None) -> str:
     ])
 
 
-async def recon(cfg: Config, app_name: str, url: str | None = None) -> str:
+async def recon(cfg: Config, app_name: str, url: str | None = None, audit=None) -> str:
     app = cfg.app(app_name)
-    options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,            # an independent verifier — use the strong model
-        system_prompt=memory.preamble() + SCOUT_SYSTEM + TICKET_BLOCK_RULE,
-        cwd=app.repo_path,                   # the checkout with deps installed (can run the app)
-        # Unattended so it never stalls on the repo's Bash ask-gate. Still read-only: Write/Edit
-        # are disallowed outright, and the repo's deny rules (rm -rf, force-push) still hold.
-        permission_mode="bypassPermissions",
-        allowed_tools=["Read", "Grep", "Glob", "Bash"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],   # verify, never change app source
-        setting_sources=["project"],
-        max_turns=30,
-        effort="high",
-    )
-    run = await run_agent(_prompt(app, url), options, tag="scout")
-    return run.final or "(Scout produced no report.)"
+    from . import recon as _recon
+    # Read-only QA recon. With delegation armed, the Scout decides whether to field a squad (a soldier
+    # per user-flow / area) on a big surface and synthesize, else a single solo pass (unchanged).
+    return await _recon.run_officer(
+        officer="scout", label="Scout",
+        system=SCOUT_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app, url),
+        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
+        empty="(Scout produced no report.)", audit=audit)

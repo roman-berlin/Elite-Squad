@@ -10,10 +10,6 @@ code. (Promotion to MAIN stays the Commander's call; the Quartermaster just tell
 """
 from __future__ import annotations
 
-from claude_agent_sdk import ClaudeAgentOptions
-
-from . import memory
-from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
 
@@ -53,20 +49,14 @@ def _prompt(app) -> str:
     ])
 
 
-async def inspect(cfg: Config, app_name: str) -> str:
+async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     app = cfg.app(app_name)
-    options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
-        system_prompt=memory.preamble() + QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE,
-        cwd=app.repo_path,
-        # Unattended so it never stalls on the repo's Bash ask-gate. Read-only: Write/Edit
-        # disallowed; the repo's deny rules (rm -rf, force-push) still hold.
-        permission_mode="bypassPermissions",
-        allowed_tools=["Read", "Grep", "Glob", "Bash"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],   # certify, never change code
-        setting_sources=["project"],
-        max_turns=30,
-        effort="high",
-    )
-    run = await run_agent(_prompt(app), options, tag="quartermaster")
-    return run.final or "(Quartermaster produced no report.)"
+    from . import recon
+    # Read-only deploy-readiness certification. With delegation armed, the Quartermaster decides whether
+    # to field a squad (a soldier per readiness area) on a big surface and synthesize, else solo (unchanged).
+    return await recon.run_officer(
+        officer="quartermaster", label="Quartermaster",
+        system=QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
+        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
+        empty="(Quartermaster produced no report.)", audit=audit)

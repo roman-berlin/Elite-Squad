@@ -50,23 +50,17 @@ def _prompt(app) -> str:
     ])
 
 
-async def inspect(cfg: Config, app_name: str) -> str:
+async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     app = cfg.app(app_name)
-    options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,            # security judgment — use the strong model
-        system_prompt=memory.preamble() + PROVOST_SYSTEM + TICKET_BLOCK_RULE,
-        cwd=app.repo_path,
-        # Unattended so it never stalls on the repo's Bash ask-gate. Still read-only: Write/Edit
-        # are disallowed outright, and the repo's deny rules (rm -rf, force-push) still hold.
-        permission_mode="bypassPermissions",
-        allowed_tools=["Read", "Grep", "Glob", "Bash"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],   # flag, never edit
-        setting_sources=["project"],
-        max_turns=30,
-        effort="high",
-    )
-    run = await run_agent(_prompt(app), options, tag="provost")
-    return run.final or "(Provost produced no report.)"
+    from . import recon
+    # Read-only security recon. With delegation armed, the Provost decides for itself whether to field
+    # a squad on a big surface (a soldier per area) and synthesize, else a single solo pass (unchanged).
+    return await recon.run_officer(
+        officer="provost", label="Provost Marshal",
+        system=PROVOST_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
+        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
+        empty="(Provost produced no report.)", audit=audit)
 
 
 PROVOST_GATE_SYSTEM = """\
