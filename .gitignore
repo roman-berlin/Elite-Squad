@@ -13,6 +13,9 @@ pending_decisions.json
 telegram_offset.txt
 qa-reports/
 .general-worktrees/
+# Mac<->server state sync: the dedicated state clone (tracks the orphan `unit-state` branch). Never
+# track it from the code repo — it's a second clone living inside the repo dir. See orchestrator/sync.py.
+.unit-state/
 # council runtime — keep transcripts (council/*.md) + index as minutes; ignore private notes + logs
 commander_notes.md
 adjutant-report.md

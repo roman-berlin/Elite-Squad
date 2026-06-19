@@ -3,9 +3,30 @@
 The durable plan. The live task list in Cowork mirrors this, but this file is the source of
 truth (version-controlled, reviewable on GitHub). Update it as we ship.
 
-Last updated: 2026-06-18.
+Last updated: 2026-06-19.
 
 ## Shipped
+
+- **Mac ↔ server state sync (`general sync`)** — the server's cockpit + councils now reflect what the
+  Mac ships, and vice-versa. Each machine publishes its `audit.jsonl` to a single-writer
+  `shared/<host>.jsonl` on a dedicated **orphan `unit-state` branch** (a separate gitignored
+  `.unit-state/` clone — runtime state never pollutes `main`/`dev`, so it can't fight the server's
+  `git reset --hard origin/main` promotion). `dashboard.audit_lines` merges the local audit with every
+  peer's file (exact-dup lines collapsed), so `load_tasks` / cockpit KPIs / `collect_signals` all see
+  the unified record; a `↔ synced: mac, server` badge shows under the KPI row. Single-writer files = no
+  merge driver, no append race; best-effort (a git hiccup just no-ops). Pull-only suffices for the
+  server to see the Mac. Tests: real bare-origin round-trip + dedup + fail-soft (**12/12**); full
+  General harness sweep **164/164**, no regression. Schedule: Mac launchd every 15 min + VPS `*/15`
+  cron (set `GENERAL_HOST_ID`); runbook updated.
+
+- **Finding 1 — superadmin authz hardened (defense in depth)** — the platform-admin surface
+  (`/api/v1/admin/*`) is now gated at the **router** by construction —
+  `APIRouter(..., dependencies=[Depends(require_superadmin)])` — so a future admin route can no longer
+  be silently exposed by forgetting the per-handler guard (a one-char omission that the old per-route
+  pattern allowed). Plus a **probe-test invariant** (`backend/tests/api/routes/test_admin_authz.py`)
+  that enumerates *every* route on the admin router and asserts **401 (anon) + 403 (non-admin)** — so
+  adding an unguarded admin route turns the suite red before it ships. Guard logic untouched (still
+  5/5); full backend suite green (**115/115**).
 
 - **Turn-budget scaling + "too big" surfacing** — the build turn budget now scales with effort
   (`builder_max_turns` base 60 → high ~96 → max ~144, configurable) so a deep ticket doesn't error
@@ -159,10 +180,11 @@ Last updated: 2026-06-18.
 
 ## Next — in priority order
 
-1. **Finding 1 — superadmin authz** — Provost files it; Roman + the General build the fix together (platform-admin probe + test invariant).
+_(Clear. The General self-hosts 24/7 on the Oracle VPS now — surface the next item from a daily
+council or a patrol finding.)_
 
 ## Notes
 
 - The General self-hosts on Roman's Mac (Claude Max login, no API key). Cowork edits the source; Roman runs it.
-- Repo: github.com/roman-berlin/The-General (private), `main` + `dev`.
+- Repo: github.com/roman-berlin/Elite-Unit (private), `main` (prod, the VPS runs it) + `dev` (active dev on the Mac).
 - Roman runs separate products: Automatixy CRM, SignalDesk, MQL5 EAs — the war room's project switcher serves this.

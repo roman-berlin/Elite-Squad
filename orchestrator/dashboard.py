@@ -49,9 +49,36 @@ def _human_dur(seconds: Optional[float]) -> str:
     return f"{h}h {m}m"
 
 
+def audit_lines(audit_path: str | Path) -> list[str]:
+    """Every audit line for the unified view: this machine's live ``audit.jsonl`` PLUS each synced
+    ``shared/<host>.jsonl`` published by the other machines (see orchestrator/sync.py). Exact-duplicate
+    lines are collapsed — a host's own events live in both its audit.jsonl and its published copy, so
+    they are counted once. Order is local-first then shared; callers that care sort by ts."""
+    p = Path(audit_path)
+    paths: list[Path] = [p]
+    # Synced peers: the state clone's shared/ (orphan unit-state branch); the bare shared/ form is
+    # accepted too so tests and any future local-only layout work without the clone.
+    for shared in (p.parent / ".unit-state" / "shared", p.parent / "shared"):
+        if shared.is_dir():
+            paths += sorted(shared.glob("*.jsonl"))
+    seen: set[str] = set()
+    out: list[str] = []
+    for fp in paths:
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            s = line.strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
 def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(audit_path)
-    if not path.exists():
+    lines = audit_lines(audit_path)
+    if not lines:
         return []
     def _new(tid: str, ev: dict) -> dict[str, Any]:
         return {"ticket_id": tid, "app": ev.get("app"), "branch": ev.get("branch"),
@@ -63,7 +90,7 @@ def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
     # then a live run) does NOT merge the earlier run's phases/verdict into the new one.
     runs: list[dict[str, Any]] = []
     cur: dict[str, dict[str, Any]] = {}     # ticket_id -> its currently-open run
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue

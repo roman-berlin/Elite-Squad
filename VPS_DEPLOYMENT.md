@@ -189,9 +189,11 @@ crontab -e
 Add (the council now runs the stand-up too; small-talk gets random jitter so it isn't clockwork):
 ```cron
 # m  h  dom mon dow   command
+ 30  6   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server ./general sync >> council/cron.log 2>&1  # freshen Mac state right before the muster
  30  6   *   *   *    cd $HOME/General && ./general council   >> council/cron.log 2>&1   # daily muster (council + stand-up), off-peak
   0 11,14,16 *  *  *  bash -c 'sleep $((RANDOM % 2100)); cd $HOME/General && ./general smalltalk >> council/cron.log 2>&1'
   0  9   *   *   1    cd $HOME/General && ./general patrol    >> council/cron.log 2>&1
+*/15 *   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server ./general sync >> council/cron.log 2>&1   # Mac<->server state sync
 ```
 
 **Frugality (so you never hit the Max limit):** the server's discussions run on **Sonnet**, and corridor
@@ -223,10 +225,20 @@ The-General repo:
 
 - **VPS → Mac (already happening):** the council/scribe commit Unit Memory + officer changes; your Mac
   `git pull` picks them up.
-- **Mac → VPS (phase-2 nicety):** so the server's council sees what you shipped locally, add a cron on
-  the **Mac** that commits the run state and a cron on the **VPS** that pulls it before the 10:00
-  council. Smallest version: keep `audit.jsonl` + `council/` under git on a `state` branch both
-  machines push/pull. Tell me when you want this and I'll wire the exact two cron lines.
+- **Mac ↔ VPS state sync (now wired — `general sync`):** each machine publishes its `audit.jsonl` to
+  `shared/<host>.jsonl` on a dedicated orphan **`unit-state`** branch (in a separate `.unit-state/`
+  clone, gitignored — runtime state never lands in `main`/`dev`). The cockpit + councils then read the
+  local audit **plus** every other host's file, so the server reflects what the Mac ships (you'll see a
+  `↔ synced: mac, server` badge under the KPI row). Single-writer files = no merge conflicts; it's
+  best-effort, so a git hiccup just no-ops.
+  - **VPS:** the `*/15` cron above (set `GENERAL_HOST_ID=server`). Pull-only is enough to see the Mac;
+    pushing the server's own councils back also works if this box has git push credentials.
+  - **Mac:** `export GENERAL_HOST_ID=mac`, then load the launchd pair (every 15 min):
+    ```bash
+    cp scripts/com.roman.general.sync.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.roman.general.sync.plist
+    ```
+  - First run from the machine that has push auth (your Mac) — it bootstraps the `unit-state` branch.
 
 ---
 

@@ -83,10 +83,8 @@ def _scan(audit_path: str | Path) -> dict[str, Any]:
     optionally per app. Cheap and used by every panel."""
     last: dict[str, datetime] = {}
     count: dict[str, int] = {}
-    p = Path(audit_path)
-    if not p.exists():
-        return {"last": last, "count": count}
-    for line in p.read_text(encoding="utf-8").splitlines():
+    # Merged view: this machine's audit + every synced shared/<host>.jsonl (see dashboard.audit_lines).
+    for line in D.audit_lines(audit_path):
         line = line.strip()
         if not line:
             continue
@@ -483,6 +481,26 @@ def _liveness(state: dict, active: bool) -> str:
     return f'<span class="lv stuck">&#9888; no step for {m}m — may be stuck</span>'
 
 
+def _sync_html(cfg) -> str:
+    """Subtle one-line badge: which machines' audits are merged into this view, and how fresh.
+    Empty (no clutter) when the state clone isn't set up yet — i.e. a stand-alone machine."""
+    try:
+        from . import sync
+        files = sync.shared_files(cfg)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not files:
+        return ""
+    peers = ", ".join(sorted(p.stem for p in files))
+    ago = ""
+    try:
+        newest = max(f.stat().st_mtime for f in files)
+        ago = " · " + _fmt_dur(datetime.now().timestamp() - newest) + " ago"
+    except OSError:
+        pass
+    return f'<div class=synced>&#8646; synced: {html.escape(peers)}{html.escape(ago)}</div>'
+
+
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
     ap_on = bool((state.get("autopilot") or {}).get("on"))
@@ -517,6 +535,7 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     return (
         f'{hero}'
         f'<div class=kpis>{k}</div>'
+        f'{_sync_html(cfg)}'
         '<div class=cols>'
         f'<div class=col-main>'
         f'<section class=panel><div class=ph>Active run</div><div class=run>{run}</div></section>'
@@ -766,6 +785,8 @@ padding:3px 9px;border-radius:6px;text-transform:none}
 margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pulse2 1.4s infinite}
 .lv.quiet{color:var(--warn);background:var(--warnbg)}
 .lv.stuck{color:var(--bad);background:var(--badbg)}
+/* synced badge — which machines' audits are merged into this view */
+.synced{margin:6px 24px 0;font-size:11px;color:#5b6b86;letter-spacing:.02em}
 /* hero — the live-run headline (biggest thing when a run is in flight) */
 .hero{margin:18px 24px 0;padding:16px 20px;border:1px solid #243049;border-radius:14px;
 background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));position:relative;overflow:hidden}

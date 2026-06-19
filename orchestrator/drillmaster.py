@@ -22,7 +22,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import memory
 from .agent import run_agent
 from .config import Config
-from .dashboard import load_tasks
+from .dashboard import audit_lines, load_tasks
 
 DRILLMASTER_SYSTEM = """\
 You are the Drillmaster — the R&D unit's training officer. Your job is continuous
@@ -82,17 +82,15 @@ def collect_signals(cfg: Config) -> dict:
                 sig["issue_areas"][iss.get("area", "?")] += 1
     sig["avg_passes"] = round(total_passes / len(tasks), 2) if tasks else 0.0
 
-    path = Path(cfg.audit_path)
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("event") == "gate" and ev.get("passed") is False:
-                sig["gate_fails"] += 1
-            elif ev.get("event") == "needs_human":
-                sig["needs_human"] += 1
+    for line in audit_lines(cfg.audit_path):   # merged: local audit + synced shared/<host>.jsonl
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") == "gate" and ev.get("passed") is False:
+            sig["gate_fails"] += 1
+        elif ev.get("event") == "needs_human":
+            sig["needs_human"] += 1
     return sig
 
 
