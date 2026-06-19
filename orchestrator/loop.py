@@ -262,9 +262,26 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
         _cleanup(cfg, git, audit, report)
 
 
+async def _consult_pm(cfg, ticket, app, audit, halt_report: str):
+    """Ask the Product Manager about a Builder halt. Returns the PM verdict dict, or None when the PM
+    is disabled or errors (the caller then escalates to the Commander, i.e. the old behaviour)."""
+    if not getattr(cfg, "pm_enabled", True):
+        return None
+    try:
+        from . import pm
+        ctx = ((ticket.description or "")[:3000] + "\n\nBUILDER HALT REPORT:\n" + halt_report)[:6000]
+        r = await pm.review(cfg, app.name, ticket.id, question=halt_report[:2000], context=ctx)
+        audit.record("pm_review", ticket_id=ticket.id, verdict=r["verdict"])
+        return r
+    except Exception as e:  # noqa: BLE001 - a PM failure must never break the run
+        audit.record("pm_error", ticket_id=ticket.id, error=str(e)[:200])
+        return None
+
+
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
     cost = 0.0
     last_changes: list[str] = []
+    pm_used = False
 
     for iteration in range(1, cfg.max_iterations + 1):
         if stop_event is not None and stop_event.is_set():
@@ -296,15 +313,41 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         if not git.has_changes():
             if _is_deliberate_halt(build.summary or build.raw):
                 report = (build.summary or build.raw or "(no report)").strip()
-                decisions.add(cfg, ticket, app.name, report[:1500])   # so you can answer it
+                # Route the product/precondition blocker to the Product Manager (once per ticket). It
+                # either makes the call — and the build resumes with that decision injected — or
+                # escalates ONE recommendation to the Commander, in which case we park with a clear
+                # comment and the run moves on to the next ticket.
+                pm_outcome = None
+                if not pm_used:
+                    pm_used = True
+                    pm_outcome = await _consult_pm(cfg, ticket, app, audit, report)
+                    if pm_outcome is not None and pm_outcome["verdict"] == "DECIDE":
+                        from dataclasses import replace
+                        ticket = replace(ticket, description=(ticket.description or "")
+                            + "\n\n---\nPRODUCT MANAGER DECISION (resolves the open product question — "
+                              "act on it, do not re-raise it):\n" + pm_outcome["body"])
+                        audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration)
+                        _notify(cfg, f"🧭 {ticket.id} — the PM made the product call; the unit is "
+                                     f"continuing:\n\n{pm_outcome['body'][:800]}")
+                        print(f"  🧭 {ticket.id}: PM decided — re-building with the decision.", flush=True)
+                        continue
+                proposal = pm_outcome["body"] if pm_outcome is not None else report
+                decisions.add(cfg, ticket, app.name, proposal[:1500])   # so you can answer it in Telegram
+                if not cfg.dry_run and not ticket.ephemeral:
+                    try:
+                        backlog.add_comment(ticket, "⛔ Parked — needs a Commander product decision to "
+                                            "continue. What's needed:\n\n" + proposal[:1200])
+                    except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                        pass
                 audit.record("needs_human", ticket_id=ticket.id, iteration=iteration,
-                             question=report[:1500], reason="builder halted — precondition/blocker")
-                _notify(cfg, f"🛑 {ticket.id} — the Field Engineer HALTED before any write "
-                             f"(precondition / blocker). Your call:\n\n{report[:1500]}")
-                print(f"  🛑 {ticket.id}: Builder halted (precondition/blocker) — escalated to you.",
+                             question=proposal[:1500], reason="product blocker — escalated to Commander")
+                _notify(cfg, f"🛑 {ticket.id} — needs your product call"
+                             + (" (the PM recommends):" if pm_outcome is not None else ":")
+                             + f"\n\n{proposal[:1400]}")
+                print(f"  🛑 {ticket.id}: parked — escalated to you; the unit moves to the next ticket.",
                       flush=True)
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
-                                    notes="Builder halted (precondition/blocker) — awaiting Commander")
+                                    notes="parked — Commander product decision needed")
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                 notes="builder produced no changes")

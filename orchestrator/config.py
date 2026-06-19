@@ -111,6 +111,11 @@ class Config:
     delegation_min_ac: int = 3              # Field Engineer: delegate if >= this many AC (or size L/XL)
     delegation_max_soldiers: int = 4        # cap soldiers per ticket (build) / per inspection (recon)
 
+    # --- Product Manager officer: when the Builder halts on a product/IA blocker, consult the PM first
+    #     — it either DECIDES (the build resumes with its decision) or ESCALATES one recommendation to
+    #     the Commander (parked with a clear comment; the unit moves to the next ticket). ---
+    pm_enabled: bool = True                 # False = halts go straight to the Commander (old behaviour)
+
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
 
