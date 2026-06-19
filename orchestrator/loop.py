@@ -6,8 +6,11 @@ bounds, the cost budget, every backlog transition, and the keep-dev-green merge.
 """
 from __future__ import annotations
 
+import fcntl
+import os
 import re
 import subprocess
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from . import builder as builder_mod
@@ -148,6 +151,37 @@ class Budget:
         return self.limit > 0 and self.spent >= self.limit   # limit <= 0 disables the cap
 
 
+class WorktreeBusy(Exception):
+    """Another live run already holds this app's worktree."""
+
+
+@contextmanager
+def _worktree_lock(worktree_path: str):
+    """Advisory exclusive lock on an app's shared worktree, so two runs can never ``reset --hard`` /
+    ``clean -fd`` it out from under each other — the data-loss where 'a parallel process reset the
+    tree' and a build's work vanished. Uses ``flock``, which the OS releases automatically when the
+    process exits (even on a crash), so the lock can never go stale and wedge future runs. Excludes
+    both other processes AND other threads in this process (each `open()` is a distinct lock holder).
+    Raises ``WorktreeBusy`` if a live run already holds it."""
+    lock = Path(str(worktree_path) + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        f.close()
+        raise WorktreeBusy(str(worktree_path)) from e
+    try:
+        f.write(f"{os.getpid()}\n")
+        f.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
               audit: AuditLog, stop_event=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
@@ -156,32 +190,56 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     backlogs: dict[str, BacklogAdapter] = {}
     ensured: set[str] = set()
 
-    for app, ticket in worklist:
-        if stop_event is not None and stop_event.is_set():
-            audit.record("run_stopped", reason="commander stop (before ticket)")
-            print("  ■ stopped by Commander — remaining tickets skipped.", flush=True)
-            break
-        if budget.exceeded():
-            audit.record("budget_stop", spent=budget.spent)
-            break
-        try:
-            if app.name not in gits:
-                gits[app.name] = _make_git(cfg, app)
-            git = gits[app.name]
-            # Ephemeral (free-text) tickets have no tracker -> no creds needed.
-            if ticket.ephemeral:
-                backlog = NoneBacklog()
-            else:
-                if app.name not in backlogs:
-                    backlogs[app.name] = make_backlog(app)
-                backlog = backlogs[app.name]
-            if app.name not in ensured:
-                git.ensure_clean()
-                ensured.add(app.name)
-            report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
-        except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
-            report = _exception_report(cfg, ticket, app, exc, audit)
-        reports.append(report)
+    # Hold each app's worktree lock for the WHOLE run, so a parallel run can't reset/clean the tree
+    # mid-build and wipe in-progress work. A busy app's tickets are DEFERRED (picked up next pass),
+    # never clobbered. flock auto-releases on process exit, so a crashed run never wedges the lock.
+    locks = ExitStack()
+    busy: set[str] = set()
+    if getattr(cfg, "use_worktree", False):
+        for app in {a.name: a for a, _ in worklist}.values():
+            try:
+                locks.enter_context(_worktree_lock(_worktree_path(app, cfg)))
+            except WorktreeBusy:
+                busy.add(app.name)
+                _notify(cfg, f"⏸️ {app.name}: a run is already working this app — deferring new tickets "
+                             "so the active run's work isn't reset. They'll be picked up next pass.")
+                print(f"  ⏸️ {app.name}: worktree busy — deferring (avoids clobbering the active run).",
+                      flush=True)
+
+    try:
+        for app, ticket in worklist:
+            if stop_event is not None and stop_event.is_set():
+                audit.record("run_stopped", reason="commander stop (before ticket)")
+                print("  ■ stopped by Commander — remaining tickets skipped.", flush=True)
+                break
+            if budget.exceeded():
+                audit.record("budget_stop", spent=budget.spent)
+                break
+            if app.name in busy:
+                audit.record("worktree_busy_deferred", ticket_id=ticket.id, app=app.name)
+                reports.append(TicketReport(ticket.id, Outcome.SKIPPED, 0, 0.0, app.name,
+                                            notes="deferred — worktree busy (another run active)"))
+                continue
+            try:
+                if app.name not in gits:
+                    gits[app.name] = _make_git(cfg, app)
+                git = gits[app.name]
+                # Ephemeral (free-text) tickets have no tracker -> no creds needed.
+                if ticket.ephemeral:
+                    backlog = NoneBacklog()
+                else:
+                    if app.name not in backlogs:
+                        backlogs[app.name] = make_backlog(app)
+                    backlog = backlogs[app.name]
+                if app.name not in ensured:
+                    git.ensure_clean()
+                    ensured.add(app.name)
+                report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
+            except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
+                report = _exception_report(cfg, ticket, app, exc, audit)
+            reports.append(report)
+    finally:
+        locks.close()
     return reports
 
 
