@@ -567,7 +567,9 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         model=cfg.discussion_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
         permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
-        max_turns=6, effort="low"), tag="the-general")
+        # Room to glance at a few files before replying — 6 was too tight and errored out when the
+        # Commander's message invited a quick look ("investigate…"), so the General couldn't answer.
+        max_turns=14, effort="low"), tag="the-general")
     answer = (run.final or run.text or "(the General had no answer)").strip()
     notify.send(f"🎖️ {answer[:3500]}")
     # Log compactly — a colleague chat, not a briefing to be replayed verbatim into future prompts.

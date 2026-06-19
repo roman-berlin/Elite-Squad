@@ -146,7 +146,7 @@ class Config:
     security_gate: bool = False         # Provost reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
 
     # --- safety ---
-    dry_run: bool = True                # full loop incl. trial merge, but NO push / PR / backlog writes
+    dry_run: bool = False               # default LIVE (build + merge to DEV); pass --dry for a no-changes preview
 
     # --- notifications ---
     notify_verbose: bool = False        # also Telegram on implemented / verdict / pushed (not just key events)
