@@ -50,14 +50,52 @@ ARM is fine here: Python, Node, the Claude CLI and the unit all run on ARM Linux
 don't mind a slightly fiddlier signup → Oracle.** If you want it to "just work" for the price of a
 coffee → Hetzner. The rest of this runbook is identical on either (Ubuntu 24.04 LTS).
 
-### Provision
-- **Oracle:** Console → Compute → Instances → *Create*. Shape `VM.Standard.A1.Flex`, 2 OCPU / 12 GB,
-  image **Canonical Ubuntu 24.04**. Upload your SSH public key. Leave it on the public subnet but add
-  **no** ingress rules (we reach the cockpit via SSH tunnel, not the open internet).
-- **Hetzner:** Cloud Console → *Add Server*. Location Nuremberg/Falkenstein, image **Ubuntu 24.04**,
-  type **CX22**, add your SSH key, create.
+### Provision — register Oracle + create the box (click-by-click)
 
-Note the public IP. From now on: `ssh ubuntu@<IP>` (Oracle) or `ssh root@<IP>` (Hetzner).
+**(a) Make an SSH key on your Mac** — you'll paste the public half into Oracle:
+```bash
+ls ~/.ssh/id_ed25519.pub 2>/dev/null || ssh-keygen -t ed25519 -C "elite-unit" -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub        # copy this whole line (ssh-ed25519 AAAA… elite-unit)
+```
+
+**(b) Register for Oracle Cloud (Always Free):**
+1. Open <https://www.oracle.com/cloud/free/> → **Start for free**.
+2. Enter your email, verify it, fill in account details.
+3. **Choose your Home Region carefully — it is permanent for Always Free.** Pick a large region with good
+   ARM capacity: **US East (Ashburn)**, **US West (Phoenix)**, or **UK South (London)**.
+4. Add a credit/debit card for identity verification. Always Free does **not** charge it — you'll see a
+   small temporary authorization that's reversed.
+5. Finish; you land in the **OCI Console**.
+
+**(c) Create the Always-Free ARM VM:**
+1. Console → ☰ menu → **Compute → Instances → Create instance**.
+2. **Name:** `elite-unit`.
+3. **Image:** *Edit → Change image* → **Canonical Ubuntu 24.04** (the `aarch64`/ARM build).
+4. **Shape:** *Change shape → Ampere →* check **VM.Standard.A1.Flex**, set **2 OCPU** and **12 GB** RAM
+   (the Always-Free max as of mid-2026).
+5. **Networking:** keep defaults (it creates a VCN + public IP); ensure **Assign a public IPv4 address** is on.
+6. **Add SSH keys:** choose **Paste public keys** and paste the `id_ed25519.pub` line from step (a).
+7. Leave **Shielded Instance** and **Confidential Computing** off. Click **Create**.
+
+**If you hit "Out of host capacity"** (common on the free ARM shape — not an error you did):
+- Click **Create** again every few minutes — capacity frees up; or
+- Try a different **Availability Domain** (AD-1 / AD-2 / AD-3) in the same region; or
+- **Upgrade to Pay-As-You-Go** (Account → *Upgrade*): bigger free pool, and it **does not charge you**
+  unless you exceed Always-Free limits (our box stays within them); or
+- Run the community retry script [`hitrov/oci-arm-host-capacity`](https://github.com/hitrov/oci-arm-host-capacity)
+  (a cron that grabs capacity the instant it appears).
+
+**(d) Get on the box.** Note the instance's **public IP** (instance page). Oracle's default network usually
+allows SSH; if `ssh` times out, add an ingress rule: VCN → **Security Lists** → default → **Add Ingress
+Rule** → Source `0.0.0.0/0`, TCP, dest port **22** (the only port we ever open — the cockpit is reached by
+SSH tunnel, never exposed). Then:
+```bash
+ssh ubuntu@<IP>
+```
+
+> **Hetzner instead?** Cloud Console → *Add Server* → location Nuremberg/Falkenstein → image **Ubuntu 24.04**
+> → type **CX22** → add your SSH key → *Create*. Then `ssh root@<IP>`. No capacity dance. Everything below
+> is identical.
 
 ---
 

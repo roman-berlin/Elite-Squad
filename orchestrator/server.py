@@ -63,36 +63,17 @@ class _Tee:
         return getattr(self._real, "isatty", lambda: False)()
 
 
-def _lang_toggle() -> str:
-    """EN | עב segmented toggle for the officers' reply language. Inline-styled so it renders
-    identically on the cockpit and on every _wrap sub-page."""
-    from . import memory
-    cur = memory.language()
-
-    def seg(code: str, label: str) -> str:
-        on = cur == code
-        bg, fg = ("#2b5cff", "#fff") if on else ("#151a23", "#8a909c")
-        return (f"<form method=post action=/api/language style='margin:0;display:inline'>"
-                f"<button name=lang value={code} title='officer reply language' "
-                f"style='background:{bg};color:{fg};border:0;border-radius:0;padding:5px 11px;"
-                f"font:inherit;font-size:12px;font-weight:700;cursor:pointer'>{label}</button></form>")
-    return ("<span style='display:inline-flex;border:1px solid #2a3343;border-radius:8px;"
-            "overflow:hidden;vertical-align:middle'>" + seg("en", "EN") + seg("he", "עב") + "</span>")
-
-
 def _wrap(title: str, inner: str) -> str:
     return ("<!doctype html><meta charset=utf-8><title>" + html.escape(title) + "</title>"
             "<style>body{background:#0d0f14;color:#e8eaed;font:14px/1.6 -apple-system,"
             "BlinkMacSystemFont,sans-serif;margin:0;padding:22px 30px}a{color:#6aa9ff}"
             ".rep{white-space:pre-wrap;background:#151a23;border:1px solid #232936;"
             "border-radius:10px;padding:16px}"
-            ".rep,p,li,.q,.ndt,.bubble,.gmsg,.msg{unicode-bidi:plaintext}"
             "textarea,select,input{background:#151a23;border:1px solid #232936;color:#e8eaed;"
             "border-radius:8px;padding:8px;font:inherit}"
             "button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 16px;"
             "font-weight:650;cursor:pointer}</style>"
-            f"<p><a href='/'>&larr; cockpit</a> &nbsp;&middot;&nbsp; {_lang_toggle()}</p>"
-            f"<h2>{html.escape(title)}</h2>{inner}")
+            f"<p><a href='/'>&larr; cockpit</a></p><h2>{html.escape(title)}</h2>{inner}")
 
 
 def _working(msg: str, secs: int = 5) -> str:
@@ -280,8 +261,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       <a href="/drill">&#127894; Last drill{fr_drill}</a>
     </div>
   </details>
-
-  {_lang_toggle()}
 
   <span class=grow></span>
   {status}
@@ -478,13 +457,6 @@ def create_app(cfg: Config):
         if tid:
             D.dismiss(cfg.audit_path, tid)
         return redirect(back if back in ("/tasks", "/needs") else "/tasks")
-
-    @app.post("/api/language")
-    def language_api():
-        from . import memory
-        memory.set_language(request.form.get("lang") or "en")
-        ref = request.headers.get("Referer") or ""
-        return redirect(ref if ref.startswith("/") or "/" in ref else "/")
 
     @app.get("/tickets")
     def tickets_page():

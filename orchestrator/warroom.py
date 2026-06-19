@@ -799,8 +799,6 @@ background:#0d1119;text-decoration:none;color:inherit}
 .tki{font-size:20px}.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
 @media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
 @media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
-/* mixed EN/HE: each text block renders by its own direction (Hebrew -> RTL) automatically */
-.fbody,.ndt,.hgsub,.ndt,.feed,.ndmain{unicode-bidi:plaintext}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#222b39;border-radius:8px}
 </style></head><body>

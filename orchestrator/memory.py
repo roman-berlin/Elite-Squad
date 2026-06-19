@@ -82,47 +82,13 @@ def load() -> str:
         return ""
 
 
-_LANG_FILE = _ROOT / ".unit-language"
-
-_HE_DIRECTIVE = (
-    "=== LANGUAGE — Respond ENTIRELY in Hebrew (עברית), in natural, fluent, right-to-left Hebrew. "
-    "Write every briefing, stand-up line, council reply and corridor remark in Hebrew. Keep code, "
-    "file paths, identifiers, ticket keys (e.g. AUTO-123), branch names, URLs and CLI commands in "
-    "their original Latin form. The Commander may address you in any language; you always answer in "
-    "Hebrew. The literal markers the system parses — 'FOR THE COMMANDER:', 'INSIGHT:', 'TEST:' — must "
-    "stay in English exactly as written, but the text after them is in Hebrew. ===\n\n"
-)
-
-
-def language() -> str:
-    """Current officer reply language: 'he' or 'en' (default). Persisted in _LANG_FILE."""
-    try:
-        return "he" if _LANG_FILE.read_text(encoding="utf-8").strip().lower().startswith("he") else "en"
-    except OSError:
-        return "en"
-
-
-def set_language(lang: str) -> str:
-    """Persist the officer reply language. Returns the normalized value."""
-    v = "he" if str(lang or "").lower().startswith("he") else "en"
-    try:
-        _LANG_FILE.write_text(v, encoding="utf-8")
-    except OSError:
-        pass
-    return v
-
-
-def _lang_directive() -> str:
-    return _HE_DIRECTIVE if language() == "he" else ""
-
-
 def preamble() -> str:
-    """Block prepended to every officer's system prompt: Unit Memory + the active language order.
-    The language directive applies even when there's no memory text yet."""
+    """Compact block to prepend to an officer's system prompt. '' when there's no memory."""
     text = load()
-    mem = ("=== UNIT MEMORY — the unit's living protocol. Read it before you act; obey the "
-           "Standing Orders. ===\n" + text + "\n=== END UNIT MEMORY ===\n\n") if text else ""
-    return mem + _lang_directive()
+    if not text:
+        return ""
+    return ("=== UNIT MEMORY — the unit's living protocol. Read it before you act; obey the "
+            "Standing Orders. ===\n" + text + "\n=== END UNIT MEMORY ===\n\n")
 
 
 # --------------------------------------------------------------------------- #

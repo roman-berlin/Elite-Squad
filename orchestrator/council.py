@@ -555,8 +555,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "let him steer. Raise AT MOST ONE thing — and only when it genuinely needs him: a real "
         "decision that's his to make, or a problem the unit can't resolve itself. Otherwise do not "
         "manufacture orders or briefings — the unit runs its own work and the daily council already "
-        "covers status. You may quietly Read a file to ground a point. Always reply in the same "
-        "language the Commander is using.")
+        "covers status. You may quietly Read a file to ground a point. Reply in English.")
     prompt = "\n".join([
         *([f"Background you may lean on if relevant — do NOT recite or summarize it:\n{context[:1200]}\n"]
           if context else []),

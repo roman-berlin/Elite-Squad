@@ -25,4 +25,3 @@ blocked_tickets.json
 # macOS
 .DS_Store
 cockpit.log
-.unit-language
