@@ -7,6 +7,15 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Memory consolidation + learning from rejections** (2026-06-21) — closes the learning loop.
+  `consolidate.py` dedups + prunes the living Lessons log so it stays tight, and scans the Reviewer's
+  FAIL verdicts to cluster recurring rejection themes (an explicit tenant filter, tests-with-the-change,
+  complete typing, error/edge handling, validation, security, style, docs). When a theme recurs across
+  ≥2 distinct tickets it folds a one-line lesson into the log ("Reviewer repeatedly required X — do Y",
+  idempotent) and surfaces a **drill proposal** — so the unit stops repeating the mistakes its own
+  Reviewer keeps catching. Deterministic / free; the Scribe runs it after every pass. `general
+  consolidate [--dry]` + cockpit /memory ("Consolidate" + a recurring-rejections panel). **23/23 tests;
+  suite 46 harnesses / 651 checks.**
 - **Failure forensics + auto-post-mortem** (2026-06-21) — turns the "errored / escalated" pile into
   something actionable. `forensics.py` classifies every failed run into a cause taxonomy (under-specified,
   too-big, merge-conflict, gate/review fail, security block, product-decision-needed, infra, transient),
@@ -406,9 +415,11 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
    product-blocker / infra / transient) with a recommended fix each, surfaces repeat offenders, and
    **auto-writes a deterministic post-mortem** to `postmortems/<TICKET>.md` once a ticket fails
    `postmortem_after` (3) times. Cockpit `/forensics` page + `general forensics`. 37/37 tests.
-8. **Memory consolidation + learning from rejections.** A periodic dedup/prune pass over the Lessons
-   log, and an auto-drill proposal when the Reviewer rejects the same pattern repeatedly — compounding
-   learning from the unit's own PRs.
+8. ~~**Memory consolidation + learning from rejections.**~~ ✅ **Shipped 2026-06-21** — `consolidate.py`
+   dedups/prunes the Lessons log (UNIT.live.md), and scans FAIL reviews to cluster recurring rejection
+   themes (tenant filter, missing tests, typing, …); when one recurs across ≥2 tickets it folds a lesson
+   into the log + surfaces a drill proposal. Runs free after every Scribe pass; `general consolidate` +
+   cockpit /memory surface. 23/23 tests. **This closes P1.**
 
 ### P2 — reach & polish
 

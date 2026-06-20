@@ -795,13 +795,50 @@ def create_app(cfg: Config):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/memory")
 
+    @app.post("/api/consolidate")
+    def consolidate_api():
+        from . import consolidate
+        try:
+            consolidate.run(cfg)
+        except Exception as exc:  # noqa: BLE001
+            _state["last_msg"] = f"consolidate failed: {exc}"
+        return redirect("/memory")
+
     @app.get("/memory")
     def memory_page():
         memory.ensure()
+        from . import consolidate
         top = (_working("The Scribe is folding recent lessons into Unit Memory…")
                if _state.get("scribing") else "")
-        act = "" if _state.get("scribing") else _actbar(_actbtn("/api/scribe", "&#128221; Update memory"))
-        body = act + top + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
+        act = ("" if _state.get("scribing")
+               else _actbar(_actbtn("/api/scribe", "&#128221; Update memory"),
+                            _actbtn("/api/consolidate", "&#129529; Consolidate",
+                                    confirm="Dedup/prune the Lessons log and fold in any recurring "
+                                            "Reviewer-rejection lessons?")))
+        # Surface what the Reviewer keeps rejecting — the unit's own recurring mistakes.
+        pat_html = ""
+        try:
+            pats = consolidate.rejection_patterns(cfg, min_count=2)
+        except Exception:  # noqa: BLE001
+            pats = []
+        if pats:
+            rows = "".join(
+                f"<div class=lrow><div class=lhead><b>{html.escape(p['label'])}</b>"
+                f"<span class=ln>×{p['count']} · {html.escape(', '.join(p['tickets'][:5]))}</span></div>"
+                f"<div class=lact>&#8594; {html.escape(p['action'])}</div></div>" for p in pats)
+            pat_html = (
+                "<style>.lrej{margin:4px 0 18px}.lrow{background:#161122;border:1px solid #3a2b4a;"
+                "border-radius:10px;padding:11px 14px;margin-bottom:9px}.lhead{display:flex;"
+                "justify-content:space-between;gap:10px;align-items:baseline}.lhead b{color:#e9ecf1;font-size:13.5px}"
+                ".ln{color:#b59ad6;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+                ".lact{color:#9aa3b2;font-size:12.5px;margin-top:5px}</style>"
+                "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>&#9888; Reviewer keeps "
+                "rejecting these</h3><p style='color:#8a929f;font-size:12.5px;margin:0 0 10px'>Folded "
+                "into the log on Consolidate. Each is a drill candidate.</p>"
+                f"<div class=lrej>{rows}</div>")
+        body = (act + top + pat_html + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>"
+                "Lessons &amp; doctrine</h3><pre class=rep>"
+                + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>")
         return _wrap("Unit Memory", body)
 
     @app.get("/meeting")

@@ -236,4 +236,21 @@ async def scribe(cfg) -> str:
     for junk in (_BEGIN, _END, _LOG_HEADING, "## Lessons & Decisions"):
         bullets = bullets.replace(junk, "")
     update_log(bullets.strip())
-    return f"Scribe: Unit Memory updated ({UNIT_PATH})."
+    # Deterministic hygiene after the AI pass: dedup/prune the log + fold in any recurring
+    # Reviewer-rejection lessons. Free (no model call); never breaks the scribe.
+    note = ""
+    try:
+        from . import consolidate
+        r = consolidate.run(cfg)
+        bits = []
+        if r.get("added"):
+            bits.append(f"+{len(r['added'])} rejection lesson(s)")
+        if r.get("removed_dupes"):
+            bits.append(f"−{r['removed_dupes']} dup(s)")
+        if r.get("pruned"):
+            bits.append(f"−{r['pruned']} pruned")
+        if bits:
+            note = " · consolidated (" + ", ".join(bits) + ")"
+    except Exception:  # noqa: BLE001
+        note = ""
+    return f"Scribe: Unit Memory updated ({UNIT_PATH}){note}."

@@ -115,6 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
     ub = sub.add_parser("unblock", help="clear a parked (escalated) ticket so autopilot retries it")
     ub.add_argument("ticket", nargs="?", default=None, help="ticket id; omit to clear all parked")
 
+    co = sub.add_parser("consolidate", help="tighten Unit Memory: dedup/prune the log + learn from repeated Reviewer rejections")
+    co.add_argument("--dry", action="store_true", help="show what would change without writing")
+
     fx = sub.add_parser("forensics", help="failure taxonomy + repeat offenders; --postmortem <id> writes one")
     fx.add_argument("--postmortem", default=None, metavar="TICKET",
                     help="write/refresh the post-mortem for a ticket and print it")
@@ -182,6 +185,30 @@ async def _run_work(cfg: Config, worklist) -> int:
               "Re-run with --live when ready.")
     audit.record("run_end", tickets=len(reports), total_cost_usd=total)
     return 1 if any(r.outcome == Outcome.ERRORED for r in reports) else 0
+
+
+def _consolidate(args) -> int:
+    """Dedup/prune the Lessons log + learn from recurring Reviewer rejections."""
+    from . import consolidate
+    cfg = Config.load(args.config)
+    r = consolidate.run(cfg, write=not args.dry)
+    pats = r.get("patterns", [])
+    if pats:
+        print("Recurring Reviewer rejections (the unit keeps getting pulled up on these):\n")
+        for p in pats:
+            print(f"  ×{p['count']:<3} {p['label']}  ({', '.join(p['tickets'][:5])})")
+            print(f"        → {p['action']}")
+            print(f"        drill: {p['drill']}")
+        print("")
+    else:
+        print("No recurring rejection pattern (need a theme across 2+ tickets).\n")
+    verb = "would change" if args.dry else "changed"
+    print(f"Lessons log {verb}: +{len(r.get('added', []))} rejection lesson(s), "
+          f"−{r.get('removed_dupes', 0)} duplicate(s), −{r.get('pruned', 0)} pruned "
+          f"→ {r.get('kept', 0)} kept.")
+    if args.dry:
+        print("(--dry — nothing written.)")
+    return 0
 
 
 def _forensics(args) -> int:
@@ -276,6 +303,8 @@ def _branch_exists(repo: str, branch: str) -> bool:
 
 async def _main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "consolidate":
+        return _consolidate(args)
     if args.command == "forensics":
         return _forensics(args)
     if args.command == "onboard":
