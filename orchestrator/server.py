@@ -163,26 +163,35 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         _nneeds = 0
     needs_badge = f'<span class=cbadge>{_nneeds}</span>' if _nneeds else ""
 
-    # Deploy DEV -> main — only on a cockpit allowed to push (the Mac, via GENERAL_COCKPIT_PROMOTE).
-    # Shows how far DEV is ahead of main = approved changes not yet on the 24/7 server.
+    # ── Two DIFFERENT repos, two DIFFERENT promotions — kept visually distinct so they can't be
+    # confused. (A) "Update unit": THE GENERAL'S OWN code (this tool) dev->main -> the 24/7 VPS
+    # self-updates. (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production.
+    # Both only on a cockpit allowed to push (the Mac, via GENERAL_COCKPIT_PROMOTE).
     promote_html = ""
     try:
         from . import sync as _sync
         if _sync.can_promote():
             _ahead = _sync.promote_status(cfg).get("ahead", 0)
             if _ahead:
+                _pc = (f"Update THE UNIT itself — promote The General (this tool\\u2019s own code, the "
+                       f"~/Projects/General repo) dev \\u2192 main, {_ahead} commit(s). The 24/7 server "
+                       f"self-updates within ~15 min. This is the unit\\u2019s brain, NOT your app.")
                 promote_html = (
+                    '<span class=tbdiv></span>'
                     '<form method=post action=/api/promote class=tbf '
-                    f'''onsubmit="return confirm('Deploy {_ahead} commit(s) DEV \\u2192 main? The 24/7 server self-updates within ~15 min.')">'''
-                    f'<button class="btn deploy" {busy("promoting")}>&#9650; Deploy'
-                    f'<span class=cbadge>{_ahead}</span> &rarr; main</button></form>')
+                    f'''onsubmit="return confirm('{_pc}')">'''
+                    f'<button class="btn deploy" title="Promote The General — this tool\\u2019s OWN code — '
+                    f'dev\\u2192main. The VPS self-updates. NOT your app." {busy("promoting")}>'
+                    f'&#9881;&#65039; Update unit<span class=cbadge>{_ahead}</span></button></form>')
             else:
-                promote_html = '<span class="tbnote ok" title="DEV and main are in sync — nothing to deploy">&#10003; deployed</span>'
+                promote_html = ('<span class=tbdiv></span><span class="tbnote ok" '
+                                'title="The General (the unit\'s own code) is in sync with the server">'
+                                '&#10003; unit current</span>')
     except Exception:  # noqa: BLE001
         promote_html = ""
 
-    # Ship the CURRENT app DEV -> MAIN (production) — Mac-only. Distinct from Deploy (which ships the
-    # unit's OWN code to the server); this ships your product (e.g. Automatixy) live.
+    # (B) Ship the CURRENT app DEV -> MAIN (production). Names the app + says PRODUCTION so it's never
+    # mistaken for the unit self-deploy above.
     ship_html = ""
     try:
         from . import sync as _sync
@@ -190,12 +199,16 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             _sa = _sync.app_promote_status(cfg.app(app0))
             _sn = _sa.get("ahead", 0)
             if _sn:
+                _sc = (f"Ship the {html.escape(app0)} APP to PRODUCTION — {html.escape(app0)} "
+                       f"{html.escape(_sa['base'])} \\u2192 {html.escape(_sa['prot'])}. This deploys your "
+                       f"live product. Continue?")
                 ship_html = (
                     '<form method=post action=/api/ship-main class=tbf '
-                    f'''onsubmit="return confirm('Ship {html.escape(app0)} {html.escape(_sa['base'])} \\u2192 {html.escape(_sa['prot'])} to PRODUCTION? This deploys live.')">'''
+                    f'''onsubmit="return confirm('{_sc}')">'''
                     f'<input type=hidden name=app value="{html.escape(app0)}">'
-                    f'<button class="btn ship" {busy("shipping")}>&#128640; Ship {html.escape(app0)}'
-                    f'<span class=cbadge>{_sn}</span> &rarr; {html.escape(_sa["prot"])}</button></form>')
+                    f'<button class="btn ship" title="Ship the {html.escape(app0)} app to production '
+                    f'({html.escape(_sa["prot"])})" {busy("shipping")}>&#128640; Ship {html.escape(app0)} '
+                    f'&rarr; production<span class=cbadge>{_sn}</span></button></form>')
     except Exception:  # noqa: BLE001
         ship_html = ""
 
@@ -254,6 +267,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}.tbar .tbnote.ok{{color:#52b788;font-weight:600}}
 .tbar .btn.deploy{{background:#1f7a45;border-color:#2c9a5f;color:#fff}}.tbar .btn.deploy:hover{{background:#1a6b3c}}.tbar .btn.deploy .cbadge{{background:#0c3a22}}
 .tbar .btn.ship{{background:#7c3aed;border-color:#8b5cf6;color:#fff}}.tbar .btn.ship:hover{{background:#6d28d9}}.tbar .btn.ship .cbadge{{background:#3b1d7a}}
+.tbar .tbdiv{{width:1px;height:22px;background:#2a3343;margin:0 7px;align-self:center;display:inline-block}}
 .tbar .grow{{flex:1}}
 .tbar .chatbtn{{display:inline-flex;align-items:center;gap:6px}}
 .tbar .cbadge{{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px}}

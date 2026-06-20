@@ -7,6 +7,14 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Cockpit: "Update unit" vs "Ship app" — no more confusing the two repos** (2026-06-20) — the header
+  had two `dev→main` buttons for two *different* repos sitting side by side. Now unmistakable: the green
+  **⚙ Update unit** promotes **The General's own code** (`~/Projects/General` dev→main → the 24/7 VPS
+  self-updates) — its confirm says "the unit's brain, NOT your app"; the purple **🚀 Ship <app> →
+  production** promotes the **product** (e.g. Automatixy DEV→MAIN → live) — its confirm says "the <app>
+  APP to PRODUCTION." A divider separates them. Same wiring as before (already targeted the right repos
+  — lowercase `dev`/`main` for the unit, uppercase `DEV`/`MAIN` for the app); this is the labelling fix.
+
 - **Sentinel — S-3 · Integration & rollback (post-merge guard + auto-revert)** (2026-06-20) — a new
   officer and the unit's last line of defence on DEV. The pre-review gate already validates the exact
   merge on a throwaway branch before DEV is touched, so Sentinel runs the **heavier post-merge suite**
