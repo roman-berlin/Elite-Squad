@@ -219,7 +219,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
     # Reviewer + the gate validate before any merge, and MAIN is never touched. Repo conventions
     # still apply — BUILDER_SYSTEM tells it to read CLAUDE.md + .claude/rules and follow them.
     eff = effort_for(cfg, req.iteration, req.ticket)
-    from . import models
+    from . import models, guard
     model, mreason = models.for_builder(cfg, req.ticket, eff)
     if getattr(cfg, "auto_model", False):
         print(f"  · builder model: {mreason}", flush=True)
@@ -230,6 +230,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         setting_sources=[],            # no settings files -> no ask/deny gate at any level
+        hooks=guard.hooks_config(),    # hard denylist: blocks secrets/.env/CI writes + destructive shell
         max_turns=turns_for(cfg, eff),
         effort=eff,
     )

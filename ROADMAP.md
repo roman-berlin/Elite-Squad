@@ -7,6 +7,22 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **The unit's own test suite + CI — the guard that guards the guard** (2026-06-20) — promoted the ~40
+  scratch harnesses (which used to vanish each session) into the repo as **`tests/`** with a
+  `tests/run_all.py` runner (**41 harnesses / 505 checks, all green**), and a **GitHub Actions** workflow
+  that runs the whole suite on every push to `dev`/`main` and every PR — so a regression in the
+  orchestrator goes red before it reaches the 24/7 server. Paths made portable (repo-relative), and the
+  two long-stale harnesses fixed (`patrol_test` fake-signature drift; `wr_test` missing setup +
+  render-signature drift). Closes the last P0 hardening item.
+
+- **Hard tool-call guardrail (denylist) under bypassPermissions** (2026-06-20) — the safety net the
+  bypassPermissions change needed. A **PreToolUse SDK hook** (`guard.py`) that BLOCKS in code — no matter
+  what an officer decides — writes to `.env*` / secrets / keys / `.github` CI config, and destructive
+  shell (`rm -rf` of a root/home path, `git push --force`, push to `main`/`master`, `git reset --hard`,
+  `DROP`/`TRUNCATE`, `chmod 777`, fork bombs, `curl … | sh`). Wired into the **builder + soldiers** (the
+  write-capable agents). Fails closed only on a clear match; `.env.example` templates and every normal
+  build command pass through untouched. **53/53** tests.
+
 - **Ship app→production does a REAL merge of DEV into MAIN** (2026-06-20) — the app Ship button used a
   fast-forward, which can't ship a repo whose MAIN carries its own commits — and Automatixy's MAIN does
   (the "Merge pull request #43–47" bookkeeping commits from shipping via PRs). So ff was rejected and
@@ -337,23 +353,16 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
 
 ### P0 — harden what we just loosened (safety mechanisms)
 
-1. **Structural tool-call guardrail (a hard denylist).** We just put all officers on
-   `bypassPermissions`, so the prompt is no longer the safety boundary. Install the *missing* one: a
-   guard at the tool-call boundary that BLOCKS, regardless of what an officer decides, any write to
-   `.env*` / secrets / CI config, any touch of `main`/`MAIN`, and destructive shell (`rm -rf`,
-   `git push --force`, `DROP`/`TRUNCATE`). Enforced in code, not by instruction. This is the
-   complement to removing the permission popup — without it, bypass is trust-only.
-2. **Commit the unit's OWN test suite + CI.** Today the orchestrator that builds and merges Roman's
-   code is itself verified only by ~30 ephemeral scratch harnesses (≈298 checks) that live outside the
-   repo and vanish each session. Promote them into `tests/` (pytest) and a GitHub Actions workflow on
-   every push to `dev`. The guard must be guarded — and a red suite should block the server's
-   self-update from `main`.
+1. ~~**Structural tool-call guardrail (a hard denylist).**~~ ✅ **Shipped 2026-06-20** — `guard.py`
+   PreToolUse hook blocks secret/.env/CI writes + destructive shell (`rm -rf`, force-push, push to
+   main, `DROP`/`TRUNCATE`, …) on the builder + soldiers, in code; 53/53 tests.
+2. ~~**Commit the unit's OWN test suite + CI.**~~ ✅ **Shipped 2026-06-20** — `tests/` (41 harnesses /
+   505 checks) + `tests/run_all.py` + a GitHub Actions workflow on every push/PR. (Follow-up still open:
+   have the server's `self-update.sh` refuse to deploy a `main` whose CI is red — a 1-line `gh` check.)
 3. ~~**Cost governor v2 — rolling budget + auto-pause + cockpit panel.**~~ ✅ **Shipped 2026-06-20**
    (token ledger + daily ceiling + auto-pause + 80% alert + Token-usage window).
-4. **Post-merge DEV health gate + auto-revert.** A change can pass its own gate yet break DEV on
-   integration. After each land, run DEV's build/test; if it goes red, auto-revert that merge and
-   re-park the ticket. Closes the "keep DEV green" promise structurally (the after-merge Scout covers
-   runtime/UX; this covers build/test).
+4. ~~**Post-merge DEV health gate + auto-revert.**~~ ✅ **Shipped 2026-06-20** as the **Sentinel**
+   officer (post-merge suite on landed DEV + forward-only auto-revert if it breaks).
 
 ### P1 — capability & throughput
 

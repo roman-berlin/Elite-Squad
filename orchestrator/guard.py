@@ -1,0 +1,96 @@
+"""Hard tool-call guardrail — the safety net underneath bypassPermissions.
+
+Every write-capable officer runs ``permission_mode="bypassPermissions"``, so the model's own judgement is
+the only thing between it and a destructive action. This installs the MISSING boundary: a **PreToolUse
+hook** that BLOCKS, in code (not by instruction), regardless of what the agent decides —
+
+  • writes to secrets / env / CI config (``.env*``, ``*.pem``/``*.key``, ``id_rsa``, ``.github/``,
+    ``secrets.*``),
+  • destructive shell (``rm -rf`` of a root/home path, ``git push --force``, push to a protected branch,
+    ``git reset --hard`` of someone else's tree, ``DROP``/``TRUNCATE``, world-writable ``chmod 777``,
+    fork bombs, ``curl … | sh``).
+
+Defense-in-depth: the builder already works only in an isolated worktree and never touches MAIN — but a
+bug, or a prompt-injection buried in a Jira ticket, must not be able to exfiltrate a secret or nuke a
+tree just because the permission prompt is off. The guard fails CLOSED (deny) only on a clear match;
+anything it doesn't recognise is allowed, so it never gets in the way of normal building.
+"""
+from __future__ import annotations
+
+import re
+
+# Paths an officer must never write to / edit.
+_SECRET_PATH = re.compile(
+    r"(^|/)\.env(\.[\w.-]+)?$"          # .env, .env.local, .env.production
+    r"|(^|/)\.git/"                     # internal git plumbing
+    r"|\.pem$|\.key$|(^|/)id_rsa"       # private keys
+    r"|(^|/)\.github/"                  # CI / Actions config
+    r"|(^|/)secrets?\.(ya?ml|json|toml|tfvars|env)$",
+    re.IGNORECASE,
+)
+
+# Destructive / exfiltrating shell. Each entry: (pattern, human reason).
+_DANGER_CMD: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\brm\b[^|;&\n]*\s-{1,2}[a-z]*[rf][a-z]*\b[^|;&\n]*\s(/|~|\$HOME|\.\.?)(/|\s|$)"),
+     "recursive delete of a root / home / repo path"),
+    (re.compile(r"\bgit\s+push\b[^|;&\n]*(--force\b|--force-with-lease\b|\s-f\b)"), "force-push"),
+    (re.compile(r"\bgit\s+push\b[^|;&\n]*\b(main|master)\b", re.IGNORECASE), "push to a protected branch"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard (discards work)"),
+    (re.compile(r"\bgit\s+clean\s+-[a-z]*f"), "git clean -f (deletes untracked files)"),
+    (re.compile(r"\b(DROP|TRUNCATE)\s+(TABLE|DATABASE|SCHEMA)\b", re.IGNORECASE), "destructive SQL"),
+    (re.compile(r"\bchmod\s+(-R\s+)?0?777\b"), "world-writable chmod 777"),
+    (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;\s*:"), "fork bomb"),
+    (re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b"), "pipe-to-shell of a remote script"),
+]
+
+_WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+
+
+def is_dangerous(tool_name: str, tool_input: dict | None) -> tuple[bool, str]:
+    """Pure denylist: does this tool call cross a hard line? Returns ``(blocked, reason)``.
+    Unit-testable without the SDK — this is the heart of the guard."""
+    ti = tool_input or {}
+    if tool_name in _WRITE_TOOLS:
+        path = str(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
+        low = path.lower()
+        # templates/samples carry no real secrets — let those through (e.g. .env.example, key.pem.sample)
+        is_template = low.endswith((".example", ".sample", ".template", ".dist", ".tmpl"))
+        if path and not is_template and _SECRET_PATH.search(path):
+            return True, f"writing to a protected/secret path ({path})"
+    if tool_name == "Bash":
+        cmd = str(ti.get("command") or "")
+        for rx, why in _DANGER_CMD:
+            if rx.search(cmd):
+                return True, f"destructive shell — {why}"
+    return False, ""
+
+
+async def _pretooluse(input_data, tool_use_id, context):  # noqa: ANN001 - SDK callback signature
+    """PreToolUse hook: DENY in code when the call is dangerous, otherwise stay out of the way."""
+    try:
+        if isinstance(input_data, dict):
+            name, ti = input_data.get("tool_name", ""), input_data.get("tool_input", {})
+        else:
+            name, ti = getattr(input_data, "tool_name", ""), getattr(input_data, "tool_input", {})
+        blocked, why = is_dangerous(name, ti)
+    except Exception:  # noqa: BLE001 - a guard bug must not crash the run
+        return {}
+    if blocked:
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (f"BLOCKED by the unit's hard guardrail — {why}. This is "
+                                         "non-negotiable; do not retry it, find another way."),
+        }}
+    return {}
+
+
+def hooks_config():
+    """The ``hooks=`` dict to attach to every WRITE-CAPABLE officer's ClaudeAgentOptions. Returns None
+    if the SDK is too old to support hooks (the guard then simply isn't installed — never an error)."""
+    try:
+        from claude_agent_sdk import HookMatcher
+        return {"PreToolUse": [HookMatcher(matcher="Bash|Write|Edit|MultiEdit|NotebookEdit",
+                                           hooks=[_pretooluse])]}
+    except Exception:  # noqa: BLE001
+        return None
