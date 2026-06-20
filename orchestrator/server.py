@@ -180,8 +180,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                     '<span class=tbdiv></span>'
                     '<form method=post action=/api/promote class=tbf '
                     f'''onsubmit="return confirm('{_pc}')">'''
-                    f'<button class="btn deploy" title="Promote The General — this tool\\u2019s OWN code — '
-                    f'dev\\u2192main. The VPS self-updates. NOT your app." {busy("promoting")}>'
+                    f'<button class="btn deploy" title="Promote The General — this tool&#39;s OWN code — '
+                    f'dev&#8594;main. The VPS self-updates. NOT your app." {busy("promoting")}>'
                     f'&#9881;&#65039; Update unit<span class=cbadge>{_ahead}</span></button></form>')
             else:
                 promote_html = ('<span class=tbdiv></span><span class="tbnote ok" '

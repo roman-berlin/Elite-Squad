@@ -52,9 +52,37 @@ for i in {1..60}; do
   sleep 0.5
 done
 
-# Open the cockpit. Plain `open` is the most reliable — it uses your default browser and
-# always produces a window (the chromeless-window trick was the thing that silently failed).
+# Open the cockpit (always produces a tab), THEN keep exactly one: close any duplicate localhost:8787
+# tabs. The dedupe needs Chrome/Safari Automation permission (granted once: System Settings > Privacy &
+# Security > Automation > "Elite War Room" > the browser). Without it you still get a working tab — it
+# just won't auto-dedupe.
 open "$URL"
+sleep 1
+/usr/bin/osascript >/dev/null 2>&1 <<'OSA'
+on dedupe(appName)
+  tell application "System Events"
+    if not (exists (processes whose name is appName)) then return
+  end tell
+  tell application appName
+    set kept to false
+    repeat with w in windows
+      try
+        repeat with i from (count of tabs of w) to 1 by -1
+          if (URL of tab i of w) contains "localhost:8787" then
+            if kept then
+              close tab i of w
+            else
+              set kept to true
+            end if
+          end if
+        end repeat
+      end try
+    end repeat
+  end tell
+end dedupe
+dedupe("Google Chrome")
+dedupe("Safari")
+OSA
 
 # Keep the app alive while the cockpit runs (Quit the app = stop the cockpit)
 wait "$SERVE_PID"

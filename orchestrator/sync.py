@@ -79,8 +79,11 @@ def shared_files(cfg: Config) -> list[Path]:
 
 
 def _git(cwd: Path, *args: str, timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    # GIT_TERMINAL_PROMPT=0: a push over HTTPS with no cached credentials must FAIL FAST, never block
+    # forever waiting for a username/password the cockpit thread can't answer (the "stuck spinner").
     return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     )
 
 
@@ -255,37 +258,34 @@ def promote_status(cfg: Config) -> dict[str, Any]:
 
 
 def promote(cfg: Config) -> dict[str, Any]:
-    """Promote ``dev`` -> ``main`` and push; the server auto-deploys ``main``. **Fast-forward only** —
-    if dev and main have diverged it reports instead of forcing a merge. Always returns the working
-    tree to ``dev``. ``{ok, ahead_before, pushed, error}``."""
+    """Promote ``dev`` -> ``main`` on the REMOTE (the server auto-deploys ``main``) **without touching
+    the working tree** — the unit constantly writes runtime files, so a dirty tree must never block a
+    deploy (it was the old checkout-based version's "stuck spinner"). Pushes ``dev`` straight onto
+    ``main``, **fast-forward only**; if they've diverged the push is rejected (never forced).
+    ``{ok, ahead_before, pushed, error}``."""
     repo = _repo_root(cfg)
     out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None}
     if not can_promote():
         out["error"] = "promote not allowed on this cockpit"
         return out
-    cur = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "dev"
     out["ahead_before"] = promote_status(cfg).get("ahead", 0)
     if out["ahead_before"] == 0:
         out["ok"] = True   # already in sync — nothing to deploy
         return out
     try:
-        co = _git(repo, "checkout", "main")
-        if co.returncode != 0:
-            out["error"] = "checkout main failed (uncommitted changes on the working tree?): " + (co.stderr or "").strip()[:150]
-            return out
-        mg = _git(repo, "merge", "--ff-only", "dev")
-        if mg.returncode != 0:
-            out["error"] = "fast-forward failed — dev and main diverged; resolve in a terminal: " + (mg.stderr or "").strip()[:140]
-            return out
-        ps = _git(repo, "push", "origin", "main")
-        out["pushed"] = ps.returncode == 0
-        out["ok"] = ps.returncode == 0
-        if not out["pushed"]:
-            out["error"] = "push to origin/main failed: " + ((ps.stderr or ps.stdout) or "").strip()[:150]
+        ps = _git(repo, "push", "origin", "dev:main")   # ff-only by default; the tree is never touched
+        out["pushed"] = out["ok"] = ps.returncode == 0
+        if out["ok"]:
+            _git(repo, "branch", "-f", "main", "dev")   # advance the local main ref (main isn't checked out)
+        else:
+            err = ((ps.stderr or ps.stdout) or "").strip()
+            out["error"] = ("dev and main have diverged — resolve in a terminal"
+                            if ("non-fast-forward" in err or "rejected" in err)
+                            else "push to origin/main failed: " + err[:150])
+    except subprocess.TimeoutExpired:
+        out["error"] = "push timed out — check your network / GitHub credentials"
     except (subprocess.SubprocessError, OSError) as e:
         out["error"] = str(e)[:200]
-    finally:
-        _git(repo, "checkout", cur if cur != "main" else "dev")   # always leave the tree on DEV
     return out
 
 
@@ -333,8 +333,9 @@ def app_promote_commits(app, limit: int = 300) -> list[dict[str, str]]:
 
 
 def promote_app(app) -> dict[str, Any]:
-    """Ship an app's DEV -> MAIN (production) and push. **Fast-forward only** — if DEV and MAIN have
-    diverged it reports instead of forcing. Always returns the tree to DEV. The cockpit Ship button."""
+    """Ship an app's DEV -> MAIN (production) on the REMOTE **without touching the working tree** —
+    same push-based, fast-forward-only approach as ``promote`` (a dirty tree never blocks a ship).
+    The cockpit Ship button. ``{ok, ahead_before, pushed, error, base, prot, app}``."""
     repo = Path(app.repo_path).expanduser()
     base, prot = app.base_branch, app.protected_branch
     out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
@@ -342,27 +343,22 @@ def promote_app(app) -> dict[str, Any]:
     if not can_promote():
         out["error"] = "shipping is disabled on this cockpit (read-only box)"
         return out
-    cur = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or base
     out["ahead_before"] = app_promote_status(app).get("ahead", 0)
     if out["ahead_before"] == 0:
         out["ok"] = True   # already shipped — nothing ahead
         return out
     try:
-        co = _git(repo, "checkout", prot)
-        if co.returncode != 0:
-            out["error"] = f"checkout {prot} failed (uncommitted changes on the working tree?): " + (co.stderr or "").strip()[:150]
-            return out
-        mg = _git(repo, "merge", "--ff-only", base)
-        if mg.returncode != 0:
-            out["error"] = f"fast-forward failed — {base} and {prot} have diverged; resolve in a terminal: " + (mg.stderr or "").strip()[:140]
-            return out
-        ps = _git(repo, "push", "origin", prot)
-        out["pushed"] = ps.returncode == 0
-        out["ok"] = ps.returncode == 0
-        if not out["pushed"]:
-            out["error"] = f"push to origin/{prot} failed: " + ((ps.stderr or ps.stdout) or "").strip()[:150]
+        ps = _git(repo, "push", "origin", f"{base}:{prot}")   # ff-only; tree untouched
+        out["pushed"] = out["ok"] = ps.returncode == 0
+        if out["ok"]:
+            _git(repo, "branch", "-f", prot, base)   # advance the local protected ref (it isn't checked out)
+        else:
+            err = ((ps.stderr or ps.stdout) or "").strip()
+            out["error"] = (f"{base} and {prot} have diverged — resolve in a terminal"
+                            if ("non-fast-forward" in err or "rejected" in err)
+                            else f"push to origin/{prot} failed: " + err[:150])
+    except subprocess.TimeoutExpired:
+        out["error"] = f"push to {prot} timed out — check your network / credentials"
     except (subprocess.SubprocessError, OSError) as e:
         out["error"] = str(e)[:200]
-    finally:
-        _git(repo, "checkout", cur if cur != prot else base)   # always leave the tree on the base branch
     return out
