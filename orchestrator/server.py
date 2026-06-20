@@ -979,6 +979,16 @@ def create_app(cfg: Config):
             ".nbtn.ok{background:#10371f;border:1px solid #1c5238;color:#56d98a}.nbtn.send{background:#3b6cff;color:#fff}"
             ".nbtn.no{background:#23191a;border:1px solid #3a2f12;color:#f0676b}"
             ".nbtn.x{background:#1a1f2a;border:1px solid #2a3343;color:#8a929f}"
+            ".ncard details>summary{cursor:pointer;color:#e9ecf1;list-style:none;display:flex;"
+            "align-items:center;gap:8px;outline:none}"
+            ".ncard details>summary::-webkit-details-marker{display:none}"
+            ".ncard details>summary::before{content:'\\25B8';color:#6b7480;font-size:11px;transition:transform .15s}"
+            ".ncard details[open]>summary::before{transform:rotate(90deg)}"
+            ".ncard .ndetail{margin:11px 0 2px;padding:11px 13px;background:#0d1119;border:1px solid #222a38;"
+            "border-radius:8px}"
+            ".ncard .ndt{color:#c3cad6;font-size:13px;line-height:1.5;margin:5px 0}"
+            ".ncard .ndt.sub{color:#8a929f;padding-left:8px}.ncard .ndt.muted{color:#6b7480}"
+            ".ncard .ndt b{color:#e9ecf1;font-weight:650}"
             ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
         if not s["total"]:
             return _wrap("Needs you", style
@@ -1013,15 +1023,21 @@ def create_app(cfg: Config):
                     "<button class='nbtn no'>Disapprove</button></form></div></div>")
             out.append("</div>")
         if s["tasks"]:
+            from urllib.parse import quote
+            from . import dashboard as _dash
             out.append(f"<div class=nsec><h3>&#9888;&#65039; Runs that need you · {len(s['tasks'])}</h3>")
             for t in s["tasks"]:
                 tid = html.escape(str(t.get("ticket_id") or ""))
                 oc = html.escape(str(t.get("outcome") or ""))
-                note = html.escape(str(t.get("note") or "")[:140])
+                note = html.escape(_dash._short(t.get("note") or "", 120))
+                detail = _dash.needs_detail_html(t)            # the full 'what went wrong'
+                prefill = quote(_dash.needs_chat_summary(t))   # pre-loaded into the General chat
                 out.append(
-                    f"<div class=ncard><div class=q><span class=meta>{tid}</span> &nbsp;{oc}</div>"
-                    + (f"<div class=meta>{note}</div>" if note else "")
-                    + "<div class=nrow><a class='nbtn send' href='/chat'>Discuss with the General</a>"
+                    "<div class=ncard><details><summary>"
+                    f"<span class=meta>{tid}</span> &nbsp;{oc}"
+                    + (f" <span class=muted>— {note}</span>" if note else "")
+                    + f"</summary><div class=ndetail>{detail}</div></details>"
+                    + f"<div class=nrow><a class='nbtn send' href='/chat?prefill={prefill}'>Discuss with the General</a>"
                     "<form method=post action=/api/dismiss style='margin:0'>"
                     f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
                     "<button class='nbtn x'>Dismiss</button></form></div></div>")
@@ -1035,10 +1051,12 @@ def create_app(cfg: Config):
             npend = len(decisions.load(cfg))
         except Exception:  # noqa: BLE001
             npend = 0
+        # 'Discuss with the General' on /needs hands us a ready-made brief of the problem to send.
+        prefill = html.escape((request.args.get("prefill") or "")[:800], quote=True)
         body = (_CHAT_STYLE + _chat_tabs("general", npend)
                 + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
                 '<div class=composer><form method=post action=/api/chat>'
-                '<input type=text name=text autocomplete=off autofocus '
+                f'<input type=text name=text autocomplete=off autofocus value="{prefill}" '
                 'placeholder="Message the General…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
                 'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'

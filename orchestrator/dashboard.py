@@ -218,6 +218,70 @@ def _detail_html(t: dict[str, Any]) -> str:
     return '<div class=det>' + "".join(blocks) + '</div>'
 
 
+def _finding_str(x: Any) -> str:
+    """A reviewer finding may be a plain string or a {severity, area, detail} dict — render either."""
+    if isinstance(x, dict):
+        bits = [str(x.get("severity") or "").strip(), str(x.get("area") or "").strip()]
+        head = " ".join(b for b in bits if b)
+        detail = str(x.get("detail") or x.get("message") or "").strip()
+        return (f"{head}: {detail}" if head and detail else head or detail or str(x))
+    return str(x)
+
+
+def _short(s: Any, n: int) -> str:
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def needs_detail_html(t: dict[str, Any]) -> str:
+    """The full 'what went wrong' for one Needs-you run — the note plus each pass's builder/reviewer
+    summary and the reviewer's specific findings. Shown inside the card's expand panel."""
+    rows: list[str] = []
+    if t.get("note"):
+        rows.append(f'<div class=ndt><b>What happened:</b> {html.escape(str(t["note"]))}</div>')
+    for p in (t.get("passes_list") or []):
+        n = p.get("n", "?")
+        if p.get("build_summary"):
+            rows.append(f'<div class=ndt><b>Builder · pass {html.escape(str(n))}:</b> '
+                        f'{html.escape(_short(p["build_summary"], 700))}</div>')
+        if p.get("review_summary"):
+            v = p.get("verdict")
+            vlbl = f' · verdict {html.escape(str(v))}' if v else ''
+            rows.append(f'<div class=ndt><b>Reviewer · pass {html.escape(str(n))}{vlbl}:</b> '
+                        f'{html.escape(_short(p["review_summary"], 700))}</div>')
+        for f in (p.get("required_changes") or [])[:8]:
+            rows.append(f'<div class="ndt sub">• {html.escape(_short(_finding_str(f), 240))}</div>')
+        for f in (p.get("issues") or [])[:8]:
+            rows.append(f'<div class="ndt sub">• {html.escape(_short(_finding_str(f), 240))}</div>')
+    if not rows:
+        rows.append('<div class="ndt muted">No further detail was captured for this run — '
+                    'open it with the General to investigate.</div>')
+    return "".join(rows)
+
+
+def needs_chat_summary(t: dict[str, Any]) -> str:
+    """A compact plain-text brief of the problem, pre-loaded into the General chat when the Commander
+    clicks 'Discuss with the General' — so he can send it as-is (or tweak) instead of retyping."""
+    tid = str(t.get("ticket_id") or "this run")
+    oc = str(t.get("outcome") or "needs attention")
+    parts = [f"{tid} ended '{oc}'."]
+    if t.get("note"):
+        parts.append(_short(t["note"], 200))
+    last = next((p for p in reversed(t.get("passes_list") or [])
+                 if p.get("build_summary") or p.get("review_summary")), None)
+    if last:
+        if last.get("build_summary"):
+            parts.append("Builder: " + _short(last["build_summary"], 260))
+        if last.get("review_summary"):
+            v = last.get("verdict")
+            parts.append((f"Reviewer ({v}): " if v else "Reviewer: ") + _short(last["review_summary"], 260))
+        findings = (last.get("required_changes") or []) + (last.get("issues") or [])
+        if findings:
+            parts.append("Open items: " + "; ".join(_short(_finding_str(f), 120) for f in findings[:3]))
+    parts.append("What do you want me to do?")
+    return " ".join(parts)
+
+
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None) -> str:
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
