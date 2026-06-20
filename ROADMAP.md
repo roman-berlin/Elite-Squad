@@ -7,6 +7,13 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Living roster doc + hierarchy chart** (2026-06-20) — a once-a-day, info-only `ROSTER.md`: the
+  chain-of-command (Mermaid chart), every officer + role + **duty** + the model it runs on, and the
+  soldiers each squad fields — all read straight from the code, so it can never drift from reality. A
+  single cheapest-model (Haiku) line adds the day's status ("shipped N, parked M"). Refreshed at the end
+  of the daily council; on demand via `general roster`; viewable in the cockpit (Reports → Unit roster).
+  Gitignored (runtime). Sentinel was also added to the cockpit roster for consistency. Tests **30/30**.
+
 - **Automode — the unit never stops for your approval** (2026-06-20) — opt-in `auto_mode`. Normally
   when a build hits a product/scope blocker the PM either decides the everyday calls or ESCALATES a
   critical one and **parks to wait for your approve button**. In automode the PM **must decide** — it

@@ -34,6 +34,7 @@ _OFFICERS = [
     ("scout",         "Scout",           "S-2 · QA / recon"),
     ("provost",       "Provost Marshal", "Security gate"),
     ("quartermaster", "Quartermaster",   "S-4 · deploy"),
+    ("sentinel",      "Sentinel",        "S-3 · integration & rollback"),
     ("drill",         "Drillmaster",     "Doctrine / training"),
 ]
 

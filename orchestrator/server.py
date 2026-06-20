@@ -319,6 +319,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
       <a href="/memory">&#128221; Unit memory{fr_mem}</a>
       <a href="/usage">&#128202; Token usage{fr_usage}</a>
+      <a href="/roster-doc">&#128101; Unit roster</a>
       <a href="/drill">&#127894; Last drill{fr_drill}</a>
     </div>
   </details>
@@ -1120,6 +1121,11 @@ def create_app(cfg: Config):
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
+
+    @app.get("/roster-doc")
+    def roster_doc_page():
+        from . import roster as _roster
+        return _wrap("Unit roster", _roster.html_view(cfg, _roster.latest_status(cfg)))
 
     @app.get("/chat")
     def chat_page():

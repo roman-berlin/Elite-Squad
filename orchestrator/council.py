@@ -335,6 +335,12 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         print(f"  {await memory.scribe(cfg)}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  Scribe skipped: {exc}", flush=True)
+    # Refresh the living roster (daily, info-only, cheapest model) — best-effort.
+    try:
+        from . import roster
+        await roster.refresh(cfg, audit)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Roster refresh skipped: {exc}", flush=True)
     print(f"\n  council saved → {saved}\n", flush=True)
     return briefing
 
