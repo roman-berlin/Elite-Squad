@@ -107,6 +107,8 @@ class Config:
     auto_model: bool = False                # pick cheapest model that fits each task (<=ceiling); see models.py
     sentinel_enabled: bool = False          # Sentinel runs postmerge_commands after a land + auto-reverts if red
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
+    readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
+    readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
 
     # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
     #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether

@@ -248,6 +248,26 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
     audit.record("ticket_start", ticket_id=ticket.id, app=app.name, branch=branch,
                  dry_run=cfg.dry_run, ephemeral=ticket.ephemeral)
 
+    # Readiness gate: an under-specified ticket (no acceptance criteria + a thin description) is handed
+    # back BEFORE any build effort — the Builder would only guess and halt. Opt-in (`readiness_gate`).
+    if getattr(cfg, "readiness_gate", False):
+        from . import readiness
+        ready, missing = readiness.assess(ticket, min_desc_chars=getattr(cfg, "readiness_min_desc", 80))
+        if not ready:
+            note = "Not ready to build:\n" + "\n".join(f"• {m}" for m in missing)
+            if not cfg.dry_run and not ticket.ephemeral:
+                try:
+                    backlog.set_status(ticket, "Needs Human")
+                    backlog.add_comment(ticket, "🚧 " + note + "\n\nAdd these and move it back to To Do.")
+                except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                    pass
+            decisions.add(cfg, ticket, app.name, note)
+            _notify(cfg, f"🚧 {ticket.id} — handed back, not ready to build:\n\n{note}")
+            audit.record("not_ready", ticket_id=ticket.id, missing=missing)
+            print(f"  🚧 {ticket.id}: not ready — handed back (no build spent).", flush=True)
+            return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name, branch,
+                                notes="not ready — handed back before build")
+
     if not cfg.dry_run and not ticket.ephemeral:
         backlog.set_status(ticket, "In Progress")
     git.checkout_feature(branch)

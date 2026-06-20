@@ -7,6 +7,14 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Ticket-readiness gate — hand back under-specified tickets before building** (2026-06-20) — the first
+  P1 item. A cheap, **deterministic** check (`readiness.py`, no model call) runs before the build: a
+  ticket with **no acceptance criteria AND a thin description** (or one that just restates its title) is
+  handed back — moved to Needs Human with a comment listing exactly what's missing — instead of the
+  Builder guessing the scope and halting mid-way. Anything with acceptance criteria, or a real
+  description, sails through. Saves the wasted Opus on a blind build. Opt-in (`readiness_gate`;
+  `readiness_min_desc` tunes the threshold); off by default. **16/16** tests; suite now **42 / 521**.
+
 - **The unit's own test suite + CI — the guard that guards the guard** (2026-06-20) — promoted the ~40
   scratch harnesses (which used to vanish each session) into the repo as **`tests/`** with a
   `tests/run_all.py` runner (**41 harnesses / 505 checks, all green**), and a **GitHub Actions** workflow
@@ -366,9 +374,8 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
 
 ### P1 — capability & throughput
 
-5. **Ticket-readiness gate (PM, pre-build).** Formalize the unit's own corridor insight: the PM hands
-   an under-specified ticket BACK (no clear acceptance criteria / exit conditions) *before* the Builder
-   guesses mid-build. Fewer halts, less wasted Opus, cleaner scope.
+5. ~~**Ticket-readiness gate (PM, pre-build).**~~ ✅ **Shipped 2026-06-20** — `readiness.py` hands back a
+   no-AC + thin-description ticket before the build (opt-in `readiness_gate`); 16/16 tests.
 6. **Parallel multi-app builds.** Worktree locks already isolate per app; let independent apps build
    concurrently (bounded by the cost governor) for 2–3× throughput across Roman's products.
 7. **Failure forensics + auto-post-mortem.** Categorize "errored" into a taxonomy
