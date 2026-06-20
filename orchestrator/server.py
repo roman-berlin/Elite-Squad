@@ -206,6 +206,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                     f'<a class="btn ship" href="/ship-preview?app={html.escape(app0)}" '
                     f'title="Review the {html.escape(app0)} commits + tickets, then ship to production">'
                     f'&#128640; Ship {html.escape(app0)} &rarr; production<span class=cbadge>{_sn}</span></a>')
+            else:
+                # Nothing ahead — DEV is fully merged into production. Show it explicitly (don't just hide
+                # the button) so "all shipped" is unmistakable after a merge.
+                ship_html = ('<span class="tbnote ok" '
+                             f'title="{html.escape(app0)} DEV is fully merged into production — nothing to ship">'
+                             f'&#10003; {html.escape(app0)} shipped</span>')
     except Exception:  # noqa: BLE001
         ship_html = ""
 
@@ -243,6 +249,23 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     except Exception:  # noqa: BLE001
         fr_fx = ""
 
+    # Deploy progress: while a unit-promote or app-ship runs in the background, show a live bar that
+    # polls /api/deploy-status and reloads when it finishes — so the button never looks dead (the push
+    # to GitHub can take 10-30s). One strip covers BOTH deploy buttons.
+    deploy_strip = ""
+    if _state.get("promoting") or _state.get("shipping"):
+        dlabel = (f"Shipping {html.escape(app0)} &rarr; production…" if _state.get("shipping")
+                  else "Deploying the unit (dev &rarr; main)…")
+        deploy_strip = (
+            "<div class=deploybar><div class=dspin></div>"
+            f"<div class=dmsg>{dlabel} <span class=dsub>pushing to GitHub — the server self-updates "
+            "after. Leave this open; it clears itself when done.</span></div>"
+            "<div class=dprog><span class=dprogfill></span></div></div>"
+            "<script>(function(){function p(){fetch('/api/deploy-status')"
+            ".then(function(r){return r.json()}).then(function(d){"
+            "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
+            ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
+
     return f"""
 <style>
 .tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid #1f2531;background:#0e1219}}
@@ -278,6 +301,14 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .btn:disabled{{opacity:.5;cursor:not-allowed}}
 .tbar .panel a{{display:flex;align-items:center}}
 .tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:#5c6573;font-size:11px;font-weight:400}}
+.deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:#0f1626;border-bottom:1px solid #20304d}}
+.deploybar .dspin{{width:18px;height:18px;border:3px solid #21314f;border-top-color:#3b6cff;border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
+.deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
+.deploybar .dsub{{color:#7f8ba3;font-weight:400;font-size:12px}}
+.deploybar .dprog{{flex:1;max-width:300px;height:6px;background:#0c1119;border-radius:99px;overflow:hidden;border:1px solid #21314f}}
+.deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,#2b5cff,#6aa9ff);border-radius:99px;animation:dsl 1.4s ease-in-out infinite}}
+@keyframes dsp{{to{{transform:rotate(360deg)}}}}
+@keyframes dsl{{0%{{margin-left:-38%}}100%{{margin-left:100%}}}}
 @media(max-width:820px){{
 .tbar{{gap:7px;padding:10px 14px}}
 .tbar .btn{{padding:8px 10px;font-size:12px}}
@@ -332,7 +363,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 
   <span class=grow></span>
   {status}
-</div>"""
+</div>
+{deploy_strip}"""
 
 
 def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
@@ -907,13 +939,15 @@ def create_app(cfg: Config):
             _state["last_msg"] = "finish the active run before deploying DEV → main"
             return redirect("/")
         if not _state.get("promoting"):
+            _state["promoting"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
+
             def _bg():
-                _state["promoting"] = True
                 try:
                     r = sync.promote(cfg)
                     if r.get("ok"):
                         n = r.get("ahead_before", 0)
-                        _state["last_msg"] = f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
+                        _state["last_msg"] = (f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
+                                              if n else "Unit already current — nothing to deploy.")
                     else:
                         _state["last_msg"] = "Deploy failed: " + (r.get("error") or "unknown")
                 except Exception as exc:  # noqa: BLE001
@@ -922,6 +956,15 @@ def create_app(cfg: Config):
                     _state["promoting"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
+
+    @app.get("/api/deploy-status")
+    def deploy_status_api():
+        """Live state for the deploy progress bar: is a unit-promote or app-ship still running, and the
+        latest result line. The cockpit polls this so the button shows progress instead of looking dead."""
+        from flask import jsonify
+        active = bool(_state.get("promoting") or _state.get("shipping"))
+        kind = "ship" if _state.get("shipping") else ("promote" if _state.get("promoting") else "")
+        return jsonify({"active": active, "kind": kind, "msg": _state.get("last_msg", "")})
 
     @app.post("/api/ship-main")
     def ship_main_api():
@@ -934,8 +977,9 @@ def create_app(cfg: Config):
             _state["last_msg"] = "finish the active run before shipping to production"
             return redirect("/")
         if not _state.get("shipping"):
+            _state["shipping"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
+
             def _bg():
-                _state["shipping"] = True
                 try:
                     r = sync.promote_app(cfg.app(app_name))
                     if r.get("ok"):

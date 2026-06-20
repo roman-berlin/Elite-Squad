@@ -7,6 +7,13 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Deploy progress bar + fresh ahead-count** (2026-06-21) — the "Update unit" / "Ship → production"
+  buttons looked stuck (the GitHub push takes 10–30s with no feedback) and the ahead-count badge went
+  stale after a merge (showed "13"/"8" when DEV was already fully merged into MAIN — count was really 0).
+  Now: a live **progress strip** shows while a promote/ship runs, polls `/api/deploy-status`, and reloads
+  the page when it finishes so the count re-renders; the busy flag is set synchronously to avoid a render
+  race; and at 0-ahead both buttons show an explicit **"✓ unit current" / "✓ <app> shipped"** instead of
+  a stale number. **13/13 tests; suite 48 harnesses / 674 checks.**
 - **Runnable discovered repos — click-to-onboard** (2026-06-21) — the "Found nearby" repos (git repos
   beside your configured ones, not yet in config) are now actionable: the **➕ Product** page lists them
   as chips, and clicking one pre-fills the onboard form (name + path + auto-detected base/protected
