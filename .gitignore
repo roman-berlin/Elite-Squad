@@ -16,13 +16,18 @@ qa-reports/
 # Mac<->server state sync: the dedicated state clone (tracks the orphan `unit-state` branch). Never
 # track it from the code repo — it's a second clone living inside the repo dir. See orchestrator/sync.py.
 .unit-state/
-# council runtime — keep transcripts (council/*.md) + index as minutes; ignore private notes + logs
+# council runtime — the transcripts (council/*.md) + index are RUNTIME minutes: the unit rewrites them
+# on EVERY council and the cockpit reads them straight from disk, so they don't belong in git. Tracking
+# them kept the tree permanently dirty (which used to block the promote) and let the server's
+# `git reset --hard` clobber its own minutes. Untracked, they're written + shown exactly as before.
 commander_notes.md
 adjutant-report.md
 scout-report.md
 provost-report.md
 quartermaster-report.md
 council/*.log
+council/*.md
+council/index.jsonl
 backups/
 blocked_tickets.json
 # Unit Memory — versioned DOCTRINE (memory/UNIT.md) is tracked; the officer-maintained LIVING LOG is
