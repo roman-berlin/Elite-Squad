@@ -306,6 +306,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
+  <a class="btn" href="/onboard" title="Scaffold a new product into the unit (config + Jira)">&#10133; Product</a>
   <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
   {promote_html}
   {ship_html}
@@ -1264,6 +1265,74 @@ def create_app(cfg: Config):
         from . import connections as _conn
         _conn.remove(cfg, (request.form.get("id") or "").strip())
         return redirect(f"/jira?app={quote((request.form.get('app') or '').strip())}")
+
+    @app.get("/onboard")
+    def onboard_page():
+        """Scaffold a new product into config.yaml — so the unit serves SignalDesk / the EAs, not just
+        Automatixy. Detects branches, backs up the file, optionally wires a saved Jira connection."""
+        from . import connections as _conn
+        esc = html.escape
+        conns = _conn.list_connections(cfg)
+        copts = ("<option value=''>— none (free-text tasks, or JIRA_EMAIL/JIRA_API_TOKEN) —</option>"
+                 + "".join(f"<option value='{esc(c['id'])}'>{esc(c['name'])} &middot; {esc(c['base_url'])}"
+                           f"</option>" for c in conns))
+        current = ", ".join(esc(a.name) for a in cfg.apps) or "—"
+        style = (
+            "<style>"
+            ".cur{color:#8a929f;margin:2px 0 18px}.cur b{color:#e9ecf1}"
+            ".ob{background:#12161f;border:1px solid #232936;border-radius:12px;padding:17px 19px}"
+            ".obgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:13px}"
+            ".ob label{display:block;color:#c4c9d2;font-size:12.5px;font-weight:600}"
+            ".ob input,.ob select{width:100%;margin-top:5px;box-sizing:border-box}"
+            ".ob .opt{color:#5c6573;font-weight:400}"
+            ".obrow{display:flex;gap:12px;align-items:center;margin-top:15px;flex-wrap:wrap}"
+            ".jbtn{background:#1b2230;border:1px solid #2a3343;color:#e9ecf1;border-radius:8px;padding:9px 15px;"
+            "font:inherit;font-size:13px;font-weight:650;cursor:pointer}"
+            ".jbtn.primary{background:#2b5cff;border-color:#2b5cff;color:#fff}.jbtn.primary:hover{background:#2350e6}"
+            ".hint{color:#6b7480;font-size:12px}.hint2{color:#8a929f;font-size:12.5px;margin-top:16px}"
+            "h3{margin:18px 0 9px;font-size:14px;color:#c4c9d2}"
+            "</style>")
+        form = (
+            "<form method=post action=/api/onboard class=ob>"
+            "<div class=obgrid>"
+            "<label>Product name<input name=name placeholder='e.g. signaldesk' required></label>"
+            "<label>Repo path<input name=repo_path placeholder='/Users/&hellip;/SignalDesk' required></label>"
+            "<label>Base branch <span class=opt>(features merge here)</span>"
+            "<input name=base placeholder='auto-detect'></label>"
+            "<label>Protected branch <span class=opt>(production)</span>"
+            "<input name=protected placeholder='auto-detect'></label>"
+            f"<label>Jira <span class=opt>(pick a saved connection)</span><select name=jira>{copts}</select></label>"
+            "</div>"
+            "<div class=obrow><button class='jbtn primary'>&#10133; Add product</button>"
+            "<span class=hint>Detects branches from the repo, backs up config.yaml, inserts the entry. "
+            "Restart the cockpit to load it.</span></div></form>")
+        body = (style + f"<p class=cur>Current products: <b>{current}</b></p>"
+                + "<h3>Onboard a new product</h3>" + form
+                + "<p class=hint2>No Jira yet? <a href='/jira'>Connect one first</a>, then pick it here.</p>")
+        return _wrap("Onboard a product", body)
+
+    @app.post("/api/onboard")
+    def onboard_api():
+        from . import onboarding
+        esc = html.escape
+        f = request.form
+        path = getattr(cfg, "_source_path", "config.yaml")
+        jira = (f.get("jira") or "").strip()
+        r = onboarding.scaffold(path, name=(f.get("name") or ""), repo_path=(f.get("repo_path") or ""),
+                                base=(f.get("base") or None), protected=(f.get("protected") or None),
+                                backlog=("jira" if jira else "none"), connection_id=jira, write=True)
+        if not r["ok"]:
+            return _wrap("Onboard a product",
+                         f"<p style='color:#f0676b'>&#10007; {esc(r['error'])}</p>"
+                         "<p><a href='/onboard'>&larr; back</a></p>")
+        warn = "".join(f"<li>&#9888; {esc(w)}</li>" for w in r["warnings"])
+        warnhtml = f"<ul style='color:#d99a2b'>{warn}</ul>" if warn else ""
+        return _wrap("Onboard a product",
+                     f"<p style='color:#3fb961'>&#10003; Added <b>{esc(r['name'])}</b> — base "
+                     f"{esc(r['base'])} &rarr; protected {esc(r['protected'])}. Backed up config.yaml; "
+                     f"<b>restart the cockpit / autopilot</b> to load it.</p>{warnhtml}"
+                     f"<pre class=rep>{esc(r['block'])}</pre>"
+                     "<p><a href='/onboard'>&larr; onboard another</a> &middot; <a href='/'>cockpit</a></p>")
 
     @app.get("/roster-doc")
     def roster_doc_page():

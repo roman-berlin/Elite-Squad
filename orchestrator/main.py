@@ -114,6 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
     apc.add_argument("--interval", type=int, default=60, help="seconds to wait when the queue is empty (default 60)")
     ub = sub.add_parser("unblock", help="clear a parked (escalated) ticket so autopilot retries it")
     ub.add_argument("ticket", nargs="?", default=None, help="ticket id; omit to clear all parked")
+
+    ob = sub.add_parser("onboard", help="scaffold a new product into config.yaml (SignalDesk, the EAs, …)")
+    ob.add_argument("name", help="short app name, e.g. signaldesk")
+    ob.add_argument("repo_path", help="path to the product's git repo")
+    ob.add_argument("--base", default=None, help="base branch (features merge here); default: auto-detected")
+    ob.add_argument("--protected", default=None, help="protected/production branch; default: auto-detected")
+    ob.add_argument("--jira", dest="jira_conn", default="", metavar="CONNECTION_ID",
+                    help="attach a cockpit Jira connection id (sets backlog_backend=jira)")
+    ob.add_argument("--write", action="store_true",
+                    help="write the entry into config.yaml (default: preview only)")
     return p
 
 
@@ -170,6 +180,29 @@ async def _run_work(cfg: Config, worklist) -> int:
     return 1 if any(r.outcome == Outcome.ERRORED for r in reports) else 0
 
 
+def _onboard(args) -> int:
+    """Scaffold a new product into config.yaml. Preview by default; --write applies it."""
+    from . import onboarding
+    r = onboarding.scaffold(
+        args.config, name=args.name, repo_path=args.repo_path, base=args.base,
+        protected=args.protected, backlog=("jira" if args.jira_conn else "none"),
+        connection_id=args.jira_conn, write=args.write)
+    if not r["ok"]:
+        print(f"  ✗ {r['error']}")
+        return 1
+    print(f"Product '{r['name']}'  ·  base {r['base']} → protected {r['protected']}  ·  backlog {r['backlog']}")
+    for w in r["warnings"]:
+        print(f"  ⚠ {w}")
+    print("\nconfig.yaml entry:\n")
+    print(r["block"])
+    if r["written"]:
+        print(f"\n  ✓ written into {args.config} (backup: {args.config}.bak). "
+              "Restart the cockpit / autopilot to load it.")
+    else:
+        print(f"\n  (preview only) — re-run with --write to add it to {args.config}.")
+    return 0
+
+
 def _doctor(cfg_path: str) -> int:
     from . import health
     glyph = {"ok": "  ✓", "warn": "  ⚠", "bad": "  ✗"}
@@ -208,6 +241,8 @@ def _branch_exists(repo: str, branch: str) -> bool:
 
 async def _main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "onboard":
+        return _onboard(args)
     if args.command == "doctor":
         return _doctor(args.config)
     if args.command == "ping":
@@ -227,6 +262,7 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "serve":
         from . import server
+        cfg._source_path = args.config   # so the cockpit's onboard form knows which config.yaml to edit
         server.serve(cfg, port=args.port)
         return 0
 

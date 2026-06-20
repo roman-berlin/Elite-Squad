@@ -7,6 +7,13 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **One-command new-product onboarding** (2026-06-21) — scaffold a new product into the unit without
+  hand-editing YAML. `onboarding.py` validates the repo is a git repo, **auto-detects** its base/protected
+  branches (honoring DEV/MAIN vs dev/main casing), refuses duplicate names, **backs up `config.yaml`** and
+  does a **surgical insert** under `apps:` so existing comments/order survive, and optionally **attaches a
+  saved Jira connection** to the new project. CLI `general onboard <name> <repo> [--jira <id>] [--write]`
+  (preview-by-default) + a cockpit **➕ Product** page. So the unit can take on SignalDesk, the MQL5 EAs,
+  etc. **33/33 tests; suite 44 harnesses / 591 checks.**
 - **Cockpit Jira-connection UI — pick / quick-connect a Jira per project** (2026-06-20) — Roman runs
   products against different Jira accounts (Automatixy on one, the algo-trading robot on another).
   `connections.py` is a gitignored store of named Jira connections + which one each project uses; the
@@ -400,8 +407,12 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
    panel: pick the Jira a project uses, quick-connect a new one (name + site URL + email + token,
    stored in a gitignored `jira_connections.json`, masked in the UI), switch projects from the same
    page. The adapter prefers an assigned connection, falling back to `email_env`/`token_env`. 37/37 tests.
-10. **One-command new-product onboarding.** Scaffold config + memory + Jira for a new product
-    (SignalDesk, the MQL5 EAs) so the unit serves more than Automatixy.
+10. ~~**One-command new-product onboarding.**~~ ✅ **Shipped 2026-06-21** — `onboarding.py` +
+    `general onboard <name> <repo> [--jira <id>] [--write]` + a cockpit **➕ Product** page: detects the
+    repo's base/protected branches, refuses duplicates, backs up `config.yaml` and does a surgical insert
+    under `apps:` (comments survive), and optionally wires a saved Jira connection to the new project.
+    Preview-by-default. 33/33 tests. (#11 below — click-to-onboard discovered repos — now just wires the
+    "Found nearby" list into this.)
 11. **Runnable discovered repos.** Make "Found nearby" repos click-to-onboard (scaffold a config entry)
     instead of read-only hints.
 
