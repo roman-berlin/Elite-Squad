@@ -115,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     ub = sub.add_parser("unblock", help="clear a parked (escalated) ticket so autopilot retries it")
     ub.add_argument("ticket", nargs="?", default=None, help="ticket id; omit to clear all parked")
 
+    fx = sub.add_parser("forensics", help="failure taxonomy + repeat offenders; --postmortem <id> writes one")
+    fx.add_argument("--postmortem", default=None, metavar="TICKET",
+                    help="write/refresh the post-mortem for a ticket and print it")
+
     ob = sub.add_parser("onboard", help="scaffold a new product into config.yaml (SignalDesk, the EAs, …)")
     ob.add_argument("name", help="short app name, e.g. signaldesk")
     ob.add_argument("repo_path", help="path to the product's git repo")
@@ -180,6 +184,37 @@ async def _run_work(cfg: Config, worklist) -> int:
     return 1 if any(r.outcome == Outcome.ERRORED for r in reports) else 0
 
 
+def _forensics(args) -> int:
+    """Print the failure taxonomy + repeat offenders, or write one ticket's post-mortem."""
+    from . import forensics
+    cfg = Config.load(args.config)
+    if args.postmortem:
+        p = forensics.write_postmortem(cfg, args.postmortem)
+        if not p:
+            print(f"  no failures on record for {args.postmortem}")
+            return 1
+        print(f"  ✓ wrote {p}\n")
+        print(p.read_text(encoding="utf-8"))
+        return 0
+    tax = forensics.taxonomy(cfg)
+    if not tax:
+        print("No failures on record — clean sheet.")
+        return 0
+    total = sum(t["count"] for t in tax)
+    print(f"Failure taxonomy — {total} failed run(s):\n")
+    for t in tax:
+        print(f"  {t['count']:>3} · {t['label']}")
+        print(f"        → {t['action']}")
+    offenders = forensics.repeat_offenders(cfg, threshold=2)
+    if offenders:
+        print("\nRepeat offenders (failed 2+ times):")
+        for o in offenders:
+            pm = forensics.postmortem_path(cfg, o["ticket_id"])
+            tag = "  · post-mortem written" if pm.exists() else ""
+            print(f"  {o['ticket_id']:<16} ×{o['count']:<3} {o['label']}{tag}")
+    return 0
+
+
 def _onboard(args) -> int:
     """Scaffold a new product into config.yaml. Preview by default; --write applies it."""
     from . import onboarding
@@ -241,6 +276,8 @@ def _branch_exists(repo: str, branch: str) -> bool:
 
 async def _main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "forensics":
+        return _forensics(args)
     if args.command == "onboard":
         return _onboard(args)
     if args.command == "doctor":

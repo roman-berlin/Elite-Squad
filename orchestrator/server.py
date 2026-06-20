@@ -236,6 +236,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         fr_usage = f" · {_u // 1000}k today" if _u >= 1000 else (f" · {_u} today" if _u else "")
     except Exception:  # noqa: BLE001
         fr_usage = ""
+    try:
+        from . import forensics as _fx
+        _nf = sum(t["count"] for t in _fx.taxonomy(cfg))
+        fr_fx = f" · {_nf}" if _nf else ""
+    except Exception:  # noqa: BLE001
+        fr_fx = ""
 
     return f"""
 <style>
@@ -318,6 +324,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
       <a href="/memory">&#128221; Unit memory{fr_mem}</a>
       <a href="/usage">&#128202; Token usage{fr_usage}</a>
+      <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
       <a href="/roster-doc">&#128101; Unit roster</a>
       <a href="/drill">&#127894; Last drill{fr_drill}</a>
     </div>
@@ -1333,6 +1340,66 @@ def create_app(cfg: Config):
                      f"<b>restart the cockpit / autopilot</b> to load it.</p>{warnhtml}"
                      f"<pre class=rep>{esc(r['block'])}</pre>"
                      "<p><a href='/onboard'>&larr; onboard another</a> &middot; <a href='/'>cockpit</a></p>")
+
+    @app.get("/forensics")
+    def forensics_page():
+        """Why tickets fail — a taxonomy of causes, repeat offenders, and the auto-written post-mortems."""
+        from . import forensics as _fx
+        esc = html.escape
+        pm = (request.args.get("pm") or "").strip()
+        if pm:  # view one post-mortem
+            try:
+                md = _fx.postmortem_path(cfg, pm).read_text(encoding="utf-8")
+            except OSError:
+                md = ""
+            inner = (f"<p><a href='/forensics'>&larr; forensics</a></p>"
+                     + (f"<pre class=rep>{esc(md)}</pre>" if md
+                        else f"<p>No post-mortem on file for {esc(pm)}.</p>"))
+            return _wrap(f"Post-mortem — {pm}", inner)
+
+        tax = _fx.taxonomy(cfg)
+        offenders = _fx.repeat_offenders(cfg, threshold=2)
+        total = sum(t["count"] for t in tax)
+        style = (
+            "<style>"
+            ".fxtax{display:flex;flex-direction:column;gap:9px;margin:6px 0 22px}"
+            ".fxrow{background:#12161f;border:1px solid #232936;border-radius:10px;padding:11px 14px}"
+            ".fxhead{display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
+            ".fxlabel{color:#e9ecf1;font-weight:650;font-size:13.5px}.fxn{color:#8a929f;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+            ".fxbar{height:7px;background:#0d1119;border-radius:5px;overflow:hidden;border:1px solid #222a38;margin:8px 0 7px}"
+            ".fxbar .fill{display:block;height:100%;background:#3b6cff}"
+            ".fxact{color:#8a929f;font-size:12.5px}"
+            ".fxtbl{width:100%;border-collapse:collapse;margin:4px 0 20px;font-size:13px}"
+            ".fxtbl th{color:#6b7480;text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid #232936}"
+            ".fxtbl td{color:#c3cad6;padding:6px 8px;border-bottom:1px solid #1a1f2a}"
+            ".fxtbl .c{color:#f0a93f;font-weight:700;font-family:ui-monospace,Menlo,monospace}"
+            ".fxempty{background:#101620;border:1px solid #1f6f43;border-radius:12px;padding:16px 18px;color:#aab2c0}"
+            "h3{margin:20px 0 8px;font-size:14px;color:#c4c9d2}"
+            "</style>")
+        if not tax:
+            return _wrap("Failure forensics", style + "<div class=fxempty>&#10003; No failed runs on "
+                         "record — clean sheet.</div>")
+        mx = max(t["count"] for t in tax) or 1
+        rows = "".join(
+            f"<div class=fxrow><div class=fxhead><span class=fxlabel>{esc(t['label'])}</span>"
+            f"<span class=fxn>{t['count']} / {total}</span></div>"
+            f"<div class=fxbar><span class=fill style='width:{int(t['count']/mx*100)}%'></span></div>"
+            f"<div class=fxact>&#8594; {esc(t['action'])}</div></div>" for t in tax)
+        off_html = ""
+        if offenders:
+            trs = []
+            for o in offenders:
+                exists = _fx.postmortem_path(cfg, o["ticket_id"]).exists()
+                link = (f"<a href='/forensics?pm={quote(o['ticket_id'])}'>post-mortem &rarr;</a>"
+                        if exists else "<span style='color:#5c6573'>—</span>")
+                trs.append(f"<tr><td><b>{esc(o['ticket_id'])}</b></td><td>{esc(o['app'] or '—')}</td>"
+                           f"<td class=c>×{o['count']}</td><td>{esc(o['label'])}</td><td>{link}</td></tr>")
+            off_html = ("<h3>Repeat offenders</h3><table class=fxtbl><tr><th>ticket</th><th>app</th>"
+                        "<th>fails</th><th>dominant cause</th><th>post-mortem</th></tr>"
+                        + "".join(trs) + "</table>")
+        body = (style + f"<p style='color:#8a929f'>{total} failed run(s), grouped by cause.</p>"
+                + "<div class=fxtax>" + rows + "</div>" + off_html)
+        return _wrap("Failure forensics", body)
 
     @app.get("/roster-doc")
     def roster_doc_page():

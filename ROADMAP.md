@@ -7,6 +7,14 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Failure forensics + auto-post-mortem** (2026-06-21) — turns the "errored / escalated" pile into
+  something actionable. `forensics.py` classifies every failed run into a cause taxonomy (under-specified,
+  too-big, merge-conflict, gate/review fail, security block, product-decision-needed, infra, transient),
+  each with a recommended fix; surfaces **repeat offenders**; and once a ticket fails `postmortem_after`
+  (3) times the unit **auto-writes a deterministic post-mortem** (`postmortems/<TICKET>.md`: pattern,
+  attempt timeline, dominant cause, what to change) — no model call, runs unattended. Hooked into the run
+  loop; cockpit **🧩 Failure forensics** page + `general forensics`. **37/37 tests; suite 45 harnesses /
+  628 checks.**
 - **One-command new-product onboarding** (2026-06-21) — scaffold a new product into the unit without
   hand-editing YAML. `onboarding.py` validates the repo is a git repo, **auto-detects** its base/protected
   branches (honoring DEV/MAIN vs dev/main casing), refuses duplicate names, **backs up `config.yaml`** and
@@ -393,10 +401,11 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
 6. ~~**Parallel multi-app builds.**~~ ❌ **Dropped 2026-06-20** (Roman's call) — running two products at
    once is unnecessary and invites a mess. The unit works **one project at a time**; you switch projects
    (VS Code-style, with Recent projects) when you're done with one. Throughput per project, not across.
-7. **Failure forensics + auto-post-mortem.** Categorize "errored" into a taxonomy
-   (precondition / build-cap / merge-conflict / gate-fail / infra), and have the General auto-write a
-   short post-mortem when the same ticket fails N times — it already holds the data (now surfaced in
-   the Needs-you expander).
+7. ~~**Failure forensics + auto-post-mortem.**~~ ✅ **Shipped 2026-06-21** — `forensics.py` classifies
+   every failed run into a taxonomy (under-specified / too-big / merge-conflict / gate-fail / security /
+   product-blocker / infra / transient) with a recommended fix each, surfaces repeat offenders, and
+   **auto-writes a deterministic post-mortem** to `postmortems/<TICKET>.md` once a ticket fails
+   `postmortem_after` (3) times. Cockpit `/forensics` page + `general forensics`. 37/37 tests.
 8. **Memory consolidation + learning from rejections.** A periodic dedup/prune pass over the Lessons
    log, and an auto-drill proposal when the Reviewer rejects the same pattern repeatedly — compounding
    learning from the unit's own PRs.

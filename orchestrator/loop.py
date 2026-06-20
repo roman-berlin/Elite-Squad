@@ -238,6 +238,12 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
             except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
                 report = _exception_report(cfg, ticket, app, exc, audit)
             reports.append(report)
+            # Failure forensics: if this ticket has now failed enough times, auto-write its post-mortem.
+            try:
+                from . import forensics
+                forensics.maybe_postmortem(cfg, report, audit)
+            except Exception:  # noqa: BLE001 - diagnostics must never break the run
+                pass
     finally:
         locks.close()
     return reports

@@ -109,6 +109,7 @@ class Config:
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
+    postmortem_after: int = 3               # auto-write a post-mortem once a ticket has failed this many times (0 = off); see forensics.py
 
     # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
     #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether

@@ -44,6 +44,8 @@ recent_projects.json
 # Jira connections — holds API TOKENS (the cockpit's quick-connect store). NEVER version it; each
 # machine keeps its own, and the cockpit only ever shows tokens masked. See connections.py.
 jira_connections.json
+# Auto-written failure post-mortems — runtime diagnostics regenerated from the audit log (forensics.py).
+postmortems/
 usage_ledger.jsonl
 ROSTER.md
 # macOS
