@@ -7,6 +7,16 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Sentinel — S-3 · Integration & rollback (post-merge guard + auto-revert)** (2026-06-20) — a new
+  officer and the unit's last line of defence on DEV. The pre-review gate already validates the exact
+  merge on a throwaway branch before DEV is touched, so Sentinel runs the **heavier post-merge suite**
+  (`postmerge_commands` — e2e/integration too slow for every build pass) on the *landed* DEV. If it's
+  red, Sentinel **reverts the merge forward-only** (`git revert -m 1`, no force-push, no history
+  rewrite) and hands the ticket back (Needs Human + comment), so DEV is never left broken. Opt-in
+  (`sentinel_enabled` + a per-app `postmerge_commands` list); a no-op when no post-merge suite is
+  configured. Now sits on the council roster. Tests **18/18**, including a real `git revert`
+  round-trip.
+
 - **Auto model selection — Opus for code, conserve only under budget pressure** (2026-06-20) — opt-in
   `auto_model`. Opus is the better coder, so the **builder and reviewer stay on Opus for all code** and
   drop to Sonnet *only when the day's token budget is tight* (to keep the unit working rather than
@@ -255,7 +265,7 @@ Last updated: 2026-06-20.
   (≤0.5s, with a 5s-poll fallback). Detailed transcript table moved to `/tasks`.
 
 - **Autonomous pipeline** — build → gate → review → **security gate (Provost)** → land on DEV → QA, on an isolated git worktree; MAIN never touched.
-- **Seven officers** — Adjutant (S-1/HR) · Field Engineer (Builder) · Inspector General (Reviewer) · Scout (S-2/QA) · Provost Marshal (Security) · Quartermaster (S-4/DevOps) · Drillmaster (Doctrine).
+- **Officers** — Adjutant (S-1/HR) · Field Engineer (Builder) · Inspector General (Reviewer) · Scout (S-2/QA) · Provost Marshal (Security) · Quartermaster (S-4/DevOps) · Sentinel (S-3/Integration & rollback) · Drillmaster (Doctrine) · Product Manager (S-5) — chaired by The General.
 - **Autopilot** — always-on worker: resume In Progress, else take top To Do (assignee-pinned to you), with a park-guard so it never spins on a stuck ticket; KeepAlive launchd.
 - **Daily council** — 10:00 muster, briefing to Telegram, transcript saved, escalates only Commander-level calls.
 - **Two-way Telegram** — the General answers you; your replies become standing guidance.

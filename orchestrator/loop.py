@@ -479,6 +479,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
 
     # LIVE + validated -> fast-forward DEV to the trial and push: the ONLY moment DEV changes.
     if not reason:
+        merge_sha = git.current_sha()   # the validated merge commit — Sentinel reverts THIS if DEV breaks
         git.land_trial(temp)
         git.delete_local_branch(branch)   # merged into DEV (commits live there) -> retire the feature branch
         sync = git.sync_main_base() if getattr(cfg, "sync_base_after_merge", False) else ""
@@ -502,6 +503,20 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         test_line = f"\n🔗 Test on {app.base_branch}: {turl}" if turl else ""
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
+
+        # Sentinel: run the heavier post-merge suite on the landed DEV; if it's red, roll the merge
+        # back (forward-only) and hand the ticket back rather than leave DEV broken.
+        from . import sentinel
+        if sentinel.should_run(cfg, app):
+            ok, snote = sentinel.guard(cfg, app, ticket, git, merge_sha, audit)
+            if not ok:
+                if not ticket.ephemeral:
+                    backlog.set_status(ticket, "Needs Human")
+                    backlog.add_comment(ticket, f"⚠️ Sentinel rolled this back from {app.base_branch}. {snote[:900]}")
+                print(f"  🛡️ {ticket.id}: Sentinel reverted the merge — needs you.", flush=True)
+                return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                    notes=f"sentinel reverted: {snote[:160]}")
+
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
                             + (", Done" if cfg.mark_done_on_merge else ", awaiting QA"))

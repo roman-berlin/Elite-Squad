@@ -59,9 +59,10 @@ class AppConfig:
     protected_branch: str = "main"      # NEVER touched by the pipeline
     branch_prefix: str = "autodev"
     qa_url: Optional[str] = None         # base URL where this app's DEV is testable; shown on merge -> QA
-    gate_commands: list[str] = field(default_factory=list)   # tests/lint/typecheck
+    gate_commands: list[str] = field(default_factory=list)   # tests/lint/typecheck (pre-review gate)
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
+    postmerge_commands: list[str] = field(default_factory=list)  # Sentinel's heavier post-merge suite (e2e/integration); empty = skip
     backlog_backend: str = "jira"       # "jira" | "notion" | "none"
     backlog: dict[str, Any] = field(default_factory=dict)
     # runtime-resolved working dir for officers + gate (the worktree in isolated mode).
@@ -104,6 +105,7 @@ class Config:
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
     auto_model: bool = False                # pick cheapest model that fits each task (<=ceiling); see models.py
+    sentinel_enabled: bool = False          # Sentinel runs postmerge_commands after a land + auto-reverts if red
 
     # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
     #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether

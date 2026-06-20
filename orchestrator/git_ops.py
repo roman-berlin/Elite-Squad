@@ -153,6 +153,39 @@ class Git:
     def push_base(self) -> None:
         self._run("push", "origin", self.base)
 
+    def revert_merge_on_base(self, merge_sha: str) -> bool:
+        """Forward-only undo of a landed merge commit (Sentinel's rollback). Builds a branch at the
+        current origin/<base>, reverts the merge (keeping the pre-merge first parent), and ff-pushes
+        the revert to <base>. No force-push, no history rewrite. Returns False if the revert can't be
+        applied cleanly (caller then escalates to a human)."""
+        if self.base == self.protected:
+            raise GitError("refusing to revert on the protected branch")
+        rb = f"{self.base.replace('/', '_')}_revert"
+        if self.isolated:
+            self._git(self.main, "fetch", "origin", self.base, check=False)
+            self._run("checkout", "-B", rb, self.base_ref)
+        else:
+            self._run("checkout", self.base)
+            self._run("pull", "--ff-only", check=False)
+            self._run("checkout", "-B", rb, self.base)
+        code, _, _ = self._run_code("revert", "--no-edit", "-m", "1", merge_sha)
+        if code != 0:
+            self._run_code("revert", "--abort")
+            self._cleanup_branch(rb)
+            return False
+        if self.isolated:
+            self._run("push", "origin", f"{rb}:{self.base}")   # ff origin/<base> forward by the revert
+            self._run("checkout", "--detach", self.base_ref)
+        else:
+            self._run("checkout", self.base)
+            self._run("merge", "--ff-only", rb)
+            self._run("push", "origin", self.base)
+        self._cleanup_branch(rb)
+        return True
+
+    def _cleanup_branch(self, branch: str) -> None:
+        self._run_code("branch", "-D", branch)
+
     # -- trial merge (keep base untouched until the final, validated merge) --- #
     def trial_merge(self, feature: str, temp: str, message: str) -> bool:
         """Create a throwaway `temp` branch from base and merge `feature` into IT
