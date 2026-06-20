@@ -293,6 +293,31 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     }
 
 
+def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = 150) -> bool:
+    """True when a run is genuinely live RIGHT NOW even though the cockpit didn't start it — e.g. a build
+    kicked off by the Needs-you answer box, /unblock, or autopilot in another process. Heuristic: the
+    newest run for this project has NO terminal outcome AND the audit shows activity within the last
+    `within_s` seconds. Time-bounded so a crashed/interrupted attempt stops reading as live."""
+    ts = _scope(tasks, app)
+    if not ts or ts[0].get("outcome"):     # no runs, or the newest one already finished
+        return False
+    try:
+        for line in reversed(D.audit_lines(cfg.audit_path)):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            dt = D._parse_ts(ev.get("ts", ""))
+            if dt:
+                return (datetime.now().timestamp() - dt.timestamp()) < within_s
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def _fmt_dur(secs: float) -> str:
     secs = int(max(0, secs))
     if secs < 3600:
@@ -506,18 +531,22 @@ def _sync_html(cfg) -> str:
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
     ap_on = bool((state.get("autopilot") or {}).get("on"))
-    active = bool(state.get("active")) or ap_on
+    tasks = D.load_tasks(cfg.audit_path)
+    # A run is live if the cockpit started it, autopilot is on, OR there's fresh audit activity with no
+    # terminal outcome yet — the last case covers builds started by the answer box / /unblock / another
+    # process, which otherwise (wrongly) render as "last run · interrupted".
+    inflight = (not state.get("active") and not ap_on) and _run_in_flight(cfg, tasks, app)
+    active = bool(state.get("active")) or ap_on or inflight
     dry = state.get("dry_run")
     mode = None
     if active:
-        mode = "live" if (ap_on or dry is False) else ("dry" if dry is True else None)
+        mode = "live" if (ap_on or dry is False or inflight) else ("dry" if dry is True else None)
     # Elapsed on the live run; Stop only for a manual run (Autopilot stops from the header).
     elapsed = None
     rs = state.get("run_started")
     if active and rs:
         elapsed = _fmt_dur(datetime.now().timestamp() - rs)
     manual = bool(state.get("active")) and not ap_on
-    tasks = D.load_tasks(cfg.audit_path)
     run_obj = active_run(cfg, tasks, app, active)
     k = _kpi_html(kpis(cfg, tasks, app))
     run = _run_html(run_obj, mode, elapsed, manual)
@@ -542,7 +571,8 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         f'<div class=col-main>'
         f'<section class=panel><div class=ph>Active run</div><div class=run>{run}</div></section>'
         f'{log_panel}'
-        f'<section class=panel><div class=ph>Activity</div><div class=feed>{fd}</div></section>'
+        f'<details class="panel collapse" id=actpanel open><summary class=ph>Activity</summary>'
+        f'<div class=feed>{fd}</div></details>'
         '</div>'
         f'<div class=col-side>'
         f'<section class="panel needspanel"><div class=ph>Needs you{ncount}</div>'
@@ -805,8 +835,16 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .fbody{font-size:13px;min-width:0}.fmeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:3px}
 /* live log */
 .logbox{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#b9c2cf;background:#070a0e;
-margin:0;padding:13px 16px;max-height:170px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
+white-space:pre-wrap;word-break:break-word}
 .logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
+details.collapse{padding:0}
+details.collapse>summary{cursor:pointer;list-style:none;user-select:none}
+details.collapse>summary::-webkit-details-marker{display:none}
+details.collapse>summary::after{content:"\\25BE";float:right;color:var(--faint);font-size:11px;font-weight:400;transition:transform .15s;margin-top:1px}
+details.collapse[open]>summary::after{transform:rotate(180deg)}
+details.collapse>summary:hover::after{color:var(--ink)}
+details.collapse:not([open])>summary{opacity:.82}
 .logempty{padding:16px;color:var(--faint);font-size:12.5px}
 .lv{margin-left:auto;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.03em;
 padding:3px 9px;border-radius:6px;text-transform:none}
@@ -869,11 +907,23 @@ var APP="{{APP}}";
 function proj(v){APP=v;location.search="?app="+encodeURIComponent(v);}
 document.addEventListener("click",function(e){
   document.querySelectorAll("details[open]").forEach(function(d){
-    if(!d.contains(e.target)) d.removeAttribute("open");
+    if(!d.classList.contains("collapse") && !d.contains(e.target)) d.removeAttribute("open");
   });
 });
+// Collapsible Activity panel + resizable terminal live INSIDE #board, which the SSE feed re-renders
+// every frame — so persist their state and re-apply it after each refresh (otherwise it resets).
+function saveUi(){try{
+  var a=document.getElementById("actpanel");if(a)localStorage.setItem("ui.act",a.open?"1":"0");
+  var lb=document.getElementById("logbox");if(lb&&lb.style.height)localStorage.setItem("ui.logh",lb.style.height);
+}catch(e){}}
+function applyUi(){try{
+  var a=document.getElementById("actpanel");
+  if(a){var v=localStorage.getItem("ui.act");if(v==="0")a.removeAttribute("open");else if(v==="1")a.setAttribute("open","");a.addEventListener("toggle",saveUi);}
+  var lb=document.getElementById("logbox");
+  if(lb){var h=localStorage.getItem("ui.logh");if(h)lb.style.height=h;if(window.ResizeObserver)new ResizeObserver(saveUi).observe(lb);}
+}catch(e){}}
 function scrollLog(){var lb=document.getElementById("logbox");if(lb)lb.scrollTop=lb.scrollHeight;}
-function applyBoard(html){var b=document.getElementById("board");if(b){b.innerHTML=html;scrollLog();}}
+function applyBoard(html){saveUi();var b=document.getElementById("board");if(b){b.innerHTML=html;scrollLog();applyUi();}}
 async function tick(){
   try{
     var r=await fetch("/api/board?app="+encodeURIComponent(APP),{cache:"no-store"});
@@ -893,6 +943,7 @@ function startStream(){
     _es.onerror=function(){setDot("off");if(_es){_es.close();_es=null;}fallback();setTimeout(startStream,4000);};
   }catch(e){setDot("off");fallback();}
 }
+applyUi();
 scrollLog();
 startStream();
 </script>

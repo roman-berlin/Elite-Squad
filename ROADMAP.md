@@ -7,6 +7,13 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Live phase bar + bigger terminal + collapsible Activity** (2026-06-21) — three cockpit fixes. (1) A
+  build started by the answer box / `/unblock` / autopilot now lights the **ACTIVE RUN phase bar**
+  (Build → Gate → Review → Security → Land) instead of showing "last run · interrupted" while the builder
+  is clearly working — `_run_in_flight` infers a live run from fresh audit activity with no terminal
+  outcome (time-bounded so a crash stops reading as live). (2) The **LIVE FEED terminal** is taller
+  (380px) and drag-resizable. (3) The **Activity** panel is collapsible with a caret. Collapse + height
+  persist in localStorage and survive the SSE re-render. **12 tests; suite 50 harnesses / 701 checks.**
 - **Needs-you: answer a parked decision from the cockpit** (2026-06-21) — a parked "awaiting decision"
   ticket (e.g. AUTO-14) could only be "Discuss with the General" (chat) or Dismiss — no way to ship an
   actual answer. Added `/api/answer` + a **Ship-answer** box on every Needs-you card: it resolves the
