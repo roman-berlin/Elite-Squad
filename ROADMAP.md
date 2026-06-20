@@ -3,9 +3,55 @@
 The durable plan. The live task list in Cowork mirrors this, but this file is the source of
 truth (version-controlled, reviewable on GitHub). Update it as we ship.
 
-Last updated: 2026-06-19.
+Last updated: 2026-06-20.
 
 ## Shipped
+
+- **Officers never stall remotely — bypassPermissions + own-token Jira** (2026-06-20) — every
+  read-only officer (the General's chat, the whole council, stand-up, ship-review, group room, plus the
+  adjutant / drillmaster / reviewer / squad propose+plan passes — **12 in all**) now runs
+  `permission_mode="bypassPermissions"` instead of `default`. On the headless VPS a `default` officer
+  **dead-stopped** waiting for a tool-approval prompt no human could answer (the "approve Atlassian in
+  Claude" wall over Telegram). Writes stay disallowed, so bypass just means "read without stalling."
+  The General also answers ticket questions ("is AUTO-14 ok?") by pulling the ticket through the unit's
+  **own** Jira adapter/token and injecting it inline — never reaching for an ambient Atlassian MCP.
+  Tests **20/20**; full sweep 278.
+
+- **Needs-you — expandable problem detail + pre-filled General chat** (2026-06-20) — each "runs that
+  need you" card now **expands** (native disclosure arrow) to the full story: what halted, the
+  Builder's summary, the Reviewer's verdict, and the specific findings. **"Discuss with the General"**
+  pre-loads a one-line brief of that problem into the chat composer, so you send (or tweak) instead of
+  retyping. One source of truth (`dashboard.needs_detail_html` + `needs_chat_summary`). Tests **20/20**.
+
+- **Cockpit project switcher + Recent projects** (2026-06-20) — a VS-Code-style **Recent** list at the
+  top of the header switcher, plus **nearby-repo discovery** (scans the parents of configured repos +
+  `$GENERAL_PROJECTS_DIR` / `~/Projects`) so you can see what else is there to onboard. Tests **10/10**.
+
+- **Cockpit "Ship → MAIN" button** (2026-06-20) — promote the **current app's** DEV→MAIN to production
+  from the War Room (Mac-only, ff-only, confirm-gated) — the app-level sibling of the unit's own
+  Deploy→main. Tests **9/9**.
+
+- **Server→Mac living-log bridge** — the Mac pulls the server's runtime `UNIT.live.md` over SSH so the
+  Mac cockpit reflects what the 24/7 server has been doing (gated on `GENERAL_SERVER_SSH`, skipped on
+  the read-only server). Tests **7/7**.
+
+- **Unit Memory split — doctrine vs runtime log** — `memory/UNIT.md` (tracked doctrine) vs
+  `memory/UNIT.live.md` (gitignored, server-canonical living log), so the server's `git reset --hard`
+  self-update can't clobber the officers' running notes. Tests **9/9**.
+
+- **Multi-Jira develop loop** — per-app Jira credentials (`email_env` / `token_env` per backlog) so the
+  unit develops tickets across several Jira connections/projects, not just one. Tests **6/6**.
+
+- **Product Manager officer (S-5)** — when a build deliberately halts on a product call, the PM
+  **DECIDES** if it's within mandate (the ticket continues with the decision baked in) or **ESCALATES**
+  to you with a proposed solution (parks + comments). Can recruit its own soldiers. Tests **11/11 + 8/8**.
+
+- **Worktree lock** — a per-app file lock (`fcntl.flock`) stops two runs of the same app from sharing
+  one worktree and clobbering each other (the AUTO-14 data-loss root cause); a busy app is **skipped,
+  not corrupted**. Tests **6/6**.
+
+- **Default run = live; dry-run opt-in** — the cockpit/CLI default is now a real build+merge; dry-run
+  is an explicit opt-in, and stale "dry" state is cleared at run-end so the UI never lies. Tests **7/7**.
 
 - **Recon squads — officers recruit soldiers autonomously** — the read-only patrol officers (Scout,
   Provost Marshal, Quartermaster) can now do what the Field Engineer already did: when a surface is
@@ -200,8 +246,59 @@ Last updated: 2026-06-19.
 
 ## Next — in priority order
 
-_(Clear. The General self-hosts 24/7 on the Oracle VPS now — surface the next item from a daily
-council or a patrol finding.)_
+The unit is mature: it self-hosts 24/7, finds → files → fixes, self-improves, and self-staffs. The
+next phase is **hardening the autonomy we now have** before widening it. Priority order below.
+
+### P0 — harden what we just loosened (safety mechanisms)
+
+1. **Structural tool-call guardrail (a hard denylist).** We just put all officers on
+   `bypassPermissions`, so the prompt is no longer the safety boundary. Install the *missing* one: a
+   guard at the tool-call boundary that BLOCKS, regardless of what an officer decides, any write to
+   `.env*` / secrets / CI config, any touch of `main`/`MAIN`, and destructive shell (`rm -rf`,
+   `git push --force`, `DROP`/`TRUNCATE`). Enforced in code, not by instruction. This is the
+   complement to removing the permission popup — without it, bypass is trust-only.
+2. **Commit the unit's OWN test suite + CI.** Today the orchestrator that builds and merges Roman's
+   code is itself verified only by ~30 ephemeral scratch harnesses (≈298 checks) that live outside the
+   repo and vanish each session. Promote them into `tests/` (pytest) and a GitHub Actions workflow on
+   every push to `dev`. The guard must be guarded — and a red suite should block the server's
+   self-update from `main`.
+3. **Cost governor v2 — rolling budget + auto-pause + cockpit panel.** A 24/7 Opus loop's real failure
+   mode is runaway spend. Extend the hourly governor to a daily/weekly ceiling that pauses Autopilot
+   when hit, surface burn in a cockpit panel (we already log `usage.jsonl`), and ping Telegram at 80%.
+4. **Post-merge DEV health gate + auto-revert.** A change can pass its own gate yet break DEV on
+   integration. After each land, run DEV's build/test; if it goes red, auto-revert that merge and
+   re-park the ticket. Closes the "keep DEV green" promise structurally (the after-merge Scout covers
+   runtime/UX; this covers build/test).
+
+### P1 — capability & throughput
+
+5. **Ticket-readiness gate (PM, pre-build).** Formalize the unit's own corridor insight: the PM hands
+   an under-specified ticket BACK (no clear acceptance criteria / exit conditions) *before* the Builder
+   guesses mid-build. Fewer halts, less wasted Opus, cleaner scope.
+6. **Parallel multi-app builds.** Worktree locks already isolate per app; let independent apps build
+   concurrently (bounded by the cost governor) for 2–3× throughput across Roman's products.
+7. **Failure forensics + auto-post-mortem.** Categorize "errored" into a taxonomy
+   (precondition / build-cap / merge-conflict / gate-fail / infra), and have the General auto-write a
+   short post-mortem when the same ticket fails N times — it already holds the data (now surfaced in
+   the Needs-you expander).
+8. **Memory consolidation + learning from rejections.** A periodic dedup/prune pass over the Lessons
+   log, and an auto-drill proposal when the Reviewer rejects the same pattern repeatedly — compounding
+   learning from the unit's own PRs.
+
+### P2 — reach & polish
+
+9. **Cockpit Jira-connection UI.** The multi-Jira *backend* exists (`email_env`/`token_env` per app);
+   add the cockpit panel to add/switch connections by site URL + token. (Last cockpit-polish item.)
+10. **One-command new-product onboarding.** Scaffold config + memory + Jira for a new product
+    (SignalDesk, the MQL5 EAs) so the unit serves more than Automatixy.
+11. **Runnable discovered repos.** Make "Found nearby" repos click-to-onboard (scaffold a config entry)
+    instead of read-only hints.
+
+### Known debt (surface, don't forget)
+
+- Two scratch harnesses are stale (`patrol_test`, `wr_test`) — a fake-signature drift and a missing
+  `sys.path`; fold the fixes in when #2 promotes the suite into the repo.
+- Full Jira browser-OAuth is deferred (token env vars work today).
 
 ## Notes
 
