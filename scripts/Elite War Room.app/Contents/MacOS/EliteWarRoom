@@ -21,6 +21,22 @@ cd "$REPO" 2>/dev/null || { osascript -e 'display alert "Elite War Room" message
 PIDS=$(lsof -ti tcp:$PORT 2>/dev/null)
 [[ -n "$PIDS" ]] && { kill $PIDS 2>/dev/null; sleep 1; PIDS=$(lsof -ti tcp:$PORT 2>/dev/null); [[ -n "$PIDS" ]] && kill -9 $PIDS 2>/dev/null; }
 
+# Sweep up any leftover War Room *terminal* windows from the .command launcher — the server was just
+# stopped, so they're idle and close without a prompt. The app runs the cockpit in the background (no
+# terminal of its own), so it just clears the strays. Matched by the cockpit URL/banner in scrollback.
+/usr/bin/osascript >/dev/null 2>&1 <<'OSA'
+tell application "Terminal"
+  repeat with w in windows
+    try
+      set htxt to (history of selected tab of w)
+      if (htxt contains "localhost:8787") or (htxt contains "War Room") or (htxt contains "general serve") then
+        close w saving no
+      end if
+    end try
+  end repeat
+end tell
+OSA
+
 # Start the cockpit in the background, logging everything
 ./general serve >> "$LOG" 2>&1 &
 SERVE_PID=$!

@@ -27,11 +27,12 @@ if [[ -n "$PIDS" ]]; then
   [[ -n "$PIDS" ]] && kill -9 $PIDS 2>/dev/null
 fi
 
-# 1b) Close the OLD cockpit's Terminal window (its server was just stopped above) and TAG this
-#     window, so each launch leaves exactly one cockpit window — this one. Other Terminal windows
-#     are untouched. (First run prompts once: System Settings > Privacy & Security > Automation.)
+# 1b) Close EVERY other War Room terminal window. Their server was just stopped above, so they're idle
+#     ([Process completed]) — closing them raises no "terminate process?" prompt. Matched by the cockpit
+#     URL/banner in each window's scrollback (NOT a tag), so it catches the whole pile — even windows
+#     opened before this existed. THIS window is left alone. (First run asks once: System Settings >
+#     Privacy & Security > Automation > Terminal.)
 /usr/bin/osascript >/dev/null 2>&1 <<'OSA'
-set theTag to "Elite Unit · War Room"
 tell application "Terminal"
   try
     set myID to id of front window
@@ -39,13 +40,15 @@ tell application "Terminal"
     return
   end try
   repeat with w in windows
-    try
-      if (custom title of w) is theTag and (id of w) is not myID then close w saving no
-    end try
+    if (id of w) is not myID then
+      try
+        set htxt to (history of selected tab of w)
+        if (htxt contains "localhost:8787") or (htxt contains "War Room") or (htxt contains "general serve") then
+          close w saving no
+        end if
+      end try
+    end if
   end repeat
-  try
-    set custom title of window id myID to theTag
-  end try
 end tell
 OSA
 

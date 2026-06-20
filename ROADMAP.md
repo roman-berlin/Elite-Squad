@@ -7,6 +7,19 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Ship → production opens a review page (commits + their tickets)** (2026-06-20) — the
+  "Ship <app> → production" button no longer ships on a single confirm click. It opens a review page
+  listing every commit DEV is ahead of MAIN, **grouped by ticket** (the AUTO-key parsed from each commit
+  subject, e.g. AUTO-4 → its commits), with a "tickets going live" summary and the final
+  **Ship to production** button there. So you see exactly what's about to deploy before you commit to it.
+  `sync.app_promote_commits` + a `/ship-preview` route. Tests **15/15**.
+
+- **Launcher: close the whole War Room terminal pile** (2026-06-20) — the earlier "close the old window"
+  fix was tag-based, so it couldn't recognise windows opened before the fix. Now all three launchers
+  (`War Room.command`, repo `War-Room.command`, **and the `Elite War Room.app`**) close every other
+  cockpit terminal by matching the cockpit URL/banner in each window's scrollback — catching the whole
+  pile, idle (no "terminate?" prompt) because the server was just stopped. One relaunch clears them all.
+
 - **Living roster doc + hierarchy chart** (2026-06-20) — a once-a-day, info-only `ROSTER.md`: the
   chain-of-command (Mermaid chart), every officer + role + **duty** + the model it runs on, and the
   soldiers each squad fields — all read straight from the code, so it can never drift from reality. A

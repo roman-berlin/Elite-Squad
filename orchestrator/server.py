@@ -199,16 +199,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             _sa = _sync.app_promote_status(cfg.app(app0))
             _sn = _sa.get("ahead", 0)
             if _sn:
-                _sc = (f"Ship the {html.escape(app0)} APP to PRODUCTION — {html.escape(app0)} "
-                       f"{html.escape(_sa['base'])} \\u2192 {html.escape(_sa['prot'])}. This deploys your "
-                       f"live product. Continue?")
+                # The button now OPENS A REVIEW PAGE (commits + their tickets) instead of shipping on
+                # the spot — you see exactly what's going to production, then confirm there.
                 ship_html = (
-                    '<form method=post action=/api/ship-main class=tbf '
-                    f'''onsubmit="return confirm('{_sc}')">'''
-                    f'<input type=hidden name=app value="{html.escape(app0)}">'
-                    f'<button class="btn ship" title="Ship the {html.escape(app0)} app to production '
-                    f'({html.escape(_sa["prot"])})" {busy("shipping")}>&#128640; Ship {html.escape(app0)} '
-                    f'&rarr; production<span class=cbadge>{_sn}</span></button></form>')
+                    f'<a class="btn ship" href="/ship-preview?app={html.escape(app0)}" '
+                    f'title="Review the {html.escape(app0)} commits + tickets, then ship to production">'
+                    f'&#128640; Ship {html.escape(app0)} &rarr; production<span class=cbadge>{_sn}</span></a>')
     except Exception:  # noqa: BLE001
         ship_html = ""
 
@@ -1126,6 +1122,75 @@ def create_app(cfg: Config):
     def roster_doc_page():
         from . import roster as _roster
         return _wrap("Unit roster", _roster.html_view(cfg, _roster.latest_status(cfg)))
+
+    @app.get("/ship-preview")
+    def ship_preview_page():
+        from . import sync as _sync
+        appq = (request.args.get("app") or "").strip() or app0
+        style = (
+            "<style>"
+            ".shp{max-width:940px}.shhead{background:#171226;border:1px solid #2c2148;border-radius:12px;"
+            "padding:16px 18px;margin:4px 0 18px}.shhead h2{margin:0 0 6px;color:#e9ecf1;font-size:20px}"
+            ".shhead .meta{color:#b9a6e6;font-size:13px;font-family:ui-monospace,Menlo,monospace}"
+            ".shtix{margin:14px 0 6px;color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
+            ".shcard{background:#12161f;border:1px solid #232936;border-radius:11px;padding:12px 15px;margin:9px 0}"
+            ".shcard .tk{color:#e9ecf1;font-weight:700;font-size:14px}.shcard .tk a{color:#7aa2ff;text-decoration:none}"
+            ".shcard .n{color:#6b7480;font-size:12px;margin-left:6px}"
+            ".shcard ul{margin:8px 0 0;padding-left:0;list-style:none}"
+            ".shcard li{color:#c3cad6;font-size:13px;padding:3px 0;display:flex;gap:9px}"
+            ".shcard li .sha{color:#7aa2ff;font-family:ui-monospace,Menlo,monospace;white-space:nowrap}"
+            ".shbar{display:flex;gap:10px;align-items:center;margin:20px 0 8px}"
+            ".shgo{background:#7c3aed;border:0;color:#fff;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer;font:inherit}"
+            ".shgo:hover{background:#6d28d9}.shcancel{color:#8a929f;text-decoration:none;padding:11px 6px}"
+            ".shempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
+        if not appq:
+            return _wrap("Ship to production", style + "<div class=shempty>No app selected.</div>")
+        try:
+            app_cfg = cfg.app(appq)
+            st = _sync.app_promote_status(app_cfg)
+            commits = _sync.app_promote_commits(app_cfg)
+        except Exception as e:  # noqa: BLE001
+            return _wrap("Ship to production",
+                         f"<p>Couldn't read {html.escape(appq)}: {html.escape(str(e)[:200])}</p>")
+        base, prot, ahead = st.get("base", "DEV"), st.get("prot", "MAIN"), st.get("ahead", 0)
+        back = f'<a class=shcancel href="/?app={html.escape(appq)}">&larr; back to cockpit</a>'
+        if not ahead:
+            return _wrap("Ship to production", style + f'<div class=shp><div class=shempty>&#10003; '
+                         f'{html.escape(appq)} — {html.escape(base)} and {html.escape(prot)} are in sync. '
+                         f'Nothing to ship.</div>{back}</div>')
+        # group commits by ticket, preserving first-seen order
+        groups: "dict[str, list]" = {}
+        for c in commits:
+            groups.setdefault(c.get("ticket") or "—", []).append(c)
+        tickets = [t for t in groups if t != "—"]
+        jira_base = ""
+        try:
+            jira_base = str((app_cfg.backlog or {}).get("site", "")).rstrip("/")
+        except Exception:  # noqa: BLE001
+            jira_base = ""
+        cards = []
+        for tk in tickets + (["—"] if "—" in groups else []):
+            cs = groups[tk]
+            label = (f'<a href="{jira_base}/browse/{tk}" target=_blank>{tk}</a>' if (tk != "—" and jira_base)
+                     else (tk if tk != "—" else "No ticket"))
+            lis = "".join(f'<li><span class=sha>{html.escape(c["sha"])}</span>'
+                          f'<span>{html.escape(c["subject"])}</span></li>' for c in cs)
+            cards.append(f'<div class=shcard><div class=tk>{label}<span class=n>· {len(cs)} commit'
+                         f'{"s" if len(cs) != 1 else ""}</span></div><ul>{lis}</ul></div>')
+        tix_summary = ", ".join(tickets) if tickets else "none tagged"
+        body = (style + '<div class=shp>'
+                f'<div class=shhead><h2>&#128640; Ship {html.escape(appq)} &rarr; production</h2>'
+                f'<div class=meta>{ahead} commit{"s" if ahead != 1 else ""} · {len(tickets)} ticket'
+                f'{"s" if len(tickets) != 1 else ""} · {html.escape(base)} &rarr; {html.escape(prot)}</div></div>'
+                f'<div class=shtix>Tickets going live: {html.escape(tix_summary)}</div>'
+                + "".join(cards)
+                + '<form method=post action=/api/ship-main class=shbar '
+                + 'onsubmit="return confirm(\'Ship ' + html.escape(appq)
+                + ' to PRODUCTION now? This deploys your live product.\')">'
+                + f'<input type=hidden name=app value="{html.escape(appq)}">'
+                + f'<button class=shgo>&#128640; Ship {html.escape(appq)} to production</button>'
+                + back + '</form></div>')
+        return _wrap("Ship to production", body)
 
     @app.get("/chat")
     def chat_page():

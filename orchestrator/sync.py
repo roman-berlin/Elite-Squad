@@ -30,6 +30,7 @@ machine hostname. Set it explicitly on both machines for clean, stable file name
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -304,6 +305,30 @@ def app_promote_status(app) -> dict[str, Any]:
         out["ahead"] = int((r.stdout or "0").strip() or "0") if r.returncode == 0 else 0
     except (subprocess.SubprocessError, OSError, ValueError) as e:
         out["error"] = str(e)[:200]
+    return out
+
+
+_TICKET_KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")
+
+
+def app_promote_commits(app, limit: int = 300) -> list[dict[str, str]]:
+    """The commits on the app's DEV not yet on MAIN — exactly what 'Ship' will deploy — newest first:
+    ``[{sha, subject, ticket}]``. ``ticket`` is the first AUTO-style key in the subject, or ''."""
+    repo = Path(app.repo_path).expanduser()
+    base, prot = app.base_branch, app.protected_branch
+    out: list[dict[str, str]] = []
+    try:
+        r = _git(repo, "log", f"{prot}..{base}", "--pretty=format:%h%x1f%s", f"-{int(limit)}")
+        if r.returncode != 0:
+            return out
+        for line in (r.stdout or "").splitlines():
+            if "\x1f" not in line:
+                continue
+            sha, subj = line.split("\x1f", 1)
+            m = _TICKET_KEY.search(subj)
+            out.append({"sha": sha.strip(), "subject": subj.strip(), "ticket": m.group(0) if m else ""})
+    except (subprocess.SubprocessError, OSError):
+        return out
     return out
 
 
