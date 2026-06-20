@@ -282,7 +282,11 @@ async def _main(argv: list[str]) -> int:
         peers = ", ".join(r["hosts"]) or "(none yet)"
         pushed = "read-only" if r["pushed"] is None else r["pushed"]
         line = f"sync[{r['host']}] pulled={r['pulled']} pushed={pushed} peers={peers}"
-        print(line + (f"  error: {r['error']}" if r["error"] else ""))
+        ll = sync.pull_server_state(cfg)   # Mac-side: pull the server's living log over SSH
+        if ll["attempted"]:
+            line += f"  livelog={'ok' if ll['pulled'] else 'fail'}"
+        print(line + (f"  error: {r['error']}" if r["error"] else "")
+              + (f"  livelog-error: {ll['error']}" if ll.get("error") else ""))
         return 0 if not r["error"] else 1
 
     if args.command == "pm":

@@ -197,6 +197,35 @@ def git_sync(cfg: Config) -> dict[str, Any]:
     return out
 
 
+def pull_server_state(cfg: Config) -> dict[str, Any]:
+    """Mac-side server→Mac bridge over SSH: copy the server's officer-canonical living log down so the
+    Mac's builds read the latest server-learned lessons. One-directional and read-only on the server —
+    we just `scp` a file out, so the server never needs git write access.
+
+    No-op unless ``GENERAL_SERVER_SSH`` (e.g. ``ubuntu@1.2.3.4``) is set and we're not the server itself
+    (``GENERAL_SYNC_PULL_ONLY``). ``GENERAL_SERVER_REPO`` overrides the remote repo dir (default
+    ``General``). Best-effort: any SSH hiccup is reported, never fatal."""
+    out: dict[str, Any] = {"attempted": False, "pulled": False, "error": None}
+    host = os.environ.get("GENERAL_SERVER_SSH", "").strip()
+    if not host or pull_only():
+        return out
+    out["attempted"] = True
+    remote_repo = os.environ.get("GENERAL_SERVER_REPO", "General").strip() or "General"
+    src = f"{host}:{remote_repo}/memory/UNIT.live.md"
+    dst = _repo_root(cfg) / "memory" / "UNIT.live.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", src, str(dst)],
+            capture_output=True, text=True, timeout=60)
+        out["pulled"] = r.returncode == 0
+        if r.returncode != 0:
+            out["error"] = (r.stderr or r.stdout or "scp failed").strip()[:200]
+    except (subprocess.SubprocessError, OSError) as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Promote DEV -> main from the cockpit (the "Deploy" button).
 # ---------------------------------------------------------------------------

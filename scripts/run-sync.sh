@@ -8,6 +8,7 @@
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 [ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile" 2>/dev/null
 export GENERAL_HOST_ID="mac"     # clean, stable name for shared/mac.jsonl (the server sets "server")
+export GENERAL_SERVER_SSH="ubuntu@151.145.91.229"   # pull the server's living log down over SSH (server->Mac)
 
 cd "$HOME/Projects/General" || exit 1
 mkdir -p council
