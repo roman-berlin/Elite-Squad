@@ -220,6 +220,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
     except Exception:  # noqa: BLE001
         fr_mem = ""
+    try:
+        from . import usage as _usg
+        _u = _usg.today_tokens(cfg)
+        fr_usage = f" · {_u // 1000}k today" if _u >= 1000 else (f" · {_u} today" if _u else "")
+    except Exception:  # noqa: BLE001
+        fr_usage = ""
 
     return f"""
 <style>
@@ -298,6 +304,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       <a href="/tasks">&#128203; Task log{fr_tasks}</a>
       <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
       <a href="/memory">&#128221; Unit memory{fr_mem}</a>
+      <a href="/usage">&#128202; Token usage{fr_usage}</a>
       <a href="/drill">&#127894; Last drill{fr_drill}</a>
     </div>
   </details>
@@ -408,6 +415,8 @@ def create_app(cfg: Config):
     from flask import Flask, redirect, request
     app = Flask(__name__)
     audit = AuditLog(cfg.audit_path)
+    from . import usage
+    usage.configure(cfg.audit_path)   # the cockpit process meters token burn too
 
     @app.get("/")
     def index():
@@ -1043,6 +1052,60 @@ def create_app(cfg: Config):
                     "<button class='nbtn x'>Dismiss</button></form></div></div>")
             out.append("</div>")
         return _wrap("Needs you", "".join(out))
+
+    @app.get("/usage")
+    def usage_page():
+        from . import usage as _usage
+        w = _usage.windows(cfg)
+        bs = _usage.budget_status(cfg)
+        style = (
+            "<style>"
+            ".ugrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:6px 0 20px}"
+            ".ucard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:15px 17px}"
+            ".ut{color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
+            ".ubig{color:#e9ecf1;font-size:30px;font-weight:750;margin:7px 0 2px}.ubig .us{font-size:13px;color:#6b7480;font-weight:500}"
+            ".umeta{color:#6b7480;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+            ".umodels{width:100%;border-collapse:collapse;margin-top:11px;font-size:12px}"
+            ".umodels th{color:#6b7480;text-align:left;font-weight:600;padding:3px 6px;border-bottom:1px solid #232936}"
+            ".umodels td{color:#c3cad6;padding:3px 6px;border-bottom:1px solid #1a1f2a}"
+            ".umodels .r{text-align:right;font-family:ui-monospace,Menlo,monospace}"
+            ".budget{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
+            ".budget .bl{color:#e9ecf1;font-size:13px;margin-bottom:9px}"
+            ".bar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+            ".bar .fill{display:block;height:100%}.bar .fill.ok{background:#3b6cff}.bar .fill.warn{background:#d99a2b}.bar .fill.over{background:#f0676b}"
+            ".bnote{color:#8a929f;font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:#8a929f}"
+            "</style>")
+
+        def card(title: str, d: dict) -> str:
+            rows = "".join(
+                f"<tr><td>{html.escape(m)}</td><td class=r>{v['calls']:,}</td>"
+                f"<td class=r>{v['in']:,}</td><td class=r>{v['out']:,}</td></tr>"
+                for m, v in sorted(d["by_model"].items(), key=lambda kv: -(kv[1]['in'] + kv[1]['out'])))
+            tbl = (f"<table class=umodels><tr><th>model</th><th class=r>calls</th><th class=r>in</th>"
+                   f"<th class=r>out</th></tr>{rows}</table>") if rows else ""
+            return (f"<div class=ucard><div class=ut>{title}</div>"
+                    f"<div class=ubig>{d['total']:,}<span class=us> tokens</span></div>"
+                    f"<div class=umeta>{d['calls']:,} calls · {d['input']:,} in · {d['output']:,} out</div>{tbl}</div>")
+
+        if bs["on"]:
+            pct = min(100, int(bs["pct"] * 100))
+            barcls = "over" if bs["over"] else ("warn" if bs["alert"] else "ok")
+            note = ("⛔ Autopilot pauses new tickets until midnight." if bs["over"]
+                    else (f"⚠️ Past the {int(float(getattr(cfg, 'budget_alert_pct', 0.8)) * 100)}% alert line." if bs["alert"]
+                          else "On track."))
+            budget = (f"<div class=budget><div class=bl>Daily budget — <b>{bs['used']:,}</b> / "
+                      f"{bs['cap']:,} tokens ({pct}%)</div>"
+                      f"<div class=bar><span class='fill {barcls}' style='width:{pct}%'></span></div>"
+                      f"<div class=bnote>{note}</div></div>")
+        else:
+            budget = ("<div class=budget><div class=bl>No daily budget set — "
+                      "<span class=mono>daily_token_budget: 0</span>. Set it in config.yaml so Autopilot "
+                      "auto-pauses runaway spend.</div></div>")
+
+        body = (style + budget + "<div class=ugrid>"
+                + card("Today", w["today"]) + card("Last 7 days", w["week"])
+                + card("Last 30 days", w["month"]) + "</div>")
+        return _wrap("Token usage", body)
 
     @app.get("/chat")
     def chat_page():

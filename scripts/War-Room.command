@@ -27,6 +27,28 @@ if [[ -n "$PIDS" ]]; then
   [[ -n "$PIDS" ]] && kill -9 $PIDS 2>/dev/null
 fi
 
+# 1b) Close the OLD cockpit's Terminal window (its server was just stopped above) and TAG this
+#     window, so each launch leaves exactly one cockpit window — this one. Other Terminal windows
+#     are untouched. (First run prompts once: System Settings > Privacy & Security > Automation.)
+/usr/bin/osascript >/dev/null 2>&1 <<'OSA'
+set theTag to "Elite Unit · War Room"
+tell application "Terminal"
+  try
+    set myID to id of front window
+  on error
+    return
+  end try
+  repeat with w in windows
+    try
+      if (custom title of w) is theTag and (id of w) is not myID then close w saving no
+    end try
+  end repeat
+  try
+    set custom title of window id myID to theTag
+  end try
+end tell
+OSA
+
 # 2) Quick pre-flight (health is also shown inside the dashboard)
 echo
 ./general doctor

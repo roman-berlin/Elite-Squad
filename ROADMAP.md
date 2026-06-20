@@ -7,6 +7,20 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Cost governor v2 + token-usage window** (2026-06-20) — Roman is on the **Max** plan, so the budget
+  that matters is token throughput. Every agent call (officer / builder / soldier / council / chat) now
+  meters its input+output tokens from a single choke-point (`agent.run_agent` → `usage.py` ledger). The
+  cockpit gets a **Token usage** page — *today / last 7d / last 30d*, totals + a per-model breakdown +
+  a daily-budget bar. A configurable `daily_token_budget` makes **Autopilot pause itself** when the
+  day's burn hits the ceiling (Telegram alert at 80%, pause at 100%, auto-resume next day). Header shows
+  today's burn at a glance. Tests **20/20**; full sweep 318.
+
+- **War Room launcher — one click = clean refresh** (2026-06-20) — double-clicking *War Room.command*
+  now (1) stops the old cockpit server, (2) **closes the old cockpit Terminal window** (tags its own
+  window so each launch leaves exactly one), and (3) closes the stale browser tab + opens one fresh tab.
+  No more piling up dead terminals and tabs. (Desktop launcher + repo `scripts/War-Room.command` kept
+  in sync; first run asks once for Automation permission.)
+
 - **Officers never stall remotely — bypassPermissions + own-token Jira** (2026-06-20) — every
   read-only officer (the General's chat, the whole council, stand-up, ship-review, group room, plus the
   adjutant / drillmaster / reviewer / squad propose+plan passes — **12 in all**) now runs
@@ -262,9 +276,8 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
    repo and vanish each session. Promote them into `tests/` (pytest) and a GitHub Actions workflow on
    every push to `dev`. The guard must be guarded — and a red suite should block the server's
    self-update from `main`.
-3. **Cost governor v2 — rolling budget + auto-pause + cockpit panel.** A 24/7 Opus loop's real failure
-   mode is runaway spend. Extend the hourly governor to a daily/weekly ceiling that pauses Autopilot
-   when hit, surface burn in a cockpit panel (we already log `usage.jsonl`), and ping Telegram at 80%.
+3. ~~**Cost governor v2 — rolling budget + auto-pause + cockpit panel.**~~ ✅ **Shipped 2026-06-20**
+   (token ledger + daily ceiling + auto-pause + 80% alert + Token-usage window).
 4. **Post-merge DEV health gate + auto-revert.** A change can pass its own gate yet break DEV on
    integration. After each land, run DEV's build/test; if it goes red, auto-revert that merge and
    re-park the ticket. Closes the "keep DEV green" promise structurally (the after-merge Scout covers

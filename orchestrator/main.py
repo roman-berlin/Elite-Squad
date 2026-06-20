@@ -220,6 +220,9 @@ async def _main(argv: list[str]) -> int:
 
     cfg = Config.load(args.config)
     _apply_overrides(cfg, args)
+    from . import usage
+    usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
+    usage.prune(cfg)
 
     if args.command == "serve":
         from . import server

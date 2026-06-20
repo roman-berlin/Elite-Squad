@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import events, intake, notify
+from . import events, intake, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import Outcome
@@ -93,11 +93,38 @@ async def autopilot(cfg: Config, app_name: str | None = None,
               "continuous, or keep --once for a dry test.", flush=True)
 
     audit.record("autopilot_start", mode=mode, app=app_name, once=once)
+    budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
+    budget_alerted = False
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
                 break
+
+            # Cost governor: never let a runaway loop eat the day's token budget. Pause new tickets
+            # once today's burn hits the ceiling (resumes after midnight / when the ceiling is raised).
+            bs = usage.budget_status(cfg)
+            if bs["over"]:
+                if not budget_paused:
+                    notify.send(f"⛔ Autopilot paused — daily token budget reached "
+                                f"({bs['used']:,}/{bs['cap']:,}). Resumes after midnight, or raise "
+                                f"`daily_token_budget`.")
+                    audit.record("budget_pause", used=bs["used"], cap=bs["cap"])
+                    budget_paused = True
+                print(f"  · token budget reached ({bs['used']:,}/{bs['cap']:,} today) — holding new "
+                      "tickets", flush=True)
+                if once:
+                    break
+                _sleep(max(30, interval), stop_event)
+                continue
+            budget_paused = False
+            if bs["alert"] and not budget_alerted:
+                notify.send(f"⚠️ Token budget {int(bs['pct'] * 100)}% used today "
+                            f"({bs['used']:,}/{bs['cap']:,}).")
+                budget_alerted = True
+            elif not bs["alert"]:
+                budget_alerted = False
+
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
             worklist = intake.from_drain(cfg, app_name, cap + len(blocked) + 5)
             worklist = [(a, t) for (a, t) in worklist if t.id not in blocked][:cap]
