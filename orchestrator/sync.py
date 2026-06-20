@@ -34,6 +34,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -333,9 +334,11 @@ def app_promote_commits(app, limit: int = 300) -> list[dict[str, str]]:
 
 
 def promote_app(app) -> dict[str, Any]:
-    """Ship an app's DEV -> MAIN (production) on the REMOTE **without touching the working tree** —
-    same push-based, fast-forward-only approach as ``promote`` (a dirty tree never blocks a ship).
-    The cockpit Ship button. ``{ok, ahead_before, pushed, error, base, prot, app}``."""
+    """Ship an app's DEV -> MAIN (production): a **real merge** of DEV into MAIN (MAIN keeps its own
+    commits — e.g. earlier PR merges — and DEV's commits are added), then push MAIN. Done in a throwaway
+    git worktree so the user's (often dirty) checkout is never touched, and so it works even when DEV
+    and MAIN have diverged (a fast-forward can't). If MAIN is a protected branch the push is rejected
+    and we say so — ship via a PR. The cockpit Ship button. ``{ok, ahead_before, pushed, error, ...}``."""
     repo = Path(app.repo_path).expanduser()
     base, prot = app.base_branch, app.protected_branch
     out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
@@ -347,18 +350,33 @@ def promote_app(app) -> dict[str, Any]:
     if out["ahead_before"] == 0:
         out["ok"] = True   # already shipped — nothing ahead
         return out
+    wt = tempfile.mkdtemp(prefix="general-ship-")
     try:
-        ps = _git(repo, "push", "origin", f"{base}:{prot}")   # ff-only; tree untouched
+        _git(repo, "fetch", "origin", base, prot, timeout=120)
+        add = _git(repo, "worktree", "add", "--detach", "--force", wt, f"origin/{prot}")
+        if add.returncode != 0:
+            out["error"] = "couldn't stage the merge: " + ((add.stderr or add.stdout) or "").strip()[:150]
+            return out
+        wtp = Path(wt)
+        mg = _git(wtp, "merge", "--no-edit", "-m", f"Ship {base} -> {prot} (production)", f"origin/{base}")
+        if mg.returncode != 0:
+            _git(wtp, "merge", "--abort")
+            out["error"] = f"merging {base} into {prot} hit conflicts — resolve in a terminal or a PR"
+            return out
+        ps = _git(wtp, "push", "origin", f"HEAD:{prot}")
         out["pushed"] = out["ok"] = ps.returncode == 0
         if out["ok"]:
-            _git(repo, "branch", "-f", prot, base)   # advance the local protected ref (it isn't checked out)
+            _git(repo, "branch", "-f", prot, f"origin/{prot}")   # advance local MAIN so the cockpit shows 0 ahead
         else:
             err = ((ps.stderr or ps.stdout) or "").strip()
-            out["error"] = (f"{base} and {prot} have diverged — resolve in a terminal"
-                            if ("non-fast-forward" in err or "rejected" in err)
+            out["error"] = (f"{prot} is a protected branch — ship via a Pull Request instead"
+                            if ("protected" in err.lower() or "denied" in err.lower() or "hook" in err.lower())
                             else f"push to origin/{prot} failed: " + err[:150])
     except subprocess.TimeoutExpired:
-        out["error"] = f"push to {prot} timed out — check your network / credentials"
+        out["error"] = f"merge/push to {prot} timed out — check your network / credentials"
     except (subprocess.SubprocessError, OSError) as e:
         out["error"] = str(e)[:200]
+    finally:
+        _git(repo, "worktree", "remove", "--force", wt)
+        shutil.rmtree(wt, ignore_errors=True)
     return out

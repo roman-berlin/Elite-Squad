@@ -7,6 +7,24 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Ship app→production does a REAL merge of DEV into MAIN** (2026-06-20) — the app Ship button used a
+  fast-forward, which can't ship a repo whose MAIN carries its own commits — and Automatixy's MAIN does
+  (the "Merge pull request #43–47" bookkeeping commits from shipping via PRs). So ff was rejected and
+  nothing shipped. Rewrote `promote_app` to do a **real merge** of DEV into MAIN (MAIN keeps its
+  commits, DEV's are added) in a **throwaway git worktree** — the user's dirty checkout is never
+  touched, and it works even when the branches have diverged — then push and advance the local ref so
+  the cockpit shows 0-ahead. If MAIN is a protected branch the push is rejected with a clear "ship via a
+  PR" message. (The General's "Update unit" stays fast-forward — correct for its pure dev→main.) **11/11**.
+
+- **Fix the stuck "Update unit" / "Ship" buttons — promote on the remote, not via checkout** (2026-06-20)
+  — the cockpit promote used to `git checkout main → merge → push`, which **chokes on a dirty working
+  tree** (the unit constantly writes runtime files like `council/index.jsonl`) and could **hang on
+  HTTPS credentials** — the "still thinking" spinner. Now `promote` (dev→main) and `promote_app`
+  (DEV→MAIN) push the branch straight onto the target **on the remote** (`git push origin dev:main`),
+  fast-forward only, **never touching the working tree**, then advance the local ref. Plus
+  `GIT_TERMINAL_PROMPT=0` so a push without cached creds **fails fast instead of hanging**. Manual
+  equivalent any time: `git push origin dev:main`. Tests **13/13** (incl. a dirty-tree regression).
+
 - **Ship → production opens a review page (commits + their tickets)** (2026-06-20) — the
   "Ship <app> → production" button no longer ships on a single confirm click. It opens a review page
   listing every commit DEV is ahead of MAIN, **grouped by ticket** (the AUTO-key parsed from each commit
