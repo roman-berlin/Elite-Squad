@@ -7,6 +7,15 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Automode — the unit never stops for your approval** (2026-06-20) — opt-in `auto_mode`. Normally
+  when a build hits a product/scope blocker the PM either decides the everyday calls or ESCALATES a
+  critical one and **parks to wait for your approve button**. In automode the PM **must decide** — it
+  makes the best *reversible* call, the unit keeps building, and the decision is logged on the ticket +
+  Telegram for you to review and **reverse** afterward. The safety floors are untouched: everything
+  lands on DEV (never MAIN — only you ship to production), **Sentinel** guards DEV and auto-reverts a
+  bad land, the Provost still blocks CRITICAL security, and the max-iterations / token-budget limits
+  still stop a runaway. Off by default. Tests **14/14**.
+
 - **Cockpit: "Update unit" vs "Ship app" — no more confusing the two repos** (2026-06-20) — the header
   had two `dev→main` buttons for two *different* repos sitting side by side. Now unmistakable: the green
   **⚙ Update unit** promotes **The General's own code** (`~/Projects/General` dev→main → the 24/7 VPS

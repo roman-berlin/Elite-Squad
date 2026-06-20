@@ -76,7 +76,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     audit = AuditLog(cfg.audit_path)
     blocked = load_blocked(cfg)
     cap = max(1, cfg.max_tickets_per_run)
-    mode = "DRY-RUN" if cfg.dry_run else "LIVE"
+    mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
 
     # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
     if notify.configured():

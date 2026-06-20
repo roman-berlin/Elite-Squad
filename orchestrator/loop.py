@@ -323,13 +323,25 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     pm_outcome = await _consult_pm(cfg, ticket, app, audit, report)
                     if pm_outcome is not None and pm_outcome["verdict"] == "DECIDE":
                         from dataclasses import replace
+                        auto = bool(getattr(cfg, "auto_mode", False))
                         ticket = replace(ticket, description=(ticket.description or "")
                             + "\n\n---\nPRODUCT MANAGER DECISION (resolves the open product question — "
                               "act on it, do not re-raise it):\n" + pm_outcome["body"])
-                        audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration)
-                        _notify(cfg, f"🧭 {ticket.id} — the PM made the product call; the unit is "
-                                     f"continuing:\n\n{pm_outcome['body'][:800]}")
-                        print(f"  🧭 {ticket.id}: PM decided — re-building with the decision.", flush=True)
+                        audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration, automode=auto)
+                        # Automode: the PM decided WITHOUT waiting for you. Leave a durable trail on the
+                        # ticket so you can review it (and reverse — it's on DEV, never production).
+                        if auto and not cfg.dry_run and not ticket.ephemeral:
+                            try:
+                                backlog.add_comment(ticket, "🤖 Automode — the PM decided this "
+                                    "autonomously (review & reverse if needed; lands on DEV, not "
+                                    "production):\n\n" + pm_outcome["body"][:1200])
+                            except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                                pass
+                        head = ("🤖 Automode — the PM decided autonomously" if auto
+                                else "🧭 the PM made the product call")
+                        _notify(cfg, f"{head}; {ticket.id} continuing:\n\n{pm_outcome['body'][:800]}")
+                        print(f"  {'🤖' if auto else '🧭'} {ticket.id}: PM decided — re-building with "
+                              "the decision.", flush=True)
                         continue
                 proposal = pm_outcome["body"] if pm_outcome is not None else report
                 decisions.add(cfg, ticket, app.name, proposal[:1500])   # so you can answer it in Telegram

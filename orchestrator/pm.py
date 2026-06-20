@@ -40,6 +40,15 @@ Above that line: the decision + rationale (DECIDE), or your recommended solution
 (ESCALATE)."""
 
 
+PM_AUTOMODE = """
+
+AUTOMODE IS ON. The Commander is not available to approve anything right now and wants the unit to keep
+moving without stopping for his approval. You MUST DECIDE — do NOT escalate. Make the best REVERSIBLE
+call you can, state your assumptions explicitly, and the unit proceeds. Everything lands on DEV (never
+production), and the Commander reviews your decisions afterward and can reverse any of them — so bias to
+the safest reversible option and document why. Always end with PM VERDICT: DECIDE."""
+
+
 def _prompt(app_name: str, ticket_id: str, question: str, context: str) -> str:
     parts = [
         f"App: {app_name}    Ticket: {ticket_id}",
@@ -57,9 +66,11 @@ def _prompt(app_name: str, ticket_id: str, question: str, context: str) -> str:
     return "\n".join(parts)
 
 
-def parse_verdict(text: str | None) -> dict[str, str]:
+def parse_verdict(text: str | None, auto_mode: bool = False) -> dict[str, str]:
     """Pure parse of the PM's reply into {verdict, body}. Unclear -> ESCALATE (fail-safe: ask the
-    Commander rather than auto-decide). Unit-testable without an agent."""
+    Commander rather than auto-decide). In AUTOMODE the PM never waits on the Commander: an ESCALATE (or
+    an unclear reply) is coerced to DECIDE so the unit keeps moving — the recommendation becomes the
+    decision, logged for the Commander to review/reverse. Unit-testable without an agent."""
     raw = (text or "").strip()
     up = raw.upper()
     if "PM VERDICT: ESCALATE" in up:
@@ -68,6 +79,8 @@ def parse_verdict(text: str | None) -> dict[str, str]:
         verdict = "DECIDE"
     else:
         verdict = "ESCALATE"
+    if auto_mode and verdict == "ESCALATE":
+        verdict = "DECIDE"   # automode: decide autonomously, never stop for the approve button
     body = raw.rsplit("PM VERDICT:", 1)[0].strip() if "PM VERDICT:" in up else raw
     return {"verdict": verdict, "body": body or "(the PM gave no detail)", "raw": raw}
 
@@ -75,16 +88,18 @@ def parse_verdict(text: str | None) -> dict[str, str]:
 async def review(cfg: Config, app_name: str, ticket_id: str, question: str, context: str = "") -> dict[str, str]:
     """Run the PM officer on one product question. Returns {verdict: DECIDE|ESCALATE, body, raw}.
     Pure decision — the caller (CLI or the loop) acts on the verdict (resume the build, or file a
-    Commander decision)."""
+    Commander decision). In automode the PM is told to decide and the verdict is coerced to DECIDE."""
     app = cfg.app(app_name)
+    auto = bool(getattr(cfg, "auto_mode", False))
     from . import recon
     # Read-only product review. With delegation armed, the PM decides for itself whether to recruit
     # soldiers (a slice of the console each) and synthesize the call, else a single solo pass. Either
     # way the reply ends with the PM VERDICT line that parse_verdict reads.
     report = await recon.run_officer(
         officer="pm", label="Product Manager",
-        system=PM_SYSTEM, task=_prompt(app_name, ticket_id, question, context),
+        system=PM_SYSTEM + (PM_AUTOMODE if auto else ""),
+        task=_prompt(app_name, ticket_id, question, context),
         cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
         soldier_tools=["Read", "Grep", "Glob"], max_turns=18, effort="high",
         empty="(the PM gave no answer)")
-    return parse_verdict(report)
+    return parse_verdict(report, auto_mode=auto)

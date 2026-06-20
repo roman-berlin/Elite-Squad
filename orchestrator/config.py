@@ -106,6 +106,7 @@ class Config:
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
     auto_model: bool = False                # pick cheapest model that fits each task (<=ceiling); see models.py
     sentinel_enabled: bool = False          # Sentinel runs postmerge_commands after a land + auto-reverts if red
+    auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
 
     # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
     #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether
