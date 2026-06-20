@@ -33,7 +33,7 @@ class JiraAdapter(BacklogAdapter):
     def __init__(self, app):
         b = app.backlog
         self.app_name = app.name
-        self.base_url = b["base_url"].rstrip("/")
+        self.base_url = (b.get("base_url") or "").rstrip("/")
         self.project = b.get("project_key")
         self.ready_status = b.get("ready_status", "To Do")
         self.label = b.get("label", "autodev")
@@ -48,19 +48,35 @@ class JiraAdapter(BacklogAdapter):
         # each ordered by board Rank (top first). Override with `queue_statuses:` in config.
         self.queue_statuses = b.get("queue_statuses") or ["In Progress", self.ready_status]
         self.session = requests.Session()
-        # Per-app credentials, so several Jira sites/accounts run side by side: each app's backlog
-        # names its env vars (default JIRA_EMAIL / JIRA_API_TOKEN — the primary connection). A second
-        # Jira just sets e.g. `email_env: OTHER_JIRA_EMAIL` + `token_env: OTHER_JIRA_TOKEN`.
-        email_env = b.get("email_env", "JIRA_EMAIL")
-        token_env = b.get("token_env", "JIRA_API_TOKEN")
+        # Credentials, in priority order:
+        #  1) a cockpit "connection" assigned to this project (the quick-connect store) — base_url +
+        #     project + email/token come straight from it.
+        #  2) the per-app env-var path (email_env / token_env) — the original mechanism, untouched.
+        conn = None
         try:
-            self.session.auth = (os.environ[email_env], os.environ[token_env])
-        except KeyError as exc:
+            from .. import connections
+            conn = connections.for_app(self.app_name)
+        except Exception:  # noqa: BLE001 - a bad store must never break a configured app
+            conn = None
+        if conn:
+            self.base_url = (conn.get("base_url") or self.base_url).rstrip("/")
+            self.project = conn.get("project_key") or self.project
+            self.session.auth = (conn.get("email", ""), conn.get("token", ""))
+        else:
+            email_env = b.get("email_env", "JIRA_EMAIL")
+            token_env = b.get("token_env", "JIRA_API_TOKEN")
+            try:
+                self.session.auth = (os.environ[email_env], os.environ[token_env])
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"Jira credentials for app '{self.app_name}' are not set — missing env var {exc}. "
+                    f"Set {email_env} and {token_env}, or connect a Jira in the cockpit (Jira → "
+                    "Quick connect)."
+                ) from exc
+        if not self.base_url:
             raise RuntimeError(
-                f"Jira credentials for app '{self.app_name}' are not set — missing env var {exc}. "
-                f"Set {email_env} and {token_env} (this app's backlog references them via "
-                "email_env / token_env)."
-            ) from exc
+                f"No Jira base_url for app '{self.app_name}' — set `base_url` in config or connect a "
+                "Jira in the cockpit (Jira → Quick connect).")
         self.session.headers.update({"Accept": "application/json",
                                      "Content-Type": "application/json"})
 

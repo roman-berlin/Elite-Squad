@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from . import dashboard as D
 from . import health
@@ -304,6 +305,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
+  <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
   <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
   {promote_html}
   {ship_html}
@@ -1117,6 +1119,151 @@ def create_app(cfg: Config):
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
+
+    @app.get("/jira")
+    def jira_page():
+        """Pick a Jira per project + quick-connect a new one. Roman runs several products against
+        DIFFERENT Jira accounts; this lets him switch the active Jira for the current project (or add one)
+        without hand-editing .env / config. Tokens are shown masked; the raw token never leaves the box."""
+        from . import connections as _conn
+        appq = (request.args.get("app") or (cfg.apps[0].name if cfg.apps else "")).strip()
+        conns = _conn.list_connections(cfg)
+        active_id = _conn.assigned_id(cfg, appq)
+        active = next((c for c in conns if c["id"] == active_id), None)
+        esc = html.escape
+
+        proj_opts = "".join(
+            f"<option value='{esc(a.name)}' {'selected' if a.name == appq else ''}>{esc(a.name)}</option>"
+            for a in cfg.apps)
+        switcher = (f"<label class=jlbl>Project</label><select class=jsel "
+                    f"onchange=\"location.href='/jira?app='+encodeURIComponent(this.value)\">{proj_opts}</select>")
+        if active:
+            active_html = (f"<div class=jactive><span class=jdot></span>"
+                           f"<div><b>{esc(active['name'])}</b> &middot; <span class=jmono>{esc(active['base_url'])}</span>"
+                           f"<div class=jsub>{esc(active['email'])} &middot; token {esc(active['token_hint'])}"
+                           + (f" &middot; project {esc(active['project_key'])}" if active['project_key'] else "")
+                           + f"</div></div></div>")
+        else:
+            active_html = ("<div class=jactive off><span class=jdot off></span><div>No Jira connected for "
+                           f"<b>{esc(appq)}</b> — using env vars "
+                           "<span class=jmono>JIRA_EMAIL / JIRA_API_TOKEN</span>. Pick or connect one below."
+                           "</div></div>")
+
+        if conns:
+            cards = []
+            for c in conns:
+                is_active = c["id"] == active_id
+                if is_active:
+                    use = "<span class='jbtn on' title='Active for this project'>&#10003; Active</span>"
+                else:
+                    use = (f"<form method=post action=/api/jira-assign class=jf>"
+                           f"<input type=hidden name=app value='{esc(appq)}'>"
+                           f"<input type=hidden name=id value='{esc(c['id'])}'>"
+                           f"<button class=jbtn>Use for {esc(appq)}</button></form>")
+                forget = (f"<form method=post action=/api/jira-forget class=jf "
+                          f"onsubmit=\"return confirm('Forget the Jira connection &quot;{esc(c['name'])}&quot;?')\">"
+                          f"<input type=hidden name=app value='{esc(appq)}'>"
+                          f"<input type=hidden name=id value='{esc(c['id'])}'>"
+                          f"<button class='jbtn ghost'>Forget</button></form>")
+                cards.append(
+                    f"<div class='jcard{' act' if is_active else ''}'>"
+                    f"<div class=jname>{esc(c['name'])}{' <span class=jtag>active</span>' if is_active else ''}</div>"
+                    f"<div class=jmeta><span class=jmono>{esc(c['base_url'])}</span></div>"
+                    f"<div class=jmeta>{esc(c['email'])} &middot; token <span class=jmono>{esc(c['token_hint'])}</span>"
+                    + (f" &middot; project <span class=jmono>{esc(c['project_key'])}</span>" if c['project_key'] else "")
+                    + f"</div><div class=jrow>{use}{forget}</div></div>")
+            conns_html = "<div class=jcards>" + "".join(cards) + "</div>"
+        else:
+            conns_html = ("<div class=jempty>No saved Jira connections yet. Add your first one below — for "
+                          "example one account for Automatixy and another for your algo-trading robot.</div>")
+
+        form = (
+            f"<form method=post action=/api/jira-connect class=jconnect>"
+            f"<input type=hidden name=app value='{esc(appq)}'>"
+            "<div class=jgrid>"
+            "<label>Name<input name=name placeholder='e.g. Automatixy Jira' required></label>"
+            "<label>Site URL<input name=base_url type=url placeholder='https://your-site.atlassian.net' required></label>"
+            "<label>Email<input name=email type=email placeholder='you@example.com' required></label>"
+            "<label>API token<input name=token type=password placeholder='paste Atlassian API token' required></label>"
+            "<label>Project key <span class=jopt>(optional)</span><input name=project_key placeholder='e.g. AUTO'></label>"
+            "</div>"
+            f"<label class=jassign><input type=checkbox name=assign value=1 checked> Use this Jira for "
+            f"<b>{esc(appq)}</b> right away</label>"
+            "<div class=jrow><button class='jbtn primary'>&#128268; Connect Jira</button>"
+            "<span class=jhint>Create a token at id.atlassian.com &rarr; Security &rarr; API tokens. "
+            "Stored locally, masked here, never committed to git.</span></div>"
+            "</form>")
+
+        style = (
+            "<style>"
+            ".jbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 16px}"
+            ".jlbl{color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.06em;font-weight:700}"
+            ".jsel{min-width:190px}"
+            ".jactive{display:flex;gap:11px;align-items:flex-start;background:#101620;border:1px solid #1f6f43;"
+            "border-radius:12px;padding:13px 16px;margin:0 0 22px}"
+            ".jactive.off{border-color:#3a2a18}"
+            ".jdot{width:9px;height:9px;border-radius:50%;background:#3fb961;margin-top:6px;flex:none;"
+            "box-shadow:0 0 0 4px rgba(63,185,97,.16)}.jdot.off{background:#d99a2b;box-shadow:0 0 0 4px rgba(217,154,43,.16)}"
+            ".jsub{color:#8a929f;font-size:12px;margin-top:3px}"
+            ".jmono{font-family:ui-monospace,Menlo,monospace;color:#9aa3b2}"
+            ".jcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:13px;margin:6px 0 26px}"
+            ".jcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 16px}"
+            ".jcard.act{border-color:#1f6f43}"
+            ".jname{font-size:15px;font-weight:700;color:#e9ecf1;margin-bottom:7px}"
+            ".jtag{font-size:10px;font-weight:800;color:#3fb961;border:1px solid #1f6f43;border-radius:99px;"
+            "padding:1px 7px;margin-left:6px;vertical-align:middle;text-transform:uppercase}"
+            ".jmeta{color:#aab2c0;font-size:12.5px;margin-top:3px}"
+            ".jrow{display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap}"
+            ".jf{margin:0}"
+            ".jbtn{background:#1b2230;border:1px solid #2a3343;color:#e9ecf1;border-radius:8px;padding:8px 13px;"
+            "font:inherit;font-size:13px;font-weight:600;cursor:pointer}.jbtn:hover{background:#222b3b}"
+            ".jbtn.primary{background:#2b5cff;border-color:#2b5cff;color:#fff}.jbtn.primary:hover{background:#2350e6}"
+            ".jbtn.ghost{background:none;color:#9aa3b2}.jbtn.ghost:hover{color:#f0676b;border-color:#5a2a2e}"
+            ".jbtn.on{background:none;border:1px solid #1f6f43;color:#3fb961;padding:8px 13px;border-radius:8px;"
+            "font-size:13px;font-weight:700}"
+            ".jempty,.jconnect{background:#12161f;border:1px solid #232936;border-radius:12px;padding:16px 18px}"
+            ".jempty{color:#8a929f}"
+            ".jgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}"
+            ".jconnect label{display:block;color:#c4c9d2;font-size:12.5px;font-weight:600}"
+            ".jconnect .jgrid input{width:100%;margin-top:5px;box-sizing:border-box}"
+            ".jopt{color:#5c6573;font-weight:400}"
+            ".jassign{display:flex;align-items:center;gap:8px;margin:14px 0 4px;color:#c4c9d2;font-weight:500!important}"
+            ".jhint{color:#6b7480;font-size:12px}"
+            "h3{margin:24px 0 8px;font-size:14px;color:#c4c9d2}"
+            "</style>")
+
+        body = (style + "<div class=jbar>" + switcher + "</div>" + active_html
+                + "<h3>Saved Jira connections</h3>" + conns_html
+                + "<h3>Quick connect a Jira</h3>" + form)
+        return _wrap("Jira connections", body)
+
+    @app.post("/api/jira-connect")
+    def jira_connect_api():
+        from . import connections as _conn
+        f = request.form
+        app_name = (f.get("app") or "").strip()
+        base = (f.get("base_url") or "").strip()
+        email = (f.get("email") or "").strip()
+        token = (f.get("token") or "").strip()
+        if base and email and token:
+            cid = _conn.add(cfg, name=(f.get("name") or "").strip(), base_url=base, email=email,
+                            token=token, project_key=(f.get("project_key") or "").strip())
+            if f.get("assign") and app_name:
+                _conn.assign(cfg, app_name, cid)
+        return redirect(f"/jira?app={quote(app_name)}")
+
+    @app.post("/api/jira-assign")
+    def jira_assign_api():
+        from . import connections as _conn
+        app_name = (request.form.get("app") or "").strip()
+        _conn.assign(cfg, app_name, (request.form.get("id") or "").strip())
+        return redirect(f"/jira?app={quote(app_name)}")
+
+    @app.post("/api/jira-forget")
+    def jira_forget_api():
+        from . import connections as _conn
+        _conn.remove(cfg, (request.form.get("id") or "").strip())
+        return redirect(f"/jira?app={quote((request.form.get('app') or '').strip())}")
 
     @app.get("/roster-doc")
     def roster_doc_page():

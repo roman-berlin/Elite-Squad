@@ -41,6 +41,9 @@ dismissed.json
 group_chat.jsonl
 last-standup.md
 recent_projects.json
+# Jira connections — holds API TOKENS (the cockpit's quick-connect store). NEVER version it; each
+# machine keeps its own, and the cockpit only ever shows tokens masked. See connections.py.
+jira_connections.json
 usage_ledger.jsonl
 ROSTER.md
 # macOS

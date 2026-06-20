@@ -7,6 +7,13 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Cockpit Jira-connection UI — pick / quick-connect a Jira per project** (2026-06-20) — Roman runs
+  products against different Jira accounts (Automatixy on one, the algo-trading robot on another).
+  `connections.py` is a gitignored store of named Jira connections + which one each project uses; the
+  `/jira` cockpit page picks the Jira for the current project, quick-connects a new one (name + site URL
+  + email + API token, **password field, masked everywhere, never committed**), and switches projects
+  from the same page. The Jira adapter prefers an assigned connection and falls back to the existing
+  `email_env`/`token_env` env vars, so nothing breaks. **37/37 tests; suite 43 harnesses / 558 checks.**
 - **Ticket-readiness gate — hand back under-specified tickets before building** (2026-06-20) — the first
   P1 item. A cheap, **deterministic** check (`readiness.py`, no model call) runs before the build: a
   ticket with **no acceptance criteria AND a thin description** (or one that just restates its title) is
@@ -376,8 +383,9 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
 
 5. ~~**Ticket-readiness gate (PM, pre-build).**~~ ✅ **Shipped 2026-06-20** — `readiness.py` hands back a
    no-AC + thin-description ticket before the build (opt-in `readiness_gate`); 16/16 tests.
-6. **Parallel multi-app builds.** Worktree locks already isolate per app; let independent apps build
-   concurrently (bounded by the cost governor) for 2–3× throughput across Roman's products.
+6. ~~**Parallel multi-app builds.**~~ ❌ **Dropped 2026-06-20** (Roman's call) — running two products at
+   once is unnecessary and invites a mess. The unit works **one project at a time**; you switch projects
+   (VS Code-style, with Recent projects) when you're done with one. Throughput per project, not across.
 7. **Failure forensics + auto-post-mortem.** Categorize "errored" into a taxonomy
    (precondition / build-cap / merge-conflict / gate-fail / infra), and have the General auto-write a
    short post-mortem when the same ticket fails N times — it already holds the data (now surfaced in
@@ -388,8 +396,10 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
 
 ### P2 — reach & polish
 
-9. **Cockpit Jira-connection UI.** The multi-Jira *backend* exists (`email_env`/`token_env` per app);
-   add the cockpit panel to add/switch connections by site URL + token. (Last cockpit-polish item.)
+9. ~~**Cockpit Jira-connection UI.**~~ ✅ **Shipped 2026-06-20** — `connections.py` + a `/jira` cockpit
+   panel: pick the Jira a project uses, quick-connect a new one (name + site URL + email + token,
+   stored in a gitignored `jira_connections.json`, masked in the UI), switch projects from the same
+   page. The adapter prefers an assigned connection, falling back to `email_env`/`token_env`. 37/37 tests.
 10. **One-command new-product onboarding.** Scaffold config + memory + Jira for a new product
     (SignalDesk, the MQL5 EAs) so the unit serves more than Automatixy.
 11. **Runnable discovered repos.** Make "Found nearby" repos click-to-onboard (scaffold a config entry)
