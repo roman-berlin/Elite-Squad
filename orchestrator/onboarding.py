@@ -111,8 +111,11 @@ def _insert_under_apps(config_path: str | Path, block: str) -> None:
     """Back up config.yaml, then insert ``block`` as the first item under ``apps:`` — a surgical edit that
     leaves every existing line (and comment) untouched."""
     p = Path(config_path)
-    shutil.copyfile(p, p.with_name(p.name + ".bak"))
-    lines = p.read_text(encoding="utf-8").splitlines()
+    if p.exists():
+        shutil.copyfile(p, p.with_name(p.name + ".bak"))
+        lines = p.read_text(encoding="utf-8").splitlines()
+    else:  # no config yet — start a fresh one rather than crashing
+        lines = []
     out: list[str] = []
     inserted = False
     for line in lines:

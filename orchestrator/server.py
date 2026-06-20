@@ -1313,9 +1313,23 @@ def create_app(cfg: Config):
     @app.get("/onboard")
     def onboard_page():
         """Scaffold a new product into config.yaml — so the unit serves SignalDesk / the EAs, not just
-        Automatixy. Detects branches, backs up the file, optionally wires a saved Jira connection."""
+        Automatixy. Detects branches, backs up the file, optionally wires a saved Jira connection.
+        Repos found next to your configured ones are listed as click-to-onboard (they pre-fill the form)."""
         from . import connections as _conn
+        from . import onboarding as _ob
+        from . import projects as _proj
         esc = html.escape
+        # Pre-fill from a "Found nearby" click (?name=&repo=) — values flow straight into the form.
+        pre_name = (request.args.get("name") or "").strip()
+        pre_repo = (request.args.get("repo") or "").strip()
+        pre_base = pre_protected = ""
+        if pre_repo:
+            try:
+                rp = Path(pre_repo).expanduser()
+                if _ob.is_git_repo(rp):
+                    pre_base, pre_protected = _ob.suggest_branches(rp)
+            except Exception:  # noqa: BLE001
+                pass
         conns = _conn.list_connections(cfg)
         copts = ("<option value=''>— none (free-text tasks, or JIRA_EMAIL/JIRA_API_TOKEN) —</option>"
                  + "".join(f"<option value='{esc(c['id'])}'>{esc(c['name'])} &middot; {esc(c['base_url'])}"
@@ -1334,24 +1348,45 @@ def create_app(cfg: Config):
             "font:inherit;font-size:13px;font-weight:650;cursor:pointer}"
             ".jbtn.primary{background:#2b5cff;border-color:#2b5cff;color:#fff}.jbtn.primary:hover{background:#2350e6}"
             ".hint{color:#6b7480;font-size:12px}.hint2{color:#8a929f;font-size:12.5px;margin-top:16px}"
+            ".nearby{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}"
+            ".chip{display:inline-flex;flex-direction:column;gap:1px;background:#12161f;border:1px solid #2a3343;"
+            "border-radius:10px;padding:8px 12px;text-decoration:none;color:#e9ecf1;font-size:13px}"
+            ".chip:hover{border-color:#3b6cff;background:#161b25}.chip.on{border-color:#3b6cff;background:#16203a}"
+            ".chip small{color:#6b7480;font-size:11px;font-family:ui-monospace,Menlo,monospace}"
             "h3{margin:18px 0 9px;font-size:14px;color:#c4c9d2}"
             "</style>")
+        # Found-nearby repos (git repos beside your configured ones, not yet in config) → click to pre-fill.
+        try:
+            disc = _proj.discover_repos(cfg)
+        except Exception:  # noqa: BLE001
+            disc = []
+        nearby = ""
+        if disc:
+            chips = "".join(
+                f"<a class='chip{' on' if r['path'] == pre_repo else ''}' "
+                f"href='/onboard?name={quote(_ob.slug(r['name']))}&repo={quote(r['path'])}'>"
+                f"{esc(r['name'])}<small>{esc(r['path'])}</small></a>" for r in disc)
+            nearby = ("<h3>Found nearby <span class=opt style='color:#5c6573;font-weight:400'>"
+                      "(click to fill the form)</span></h3><div class=nearby>" + chips + "</div>")
+
+        def val(v):
+            return f" value='{esc(v)}'" if v else ""
         form = (
             "<form method=post action=/api/onboard class=ob>"
             "<div class=obgrid>"
-            "<label>Product name<input name=name placeholder='e.g. signaldesk' required></label>"
-            "<label>Repo path<input name=repo_path placeholder='/Users/&hellip;/SignalDesk' required></label>"
+            f"<label>Product name<input name=name placeholder='e.g. signaldesk'{val(pre_name)} required></label>"
+            f"<label>Repo path<input name=repo_path placeholder='/Users/&hellip;/SignalDesk'{val(pre_repo)} required></label>"
             "<label>Base branch <span class=opt>(features merge here)</span>"
-            "<input name=base placeholder='auto-detect'></label>"
+            f"<input name=base placeholder='auto-detect'{val(pre_base)}></label>"
             "<label>Protected branch <span class=opt>(production)</span>"
-            "<input name=protected placeholder='auto-detect'></label>"
+            f"<input name=protected placeholder='auto-detect'{val(pre_protected)}></label>"
             f"<label>Jira <span class=opt>(pick a saved connection)</span><select name=jira>{copts}</select></label>"
             "</div>"
             "<div class=obrow><button class='jbtn primary'>&#10133; Add product</button>"
             "<span class=hint>Detects branches from the repo, backs up config.yaml, inserts the entry. "
             "Restart the cockpit to load it.</span></div></form>")
         body = (style + f"<p class=cur>Current products: <b>{current}</b></p>"
-                + "<h3>Onboard a new product</h3>" + form
+                + nearby + "<h3>Onboard a new product</h3>" + form
                 + "<p class=hint2>No Jira yet? <a href='/jira'>Connect one first</a>, then pick it here.</p>")
         return _wrap("Onboard a product", body)
 

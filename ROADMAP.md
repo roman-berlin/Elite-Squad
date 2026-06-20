@@ -7,6 +7,12 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Runnable discovered repos — click-to-onboard** (2026-06-21) — the "Found nearby" repos (git repos
+  beside your configured ones, not yet in config) are now actionable: the **➕ Product** page lists them
+  as chips, and clicking one pre-fills the onboard form (name + path + auto-detected base/protected
+  branches). One click + confirm turns a discovered repo into a worked project. Reuses the onboarding
+  engine + hardened `_insert_under_apps` to create config.yaml if it's somehow missing. **10/10 tests;
+  suite 47 harnesses / 661 checks.**
 - **Memory consolidation + learning from rejections** (2026-06-21) — closes the learning loop.
   `consolidate.py` dedups + prunes the living Lessons log so it stays tight, and scans the Reviewer's
   FAIL verdicts to cluster recurring rejection themes (an explicit tenant filter, tests-with-the-change,
@@ -433,8 +439,11 @@ next phase is **hardening the autonomy we now have** before widening it. Priorit
     under `apps:` (comments survive), and optionally wires a saved Jira connection to the new project.
     Preview-by-default. 33/33 tests. (#11 below — click-to-onboard discovered repos — now just wires the
     "Found nearby" list into this.)
-11. **Runnable discovered repos.** Make "Found nearby" repos click-to-onboard (scaffold a config entry)
-    instead of read-only hints.
+11. ~~**Runnable discovered repos.**~~ ✅ **Shipped 2026-06-21** — git repos found beside your configured
+    ones now appear on the **➕ Product** page as click-to-onboard chips: clicking one pre-fills the
+    onboard form (name + path + auto-detected branches), so a discovered repo is one click + confirm
+    away from being a worked project. Reuses the onboarding engine. 10/10 tests. **This closes the
+    backlog.**
 
 ### Known debt (surface, don't forget)
 

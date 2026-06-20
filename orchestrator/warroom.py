@@ -569,7 +569,7 @@ def project_selector(cfg, app: Optional[str]) -> str:
              for a in cfg.apps]
     opts.append("</optgroup>")
     if disc:
-        opts.append('<optgroup label="Found nearby (add to config.yaml to work it)">')
+        opts.append('<optgroup label="Found nearby (＋ Product page → click to onboard)">')
         opts += [f'<option value="*" disabled>{_esc(r["name"])} &mdash; {_esc(r["path"])}</option>'
                  for r in disc[:12]]
         opts.append("</optgroup>")
