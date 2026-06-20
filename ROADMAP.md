@@ -7,6 +7,13 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Auto model selection — Opus for code, conserve only under budget pressure** (2026-06-20) — opt-in
+  `auto_model`. Opus is the better coder, so the **builder and reviewer stay on Opus for all code** and
+  drop to Sonnet *only when the day's token budget is tight* (to keep the unit working rather than
+  hard-stopping) — never below Sonnet, never above the configured ceiling. The cheaper tiers stay
+  confined to the non-coding chatter (council/corridor were already Sonnet/Haiku). Off by default —
+  out of the box every officer uses exactly the model it always did. Tests **21/21**.
+
 - **Cost governor v2 + token-usage window** (2026-06-20) — Roman is on the **Max** plan, so the budget
   that matters is token throughput. Every agent call (officer / builder / soldier / council / chat) now
   meters its input+output tokens from a single choke-point (`agent.run_agent` → `usage.py` ledger). The

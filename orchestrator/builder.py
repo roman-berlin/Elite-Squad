@@ -219,8 +219,12 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
     # Reviewer + the gate validate before any merge, and MAIN is never touched. Repo conventions
     # still apply — BUILDER_SYSTEM tells it to read CLAUDE.md + .claude/rules and follow them.
     eff = effort_for(cfg, req.iteration, req.ticket)
+    from . import models
+    model, mreason = models.for_builder(cfg, req.ticket, eff)
+    if getattr(cfg, "auto_model", False):
+        print(f"  · builder model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.builder_model,
+        model=model,                   # the configured ceiling, or auto-chosen <= ceiling
         system_prompt=memory.preamble() + BUILDER_SYSTEM,
         cwd=workdir,                   # the isolated worktree when enabled
         permission_mode="bypassPermissions",

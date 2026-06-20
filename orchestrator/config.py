@@ -103,6 +103,7 @@ class Config:
     builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
+    auto_model: bool = False                # pick cheapest model that fits each task (<=ceiling); see models.py
 
     # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
     #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether

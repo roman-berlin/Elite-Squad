@@ -82,8 +82,10 @@ def _prompt(diff: str, ticket: Ticket) -> str:
 
 
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config) -> ReviewResult:
+    from . import models
+    rmodel, _rreason = models.for_reviewer(cfg, diff)   # ceiling unless auto_model is on
     options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
+        model=rmodel,
         system_prompt=memory.preamble() + REVIEWER_SYSTEM,
         cwd=app.workdir or app.repo_path,   # the isolated worktree when enabled
         permission_mode="bypassPermissions",   # read-only audit; runs unattended in the build loop —
