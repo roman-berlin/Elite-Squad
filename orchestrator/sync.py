@@ -286,3 +286,58 @@ def promote(cfg: Config) -> dict[str, Any]:
     finally:
         _git(repo, "checkout", cur if cur != "main" else "dev")   # always leave the tree on DEV
     return out
+
+
+# ---------------------------------------------------------------------------
+# Ship an APP's DEV -> MAIN (production) from the cockpit (the "Ship → MAIN" button).
+# This is the user's own product (e.g. Automatixy), not the unit's own code.
+# ---------------------------------------------------------------------------
+
+def app_promote_status(app) -> dict[str, Any]:
+    """How far an app's base branch (DEV) is ahead of its protected branch (MAIN) — work that's tested
+    on DEV but not yet shipped to production. ``{ahead, base, prot, error}``."""
+    repo = Path(app.repo_path).expanduser()
+    base, prot = app.base_branch, app.protected_branch
+    out: dict[str, Any] = {"ahead": 0, "base": base, "prot": prot, "error": None}
+    try:
+        r = _git(repo, "rev-list", "--count", f"{prot}..{base}")
+        out["ahead"] = int((r.stdout or "0").strip() or "0") if r.returncode == 0 else 0
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+def promote_app(app) -> dict[str, Any]:
+    """Ship an app's DEV -> MAIN (production) and push. **Fast-forward only** — if DEV and MAIN have
+    diverged it reports instead of forcing. Always returns the tree to DEV. The cockpit Ship button."""
+    repo = Path(app.repo_path).expanduser()
+    base, prot = app.base_branch, app.protected_branch
+    out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
+                           "base": base, "prot": prot, "app": app.name}
+    if not can_promote():
+        out["error"] = "shipping is disabled on this cockpit (read-only box)"
+        return out
+    cur = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or base
+    out["ahead_before"] = app_promote_status(app).get("ahead", 0)
+    if out["ahead_before"] == 0:
+        out["ok"] = True   # already shipped — nothing ahead
+        return out
+    try:
+        co = _git(repo, "checkout", prot)
+        if co.returncode != 0:
+            out["error"] = f"checkout {prot} failed (uncommitted changes on the working tree?): " + (co.stderr or "").strip()[:150]
+            return out
+        mg = _git(repo, "merge", "--ff-only", base)
+        if mg.returncode != 0:
+            out["error"] = f"fast-forward failed — {base} and {prot} have diverged; resolve in a terminal: " + (mg.stderr or "").strip()[:140]
+            return out
+        ps = _git(repo, "push", "origin", prot)
+        out["pushed"] = ps.returncode == 0
+        out["ok"] = ps.returncode == 0
+        if not out["pushed"]:
+            out["error"] = f"push to origin/{prot} failed: " + ((ps.stderr or ps.stdout) or "").strip()[:150]
+    except (subprocess.SubprocessError, OSError) as e:
+        out["error"] = str(e)[:200]
+    finally:
+        _git(repo, "checkout", cur if cur != prot else base)   # always leave the tree on the base branch
+    return out

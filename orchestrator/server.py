@@ -181,6 +181,24 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     except Exception:  # noqa: BLE001
         promote_html = ""
 
+    # Ship the CURRENT app DEV -> MAIN (production) — Mac-only. Distinct from Deploy (which ships the
+    # unit's OWN code to the server); this ships your product (e.g. Automatixy) live.
+    ship_html = ""
+    try:
+        from . import sync as _sync
+        if _sync.can_promote() and app0:
+            _sa = _sync.app_promote_status(cfg.app(app0))
+            _sn = _sa.get("ahead", 0)
+            if _sn:
+                ship_html = (
+                    '<form method=post action=/api/ship-main class=tbf '
+                    f'''onsubmit="return confirm('Ship {html.escape(app0)} {html.escape(_sa['base'])} \\u2192 {html.escape(_sa['prot'])} to PRODUCTION? This deploys live.')">'''
+                    f'<input type=hidden name=app value="{html.escape(app0)}">'
+                    f'<button class="btn ship" {busy("shipping")}>&#128640; Ship {html.escape(app0)}'
+                    f'<span class=cbadge>{_sn}</span> &rarr; {html.escape(_sa["prot"])}</button></form>')
+    except Exception:  # noqa: BLE001
+        ship_html = ""
+
     # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
     from . import warroom as _wr
     _base = Path(cfg.audit_path)
@@ -229,6 +247,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#5c6573;padding:6px 11px 3px}}
 .tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}.tbar .tbnote.ok{{color:#52b788;font-weight:600}}
 .tbar .btn.deploy{{background:#1f7a45;border-color:#2c9a5f;color:#fff}}.tbar .btn.deploy:hover{{background:#1a6b3c}}.tbar .btn.deploy .cbadge{{background:#0c3a22}}
+.tbar .btn.ship{{background:#7c3aed;border-color:#8b5cf6;color:#fff}}.tbar .btn.ship:hover{{background:#6d28d9}}.tbar .btn.ship .cbadge{{background:#3b1d7a}}
 .tbar .grow{{flex:1}}
 .tbar .chatbtn{{display:inline-flex;align-items:center;gap:6px}}
 .tbar .cbadge{{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px}}
@@ -271,6 +290,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
   {promote_html}
+  {ship_html}
 
   <details class=menu>
     <summary class=btn>&#128202; Reports</summary>
@@ -828,6 +848,35 @@ def create_app(cfg: Config):
                     _state["last_msg"] = f"Deploy error: {exc}"
                 finally:
                     _state["promoting"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/")
+
+    @app.post("/api/ship-main")
+    def ship_main_api():
+        """Ship the CURRENT app's DEV -> MAIN (production) from the cockpit. Mac-only + ff-only."""
+        from . import sync
+        if not sync.can_promote():
+            return Response("Shipping is disabled on this cockpit (read-only box).", status=403)
+        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        if _state.get("active"):
+            _state["last_msg"] = "finish the active run before shipping to production"
+            return redirect("/")
+        if not _state.get("shipping"):
+            def _bg():
+                _state["shipping"] = True
+                try:
+                    r = sync.promote_app(cfg.app(app_name))
+                    if r.get("ok"):
+                        n = r.get("ahead_before", 0)
+                        _state["last_msg"] = (f"Shipped {app_name} {r['base']}→{r['prot']} "
+                                              f"({n} commit(s)) to PRODUCTION." if n else
+                                              f"{app_name} already shipped — nothing ahead.")
+                    else:
+                        _state["last_msg"] = "Ship failed: " + (r.get("error") or "unknown")
+                except Exception as exc:  # noqa: BLE001
+                    _state["last_msg"] = f"Ship error: {exc}"
+                finally:
+                    _state["shipping"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
