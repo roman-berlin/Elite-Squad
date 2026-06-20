@@ -1233,10 +1233,34 @@ def create_app(cfg: Config):
                            + (f" &middot; project {esc(active['project_key'])}" if active['project_key'] else "")
                            + f"</div></div></div>")
         else:
-            active_html = ("<div class=jactive off><span class=jdot off></span><div>No Jira connected for "
-                           f"<b>{esc(appq)}</b> — using env vars "
-                           "<span class=jmono>JIRA_EMAIL / JIRA_API_TOKEN</span>. Pick or connect one below."
-                           "</div></div>")
+            # No cockpit quick-connect assigned — but the app may ALREADY use Jira via its config.yaml
+            # `backlog:` + env-var creds (this is how automatixy pulls AUTO-* today). Show THAT as the
+            # live connection with its real details, instead of wrongly claiming "no Jira".
+            try:
+                _appcfg = cfg.app(appq)
+            except Exception:  # noqa: BLE001
+                _appcfg = None
+            _b = (getattr(_appcfg, "backlog", {}) or {}) if _appcfg else {}
+            if _appcfg and getattr(_appcfg, "backlog_backend", "") == "jira" and _b.get("base_url"):
+                _ee = _b.get("email_env", "JIRA_EMAIL")
+                _te = _b.get("token_env", "JIRA_API_TOKEN")
+                _email = os.environ.get(_ee, "")
+                _who = (esc(_email) if _email
+                        else f"<span class=jmono>{esc(_ee)}</span> <span class=jsub>(not set in this process)</span>")
+                _tok = (f"token <span class=jmono>{esc(_te)}</span> &#10003; set" if os.environ.get(_te)
+                        else f"token <span class=jmono>{esc(_te)}</span> &mdash; not set")
+                _proj = _b.get("project_key", "")
+                active_html = (
+                    "<div class=jactive><span class=jdot></span><div>"
+                    f"<b>Connected via config + env</b> &middot; <span class=jmono>{esc(_b['base_url'])}</span>"
+                    f"<div class=jsub>project <b>{esc(_proj) or '&mdash;'}</b> &middot; user {_who} &middot; {_tok}</div>"
+                    f"<div class=jsub>From config.yaml under <span class=jmono>{esc(appq)}</span>, creds from "
+                    "the cockpit&#39;s <span class=jmono>.env</span>. Quick-connect below only to override it.</div>"
+                    "</div></div>")
+            else:
+                active_html = ("<div class=jactive off><span class=jdot off></span><div>No Jira for "
+                               f"<b>{esc(appq)}</b> &mdash; free-text tasks only. Connect one below to pull "
+                               "tickets.</div></div>")
 
         if conns:
             cards = []

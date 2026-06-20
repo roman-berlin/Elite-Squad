@@ -138,6 +138,27 @@ chk("/api/jira-assign switched the project's Jira", connections.assigned_id(None
 client.post("/api/jira-forget", data={"app": "automatixy", "id": new_id})
 chk("/api/jira-forget removed the connection", all(c["id"] != new_id for c in connections.list_connections()))
 
+# --- /jira recognizes an app's EXISTING config+env Jira (not only cockpit connections) ---
+os.environ["JIRA_EMAIL"] = "roman@toibis.com"
+os.environ["JIRA_API_TOKEN"] = "REALTOKEN"
+connections._file = lambda cfg=None: Path(tempfile.mkdtemp()) / "empty.json"   # no cockpit connection
+jcfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(repo), base_branch="DEV",
+                              protected_branch="MAIN", backlog_backend="jira",
+                              backlog={"base_url": "https://toibis.atlassian.net", "project_key": "AUTO"})],
+              audit_path=str(tmp / "a2.jsonl"), use_worktree=False)
+jcfg.detected_auth = lambda: "test"
+jb = server.create_app(jcfg).test_client().get("/jira?app=automatixy").get_data(as_text=True)
+chk("/jira recognizes the config+env Jira (not 'no Jira')", "Connected via config + env" in jb and "No Jira for" not in jb)
+chk("/jira shows the Jira site", "toibis.atlassian.net" in jb)
+chk("/jira shows the project key", "AUTO" in jb)
+chk("/jira shows the user from JIRA_EMAIL", "roman@toibis.com" in jb)
+# a backlog-less app genuinely shows 'no Jira'
+ncfg = Config(apps=[AppConfig(name="plain", repo_path=str(repo), base_branch="DEV", protected_branch="MAIN",
+                              backlog_backend="none")], audit_path=str(tmp / "a3.jsonl"), use_worktree=False)
+ncfg.detected_auth = lambda: "test"
+nb = server.create_app(ncfg).test_client().get("/jira?app=plain").get_data(as_text=True)
+chk("/jira: a backlog-less app shows 'No Jira'", "No Jira for" in nb)
+
 print("\n============== JIRA CONNECTIONS QA ==============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

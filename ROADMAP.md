@@ -7,6 +7,12 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **/jira recognizes an app's existing config+env Jira** (2026-06-21) — the page wrongly said "No Jira
+  connected for automatixy" while the unit was happily pulling AUTO-* tickets. It only looked at the new
+  cockpit connection store and ignored the app's `config.yaml` `backlog:` + env-var creds. Now, when no
+  quick-connect is assigned, it shows the **config+env Jira as connected** — site URL (`toibis.atlassian.net`),
+  project key (`AUTO`), the user (`JIRA_EMAIL`), and token-set status — and only shows "No Jira" for a
+  genuinely backlog-less app. 5 tests added; suite 48 harnesses / 679 checks.
 - **Deploy progress bar + fresh ahead-count** (2026-06-21) — the "Update unit" / "Ship → production"
   buttons looked stuck (the GitHub push takes 10–30s with no feedback) and the ahead-count badge went
   stale after a merge (showed "13"/"8" when DEV was already fully merged into MAIN — count was really 0).
