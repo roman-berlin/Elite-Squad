@@ -35,6 +35,7 @@ approvals.json
 dismissed.json
 group_chat.jsonl
 last-standup.md
+recent_projects.json
 # macOS
 .DS_Store
 cockpit.log

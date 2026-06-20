@@ -412,6 +412,11 @@ def create_app(cfg: Config):
     @app.get("/")
     def index():
         appq = request.args.get("app")
+        try:
+            from . import projects
+            projects.record_recent(cfg, appq)   # VS-Code-style "recent projects"
+        except Exception:  # noqa: BLE001
+            pass
         h = health.summary(cfg)
         return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq, h["healthy"]), h,
                                    log_lines=recent_log())

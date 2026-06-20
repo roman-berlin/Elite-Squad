@@ -553,11 +553,26 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
 
 def project_selector(cfg, app: Optional[str]) -> str:
     sel = app or "*"
+    try:
+        from . import projects
+        rec, disc = projects.recents(cfg), projects.discover_repos(cfg)
+    except Exception:  # noqa: BLE001
+        rec, disc = [], []
     opts = [f'<option value="*" {"selected" if sel == "*" else ""}>All projects</option>']
-    for a in cfg.apps:
-        s = "selected" if a.name == sel else ""
-        opts.append(f'<option value="{_esc(a.name)}" {s}>{_esc(a.name)}</option>')
-    return (f'<select id=proj onchange="proj(this.value)" title="Jira project / app">'
+    if rec:
+        opts.append('<optgroup label="&#9733; Recent">')
+        opts += [f'<option value="{_esc(n)}" {"selected" if n == sel else ""}>{_esc(n)}</option>' for n in rec]
+        opts.append("</optgroup>")
+    opts.append('<optgroup label="Projects">')
+    opts += [f'<option value="{_esc(a.name)}" {"selected" if a.name == sel else ""}>{_esc(a.name)}</option>'
+             for a in cfg.apps]
+    opts.append("</optgroup>")
+    if disc:
+        opts.append('<optgroup label="Found nearby (add to config.yaml to work it)">')
+        opts += [f'<option value="*" disabled>{_esc(r["name"])} &mdash; {_esc(r["path"])}</option>'
+                 for r in disc[:12]]
+        opts.append("</optgroup>")
+    return (f'<select id=proj onchange="proj(this.value)" title="project / app — recent on top; nearby repos listed">'
             f'{"".join(opts)}</select>')
 
 
