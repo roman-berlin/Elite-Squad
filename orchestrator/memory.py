@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Optional
 
 _ROOT = Path(__file__).resolve().parent.parent      # the General repo root
-UNIT_PATH = _ROOT / "memory" / "UNIT.md"
+UNIT_PATH = _ROOT / "memory" / "UNIT.md"             # versioned DOCTRINE (Commander-owned; ships via git)
+LIVE_PATH = _ROOT / "memory" / "UNIT.live.md"        # runtime LIVING LOG (officer-owned; gitignored)
 _BACKUPS = _ROOT / "memory" / "backups"
 
 _BEGIN = "<!-- SCRIBE:BEGIN -->"
@@ -66,11 +67,17 @@ MAIN. Quality and tenant-safety over speed.
 
 # --------------------------------------------------------------------------- #
 def ensure() -> Path:
-    """Create a starter UNIT.md if none exists. Returns the path."""
+    """Create a starter UNIT.md if none exists, and migrate any legacy inline Scribe log out to the
+    runtime live-log file (one-time). Returns the doctrine path."""
     if not UNIT_PATH.exists():
         UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
         UNIT_PATH.write_text(_SEED.replace("{today}", datetime.now().strftime("%Y-%m-%d")),
                              encoding="utf-8")
+    if not LIVE_PATH.exists():
+        _, inline, _ = _split(load())
+        if inline.strip():
+            LIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            LIVE_PATH.write_text(inline.strip() + "\n", encoding="utf-8")
     return UNIT_PATH
 
 
@@ -82,13 +89,38 @@ def load() -> str:
         return ""
 
 
-def preamble() -> str:
-    """Compact block to prepend to an officer's system prompt. '' when there's no memory."""
+def _doctrine() -> str:
+    """The Commander-owned doctrine: UNIT.md with any LEGACY inline Scribe section stripped (the log
+    now lives in its own runtime file, so it's never shown twice)."""
     text = load()
-    if not text:
+    if _BEGIN in text and _END in text:
+        head, _, tail = _split(text)
+        text = (head.rstrip() + "\n" + tail.lstrip()).strip()
+    return text
+
+
+def _live_log() -> str:
+    """The officer-maintained living log (runtime file, gitignored). Falls back to a legacy inline
+    Scribe section in UNIT.md for an un-migrated repo. Includes the log heading."""
+    try:
+        live = LIVE_PATH.read_text(encoding="utf-8").strip()
+        if live:
+            return live
+    except OSError:
+        pass
+    _, inline, _ = _split(load())
+    return inline.strip()
+
+
+def preamble() -> str:
+    """Compact block prepended to every officer's system prompt: the versioned doctrine PLUS the live,
+    officer-maintained log. '' when there's no memory at all."""
+    doctrine, live = _doctrine(), _live_log()
+    if not doctrine and not live:
         return ""
+    body = (doctrine + ("\n\n" + live if live else "")).strip()
     return ("=== UNIT MEMORY — the unit's living protocol. Read it before you act; obey the "
-            "Standing Orders. ===\n" + text + "\n=== END UNIT MEMORY ===\n\n")
+            "Standing Orders. ===\n" + body + "\n=== END UNIT MEMORY ===\n\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -109,18 +141,15 @@ def _backup() -> None:
 
 
 def update_log(bullets: str) -> None:
-    """Replace ONLY the Scribe-owned section with a fresh log. Backs up first; preserves
-    every human-owned section. Creates the seed (and markers) if missing."""
-    ensure()
-    text = load()
-    _backup()
-    new_block = f"{_BEGIN}\n{_LOG_HEADING}\n\n{bullets.strip()}\n{_END}"
-    if _BEGIN in text and _END in text:
-        head, _, tail = _split(text)
-        out = head.rstrip() + "\n\n" + new_block + ("\n" + tail.lstrip() if tail.strip() else "\n")
-    else:
-        out = text.rstrip() + "\n\n" + new_block + "\n"
-    UNIT_PATH.write_text(out, encoding="utf-8")
+    """Write the officer-maintained living log to its OWN runtime file (gitignored), so it persists on
+    the server across self-update (`git reset --hard` never touches it) and never collides with the
+    Commander's versioned doctrine. Backs up the prior log first."""
+    LIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LIVE_PATH.exists():
+        _BACKUPS.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(LIVE_PATH, _BACKUPS / f"UNIT.live-{stamp}.md")
+    LIVE_PATH.write_text(f"{_LOG_HEADING}\n\n{bullets.strip()}\n", encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +177,7 @@ async def scribe(cfg) -> str:
     from .agent import run_agent
     from .config import normalize_effort
     ensure()
-    current = load()
-    _, current_log, _ = _split(current)
+    current_log = _live_log()
 
     # Context: latest council transcript + a compact recent-audit digest.
     council_txt = ""
