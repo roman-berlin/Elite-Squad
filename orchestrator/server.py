@@ -1109,13 +1109,14 @@ def create_app(cfg: Config):
             out.append(f"<div class=nsec><h3>&#128172; Questions from the General · {len(s['decisions'])}</h3>")
             for d in s["decisions"]:
                 tid = html.escape(str(d.get("id") or ""))
+                dapp = html.escape(str(d.get("app") or ""))
                 q = html.escape(str(d.get("question") or d.get("summary") or "(question)"))
                 out.append(
-                    f"<div class=ncard><div class=q>{q}</div><div class=meta>{tid} · {html.escape(str(d.get('app') or ''))}</div>"
-                    "<form method=post action=/api/chat class=nrow>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    "<input type=text name=text placeholder='Your decision — e.g. use DD/MM'>"
-                    "<button class='nbtn send'>Reply</button></form></div>")
+                    f"<div class=ncard><div class=q>{q}</div><div class=meta>{tid} · {dapp}</div>"
+                    "<form method=post action=/api/answer class=nrow>"
+                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=app value='{dapp}'>"
+                    "<input type=text name=text placeholder='Your decision — it re-runs the ticket with this baked in'>"
+                    "<button class='nbtn send'>Ship answer</button></form></div>")
             out.append("</div>")
         if s["approvals"]:
             out.append(f"<div class=nsec><h3>&#9989; Officer recommendations · {len(s['approvals'])}</h3>")
@@ -1139,6 +1140,7 @@ def create_app(cfg: Config):
             out.append(f"<div class=nsec><h3>&#9888;&#65039; Runs that need you · {len(s['tasks'])}</h3>")
             for t in s["tasks"]:
                 tid = html.escape(str(t.get("ticket_id") or ""))
+                tapp = html.escape(str(t.get("app") or ""))
                 oc = html.escape(str(t.get("outcome") or ""))
                 note = html.escape(_dash._short(t.get("note") or "", 120))
                 detail = _dash.needs_detail_html(t)            # the full 'what went wrong'
@@ -1148,7 +1150,13 @@ def create_app(cfg: Config):
                     f"<span class=meta>{tid}</span> &nbsp;{oc}"
                     + (f" <span class=muted>— {note}</span>" if note else "")
                     + f"</summary><div class=ndetail>{detail}</div></details>"
-                    + f"<div class=nrow><a class='nbtn send' href='/chat?prefill={prefill}'>Discuss with the General</a>"
+                    # Primary action: ship a real answer — resolves the decision + re-runs the ticket.
+                    + "<form method=post action=/api/answer class=nrow>"
+                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=app value='{tapp}'>"
+                    "<input type=text name=text placeholder='Answer the unit — your decision; it re-runs the ticket'>"
+                    "<button class='nbtn send'>Ship answer</button></form>"
+                    # Secondary: talk it through, or clear it.
+                    + f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the General</a>"
                     "<form method=post action=/api/dismiss style='margin:0'>"
                     f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
                     "<button class='nbtn x'>Dismiss</button></form></div></div>")
@@ -1705,6 +1713,50 @@ def create_app(cfg: Config):
                     _state["last_msg"] = f"chat failed: {exc}"
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/chat")
+
+    @app.post("/api/answer")
+    def answer_api():
+        """Ship the Commander's answer to a parked ticket straight from the Needs-you page. Resolves a
+        pending decision and re-runs the ticket with the answer baked into its spec; if there's no pending
+        decision on file, it records the answer as a ticket comment (the next build reads ALL comments)
+        and unblocks the ticket so autopilot retries it."""
+        tid = (request.form.get("ticket") or "").strip()
+        app_name = (request.form.get("app") or "").strip()
+        ans = (request.form.get("text") or "").strip()
+        if not (tid and ans):
+            return redirect("/needs")
+
+        def _bg():
+            try:
+                from . import decisions
+                if decisions.handle_reply(cfg, audit, f"{tid}: {ans}"):
+                    _state["last_msg"] = f"Shipped your answer to {tid} — the unit is re-running it now."
+                    return
+                # No pending decision recorded: persist the answer ON the ticket + unblock for retry.
+                posted = False
+                try:
+                    appcfg = cfg.app(app_name) if app_name else None
+                    if appcfg and getattr(appcfg, "backlog_backend", "") == "jira":
+                        from .backlog.base import make_backlog
+                        from .contracts import Ticket
+                        make_backlog(appcfg).add_comment(
+                            Ticket(id=tid, key=tid, summary=tid, description="", app=app_name), ans)
+                        posted = True
+                except Exception:  # noqa: BLE001 - a comment failure must not block the unblock
+                    posted = False
+                try:
+                    from . import autopilot as _ap
+                    _ap.unblock(cfg, tid)
+                except Exception:  # noqa: BLE001
+                    pass
+                _state["last_msg"] = (f"Recorded your answer on {tid}"
+                                      + (" (Jira comment)" if posted else "")
+                                      + " and unblocked it — it retries on the next cycle.")
+            except Exception as exc:  # noqa: BLE001
+                _state["last_msg"] = f"answer failed: {exc}"
+        _state["last_msg"] = f"Sending your answer to {tid}…"
+        threading.Thread(target=_bg, daemon=True).start()
+        return redirect("/needs")
 
     @app.get("/report")
     def report_form():

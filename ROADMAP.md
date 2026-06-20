@@ -7,6 +7,12 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Needs-you: answer a parked decision from the cockpit** (2026-06-21) — a parked "awaiting decision"
+  ticket (e.g. AUTO-14) could only be "Discuss with the General" (chat) or Dismiss — no way to ship an
+  actual answer. Added `/api/answer` + a **Ship-answer** box on every Needs-you card: it resolves the
+  pending decision and re-runs the ticket with the answer baked into its spec; if there's no pending
+  decision on file, it records the answer as a **Jira comment** (the next build reads all comments) and
+  unblocks the ticket for retry. Works without touching Telegram. 10 tests; suite 49 harnesses / 689 checks.
 - **/jira recognizes an app's existing config+env Jira** (2026-06-21) — the page wrongly said "No Jira
   connected for automatixy" while the unit was happily pulling AUTO-* tickets. It only looked at the new
   cockpit connection store and ignored the app's `config.yaml` `backlog:` + env-var creds. Now, when no
