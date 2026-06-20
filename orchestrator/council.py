@@ -12,9 +12,15 @@ and open questions are pushed to you.
 
 Officers are read-only here (they Read the record + their own files; they do not write).
 The Adjutant only *proposes* hires/retirements — you approve and apply.
+
+Permission mode is ``bypassPermissions`` for every officer here: they run UNATTENDED (the VPS on
+a schedule, the Mac via autopilot / Telegram), so there is never a human present to answer a tool
+approval prompt. With writes already disallowed, bypass just means "use your read tools without
+dead-stopping" — the autonomy the unit needs to keep working remotely, never blocked on a popup.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -195,7 +201,7 @@ def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
         model=cfg.discussion_model,          # Sonnet — discussions are cheap; Opus stays for implementation
         system_prompt=memory.preamble() + f"{_OFFICER_RULES}\n\n{system}",
         cwd=cwd,
-        permission_mode="default",
+        permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
         setting_sources=["project"],
@@ -300,7 +306,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     ])
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model, system_prompt=memory.preamble() + _CHAIR_SYSTEM, cwd=cwd,
-        permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     briefing = (chair.final or chair.text or "(no briefing)").strip()
@@ -396,7 +402,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     chair_system = _MEETING_CHAIR_SYSTEM + (TICKET_BLOCK_RULE if autospawn else "")
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model, system_prompt=memory.preamble() + chair_system, cwd=cwd,
-        permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision_raw = (chair.final or chair.text or "(no decision)").strip()
@@ -452,7 +458,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     ])
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model, system_prompt=memory.preamble() + _SHIP_REVIEW_CHAIR_SYSTEM, cwd=cwd,
-        permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision = (chair.final or chair.text or "(no recommendation)").strip()
@@ -509,7 +515,7 @@ async def small_talk(cfg: Config, audit=None) -> str:
             ])
         run = await run_agent(prompt, ClaudeAgentOptions(
             model=cfg.smalltalk_model, system_prompt=memory.preamble() + _SMALLTALK_SYSTEM, cwd=cwd,
-            permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+            permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
             disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
             max_turns=4, effort="low"), tag="smalltalk")
         convo.append((rank, (run.final or run.text or "…").strip()))
@@ -540,6 +546,42 @@ def _corridor_insight(convo: list[tuple[str, str]]) -> str:
     return ""
 
 
+_TICKET_KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")
+
+
+async def _ticket_context(cfg: Config, message: str) -> str:
+    """If the Commander names a ticket (e.g. AUTO-14), fetch it through the unit's OWN backlog
+    adapter — the Jira token it already holds — and hand the General the facts inline. That way the
+    General answers 'is this ticket ok?' from the unit's own access, instead of reaching for an
+    ambient Atlassian MCP that would stall on a permission prompt the headless server can't answer.
+    Best-effort: an unmatched key, wrong project, or transient failure just yields no context."""
+    keys = list(dict.fromkeys(_TICKET_KEY.findall(message or "")))
+    if not keys:
+        return ""
+
+    def _fetch() -> list[str]:
+        from .backlog.base import make_backlog
+        out: list[str] = []
+        for key in keys:
+            for app in getattr(cfg, "apps", []) or []:
+                if getattr(app, "backlog_backend", "none") == "none":
+                    continue
+                try:
+                    t = make_backlog(app).get_task(key)
+                except Exception:   # noqa: BLE001 — wrong project/app or transient; try the next app
+                    continue
+                desc = " ".join((t.description or "").split())
+                out.append(f"[{t.key}] {t.summary}\n{desc[:1500]}")
+                break
+        return out
+
+    try:
+        found = await asyncio.to_thread(_fetch)
+    except Exception:   # noqa: BLE001 — a backlog hiccup must never break the chat reply
+        return ""
+    return "\n\n".join(found)
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The General answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs
@@ -555,17 +597,23 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "let him steer. Raise AT MOST ONE thing — and only when it genuinely needs him: a real "
         "decision that's his to make, or a problem the unit can't resolve itself. Otherwise do not "
         "manufacture orders or briefings — the unit runs its own work and the daily council already "
-        "covers status. You may quietly Read a file to ground a point. Reply in English.")
+        "covers status. You may quietly Read a file to ground a point. You have NO live Jira/Atlassian "
+        "connection in this chat — when the Commander names a ticket, its current details are provided "
+        "to you below; rely on those plus the files you can Read, and never try to open an external "
+        "tracker. Reply in English.")
+    ticket_ctx = await _ticket_context(cfg, message)
     prompt = "\n".join([
         *([f"Background you may lean on if relevant — do NOT recite or summarize it:\n{context[:1200]}\n"]
           if context else []),
+        *([f"Ticket(s) the Commander referenced — live from the unit's own backlog:\n{ticket_ctx}\n"]
+          if ticket_ctx else []),
         *([f"What you've already discussed with him:\n{notes}\n"] if notes else []),
         f"The Commander says: {message}", "",
         "Reply like a colleague — short and natural.",
     ])
     run = await run_agent(prompt, ClaudeAgentOptions(
         model=cfg.discussion_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
-        permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         # Room to glance at a few files before replying — 6 was too tight and errored out when the
         # Commander's message invited a quick look ("investigate…"), so the General couldn't answer.
@@ -599,7 +647,7 @@ def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         model=cfg.discussion_model,           # Sonnet — a group brainstorm is many cheap turns
         system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
-        cwd=cwd, permission_mode="default",
+        cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
         setting_sources=["project"], max_turns=5, effort="low")
@@ -738,7 +786,7 @@ async def _gather_standup(cfg: Config) -> tuple[str, list[tuple[str, str]], list
         run = await run_agent(prompt, ClaudeAgentOptions(
             model=cfg.discussion_model,
             system_prompt=memory.preamble() + f"{_STANDUP_SYSTEM}\n\nYour lens — {voice}",
-            cwd=cwd, permission_mode="default", allowed_tools=["Read", "Grep", "Glob"],
+            cwd=cwd, permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
             disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"], setting_sources=["project"],
             max_turns=5, effort="low"), tag="standup-" + _officer_key(rank))
         rows.append((rank, (run.final or run.text or "(no report)").strip()))

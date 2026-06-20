@@ -127,8 +127,8 @@ async def drill(cfg: Config) -> str:
         model=cfg.reviewer_model,
         system_prompt=memory.preamble() + DRILLMASTER_SYSTEM,
         cwd=cwd,
-        permission_mode="default",
-        allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="bypassPermissions",   # read-only drill pass; runs unattended — must never
+        allowed_tools=["Read", "Grep", "Glob"], # dead-stop on a tool prompt no human is there to answer
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
         setting_sources=["project"],
         max_turns=20,

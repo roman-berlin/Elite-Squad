@@ -154,7 +154,7 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
     options = ClaudeAgentOptions(
         model=cfg.builder_model,
         system_prompt=memory.preamble() + _PLANNER_SYSTEM,
-        cwd=cwd, permission_mode="default",
+        cwd=cwd, permission_mode="bypassPermissions",   # read-only plan; unattended — never dead-stop
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit"],
         setting_sources=[], max_turns=14, effort="medium")

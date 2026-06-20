@@ -86,8 +86,8 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config) -> Revi
         model=cfg.reviewer_model,
         system_prompt=memory.preamble() + REVIEWER_SYSTEM,
         cwd=app.workdir or app.repo_path,   # the isolated worktree when enabled
-        permission_mode="default",
-        allowed_tools=["Read", "Grep", "Glob"],
+        permission_mode="bypassPermissions",   # read-only audit; runs unattended in the build loop —
+        allowed_tools=["Read", "Grep", "Glob"], # must never dead-stop on a tool prompt mid-cycle
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
         setting_sources=["project"],
         max_turns=30,
