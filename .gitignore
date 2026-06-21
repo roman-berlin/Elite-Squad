@@ -13,6 +13,11 @@ pending_decisions.json
 telegram_offset.txt
 qa-reports/
 .general-worktrees/
+# Isolated build worktrees — transient per-run clones. The path moved to .claude/worktrees/; tracking one
+# committed it as a submodule gitlink (mode 160000), which breaks clones. Never track these.
+.claude/worktrees/
+# automode runtime cadence marker ({"last": <ts>}) — per-machine runtime state, not source.
+autonomy.json
 # Mac<->server state sync: the dedicated state clone (tracks the orphan `unit-state` branch). Never
 # track it from the code repo — it's a second clone living inside the repo dir. See orchestrator/sync.py.
 .unit-state/
