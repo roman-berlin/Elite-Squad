@@ -577,19 +577,16 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             print(f"  land · {sync}", flush=True)
         _bar(4)
         turl = _test_url(app, build.summary)
-        ctest = f" Test: {turl}." if turl else ""
-        if not ticket.ephemeral:
-            if cfg.mark_done_on_merge:
-                backlog.set_status(ticket, "Done")
-                backlog.add_comment(ticket, f"Merged to {app.base_branch} and marked Done.{ctest} {review.summary}")
-            else:
-                backlog.set_status(ticket, "QA")   # your QA column; you move it Done or back To Do
-                backlog.add_comment(ticket, f"Merged to {app.base_branch}; moved to QA for your review.{ctest} {review.summary}")
-        if ticket.ephemeral:
-            done = ""   # ad-hoc task: no Jira ticket to move
-        else:
-            done = " · marked Done" if cfg.mark_done_on_merge else " · moved to QA"
         test_line = f"\n🔗 Test on {app.base_branch}: {turl}" if turl else ""
+        # QA hand-off: a brief 'what was done' + the DEV test link — NOT the reviewer's full essay.
+        if not ticket.ephemeral:
+            from . import dashboard as _D
+            whatdone = _D.brief(review.summary or build.summary, n=220)
+            head = "marked Done" if cfg.mark_done_on_merge else "moved to QA"
+            backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
+            backlog.add_comment(
+                ticket, f"✅ Merged to {app.base_branch} — {head}.\nWhat was done: {whatdone}{test_line}")
+        done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
 
