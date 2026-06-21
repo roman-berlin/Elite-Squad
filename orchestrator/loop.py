@@ -414,7 +414,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
 
         # 2) VERIFICATION GATE on the feature branch (cheap filter, before review)
         gate = run_gate(app)
-        audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed)
+        audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
+                     report=("" if gate.passed else (gate.report or "")[:2500]))
         if not gate.passed:
             print("  gate · FAILED → sending fixes back to builder", flush=True)
             _bar(1, fail=1)
