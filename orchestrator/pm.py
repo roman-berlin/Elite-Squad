@@ -93,6 +93,64 @@ def parse_verdict(text: str | None, auto_mode: bool = False) -> dict[str, str]:
     return {"verdict": verdict, "body": body or "(the PM gave no detail)", "raw": raw}
 
 
+PM_TRIAGE_SYSTEM = """You are the Product Manager, called when a ticket has EXHAUSTED its build passes —
+the Builder built it several times and the Reviewer kept rejecting it. Before the Commander is bothered,
+you triage the run. You are given the latest Builder summary and the Reviewer's outstanding required
+changes; you may Read the repo to ground your call.
+
+Judge honestly:
+- If the ticket's CORE deliverable is essentially DONE and the remaining rejections are fixable
+  scope-creep / hygiene the unit can finish ITSELF — an unrelated dependency or lockfile change to back
+  out, a missing config/CSP line, a layout fix, a stray file to delete, an out-of-scope app touched —
+  then TRIAGE: RESOLVE. Give ONE precise, surgical instruction for a single final pass that lands the
+  in-scope work and drops the out-of-scope churn. Name the files and the exact action. Ask the Commander
+  NOTHING.
+- If a GENUINE Commander decision remains — a value only he has (a real phone number, a credential), a
+  product/scope call he reserved for himself, or an irreducibly ambiguous requirement — then
+  TRIAGE: ESCALATE, as a tight 1–3 line brief (BLOCKER / DECISION / RECOMMENDATION). No essay.
+
+Bias to RESOLVE when the work is substantively done and only discipline is missing — most max-pass
+blow-ups are the Builder bundling unrelated churn, which you can simply tell it to drop. Reserve
+ESCALATE for what the unit truly cannot settle on its own.
+
+End with EXACTLY one line, nothing after it:  TRIAGE: RESOLVE   or   TRIAGE: ESCALATE"""
+
+
+def parse_triage(text: str | None) -> dict[str, str]:
+    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE, text}. Unclear -> ESCALATE (ask)."""
+    raw = (text or "").strip()
+    up = raw.upper()
+    if "TRIAGE: RESOLVE" in up:
+        action = "RESOLVE"
+    elif "TRIAGE: ESCALATE" in up:
+        action = "ESCALATE"
+    else:
+        action = "ESCALATE"
+    body = raw.rsplit("TRIAGE:", 1)[0].strip() if "TRIAGE:" in up else raw
+    return {"action": action, "text": body or "(the PM gave no detail)"}
+
+
+async def triage(cfg: Config, app_name: str, ticket_id: str, last_build: str = "",
+                 rejections: list[str] | None = None) -> dict[str, str]:
+    """Consulted when a ticket exhausts its passes. Returns {action: RESOLVE|ESCALATE, text}. RESOLVE ->
+    the loop re-queues the ticket with `text` as a corrective instruction; ESCALATE -> park with `text`
+    as the Commander brief."""
+    app = cfg.app(app_name)
+    from . import recon
+    task = "\n".join([
+        f"Ticket {ticket_id} exhausted its build passes ({cfg.max_iterations}). Decide RESOLVE vs ESCALATE.",
+        "", "Latest Builder summary:", (last_build or "(none)")[:1500],
+        "", "Reviewer's outstanding required changes:",
+        ("\n".join(f"- {c}" for c in (rejections or [])[:12]) or "(none recorded)"),
+    ])
+    report = await recon.run_officer(
+        officer="pm", label="Product Manager", system=PM_TRIAGE_SYSTEM,
+        task=task, cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        soldier_tools=["Read", "Grep", "Glob"], max_turns=14, effort="high",
+        empty="TRIAGE: ESCALATE")
+    return parse_triage(report)
+
+
 async def review(cfg: Config, app_name: str, ticket_id: str, question: str, context: str = "") -> dict[str, str]:
     """Run the PM officer on one product question. Returns {verdict: DECIDE|ESCALATE, body, raw}.
     Pure decision — the caller (CLI or the loop) acts on the verdict (resume the build, or file a

@@ -304,6 +304,24 @@ async def _consult_pm(cfg, ticket, app, audit, halt_report: str):
         return None
 
 
+def _already_pm_triaged(cfg, ticket_id: str) -> bool:
+    """True if this ticket already got its ONE PM triage — so a genuinely-stuck ticket escalates for
+    real next time instead of looping triage -> re-queue forever."""
+    try:
+        import json
+        from . import dashboard as _D
+        for line in _D.audit_lines(cfg.audit_path):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("event") == "pm_triage" and e.get("ticket_id") == ticket_id:
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
     cost = 0.0
     last_changes: list[str] = []
@@ -472,14 +490,46 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         _bar(2, fail=2)
         print("  ↻ changes requested → rebuilding", flush=True)
 
-    # Exhausted iterations -> escalate to a human
+    # Exhausted the passes. Before bothering the Commander, let the PM TRIAGE: if the core deliverable
+    # is done and the rejections are fixable scope-creep, hand back ONE corrective pass and re-queue
+    # (the next drain re-runs it); else escalate just the genuine decision as a readable brief. Capped to
+    # one triage per ticket so a truly-stuck ticket still lands on you.
+    from . import pm as _pm
+    from . import dashboard as _D
+    triage = None
+    if (getattr(cfg, "pm_enabled", True) and not ticket.ephemeral
+            and not _already_pm_triaged(cfg, ticket.id)):
+        try:
+            triage = await _pm.triage(cfg, app.name, ticket.id,
+                                      last_build=(build.summary or build.raw or ""), rejections=last_changes)
+        except Exception:  # noqa: BLE001 - triage must never crash the run
+            triage = None
+
+    if triage and triage["action"] == "RESOLVE":
+        audit.record("pm_triage", ticket_id=ticket.id, action="RESOLVE", instruction=triage["text"][:600])
+        if not cfg.dry_run and not ticket.ephemeral:
+            try:
+                backlog.add_comment(ticket, "🎖️ [PM] One focused pass to finish — stay strictly in "
+                                    "scope:\n\n" + triage["text"][:1500])
+                backlog.set_status(ticket, "To Do")   # re-queue; the next drain re-runs it with this note
+            except Exception:  # noqa: BLE001
+                pass
+        _notify(cfg, f"🎖️ {ticket.id} — the PM is finishing it (one corrective pass):\n\n{_D.brief(triage['text'])}")
+        print(f"  🎖️ {ticket.id}: PM triage → re-queued for one corrective pass.", flush=True)
+        return TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
+                            notes="PM triage — re-queued for one corrective pass")
+
+    # Escalate — with the PM's brief if it gave one, else the raw required-changes. Record a question so
+    # Needs-you shows a readable ask (not an empty 'escalated' row) that you can answer -> re-run.
+    esc = (triage.get("text") if triage else None) or _escalation_comment(last_changes)
+    decisions.add(cfg, ticket, app.name, esc[:1500])
     if not cfg.dry_run and not ticket.ephemeral:
         backlog.set_status(ticket, "Needs Human")
-        backlog.add_comment(ticket, _escalation_comment(last_changes))
+        backlog.add_comment(ticket, ("🎖️ [PM] " + esc[:1400]) if triage else esc)
     print("  ✗ escalated — needs you (max passes reached without a clean review)", flush=True)
-    _notify(cfg, f"🛑 {ticket.id} escalated — {cfg.max_iterations} passes without a clean review. "
-                 f"Needs you.\n{ticket.summary}")
-    audit.record("escalated", ticket_id=ticket.id, iterations=cfg.max_iterations)
+    _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{_D.brief(esc)}")
+    audit.record("needs_human", ticket_id=ticket.id, iterations=cfg.max_iterations,
+                 reason="max passes — PM escalated", question=esc[:1500])
     return TicketReport(ticket.id, Outcome.ESCALATED, cfg.max_iterations, cost, app.name, branch,
                         notes="max_iterations reached without a passing review")
 

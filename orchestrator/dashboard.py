@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 _TERMINAL = {"merged", "pr_opened", "escalated", "dryrun_land", "ship_dryrun",
-             "ticket_exception", "no_changes", "needs_human"}
+             "ticket_exception", "no_changes", "needs_human", "pm_triage"}
 _OUTCOME = {
     "merged": "merged→dev", "pr_opened": "PR / needs you", "escalated": "escalated",
     "dryrun_land": "dry-run", "ship_dryrun": "dry-run",
     "ticket_exception": "errored", "no_changes": "errored",
     "needs_human": "awaiting decision",
+    "pm_triage": "re-queued",   # PM sent it back for one corrective pass — not a Needs-you item
 }
 _NEEDS_YOU = {"PR / needs you", "escalated", "errored", "awaiting decision"}
 

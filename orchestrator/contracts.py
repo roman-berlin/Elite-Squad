@@ -115,6 +115,7 @@ class Outcome(str, Enum):
     ESCALATED = "escalated"       # hit max_iterations / budget -> Needs Human
     ERRORED = "errored"           # builder/infra failure
     SKIPPED = "skipped"           # dry-run (no side effects)
+    REQUEUED = "requeued"         # PM triage sent it back for ONE corrective pass (not parked)
 
 
 @dataclass

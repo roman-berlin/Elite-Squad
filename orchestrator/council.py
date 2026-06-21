@@ -625,8 +625,10 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "listed below — use those exact paths or none.")
     ticket_ctx = await _ticket_context(cfg, message)
     apps_brief = "\n".join(
-        f"- {a.name}: repo {a.repo_path} · branches {a.base_branch}/{a.protected_branch}"
-        + (f" · Jira {a.backlog.get('project_key')}" if (a.backlog or {}).get("project_key") else "")
+        f"- {a.name}: repo {getattr(a, 'repo_path', '?')} · branches "
+        f"{getattr(a, 'base_branch', '?')}/{getattr(a, 'protected_branch', '?')}"
+        + (f" · Jira {(getattr(a, 'backlog', None) or {}).get('project_key')}"
+           if (getattr(a, 'backlog', None) or {}).get("project_key") else "")
         for a in cfg.apps) or "(no products configured yet)"
     prompt = "\n".join([
         f"The unit's products and where they REALLY live (use these exact paths — never invent one):\n{apps_brief}\n",

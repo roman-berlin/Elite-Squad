@@ -7,6 +7,19 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **PM triage on iteration-exhaustion + dependency-discipline doctrine** (2026-06-21) — closed a real gap:
+  when a ticket burned all `max_iterations` on repeated Reviewer rejections it escalated **straight to the
+  Commander** with no PM consult (the PM only ever fired on a Builder *halt*, `loop.py:299`) — so
+  scope-creep blow-ups like AUTO-9 / AUTO-18 parked on Roman even though the core work was done. Now, at
+  exhaustion the loop calls **`pm.triage`**: if the deliverable is essentially done and the rejections are
+  fixable scope-creep, it returns ONE surgical instruction and the ticket is **re-queued** for a single
+  corrective pass (new non-parked `Outcome.REQUEUED`; capped to one triage/ticket via the audit so a truly
+  stuck ticket still lands on you); otherwise it escalates just the genuine decision as a readable brief
+  (recorded as `needs_human` so Needs-you shows the ask, not an empty "escalated" row). Root cause also
+  fixed at source: a **standing doctrine** in `UNIT.md` — *never change dependency versions / the lockfile
+  / an out-of-scope app unless the ticket is about that* — which is what produced the `@supabase` +
+  `bun.lock` churn that broke the `useLeads`/`useTrips` typecheck across both tickets. Scope-guidance
+  comments posted on AUTO-9 + AUTO-18. **14 new tests; suite 53 harnesses / 733 checks, all green.**
 - **Brief escalations + reliable Needs-you answer + grounded General chat** (2026-06-21) — three fixes
   from a live drain. (1) The PM now escalates in a tight **BLOCKER/DECISION/OPTIONS/RECOMMENDATION**
   brief, and the Needs-you card leads with that brief (`dashboard.brief`), full message behind a toggle —

@@ -22,6 +22,11 @@ MAIN. Quality and tenant-safety over speed.
   Commander announces that prod exists. Until then, "ship to MAIN" is just an internal integration
   milestone, not a customer-facing deploy.
 - Obey each repo's CLAUDE.md and .claude/rules (Bun-only, tenant isolation, zero-trust).
+- **Stay strictly in the ticket's scope. NEVER change dependency versions, the lockfile
+  (`bun.lock`/`package-lock`), `overrides`/`resolutions`, or any app the ticket doesn't name — unless
+  the ticket is explicitly about that.** Most max-pass blow-ups are the Builder bundling unrelated churn
+  (a Supabase bump, a type loosened to `any`, an out-of-scope app touched) that the Reviewer then blocks.
+  If finishing seems to require a dep/lockfile change, STOP and leave it — do the in-scope work only.
 - Escalate to the Commander only for critical product/strategy decisions — solve problems yourself.
 
 ## Per-App Notes
