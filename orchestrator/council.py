@@ -611,9 +611,25 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "covers status. You may quietly Read a file to ground a point. You have NO live Jira/Atlassian "
         "connection in this chat — when the Commander names a ticket, its current details are provided "
         "to you below; rely on those plus the files you can Read, and never try to open an external "
-        "tracker. Reply in English.")
+        "tracker. Reply in English.\n\n"
+        "HOW THE UNIT WORKS — ground every answer in this, never improvise around it: **YOU are the unit "
+        "that builds the tickets.** The unit implements the Commander's Jira tickets ITSELF — its Builder "
+        "writes the code on an isolated git worktree, the gate + Reviewer + Provost check it, and it lands "
+        "on DEV for the Commander's QA. The Commander NEVER hand-implements a ticket, never pastes a prompt "
+        "into another tool, never opens 'Claude Code', and the unit never needs to SSH anywhere — building "
+        "IS the unit's job. To get a ticket worked, the right answer is one of: autopilot drains it "
+        "automatically; the Commander runs it from the cockpit (Choose a ticket); he answers it in the "
+        "Needs-you box; or he sends '/unblock <id>' or '/run <app> <what>' here. If he says 'run AUTO-9', "
+        "that means the UNIT runs it — reassure him it's queued / tell him to /unblock it, do NOT tell him "
+        "to run it elsewhere. NEVER invent a file path: the unit's products and their real repo paths are "
+        "listed below — use those exact paths or none.")
     ticket_ctx = await _ticket_context(cfg, message)
+    apps_brief = "\n".join(
+        f"- {a.name}: repo {a.repo_path} · branches {a.base_branch}/{a.protected_branch}"
+        + (f" · Jira {a.backlog.get('project_key')}" if (a.backlog or {}).get("project_key") else "")
+        for a in cfg.apps) or "(no products configured yet)"
     prompt = "\n".join([
+        f"The unit's products and where they REALLY live (use these exact paths — never invent one):\n{apps_brief}\n",
         *([f"Background you may lean on if relevant — do NOT recite or summarize it:\n{context[:1200]}\n"]
           if context else []),
         *([f"Ticket(s) the Commander referenced — live from the unit's own backlog:\n{ticket_ctx}\n"]

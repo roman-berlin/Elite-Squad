@@ -59,7 +59,8 @@ autopilot.unblock = lambda c, tid: (unblocked.__setitem__("tid", tid) or "unbloc
 client.post("/api/answer", data={"ticket": "AUTO-9", "app": "automatixy", "text": "go with option A"})
 chk("no decision -> answer posted as a ticket comment", posted.get("key") == "AUTO-9" and posted.get("body") == "go with option A")
 chk("no decision -> ticket unblocked for retry", unblocked.get("tid") == "AUTO-9")
-chk("no decision -> message says recorded + unblocked", "unblocked" in server._state.get("last_msg", ""))
+chk("no decision -> message says recorded + re-queued + cleared",
+    "queue" in server._state.get("last_msg", "") and "Cleared from Needs-you" in server._state.get("last_msg", ""))
 
 # --- Case 3: empty ticket/answer -> no-op ---
 calls.clear()

@@ -32,7 +32,7 @@ TASK = {
 
 # --- 1. needs_detail_html: the full 'what went wrong' ---
 detail = D.needs_detail_html(TASK)
-chk("detail: what-happened headline", "What happened" in detail and "precondition/blocker" in detail)
+chk("detail: leads with the brief ask", "The ask:" in detail and "precondition/blocker" in detail)
 chk("detail: builder summary shown", "Builder · pass 1" in detail and "gate cost" in detail)
 chk("detail: reviewer verdict shown", "verdict FAIL" in detail and "precondition broken" in detail)
 chk("detail: reviewer findings listed", "Restore the Inspector" in detail and "axe-core failing" in detail)
@@ -61,7 +61,7 @@ client = server.create_app(cfg).test_client()
 r = client.get("/needs"); body = r.get_data(as_text=True)
 chk("/needs returns 200", r.status_code == 200, str(r.status_code))
 chk("/needs has an expand disclosure (arrow)", "<details>" in body and "<summary>" in body)
-chk("/needs expand reveals the problem detail", "What happened" in body and "gate cost" in body)
+chk("/needs expand reveals the problem detail", "The ask:" in body and "gate cost" in body)
 chk("/needs 'Discuss' carries a prefill link", "/chat?prefill=" in body)
 chk("/needs prefill is URL-encoded (no raw spaces)", "prefill=AUTO-14%20" in body)
 chk("/needs still has Dismiss", "Dismiss" in body and "/api/dismiss" in body)

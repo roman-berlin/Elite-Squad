@@ -36,8 +36,16 @@ direction. Keep it short and concrete; no hedging, no walls of text.
 End your reply with EXACTLY one line, nothing after it:
   PM VERDICT: DECIDE
   PM VERDICT: ESCALATE
-Above that line: the decision + rationale (DECIDE), or your recommended solution + why it's critical
-(ESCALATE)."""
+
+Above that line:
+- DECIDE → one short paragraph: the decision + a one-line rationale the Builder can act on.
+- ESCALATE → a BRIEF for the Commander, at most 6 lines, in EXACTLY this shape — no preamble, no
+  re-derivation, no quoting the whole ticket:
+    BLOCKER: <one sentence — what is blocked and why it's his call>
+    DECISION: <the single question he must answer>
+    OPTIONS: <A vs B in a few words, or "—" if not a choice>
+    RECOMMENDATION: <your suggested call + the one key trade-off>
+  The Commander reads this on his phone — if he can't grasp the decision in five seconds, it's too long."""
 
 
 PM_AUTOMODE = """

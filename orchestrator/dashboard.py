@@ -233,12 +233,40 @@ def _short(s: Any, n: int) -> str:
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
+def brief(text: Any, n: int = 360) -> str:
+    """A short, scannable version of a long escalation note for the Needs-you card. Prefers the PM's
+    structured lines (BLOCKER/DECISION/OPTIONS/RECOMMENDATION) when present; otherwise the first couple
+    of sentences. So the Commander reads the ask, not a wall of reasoning."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    keep = [ln.strip() for ln in raw.splitlines()
+            if any(ln.upper().lstrip("*# -").startswith(m)
+                   for m in ("BLOCKER", "DECISION", "OPTIONS", "RECOMMENDATION", "THE ASK"))]
+    if keep:
+        return _short(" · ".join(keep), n)
+    import re
+    out = ""
+    for s in re.split(r"(?<=[.!?])\s+", " ".join(raw.split())):
+        if out and len(out) + len(s) > n:
+            break
+        out += (" " if out else "") + s
+    return _short(out or raw, n)
+
+
 def needs_detail_html(t: dict[str, Any]) -> str:
-    """The full 'what went wrong' for one Needs-you run — the note plus each pass's builder/reviewer
-    summary and the reviewer's specific findings. Shown inside the card's expand panel."""
+    """The Needs-you card detail: lead with a BRIEF (the ask), then the build/review passes. The full
+    raw note is shown dimmed + capped + scrollable underneath — never an unbounded wall of text."""
     rows: list[str] = []
     if t.get("note"):
-        rows.append(f'<div class=ndt><b>What happened:</b> {html.escape(str(t["note"]))}</div>')
+        note = str(t["note"])
+        b = brief(note)
+        rows.append(f'<div class=ndt><b>The ask:</b> {html.escape(b)}</div>')
+        # Keep the full note available but contained — only when it adds more than the brief.
+        if len(" ".join(note.split())) > len(b) + 40:
+            rows.append('<details class=ndfull><summary>full message</summary>'
+                        f'<div class="ndt muted" style="white-space:pre-wrap;max-height:200px;'
+                        f'overflow:auto;margin-top:6px">{html.escape(_short(note, 1600))}</div></details>')
     for p in (t.get("passes_list") or []):
         n = p.get("n", "?")
         if p.get("build_summary"):

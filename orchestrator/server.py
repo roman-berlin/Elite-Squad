@@ -1749,9 +1749,17 @@ def create_app(cfg: Config):
                     _ap.unblock(cfg, tid)
                 except Exception:  # noqa: BLE001
                     pass
-                _state["last_msg"] = (f"Recorded your answer on {tid}"
+                # Clear the stale escalated row from Needs-you so the answer visibly "takes" — the
+                # ticket goes back to the queue (unblocked + comment attached) and autopilot re-works it;
+                # if it re-escalates a fresh row reappears.
+                try:
+                    D.dismiss(cfg.audit_path, tid)
+                except Exception:  # noqa: BLE001
+                    pass
+                _state["last_msg"] = (f"Answer recorded on {tid}"
                                       + (" (Jira comment)" if posted else "")
-                                      + " and unblocked it — it retries on the next cycle.")
+                                      + " and sent back to the queue — autopilot re-works it with your "
+                                      "decision. Cleared from Needs-you.")
             except Exception as exc:  # noqa: BLE001
                 _state["last_msg"] = f"answer failed: {exc}"
         _state["last_msg"] = f"Sending your answer to {tid}…"

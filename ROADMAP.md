@@ -7,6 +7,14 @@ Last updated: 2026-06-20.
 
 ## Shipped
 
+- **Brief escalations + reliable Needs-you answer + grounded General chat** (2026-06-21) — three fixes
+  from a live drain. (1) The PM now escalates in a tight **BLOCKER/DECISION/OPTIONS/RECOMMENDATION**
+  brief, and the Needs-you card leads with that brief (`dashboard.brief`), full message behind a toggle —
+  no more wall of text. (2) Answering a parked ticket with no pending decision now **records the answer +
+  re-queues + clears the row** (`/api/answer` dismisses it), so the answer visibly "takes." (3) The
+  **General chat was hallucinating** (invented repo paths, told the Commander to "paste into Claude
+  Code") — `respond_to_commander` now gets the real app config (paths/branches/Jira) + a "the unit builds
+  tickets itself" operating block. 18 tests; suite 53 harnesses / ~723 checks.
 - **Live phase bar + bigger terminal + collapsible Activity** (2026-06-21) — three cockpit fixes. (1) A
   build started by the answer box / `/unblock` / autopilot now lights the **ACTIVE RUN phase bar**
   (Build → Gate → Review → Security → Land) instead of showing "last run · interrupted" while the builder
