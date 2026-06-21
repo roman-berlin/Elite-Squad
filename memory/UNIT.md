@@ -14,6 +14,13 @@ MAIN. Quality and tenant-safety over speed.
 
 - Only work tickets assigned to ROMAN BERLIN.
 - Never touch MAIN; land on DEV, move the ticket to QA.
+- **No separate production environment exists yet — DEV *is* the live environment.** Everything the
+  Commander calls "production" today runs on DEV. The `vercel.json` `/api/*` rewrites that point at the
+  DEV backend are **intentional and correct**: do NOT flag them as an env-parity defect, and do NOT
+  freeze or hold DEV→MAIN over them. A dedicated production environment (separate backend + config) will
+  be stood up before any real launch; re-activate the env-parity / production-cutover gates only once the
+  Commander announces that prod exists. Until then, "ship to MAIN" is just an internal integration
+  milestone, not a customer-facing deploy.
 - Obey each repo's CLAUDE.md and .claude/rules (Bun-only, tenant isolation, zero-trust).
 - Escalate to the Commander only for critical product/strategy decisions — solve problems yourself.
 
