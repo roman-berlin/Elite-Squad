@@ -43,25 +43,70 @@ _DANGER_CMD: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b"), "pipe-to-shell of a remote script"),
 ]
 
+# Outbound network tools that can ship bytes off the box.
+_NET_TOOL = re.compile(r"\b(curl|wget|nc|ncat|netcat)\b", re.IGNORECASE)
+
+# An upload/data flag whose payload is a dotfile or secret-extension file — i.e. exfil of a credential,
+# e.g. `curl --data @/path/.env`, `wget --post-file .netrc`, `curl --upload-file id_rsa`, `nc -F .env`.
+# Requires a leading-dot filename OR a private-key/secret extension so normal POSTs (`-d name=value`,
+# `-d @payload.json`) and ordinary GETs do not match.
+_EXFIL_DOTFILE = re.compile(
+    r"(?:--data(?:-binary|-raw|-ascii|-urlencode)?|--upload-file|--post-file|--form"
+    r"|(?<![\w-])-[dFT](?![\w]))"          # short forms -d / -F / -T (not --data, not -dry)
+    r"[=\s'\"]*@?\s*"                       # optional =, quote, @file marker, whitespace
+    r"(?:~|\$HOME|\.{1,2})?/?"              # optional ~ / $HOME / . / .. prefix
+    r"(?:[\w.-]+/)*"                        # optional directory components
+    r"(?:\.[\w][\w.-]*|[^\s'\"|;&]*\.(?:pem|key))",  # a dotfile (leading dot) or a *.pem/*.key file
+    re.IGNORECASE,
+)
+
+# Filename suffixes that mark a template/sample — they carry no real secret, so let them through.
+_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist", ".tmpl")
+
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+# Tools that take a path and can EXPOSE a secret: writes (clobber/leak) plus Read (exfil source).
+_PATH_TOOLS = _WRITE_TOOLS | {"Read"}
+
+
+def _shell_secret_ref(cmd: str) -> str:
+    """Return the first whitespace/quote/@-separated token in a shell command that names a protected
+    secret path (``.env``, ``*.pem``/``*.key``, ``id_rsa``, ``secrets.*``, ``.git/``, ``.github/``),
+    skipping templates. Empty string if none — this is how we deny `cat .env` / `curl --data @/x/.env`."""
+    for tok in re.split(r"[\s'\"=|;&()<>`]+", cmd):
+        ref = tok.lstrip("@")
+        if not ref:
+            continue
+        if ref.lower().endswith(_TEMPLATE_SUFFIXES):
+            continue
+        if _SECRET_PATH.search(ref):
+            return ref
+    return ""
 
 
 def is_dangerous(tool_name: str, tool_input: dict | None) -> tuple[bool, str]:
     """Pure denylist: does this tool call cross a hard line? Returns ``(blocked, reason)``.
     Unit-testable without the SDK — this is the heart of the guard."""
     ti = tool_input or {}
-    if tool_name in _WRITE_TOOLS:
+    if tool_name in _PATH_TOOLS:
         path = str(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
         low = path.lower()
         # templates/samples carry no real secrets — let those through (e.g. .env.example, key.pem.sample)
-        is_template = low.endswith((".example", ".sample", ".template", ".dist", ".tmpl"))
+        is_template = low.endswith(_TEMPLATE_SUFFIXES)
         if path and not is_template and _SECRET_PATH.search(path):
-            return True, f"writing to a protected/secret path ({path})"
+            verb = "writing to" if tool_name in _WRITE_TOOLS else "reading"
+            return True, f"{verb} a protected/secret path ({path})"
     if tool_name == "Bash":
         cmd = str(ti.get("command") or "")
         for rx, why in _DANGER_CMD:
             if rx.search(cmd):
                 return True, f"destructive shell — {why}"
+        # (a) shell read/exfil of a real secret path (cat .env, curl --data @/x/.env, nc < secrets.yaml)
+        hit = _shell_secret_ref(cmd)
+        if hit:
+            return True, f"shell access to a protected/secret path ({hit})"
+        # (b) outbound network tool uploading a dotfile/secret payload (catches generic dotfiles too)
+        if _NET_TOOL.search(cmd) and _EXFIL_DOTFILE.search(cmd):
+            return True, "shell exfil — outbound network upload of a dotfile/secret"
     return False, ""
 
 
@@ -90,7 +135,9 @@ def hooks_config():
     if the SDK is too old to support hooks (the guard then simply isn't installed — never an error)."""
     try:
         from claude_agent_sdk import HookMatcher
-        return {"PreToolUse": [HookMatcher(matcher="Bash|Write|Edit|MultiEdit|NotebookEdit",
+        # 'Read' MUST stay in this matcher: the hook only fires for tools it names, so without Read the
+        # secret-READ blocking in is_dangerous() (EU-2 F1) would be dead code at runtime.
+        return {"PreToolUse": [HookMatcher(matcher="Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
                                            hooks=[_pretooluse])]}
     except Exception:  # noqa: BLE001
         return None
