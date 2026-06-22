@@ -582,6 +582,25 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         return TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
                             notes="PM triage — re-queued for one corrective pass")
 
+    if triage and triage["action"] == "SPLIT":
+        # Too heavy for one build → the Scrum Master breaks it into small sub-tickets (filed on the
+        # Commander), then closes the parent. The autopilot picks up the fragments next cycle.
+        from . import scrum as _scrum
+        recap = (build.summary or "") + ("\nReviewer wanted: " + "; ".join(last_changes[:6]) if last_changes else "")
+        try:
+            sp = await _scrum.split(cfg, app.name, ticket, recap=recap, reason=triage.get("text", ""))
+        except Exception as exc:  # noqa: BLE001 - a split failure must fall through to a normal escalate
+            sp = {"ok": False, "keys": [], "error": str(exc)}
+        if sp.get("ok") and sp.get("keys"):
+            kk = ", ".join(sp["keys"])
+            audit.record("pm_triage", ticket_id=ticket.id, action="SPLIT", into=sp["keys"])
+            _notify(cfg, f"🧩 {ticket.id} was too heavy — the Scrum Master split it into {kk} (on you) and "
+                         "closed the parent. The unit takes the fragments next.")
+            print(f"  🧩 {ticket.id}: too heavy → Scrum Master split into {kk}; parent closed.", flush=True)
+            return TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
+                                notes=f"too heavy — Scrum Master split into {kk}")
+        print(f"  · Scrum Master couldn't split ({sp.get('error')}) — escalating instead.", flush=True)
+
     # Escalate — with the PM's brief if it gave one, else the raw required-changes. Record a question so
     # Needs-you shows a readable ask (not an empty 'escalated' row) that you can answer -> re-run.
     esc = (triage.get("text") if triage else None) or _escalation_comment(last_changes)

@@ -109,18 +109,24 @@ Judge honestly:
   product/scope call he reserved for himself, or an irreducibly ambiguous requirement — then
   TRIAGE: ESCALATE, as a tight 1–3 line brief (BLOCKER / DECISION / RECOMMENDATION). No essay.
 
-Bias to RESOLVE when the work is substantively done and only discipline is missing — most max-pass
-blow-ups are the Builder bundling unrelated churn, which you can simply tell it to drop. Reserve
-ESCALATE for what the unit truly cannot settle on its own.
+- If the ticket is simply TOO BIG to land within the pass budget — it spans many files or areas, each
+  independently substantial, and no single corrective pass could finish it (a repo-wide rename, a
+  multi-screen feature, a cross-cutting refactor) — then TRIAGE: SPLIT. In 1–2 lines say why it's too
+  heavy; the Scrum Master will break it into small sub-tickets that each land on their own.
 
-End with EXACTLY one line, nothing after it:  TRIAGE: RESOLVE   or   TRIAGE: ESCALATE"""
+Bias to RESOLVE when the work is substantively done and only discipline is missing. Use SPLIT only when
+the ticket is genuinely oversized for one build. Reserve ESCALATE for what only the Commander can settle.
+
+End with EXACTLY one line, nothing after it:  TRIAGE: RESOLVE   or   TRIAGE: ESCALATE   or   TRIAGE: SPLIT"""
 
 
 def parse_triage(text: str | None) -> dict[str, str]:
-    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE, text}. Unclear -> ESCALATE (ask)."""
+    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE|SPLIT, text}. Unclear -> ESCALATE."""
     raw = (text or "").strip()
     up = raw.upper()
-    if "TRIAGE: RESOLVE" in up:
+    if "TRIAGE: SPLIT" in up:
+        action = "SPLIT"
+    elif "TRIAGE: RESOLVE" in up:
         action = "RESOLVE"
     elif "TRIAGE: ESCALATE" in up:
         action = "ESCALATE"
