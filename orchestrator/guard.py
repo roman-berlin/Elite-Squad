@@ -33,6 +33,12 @@ _SECRET_PATH = re.compile(
 _DANGER_CMD: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\brm\b[^|;&\n]*\s-{1,2}[a-z]*[rf][a-z]*\b[^|;&\n]*\s(/|~|\$HOME|\.\.?)(/|\s|$)"),
      "recursive delete of a root / home / repo path"),
+    # F9: anchor on ABSOLUTE paths too — `rm -rf /Users/.../repo` (or any quoted/sub-pathed absolute
+    # target) escaped the rule above, which only caught a bare `/`, `~`, `$HOME` or `..`. A recursive
+    # delete of an absolute path is, by definition, outside the relative-path worktree the officer should
+    # be confined to. Trade-off: tighter guard, rare false-positive on a deliberate absolute-path delete.
+    (re.compile(r"\brm\b[^|;&\n]*\s-{1,2}[a-z]*[rf][a-z]*\b[^|;&\n]*\s['\"]?(/|~/|\$HOME/)[\w.~-]"),
+     "recursive delete of an absolute path (outside the worktree)"),
     (re.compile(r"\bgit\s+push\b[^|;&\n]*(--force\b|--force-with-lease\b|\s-f\b)"), "force-push"),
     (re.compile(r"\bgit\s+push\b[^|;&\n]*\b(main|master)\b", re.IGNORECASE), "push to a protected branch"),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard (discards work)"),
