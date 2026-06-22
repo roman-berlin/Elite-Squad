@@ -356,7 +356,7 @@ def _chat_inner(cfg: Config) -> str:
                   '<button>Send</button></form></div>')
     pending_html = f'<div class=pending>{cards}</div>' if cards else ""
     try:
-        notes = council.recent_commander_notes(cfg, lines=240)
+        notes = council.chat_transcript(cfg, lines=400)
     except Exception:  # noqa: BLE001
         notes = ""
     bubbles = ""

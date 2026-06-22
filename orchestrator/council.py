@@ -179,6 +179,33 @@ def add_commander_note(cfg: Config, text: str) -> None:
         f.write(f"- [{stamp}] {one_line}\n")
 
 
+# --- Cockpit chat transcript --------------------------------------------------------------------- #
+# The FULL Commander<->General exchange, separate from commander_notes.md (which is truncated standing
+# guidance fed into prompts). The cockpit chat reads THIS so it shows the General's real reply inline
+# instead of the answer only landing in Telegram. Format matches cockpit_views._chat_bubbles.
+def _chat_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("commander_chat.md")
+
+
+def append_chat(cfg: Config, role: str, text: str) -> None:
+    """role 'Q' (Commander) or 'A' (General). One line per turn, full text (not truncated)."""
+    line = ("Q: " if role == "Q" else "A (General): ") + " ".join((text or "").split()).strip()
+    try:
+        with _chat_file(cfg).open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def chat_transcript(cfg: Config, lines: int = 400) -> str:
+    """Recent cockpit chat turns (full Q/A), newest kept. Falls back to the (truncated) commander notes
+    if no chat file exists yet, so existing history still shows."""
+    p = _chat_file(cfg)
+    if not p.exists():
+        return recent_commander_notes(cfg, lines=min(lines, 240))
+    return "\n".join(p.read_text(encoding="utf-8").splitlines()[-lines:]).strip()
+
+
 def history(cfg: Config, limit: int = 20) -> list[dict]:
     """Recent councils (newest first) for the cockpit: {ts, title, file, summary}."""
     idx = _council_dir(cfg) / "index.jsonl"
@@ -597,6 +624,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     """The General answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs
     the exchange as standing guidance for the unit."""
+    append_chat(cfg, "Q", message)   # show the Commander's message in the cockpit chat right away
     latest = history(cfg, limit=1)
     context = transcript_text(cfg, latest[0]["file"]) if latest else format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
@@ -651,6 +679,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     notify.send(f"🎖️ {answer[:3500]}")
     # Log compactly — a colleague chat, not a briefing to be replayed verbatim into future prompts.
     add_commander_note(cfg, f"Q: {message[:120]} → A: {answer[:200]}")
+    append_chat(cfg, "A", answer)    # full reply to the cockpit chat (not only Telegram)
     return answer
 
 

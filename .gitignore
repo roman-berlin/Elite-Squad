@@ -26,6 +26,7 @@ autonomy.json
 # them kept the tree permanently dirty (which used to block the promote) and let the server's
 # `git reset --hard` clobber its own minutes. Untracked, they're written + shown exactly as before.
 commander_notes.md
+commander_chat.md
 adjutant-report.md
 scout-report.md
 provost-report.md
