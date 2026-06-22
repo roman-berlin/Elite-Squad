@@ -172,23 +172,25 @@ def handle_command(cfg, audit, text: str) -> bool:
         from . import autopilot as ap_mod
         notify.send("▶️ " + ap_mod.unblock(cfg, arg or None) + " — autopilot will retry it.")
     elif cmd in ("run", "drain"):
+        import copy
         live = "--live" in arg
         arg = arg.replace("--live", "").strip()
-        cfg.dry_run = not live
+        rcfg = copy.copy(cfg)        # per-invocation config — never mutate the shared cfg
+        rcfg.dry_run = not live
         try:
             if cmd == "run":
                 app, _, desc = arg.partition(" ")
                 if not app or not desc.strip():
                     notify.send("Usage: /run <app> <what to build> [--live]")
                     return True
-                wl = intake.from_text(cfg, app, desc[:60], [], description=desc)
+                wl = intake.from_text(rcfg, app, desc[:60], [], description=desc)
             else:
-                wl = intake.from_drain(cfg, arg or None, cfg.max_tickets_per_run)
+                wl = intake.from_drain(rcfg, arg or None, rcfg.max_tickets_per_run)
             if not wl:
                 notify.send("Nothing to do.")
                 return True
             notify.send(f"▶️ Starting {len(wl)} ticket(s) {'(LIVE)' if live else '(dry-run)'}…")
-            _run_bg(cfg, audit, wl)
+            _run_bg(rcfg, audit, wl)
         except Exception as exc:  # noqa: BLE001
             notify.send(f"⚠️ couldn't start: {exc}")
     else:
