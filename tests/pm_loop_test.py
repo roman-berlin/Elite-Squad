@@ -82,6 +82,36 @@ chk("DECIDE -> pm_decided audited", any(e["event"] == "pm_decided" for e in au.e
 chk("DECIDE -> re-built with the PM decision injected into the ticket", any("Use 4 nav groups" in d for d in built), f"builds={len(built)}")
 chk("DECIDE -> PM consulted once, then escalated on the 2nd halt", sum(1 for e in au.ev if e["event"] == "pm_decided") == 1 and rep2.outcome == Outcome.ESCALATED)
 
+# ---- NO HALT LANGUAGE: a no-changes build still routes to the PM once before erroring (EU-10) ----
+# A benign summary with <2 halt markers used to skip the PM entirely and go straight to ERRORED.
+NO_HALT = "Looked at the code; everything already matches the acceptance criteria."
+class QuietBuilder:
+    @staticmethod
+    def effort_plan(cfg, it, ticket): return ("low", "sized")
+    @staticmethod
+    async def build(req, app, cfg, audit=None):
+        return BuildResult(ok=True, summary=NO_HALT, cost_usd=0.0, num_turns=1, raw=NO_HALT, tools=[])
+loop.builder_mod = QuietBuilder
+
+# PM consulted but cannot decide (None) -> falls through to ERRORED, having spent one cheap call.
+pm_calls = []
+async def pm_none(c, t, a, au, rep): pm_calls.append(rep); return None
+loop._consult_pm = pm_none
+au = Audit()
+rep3 = asyncio.run(loop._attempt(ticket, app, cfg, Git(), Backlog(), au, loop.Budget(0), "autodev/AUTO-14"))
+chk("no halt language -> PM consulted once before erroring", len(pm_calls) == 1, f"calls={len(pm_calls)}")
+chk("no halt language + PM no-decision -> ERRORED", rep3.outcome == Outcome.ERRORED, str(rep3.outcome))
+chk("no halt language + PM no-decision -> no_changes audited", any(e["event"] == "no_changes" for e in au.ev))
+
+# PM consulted and DECIDES -> rebuilds with the decision injected, even with no halt language.
+async def pm_dec2(c, t, a, au, rep): return {"verdict": "DECIDE", "body": "Ship the empty-state copy first."}
+loop._consult_pm = pm_dec2
+au = Audit()
+rep4 = asyncio.run(loop._attempt(ticket, app, cfg, Git(), Backlog(), au, loop.Budget(0), "autodev/AUTO-14"))
+chk("no halt language + PM DECIDE -> pm_decided audited (re-build)", any(e["event"] == "pm_decided" for e in au.ev))
+
+loop.builder_mod = FakeBuilder  # restore for any later assertions
+
 print("\n================ PM-IN-LOOP QA ================")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

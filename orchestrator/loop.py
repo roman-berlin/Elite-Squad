@@ -355,38 +355,43 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                 notes="builder process errored")
         if not git.has_changes():
-            if _is_deliberate_halt(build.summary or build.raw):
-                report = (build.summary or build.raw or "(no report)").strip()
-                # Route the product/precondition blocker to the Product Manager (once per ticket). It
-                # either makes the call — and the build resumes with that decision injected — or
-                # escalates ONE recommendation to the Commander, in which case we park with a clear
-                # comment and the run moves on to the next ticket.
-                pm_outcome = None
-                if not pm_used:
-                    pm_used = True
-                    pm_outcome = await _consult_pm(cfg, ticket, app, audit, report)
-                    if pm_outcome is not None and pm_outcome["verdict"] == "DECIDE":
-                        from dataclasses import replace
-                        auto = bool(getattr(cfg, "auto_mode", False))
-                        ticket = replace(ticket, description=(ticket.description or "")
-                            + "\n\n---\nPRODUCT MANAGER DECISION (resolves the open product question — "
-                              "act on it, do not re-raise it):\n" + pm_outcome["body"])
-                        audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration, automode=auto)
-                        # Automode: the PM decided WITHOUT waiting for you. Leave a durable trail on the
-                        # ticket so you can review it (and reverse — it's on DEV, never production).
-                        if auto and not cfg.dry_run and not ticket.ephemeral:
-                            try:
-                                backlog.add_comment(ticket, "🤖 Automode — the PM decided this "
-                                    "autonomously (review & reverse if needed; lands on DEV, not "
-                                    "production):\n\n" + pm_outcome["body"][:1200])
-                            except Exception:  # noqa: BLE001 - a comment failure must not break the run
-                                pass
-                        head = ("🤖 Automode — the PM decided autonomously" if auto
-                                else "🧭 the PM made the product call")
-                        _notify(cfg, f"{head}; {ticket.id} continuing:\n\n{pm_outcome['body'][:800]}")
-                        print(f"  {'🤖' if auto else '🧭'} {ticket.id}: PM decided — re-building with "
-                              "the decision.", flush=True)
-                        continue
+            report = (build.summary or build.raw or "(no report)").strip()
+            deliberate = _is_deliberate_halt(build.summary or build.raw)
+            # Route ANY no-changes build to the Product Manager once per ticket — not only ones whose
+            # wording trips the 2-marker halt heuristic. A genuine "no-changes" blocker phrased with <2
+            # markers would otherwise be mislabeled ERRORED and parked instead of getting a product call.
+            # The PM either makes the decision — and the build resumes with it injected — or it hands back
+            # a recommendation we surface to the Commander. (Trade-off: one extra cheap PM call on a truly
+            # empty build, which then still falls through to ERRORED below.)
+            pm_outcome = None
+            if not pm_used:
+                pm_used = True
+                pm_outcome = await _consult_pm(cfg, ticket, app, audit, report)
+                if pm_outcome is not None and pm_outcome["verdict"] == "DECIDE":
+                    from dataclasses import replace
+                    auto = bool(getattr(cfg, "auto_mode", False))
+                    ticket = replace(ticket, description=(ticket.description or "")
+                        + "\n\n---\nPRODUCT MANAGER DECISION (resolves the open product question — "
+                          "act on it, do not re-raise it):\n" + pm_outcome["body"])
+                    audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration, automode=auto)
+                    # Automode: the PM decided WITHOUT waiting for you. Leave a durable trail on the
+                    # ticket so you can review it (and reverse — it's on DEV, never production).
+                    if auto and not cfg.dry_run and not ticket.ephemeral:
+                        try:
+                            backlog.add_comment(ticket, "🤖 Automode — the PM decided this "
+                                "autonomously (review & reverse if needed; lands on DEV, not "
+                                "production):\n\n" + pm_outcome["body"][:1200])
+                        except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                            pass
+                    head = ("🤖 Automode — the PM decided autonomously" if auto
+                            else "🧭 the PM made the product call")
+                    _notify(cfg, f"{head}; {ticket.id} continuing:\n\n{pm_outcome['body'][:800]}")
+                    print(f"  {'🤖' if auto else '🧭'} {ticket.id}: PM decided — re-building with "
+                          "the decision.", flush=True)
+                    continue
+            # The PM didn't (or couldn't) make the call. Park for the Commander when this was a deliberate
+            # halt OR the PM returned a recommendation; otherwise it's a truly empty build -> ERRORED.
+            if deliberate or pm_outcome is not None:
                 proposal = pm_outcome["body"] if pm_outcome is not None else report
                 decisions.add(cfg, ticket, app.name, proposal[:1500])   # so you can answer it in Telegram
                 if not cfg.dry_run and not ticket.ephemeral:
