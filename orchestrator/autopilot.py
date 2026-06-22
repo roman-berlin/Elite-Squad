@@ -127,6 +127,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     audit.record("autopilot_start", mode=mode, app=app_name, once=once)
     budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
     budget_alerted = False
+    idle_announced = False   # print "queue clear" once per idle stretch, not every interval
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -162,13 +163,17 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             worklist = [(a, t) for (a, t) in worklist if t.id not in blocked][:cap]
 
             if not worklist:
-                print("  · queue clear — nothing of yours in In Progress / To Do"
-                      + (f" (parked: {', '.join(sorted(blocked))})" if blocked else ""), flush=True)
+                if not idle_announced:   # say it once, then stay quiet until work appears
+                    print("  · queue clear — nothing of yours in In Progress / To Do"
+                          + (f" (parked: {', '.join(sorted(blocked))})" if blocked else "")
+                          + " — idling; I'll pick up new or unblocked tickets automatically.", flush=True)
+                    idle_announced = True
                 if once:
                     break
                 await events.after_cycle(cfg, [], audit, blocked)   # quiet cycle — room for life
                 _sleep(max(5, interval), stop_event)
                 continue
+            idle_announced = False   # work again → re-announce next time the queue empties
 
             ids = ", ".join(t.id for _, t in worklist)
             print(f"  · taking {ids}", flush=True)
