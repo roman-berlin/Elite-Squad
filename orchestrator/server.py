@@ -151,22 +151,49 @@ def create_app(cfg: Config):
 
     @app.get("/tickets")
     def tickets_page():
-        app_name = request.args.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        appq = (request.args.get("app") or "").strip()
+        all_projects = appq in ("", "*")    # "" (no param) + "*" (selector "All projects") -> every backlogged Jira
+        name = None if all_projects else appq
         style = ("<style>.tlist{margin:10px 0;border:1px solid #232936;border-radius:10px;overflow:hidden}"
                  ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid #1a1f29;cursor:pointer}"
                  ".trow:first-child{border-top:0}.trow:hover{background:#151a23}"
                  ".trow input{margin-top:3px}.tkey{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6aa9ff;white-space:nowrap}"
                  ".tsum{color:#e8eaed}.trun{display:flex;gap:14px;align-items:center;margin-top:14px;flex-wrap:wrap}"
                  ".trun button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 18px;font-weight:650;cursor:pointer}"
-                 ".hint{color:#8a909c;font-size:13px}</style>")
+                 ".hint{color:#8a909c;font-size:13px}"
+                 ".tapp{margin-left:auto;font-size:11px;color:#8a909c;background:#161b24;border:1px solid #232936;border-radius:999px;padding:1px 9px;white-space:nowrap}"
+                 ".tgrp{font-size:12px;color:#c4c9d2;font-weight:700;margin:16px 0 6px}</style>")
         try:
-            items = intake.from_drain(cfg, app_name, 30)
+            items = intake.from_drain(cfg, name, 40)
         except Exception as exc:  # noqa: BLE001
-            return _wrap("Choose tickets", f"<p class=hint>Couldn't load tickets for "
-                         f"<b>{html.escape(app_name)}</b>: {html.escape(str(exc))}</p>")
+            who = "any project" if all_projects else f"<b>{html.escape(appq)}</b>"
+            return _wrap("Choose tickets", style + f"<p class=hint>Couldn't load tickets for "
+                         f"{who}: {html.escape(str(exc))}</p>")
         if not items:
-            return _wrap("Choose tickets", "<p class=hint>Nothing assigned to you in "
-                         f"<b>{html.escape(app_name)}</b> (In Progress / To Do). Clear queue.</p>")
+            who = "any project" if all_projects else f"<b>{html.escape(appq)}</b>"
+            return _wrap("Choose tickets", style + "<p class=hint>Nothing assigned to you in "
+                         f"{who} (In Progress / To Do). Clear queue.</p>")
+
+        # ALL-PROJECTS view: a read-only index grouped by app — each ticket links into its own project,
+        # where it can be ticked + developed (one run form can only target a single app/Jira).
+        if all_projects:
+            by_app: dict[str, list] = {}
+            for a, t in items:
+                by_app.setdefault(getattr(a, "name", "") or "?", []).append(t)
+            blocks = []
+            for an in sorted(by_app):
+                trows = "".join(
+                    f'<a class=trow href="/tickets?app={quote(an)}">'
+                    f'<span class=tkey>{html.escape(t.id)}</span>'
+                    f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span>'
+                    f'<span class=tapp>develop &rarr;</span></a>' for t in by_app[an])
+                blocks.append(f'<div class=tgrp>{html.escape(an)} &middot; {len(by_app[an])}</div>'
+                              f'<div class=tlist>{trows}</div>')
+            body = (style + f'<p class=hint>{len(items)} ticket(s) assigned to you across '
+                    f'{len(by_app)} project(s). Pick a project to develop its tickets.</p>'
+                    + "".join(blocks))
+            return _wrap("Choose tickets — all projects", body)
+
         rows = "".join(
             f'<label class=trow><input type=checkbox name=ticket value="{html.escape(t.id)}">'
             f'<span class=tkey>{html.escape(t.id)}</span>'
@@ -179,7 +206,7 @@ def create_app(cfg: Config):
                   "Tick the ones to develop, then Run.</p>"
                   '<form method=post action=/api/run-selected '
                   'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
-                  f'<input type=hidden name=app value="{html.escape(app_name)}">'
+                  f'<input type=hidden name=app value="{html.escape(appq)}">'
                   f'<div class=tlist>{rows}</div>'
                   '<div class=trun>'
                   '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
@@ -187,7 +214,7 @@ def create_app(cfg: Config):
                   '<button>&#9654; Develop selected</button>'
                   '<span class=hint>default builds + merges to DEV — tick “dry run” to build only</span>'
                   '</div></form>')
-        return _wrap(f"Choose tickets — {app_name}", body)
+        return _wrap(f"Choose tickets — {html.escape(appq)}", body)
 
     @app.post("/api/run-selected")
     def run_selected_api():

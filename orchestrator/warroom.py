@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 from datetime import datetime
 from urllib.parse import quote
 from pathlib import Path
@@ -528,6 +529,54 @@ def _sync_html(cfg) -> str:
     return f'<div class=synced>&#8646; synced: {html.escape(peers)}{html.escape(ago)}</div>'
 
 
+_BACKLOG_CACHE: dict[str, tuple[float, list]] = {}   # scope -> (fetched_ts, [(AppConfig, Ticket)])
+_BACKLOG_TTL = 90.0   # the board re-renders every couple seconds; only hit Jira at most once/90s/scope
+
+
+def _backlog_items(cfg, app: Optional[str]) -> tuple[list, Optional[str]]:
+    """Open To-Do / In-Progress tickets assigned to the Commander for ``app`` — or EVERY backlogged app
+    when ``app`` is None/'*'. TTL-cached so the SSE poll doesn't call Jira on every frame; serves the
+    last good result if a refresh fails, so a Jira blip never blanks the panel. Returns (items, error)."""
+    scope = app if (app and app != "*") else "*"
+    now = time.time()
+    hit = _BACKLOG_CACHE.get(scope)
+    if hit and now - hit[0] < _BACKLOG_TTL:
+        return hit[1], None
+    try:
+        from . import intake
+        name = None if scope == "*" else scope     # None → from_drain spans all backlogged apps
+        items = intake.from_drain(cfg, name, 25)
+        _BACKLOG_CACHE[scope] = (now, items)
+        return items, None
+    except Exception as exc:  # noqa: BLE001 - never let a backlog fetch break the board
+        if hit:
+            return hit[1], None
+        return [], str(exc)[:140]
+
+
+def _backlog_html(cfg, app: Optional[str]) -> str:
+    items, err = _backlog_items(cfg, app)
+    scope = "all projects" if (not app or app == "*") else _esc(app)
+    if err:
+        return f'<div class=blempty>Backlog unavailable for {scope} — {_esc(err)}</div>'
+    if not items:
+        return (f'<div class=blempty>&#10003; Nothing of yours open in {scope} '
+                '(In&nbsp;Progress / To&nbsp;Do).</div>')
+    multi = (not app or app == "*")
+    rows = []
+    for a, t in items:
+        an = _esc(getattr(a, "name", "") or "")
+        tid = _esc(getattr(t, "id", "") or getattr(t, "key", "") or "?")
+        summ = _esc(getattr(t, "summary", "") or "(no summary)")
+        badge = f'<span class=blapp>{an}</span>' if multi else ""
+        rows.append(
+            f'<a class=blrow href="/tickets?app={quote(an)}" title="Open the {an} backlog to develop this">'
+            f'<span class=blkey>{tid}</span><span class=blsum>{summ}</span>{badge}</a>')
+    head = (f'<a class=blmore href="/tickets?app={quote(app) if (app and app!="*") else "*"}">'
+            f'{len(items)} open &middot; develop &rarr;</a>')
+    return f'<div class=blhead>{head}</div><div class=bllist>{"".join(rows)}</div>'
+
+
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
     ap_on = bool((state.get("autopilot") or {}).get("on"))
@@ -570,6 +619,10 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         '<div class=cols>'
         f'<div class=col-main>'
         f'<section class=panel><div class=ph>Active run</div><div class=run>{run}</div></section>'
+        f'<details class="panel collapse" id=blpanel open>'
+        f'<summary class=ph>Tickets to work &middot; '
+        f'{"all projects" if (not app or app == "*") else _esc(app)}</summary>'
+        f'<div class=backlog>{_backlog_html(cfg, app)}</div></details>'
         f'{log_panel}'
         f'<details class="panel collapse" id=actpanel open><summary class=ph>Activity</summary>'
         f'<div class=feed>{fd}</div></details>'
@@ -827,6 +880,17 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .offlast{font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap}
 /* feed */
 .feed{padding:5px 0;max-height:430px;overflow:auto}
+/* backlog — tickets to work, scoped to the project selector (all projects = every backlogged Jira) */
+.backlog{padding:4px 0 6px;max-height:340px;overflow:auto}
+.blhead{padding:6px 16px 4px}
+.blmore{font-size:11.5px;font-weight:700;color:var(--info)}
+.bllist{display:flex;flex-direction:column}
+.blrow{display:flex;gap:11px;align-items:baseline;padding:9px 16px;border-top:1px solid var(--line);color:var(--ink)}
+.blrow:hover{background:var(--panel2)}
+.blkey{font-family:var(--mono);font-size:12px;color:var(--info);white-space:nowrap}
+.blsum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.blapp{font-size:10.5px;font-weight:700;color:var(--dim);background:#1a2333;border:1px solid var(--line2);border-radius:999px;padding:1px 8px;white-space:nowrap}
+.blempty{padding:14px 16px;color:var(--dim);font-size:13px}
 .fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid #161b24}
 .fitem:first-child{border-top:0}
 .fd{width:7px;height:7px;border-radius:99px;margin-top:6px;flex:none;background:var(--faint)}
