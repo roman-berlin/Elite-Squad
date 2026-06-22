@@ -32,6 +32,12 @@ _BEGIN = "<!-- SCRIBE:BEGIN -->"
 _END = "<!-- SCRIBE:END -->"
 _LOG_HEADING = "## Lessons & Decisions  _(Scribe-maintained — newest first)_"
 
+# How many of the newest/most-recurring lessons to inline into EVERY officer prompt. The log is
+# newest-first and Consolidate folds the most-recurring rejection lessons to the top, so the cap keeps
+# the highest-signal ones. The full log still lives in the file + on the cockpit /memory page, so this
+# bounds per-call tokens (every officer pays for the preamble) without a relevance router.
+PREAMBLE_LESSONS = 12
+
 _SEED = f"""# Elite Unit — Living Protocol (Unit Memory)
 
 The unit's shared memory. Every officer reads this before acting. The Commander owns the
@@ -99,23 +105,49 @@ def _doctrine() -> str:
     return text
 
 
-def _live_log() -> str:
+def _live_log(limit: int | None = None) -> str:
     """The officer-maintained living log (runtime file, gitignored). Falls back to a legacy inline
-    Scribe section in UNIT.md for an un-migrated repo. Includes the log heading."""
+    Scribe section in UNIT.md for an un-migrated repo. Includes the log heading. When `limit` is set,
+    only the newest `limit` lessons are returned (the rest collapse to a one-line pointer) — this is
+    what `preamble()` inlines into every officer prompt, so it stays bounded as the log grows. With
+    `limit=None` (the cockpit page) the FULL log is returned."""
+    live = ""
     try:
         live = LIVE_PATH.read_text(encoding="utf-8").strip()
-        if live:
-            return live
     except OSError:
-        pass
-    _, inline, _ = _split(load())
-    return inline.strip()
+        live = ""
+    if not live:
+        _, inline, _ = _split(load())
+        live = inline.strip()
+    if not live or limit is None:
+        return live
+    return _cap_lessons(live, limit)
+
+
+def _cap_lessons(live: str, limit: int) -> str:
+    """Keep the heading + the newest `limit` bullets; the older ones collapse to a single pointer line
+    so an officer prompt never carries the whole log."""
+    head: list[str] = []
+    kept: list[str] = []
+    extra = 0
+    for ln in live.splitlines():
+        if ln.strip().startswith("- "):
+            if len(kept) < limit:
+                kept.append(ln)
+            else:
+                extra += 1
+        elif not kept:                 # non-bullet lines before the first bullet = the heading
+            head.append(ln)
+    out = head + kept
+    if extra:
+        out.append(f"- …(+{extra} older lessons — full log on the cockpit /memory page)")
+    return "\n".join(out).strip()
 
 
 def preamble() -> str:
     """Compact block prepended to every officer's system prompt: the versioned doctrine PLUS the live,
     officer-maintained log. '' when there's no memory at all."""
-    doctrine, live = _doctrine(), _live_log()
+    doctrine, live = _doctrine(), _live_log(limit=PREAMBLE_LESSONS)
     if not doctrine and not live:
         return ""
     body = (doctrine + ("\n\n" + live if live else "")).strip()

@@ -102,6 +102,24 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     return f"unblocked all ({len(blocked)})"
 
 
+def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
+    """After a productive cycle, fold any new recurring rejection-lessons into Unit Memory and prune it
+    — FREE + deterministic (no model call), so memory compounds every cycle instead of only at the
+    06:30 council. The full model-Scribe stays on the council cadence. Best-effort: memory hygiene must
+    never break the loop. Returns the consolidate report ({} when there was nothing to learn from)."""
+    if not reports:
+        return {}
+    try:
+        from . import consolidate
+        cr = consolidate.run(cfg)
+        if cr.get("added"):
+            audit.record("memory_learn", added=len(cr["added"]), pruned=cr.get("pruned", 0))
+            print(f"  · memory: folded {len(cr['added'])} new lesson(s) learned this cycle", flush=True)
+        return cr
+    except Exception as exc:  # noqa: BLE001 - never let memory hygiene sideline the worker
+        return {"error": str(exc)}
+
+
 async def autopilot(cfg: Config, app_name: str | None = None,
                     once: bool = False, interval: int = 60, stop_event=None) -> None:
     audit = AuditLog(cfg.audit_path)
@@ -210,6 +228,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 save_blocked(cfg, blocked)
                 notify.send("⏸️ Parked (need you): " + ", ".join(newly)
                             + "\nReply /unblock <id> once handled and I'll retry it.")
+            _learn_from_cycle(cfg, reports, audit)   # fold this cycle's lessons into memory (free)
             await events.after_cycle(cfg, reports, audit, blocked)   # the unit may convene itself
             if once:
                 break

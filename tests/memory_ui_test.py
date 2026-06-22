@@ -32,6 +32,7 @@ cfg.detected_auth = lambda: "test"
 # Don't touch the real Unit Memory file or audit during the test.
 memory.ensure = lambda *a, **k: None
 memory.load = lambda *a, **k: "(stub memory)"
+memory._live_log = lambda *a, **k: "(stub lessons log)"
 consolidate.rejection_patterns = lambda *a, **k: []
 
 client = server.create_app(cfg).test_client()

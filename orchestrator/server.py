@@ -136,7 +136,10 @@ def create_app(cfg: Config):
     def tasks_page():
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path))
-        return page.replace("</header>", "</header>" + _control_bar(cfg), 1)
+        # This board view is reached from the cockpit's Reports menu, so it needs a way back like
+        # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
+        back = "<p style='margin:14px 30px 4px'><a href='/' style='color:#6aa9ff'>&larr; cockpit</a></p>"
+        return page.replace("</header>", "</header>" + back + _control_bar(cfg), 1)
 
     @app.post("/api/dismiss")
     def dismiss_api():
@@ -470,9 +473,18 @@ def create_app(cfg: Config):
         banner = (f"<div style='background:#10371f;border:1px solid #1c5238;color:#7fe3a6;border-radius:9px;"
                   f"padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
                   f"{html.escape(str(_m))}</div>" if _m else "")
-        body = (banner + act + top + pat_html + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>"
-                "Lessons &amp; doctrine</h3><pre class=rep>"
-                + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>")
+        # Doctrine (Commander-owned) + the FULL living lessons log. Officers only see the newest
+        # PREAMBLE_LESSONS of the log in their prompt; the whole tail lives here for the Commander.
+        live_full = memory._live_log()
+        live_html = (
+            "<h3 style='margin:18px 0 8px;font-size:14px;color:#c4c9d2'>Living lessons log "
+            f"<span style='color:#8a929f;font-weight:400;font-size:12px'>· officers see the newest "
+            f"{memory.PREAMBLE_LESSONS} in every prompt; the full log lives here</span></h3>"
+            "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
+        body = (banner + act + top + pat_html
+                + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>Doctrine</h3>"
+                + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
+                + live_html)
         return _wrap("Unit Memory", body)
 
     @app.get("/meeting")
