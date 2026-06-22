@@ -49,6 +49,43 @@ _DANGER_CMD: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b"), "pipe-to-shell of a remote script"),
 ]
 
+# bun subcommands that REWRITE bun.lock — i.e. drift a worktree's deps off DEV's pinned tree mid-build.
+# A *frozen* install (`bun install --frozen-lockfile`) is the only safe form: it installs exactly the
+# pinned tree and refuses to mutate the lockfile. Everything else (add/update/remove, or a bare install)
+# can resolve new versions and rewrite bun.lock, defeating EU-18's worktree dep-isolation guarantee.
+_BUN_MUTATING_SUBCMD = {
+    "install", "i",                 # bare install (no --frozen-lockfile) re-resolves & may rewrite the lock
+    "add", "a",                     # add a dependency
+    "update", "up", "upgrade",      # bump dependencies
+    "remove", "rm", "uninstall",    # drop a dependency
+}
+_BUN_FROZEN_FLAG = re.compile(r"(?<![\w-])--frozen-lockfile(?![\w-])")
+
+
+def _bun_lockfile_write(cmd: str) -> str:
+    """Return the offending bun subcommand when ``cmd`` runs a non-frozen ``bun install``/``add``/
+    ``update``/``remove`` (anything that can rewrite ``bun.lock``); empty string otherwise.
+
+    Only ``bun install --frozen-lockfile`` (and its ``bun i`` alias) is allowed — it installs DEV's
+    pinned tree exactly and never mutates the lockfile. add/update/remove always drift the lock, so they
+    are blocked regardless of flags. Splits on shell separators so a chained ``cmd && bun add x`` is
+    still caught, and tolerates env-var prefixes (``CI=1 bun install``)."""
+    for segment in re.split(r"(?:&&|\|\||[|;&\n])", cmd):
+        toks = segment.split()
+        for idx, tok in enumerate(toks):
+            if tok != "bun" and not tok.endswith("/bun"):
+                continue
+            if idx + 1 >= len(toks):
+                break
+            sub = toks[idx + 1]
+            if sub not in _BUN_MUTATING_SUBCMD:
+                break  # e.g. `bun run …`, `bun test`, `bun x` — not a lockfile-mutating call
+            if sub in ("install", "i") and _BUN_FROZEN_FLAG.search(segment):
+                break  # the one allowed form: frozen install installs the pinned tree, never rewrites it
+            return sub
+    return ""
+
+
 # Outbound network tools that can ship bytes off the box.
 _NET_TOOL = re.compile(r"\b(curl|wget|nc|ncat|netcat)\b", re.IGNORECASE)
 
@@ -106,6 +143,12 @@ def is_dangerous(tool_name: str, tool_input: dict | None) -> tuple[bool, str]:
         for rx, why in _DANGER_CMD:
             if rx.search(cmd):
                 return True, f"destructive shell — {why}"
+        # non-frozen bun install/add/update/remove rewrites bun.lock and drifts the worktree off DEV's
+        # pin (EU-18) — only `bun install --frozen-lockfile` is allowed mid-build.
+        bun_sub = _bun_lockfile_write(cmd)
+        if bun_sub:
+            return True, (f"non-frozen lockfile mutation — `bun {bun_sub}` can rewrite bun.lock and "
+                          "drift deps off DEV's pin; use `bun install --frozen-lockfile`")
         # (a) shell read/exfil of a real secret path (cat .env, curl --data @/x/.env, nc < secrets.yaml)
         hit = _shell_secret_ref(cmd)
         if hit:

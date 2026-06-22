@@ -7,9 +7,16 @@ fixed; 'warn' is degraded-but-operational. `summary(cfg)` rolls them up for the 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+from pathlib import Path
 from shutil import which
 from typing import Any
+
+# EU-18: deps a drifted worktree silently re-pins off DEV. We compare the WHOLE bun.lock
+# (the authoritative pin), but surface these names by version when there IS drift — a mismatch
+# here is the canonical symptom of the worktree install having floated off DEV.
+_PINNED_PKGS = ("@supabase/supabase-js",)
 
 # GUI-launched apps inherit a minimal PATH, so `which` alone can miss Homebrew/bun tools
 # (e.g. gh). Also look in the common bin locations.
@@ -29,6 +36,69 @@ def _git_ref(repo_path: str, ref: str) -> bool:
         return r.returncode == 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def _resolved_pin(lock_text: str | None, pkg: str) -> str | None:
+    """Best-effort resolved version of ``pkg`` in a bun.lock (text format).
+
+    bun.lock spells a resolved dependency as ``"<name>@<version>"`` (e.g.
+    ``"@supabase/supabase-js@2.39.0"``). We only need it for the human-readable detail —
+    pass/fail rides on the full-file comparison, not this regex."""
+    if not lock_text:
+        return None
+    m = re.search(re.escape(pkg) + r"@(\d[^\"'\s,\]]*)", lock_text)
+    return m.group(1) if m else None
+
+
+def lockfile_drift(worktree_lock: str | None, base_lock: str | None,
+                   pkgs: tuple[str, ...] = _PINNED_PKGS) -> tuple[str, str]:
+    """Pure check: has the worktree's bun.lock drifted off DEV's pinned bun.lock?
+
+    Returns ``(status, detail)`` with status ``'ok' | 'warn' | 'bad'``. A 'bad' means the
+    (reused) worktree install floated off DEV — the exact failure EU-18's frozen-lockfile
+    re-pin exists to prevent. 'warn' is can't-tell (no base lock, or worktree not set up)."""
+    if base_lock is None:
+        return ("warn", "no bun.lock at base ref — nothing to pin against")
+    if worktree_lock is None:
+        return ("warn", "worktree not set up / no bun.lock yet — re-pinned on next build")
+    if worktree_lock == base_lock:
+        pin = _resolved_pin(base_lock, _PINNED_PKGS[0])
+        return ("ok", "bun.lock matches DEV" + (f" (@supabase/supabase-js@{pin})" if pin else ""))
+    bits = []
+    for pkg in pkgs:
+        wv, bv = _resolved_pin(worktree_lock, pkg), _resolved_pin(base_lock, pkg)
+        if wv != bv:
+            bits.append(f"{pkg}: worktree {wv} != DEV {bv}")
+    detail = "; ".join(bits) or "bun.lock differs from DEV's pin"
+    return ("bad", "lockfile drift — " + detail + " (frozen re-pin will restore on next build)")
+
+
+def _git_show(repo_path: str, ref_path: str) -> str | None:
+    """``git show <ref>:<path>`` from a repo's object store, or None if absent."""
+    try:
+        r = subprocess.run(["git", "show", ref_path],
+                           cwd=os.path.expanduser(repo_path), capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def worktree_drift_check(cfg, app) -> tuple[str, str] | None:
+    """EU-18 doctor assertion: the (possibly reused) worktree's bun.lock — and its resolved
+    @supabase/supabase-js — equals DEV's pin after setup.
+
+    None = not applicable (in-tree mode, or the app isn't a Bun project at DEV) so the caller
+    emits no check line. Otherwise ``(status, detail)`` from :func:`lockfile_drift`."""
+    if not getattr(cfg, "use_worktree", False):
+        return None
+    from . import loop  # lazy: avoids importing the SDK-heavy loop at module load
+    base_ref = f"origin/{app.base_branch}"
+    base_lock = _git_show(app.repo_path, f"{base_ref}:bun.lock")
+    if base_lock is None:
+        return None  # no lockfile at DEV (not a Bun app, or origin not fetched) -> skip silently
+    wt_lock_path = Path(loop._worktree_path(app, cfg)) / "bun.lock"
+    wt_lock = wt_lock_path.read_text() if wt_lock_path.exists() else None
+    return lockfile_drift(wt_lock, base_lock)
 
 
 def checks(cfg) -> list[dict[str, str]]:
@@ -81,6 +151,9 @@ def checks(cfg) -> list[dict[str, str]]:
             add(f"{tag} · worktree", "ok" if ref_ok else "warn",
                 f"origin/{app.base_branch} resolves" if ref_ok
                 else f"origin/{app.base_branch} missing — falls back in-tree")
+            drift = worktree_drift_check(cfg, app)
+            if drift:
+                add(f"{tag} · dep pin", drift[0], drift[1])
         if app.backlog_backend == "jira":
             add(f"{tag} · Jira creds", "ok" if jira_have else "bad",
                 "set" if jira_have else "JIRA_EMAIL / JIRA_API_TOKEN missing")

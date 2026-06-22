@@ -139,6 +139,48 @@ def _make_git(cfg: Config, app: AppConfig) -> Git:
     return git
 
 
+def _repin_worktree_deps(cfg: Config, app: AppConfig, git: Git) -> None:
+    """Per-ticket dependency isolation (EU-18).
+
+    The one-time ``worktree_setup_cmd`` runs only when a worktree is first *created*.
+    But a worktree is REUSED across tickets, and its ``node_modules`` is gitignored —
+    so a previous ticket that mutated/added a dependency leaves the install drifted off
+    DEV's pin, and ``reset --hard``/``clean -fd`` won't restore it (clean skips ignored
+    paths; the lockfile alone says nothing about what's physically installed).
+
+    So before EVERY build we re-pin the (possibly reused) worktree to DEV:
+      1. hard-restore ``bun.lock`` from the integration base (origin/<base>), which
+         re-pins an already-clobbered lockfile to DEV's exact bytes;
+      2. reinstall with ``--frozen-lockfile`` so ``node_modules`` matches that lock
+         exactly and the command FAILS LOUDLY instead of silently rewriting the lock.
+
+    No-op outside worktree mode (in-tree runs share the user's own checkout)."""
+    if not getattr(cfg, "use_worktree", False) or not getattr(git, "isolated", False):
+        return
+    workdir = Path(git.workdir)
+    # Only meaningful for a Bun project; skip silently if there's no lockfile/manifest.
+    if not (workdir / "bun.lock").exists() and not (workdir / "package.json").exists():
+        return
+    base_ref = getattr(git, "base_ref", f"origin/{app.base_branch}")
+    # 1) restore DEV's lockfile into the worktree (undoes any prior-ticket drift).
+    restored = subprocess.run(
+        ["git", "checkout", base_ref, "--", "bun.lock"],
+        cwd=str(workdir), capture_output=True, text=True,
+    )
+    if restored.returncode != 0:
+        why = (restored.stderr.strip().splitlines() or ["no bun.lock at base"])[0]
+        print(f"  · dep isolation: bun.lock not restored from {base_ref} ({why})", flush=True)
+    # 2) reinstall frozen so the install can't drift off the pinned lock.
+    print("  · dep isolation — bun install --frozen-lockfile", flush=True)
+    proc = subprocess.run(
+        ["bun", "install", "--frozen-lockfile"],
+        cwd=str(workdir), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr.strip().splitlines() or ["unknown"])[-1]
+        print(f"  · dep isolation: frozen install reported a problem ({tail})", flush=True)
+
+
 class Budget:
     def __init__(self, limit: float):
         self.limit = limit
@@ -277,6 +319,9 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
     if not cfg.dry_run and not ticket.ephemeral:
         backlog.set_status(ticket, "In Progress")
     git.checkout_feature(branch)
+    # EU-18: re-pin the (possibly reused) worktree's deps to DEV's bun.lock before any
+    # build runs, so a prior ticket's dependency drift can't leak into this one.
+    _repin_worktree_deps(cfg, app, git)
     print(f"\n» {ticket.id}  →  branch {branch}", flush=True)
     _notify(cfg, f"🔨 {ticket.id} started — {ticket.summary}\nbranch: {branch}")
 
