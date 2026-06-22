@@ -45,6 +45,22 @@ chk("model fixed -> plain name", roster._model_for(fixed, "builder_model") == "o
 chk("model auto -> marked (auto)", roster._model_for(auto, "builder_model") == "opus (auto)")
 chk("deterministic officer (Sentinel) shows no model", roster._model_for(cfg, None) == "—")
 
+# --- F15 regression: the roster's model label must match the model each officer actually runs on ---
+# The recon officers (Scout/Provost/Quartermaster) run their recon on cfg.reviewer_model (Opus), not
+# discussion_model — verified against the officer source so doc-vs-code can't drift again.
+_attr = {name: mattr for name, _role, _duty, mattr in roster._OFFICERS}
+_recon_src = {"Scout": "scout", "Provost Marshal": "provost", "Quartermaster": "quartermaster"}
+for _name, _mod in _recon_src.items():
+    chk(f"{_name} roster label says reviewer_model", _attr[_name] == "reviewer_model", _attr[_name])
+    _src = (Path("orchestrator") / f"{_mod}.py").read_text(encoding="utf-8")
+    chk(f"{_name} source actually runs on cfg.reviewer_model", "model=cfg.reviewer_model" in _src)
+# and the labelled model resolves to Opus, not Sonnet, when the two configs differ
+_drift = Config(apps=[], audit_path="/tmp/x.jsonl", discussion_model="claude-sonnet-4-5",
+                reviewer_model="claude-opus-4-8")
+for _name in _recon_src:
+    chk(f"{_name} model column shows opus (recon model)",
+        roster._model_for(_drift, _attr[_name]) == "opus", roster._model_for(_drift, _attr[_name]))
+
 # --- html cockpit view ---
 html = roster.html_view(cfg, "all quiet")
 chk("html view renders the tree", "Chain of command" in html and "The General" in html)
