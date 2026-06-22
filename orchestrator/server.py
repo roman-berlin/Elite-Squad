@@ -27,6 +27,10 @@ _state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None,
           "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
           "approving": None}
 
+# Guards the active check-then-set so two near-simultaneous run POSTs can't both pass the
+# `_state["active"]` guard and start two runs (TOCTOU race). Acquire it whenever you claim a run.
+_run_lock = threading.Lock()
+
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
 import collections as _collections  # noqa: E402
@@ -607,14 +611,20 @@ def create_app(cfg: Config):
 
     @app.post("/api/run-selected")
     def run_selected_api():
-        if _state["active"]:
-            _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
-            return redirect("/")
+        # Atomically claim the run: check-then-set under the lock so two near-simultaneous
+        # POSTs can't both pass this guard and start two runs.
+        with _run_lock:
+            if _state["active"]:
+                _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
+                return redirect("/")
+            _state["active"] = True
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         keys = request.form.getlist("ticket")
         if not keys:
+            _state["active"] = False
             return redirect(f"/tickets?app={app_name}")
         if not health.summary(cfg)["healthy"]:
+            _state["active"] = False
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
         import copy
@@ -628,6 +638,7 @@ def create_app(cfg: Config):
         try:
             worklist = intake.from_tickets(rcfg, app_name, keys)
         except Exception as exc:  # noqa: BLE001
+            _state["active"] = False
             _state["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
@@ -650,10 +661,15 @@ def create_app(cfg: Config):
 
     @app.post("/api/run")
     def run_api():
-        if _state["active"]:
-            _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
-            return redirect("/")
+        # Atomically claim the run: check-then-set under the lock so two near-simultaneous
+        # POSTs can't both pass this guard and start two runs.
+        with _run_lock:
+            if _state["active"]:
+                _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
+                return redirect("/")
+            _state["active"] = True
         if not health.summary(cfg)["healthy"]:
+            _state["active"] = False
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
@@ -679,6 +695,7 @@ def create_app(cfg: Config):
             else:
                 worklist = intake.from_drain(rcfg, app_name or None, rcfg.max_tickets_per_run)
         except Exception as exc:  # noqa: BLE001
+            _state["active"] = False
             _state["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
@@ -1782,10 +1799,15 @@ def create_app(cfg: Config):
 
     @app.post("/api/report")
     def report_api():
-        if _state["active"]:
-            _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
-            return redirect("/")
+        # Atomically claim the run: check-then-set under the lock so two near-simultaneous
+        # POSTs can't both pass this guard and start two runs.
+        with _run_lock:
+            if _state["active"]:
+                _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
+                return redirect("/")
+            _state["active"] = True
         if not health.summary(cfg)["healthy"]:
+            _state["active"] = False
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
@@ -1799,6 +1821,7 @@ def create_app(cfg: Config):
         try:
             worklist = intake.from_text(rcfg, app_name, title, [], description=desc)
         except Exception as exc:  # noqa: BLE001
+            _state["active"] = False
             _state["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
