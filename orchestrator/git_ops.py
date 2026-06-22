@@ -113,12 +113,25 @@ class Git:
 
     def diff_against_base(self) -> str:
         """Full diff of all feature work vs base. Staging first (`add -A`) is what
-        makes NEW files show up — `git diff` alone omits untracked files."""
+        makes NEW files show up — `git diff` alone omits untracked files.
+
+        F14 hygiene — reliance on the target repo's .gitignore: `git add -A` stages
+        every untracked, non-ignored path, so any stray builder artifact (caches,
+        build output, dumps) written mid-build lands on the feature branch unless the
+        target repo's `.gitignore` excludes it. We deliberately keep `add -A` (not a
+        scoped pathspec) because narrowing risks dropping legitimately-new source
+        files — surfacing them is the whole point of this diff. The safety net is
+        therefore the target repo's `.gitignore`: it MUST cover the toolchain's
+        artifacts (node_modules/, dist/, build/, __pycache__/, *.log, .env, etc.).
+        `git add -A` honours `.gitignore` automatically, so a properly-ignored stray
+        file is never staged — verified by tests/git_add_hygiene_test.py."""
         self._run("add", "-A")
         merge_base = self._run("merge-base", self.base_ref, "HEAD")
         return self._run("diff", "--cached", merge_base)
 
     def commit_all(self, message: str) -> Optional[str]:
+        # `add -A` honours the target repo's .gitignore — stray ignored builder
+        # artifacts are never staged. See diff_against_base() for the F14 rationale.
         self._run("add", "-A")
         if not self._run("status", "--porcelain"):
             return None
