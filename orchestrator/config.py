@@ -128,7 +128,11 @@ class Config:
 
     # --- usage governor (server frugality) ---
     usage_cap_per_hour: int = 40            # cap discretionary officer-discussion calls / rolling hour; 0 = off
-    daily_token_budget: int = 0             # tokens/day ceiling; autopilot pauses when hit (0 = off — Max-plan token burn)
+    daily_token_budget: int = 100_000_000   # tokens/day ceiling; autopilot AUTO-PAUSES new tickets when today's
+                                            # ledger burn (input+output, incl. cache reads) hits this. ARMED by
+                                            # default as a runaway-loop guard sized to Max-plan headroom — tune in
+                                            # config.yaml to your own headroom (0 = off; a heavy legit day may pause
+                                            # until midnight). Resumes after midnight or when the ceiling is raised.
     budget_alert_pct: float = 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
 
     # --- autonomy (officers convene themselves between autopilot cycles) ---
