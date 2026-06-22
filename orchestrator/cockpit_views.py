@@ -149,7 +149,16 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     ship_html = ""
     try:
         from . import sync as _sync
-        if _sync.can_promote() and app0:
+        # An app whose repo IS the General's OWN repo (e.g. the 'Elite-Unit' app, added so the unit can
+        # work its own EU tickets) is promoted via "Update unit" — NOT shipped as a product. Suppress its
+        # Ship button so there's no duplicate/ambiguous "ship the unit" path next to Update-unit.
+        _is_unit_repo = False
+        if app0:
+            try:
+                _is_unit_repo = Path(cfg.app(app0).repo_path).resolve() == _sync._repo_root(cfg)
+            except Exception:  # noqa: BLE001
+                _is_unit_repo = False
+        if _sync.can_promote() and app0 and not _is_unit_repo:
             _sa = _sync.app_promote_status(cfg.app(app0))
             _sn = _sa.get("ahead", 0)
             if _sn:

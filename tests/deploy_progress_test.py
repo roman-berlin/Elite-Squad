@@ -23,7 +23,7 @@ def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 tmp = Path(tempfile.mkdtemp())
-cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp), base_branch="DEV",
+cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp / "app"), base_branch="DEV",
                              protected_branch="MAIN", backlog_backend="none")],
              audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
 cfg.detected_auth = lambda: "test"
@@ -83,6 +83,17 @@ live_bar = server._control_bar(cfg, "automatixy", True)
 chk("unit ahead -> Update unit button with the count", "Update unit" in live_bar and ">3<" in live_bar)
 chk("app ahead -> Ship button with the count", "Ship automatixy" in live_bar and ">13<" in live_bar)
 chk("ahead -> no 'all merged' note", "unit current" not in live_bar and "automatixy shipped" not in live_bar)
+
+# --- the General's OWN repo as an app (e.g. 'Elite-Unit', repo == the unit repo) is NOT a shippable
+#     product: it's promoted via "Update unit", so NO "Ship → production" button/status for it ---
+cfg_eu = Config(apps=[AppConfig(name="Elite-Unit", repo_path=str(tmp), base_branch="dev",
+                                protected_branch="main", backlog_backend="none")],
+                audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
+cfg_eu.detected_auth = lambda: "test"
+_ahead["app"] = 9
+eu_bar = server._control_bar(cfg_eu, "Elite-Unit", True)
+chk("unit-repo app -> no Ship button (promoted via Update unit, not shipped)",
+    "Ship Elite-Unit" not in eu_bar and "Elite-Unit shipped" not in eu_bar)
 
 print("\n============ DEPLOY PROGRESS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
