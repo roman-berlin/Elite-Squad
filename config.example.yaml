@@ -17,6 +17,14 @@ max_iterations: 4            # build<->review cycles before escalating to you
 max_cost_usd: 0             # 0 = no cap (subscription/Max). Set a number only for per-token API billing.
 max_tickets_per_run: 1      # per app; raise once you trust it
 
+# --- usage governor: daily token budget (autopilot auto-pause) ---
+# On the Max plan there's no per-call dollar charge, so the meaningful runaway guard is TOKEN
+# throughput. The autopilot sums today's ledger burn (input + output, incl. cache reads) and PAUSES
+# new tickets once it crosses daily_token_budget, then resumes after midnight (or when you raise it).
+daily_token_budget: 100000000   # tokens/day ceiling (0 = off). Tune to your Max-plan headroom — high
+                                # enough that only a runaway loop hits it; a heavy legit day may pause.
+budget_alert_pct: 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
+
 # --- how passing work lands on dev ---
 merge_to_dev: true          # auto-merge feature -> dev when review passes AND dev stays green
 open_pr_on_block: true      # if it can't merge cleanly (or dev would break), open a PR instead

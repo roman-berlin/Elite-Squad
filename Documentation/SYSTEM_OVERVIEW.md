@@ -288,7 +288,7 @@ buttons short-circuit with a banner if unhealthy (`server.py:617-619, 656-658`).
 | **Tool-call guardrail** | A `PreToolUse` hook on every write-capable officer (`guard.hooks_config`, wired in `builder.py:233`, `squad.py:175`) denies, in code, writes to secret paths and a denylist of destructive shell (`guard.py:23-65`). | **Best-effort denylist, not a sandbox.** See §7.1. |
 | **Security gate** | `provost.gate` blocks a CRITICAL/HIGH diff before merge (`loop.py:452-462`, `provost.py:80-100`). On in live config. | Parses a substring `SECURITY GATE: BLOCK` and otherwise **passes** — a misformatted reply lands (see §7.1). |
 | **Readiness gate** | Deterministic check hands back under-specified tickets before any build (`readiness.assess`, `readiness.py:12-28`). | Opt-in; **off** in live config. |
-| **Cost / token governor + auto-pause** | Autopilot checks `usage.budget_status` each cycle and pauses when over the daily ceiling (`autopilot.py:104-120`). | Armed only when `daily_token_budget > 0`; **0 in live config** ⇒ dormant (`usage.py:120-134`). The in-loop USD `Budget` is also a no-op on the Max plan (`max_cost_usd: 0`). |
+| **Cost / token governor + auto-pause** | Autopilot checks `usage.budget_status` each cycle and pauses when over the daily ceiling (`autopilot.py:104-120`). | Armed when `daily_token_budget > 0`; **armed by default** (`100_000_000` tokens/day, `config.py:131`) so a runaway loop auto-pauses — tune to your Max headroom (`usage.py:120-134`). The in-loop USD `Budget` is still a no-op on the Max plan (`max_cost_usd: 0`). |
 
 ### 7.1 What the guardrail can and cannot stop
 
@@ -363,8 +363,22 @@ with effort (`builder.turns_for`, `builder.py:169-172`).
 
 **Token ledger + daily budget** (`orchestrator/usage.py`): every `run_agent` call records one line to
 `usage_ledger.jsonl` (`agent.py:86-89`, `usage.record`); the cockpit shows today / 7d / 30d
-(`usage.windows`, `/usage`). `daily_token_budget` (0 = off) gates the autopilot auto-pause and the
-`budget_alert_pct` heads-up (`usage.py:120-134`). A separate rolling-hour governor
+(`usage.windows`, `/usage`). `daily_token_budget` gates the autopilot auto-pause and the
+`budget_alert_pct` heads-up (`usage.py:120-134`).
+
+> **The daily-budget knob (auto-pause).** `daily_token_budget` is the runaway-loop guard: the autopilot
+> sums **today's** ledger burn — input + output tokens across every officer/builder/soldier/council/chat
+> call, *including cache reads* — and once it crosses the ceiling it logs `budget_pause`, holds new
+> tickets, and Telegrams the Commander; it resumes after local midnight (the ledger's "today" rolls over,
+> `usage._day_start`) or as soon as the ceiling is raised (`autopilot.py:104-126`). `budget_alert_pct`
+> (default `0.8`) fires a one-time 80%-of-ceiling heads-up before the pause. The budget is **armed by
+> default** — `daily_token_budget: 100_000_000` tokens/day (`config.py:131`), set high enough that only a
+> runaway hits it. **Tune it to your own Max-plan headroom** in `config.yaml`; set `0` to disable.
+> Trade-off: a heavy *legitimate* day can pause until midnight, so size it to your real daily envelope.
+> (On the Max plan there's no per-call dollar charge, so this token ceiling — not the no-op USD
+> `max_cost_usd: 0` — is the meaningful budget.)
+
+A separate rolling-hour governor
 (`orchestrator/governor.py`, `usage.jsonl`) caps **discretionary** chatter (small-talk / spontaneous
 meetings) at `usage_cap_per_hour` (`governor.py:59-64`) — the daily muster and your chats always run.
 
@@ -472,7 +486,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `pm_enabled` | `true` | Consult the PM on a Builder halt |
 | `council_rounds` | `2` | Council discussion rounds |
 | `usage_cap_per_hour` | `40` | Cap discretionary officer chatter / hour (0 = off) |
-| `daily_token_budget` | `0` | Tokens/day ceiling for autopilot auto-pause (0 = off) |
+| `daily_token_budget` | `100_000_000` | Tokens/day ceiling for autopilot auto-pause (runaway guard; 0 = off — tune to Max headroom) |
 | `budget_alert_pct` | `0.8` | Telegram heads-up at this fraction of the ceiling |
 | `autonomy_enabled` | `true` | Officers may auto-convene between cycles |
 | `autonomy_cooldown_min` | `45` | Min minutes between auto-convened sessions |

@@ -47,9 +47,20 @@ chk("10-day-old burn NOT in today", w["today"]["total"] == 1860, str(w["today"][
 chk("10-day-old burn IS in last-30d", w["month"]["total"] == 1860 + 10000, str(w["month"]["total"]))
 chk("10-day-old burn NOT in last-7d", w["week"]["total"] == 1860, str(w["week"]["total"]))
 
+# --- F4: the daily budget is ARMED BY DEFAULT (no config.yaml override needed) ---
+cfg_default = Config(apps=[], audit_path=str(audit))
+chk("daily_token_budget default is a real positive ceiling", cfg_default.daily_token_budget > 0,
+    str(cfg_default.daily_token_budget))
+chk("budget_status 'on' by default (AC: budget_status(cfg)['on'] == True)",
+    usage.budget_status(cfg_default)["on"] is True)
+
 # --- budget status: off / under / alert / over ---
 cfg_off = Config(apps=[], audit_path=str(audit), daily_token_budget=0)
 chk("budget off when ceiling 0", usage.budget_status(cfg_off)["on"] is False and not usage.over_budget(cfg_off))
+# F4 regression: ceiling 0 must NEVER read as over, no matter how big the burn (the original bug:
+# daily_token_budget: 0 ⇒ over_budget always False ⇒ autopilot never pauses on a runaway).
+chk("ceiling 0 never trips over_budget even on huge burn",
+    usage.over_budget(Config(apps=[], audit_path=str(audit), daily_token_budget=0)) is False)
 
 cfg = Config(apps=[], audit_path=str(audit), daily_token_budget=10000, budget_alert_pct=0.8)
 st = usage.budget_status(cfg)   # today = 1860 of 10000 -> 18.6%
@@ -107,6 +118,34 @@ chk("run_agent captured input tokens (incl cache)", run.input_tokens == 800 + 20
 chk("run_agent captured output tokens", run.output_tokens == 120, str(run.output_tokens))
 chk("run_agent wrote one ledger line", usage.rollup(None, 0)["total"] == 800 + 200 + 120,
     str(usage.rollup(None, 0)["total"]))
+
+# --- F4 dry verification: with a low temporary cap the autopilot logs budget_pause and HOLDS new
+#     tickets (never reaches intake); raising the cap above the burn lets it resume past the gate. ---
+from orchestrator import autopilot
+ap_dir = Path(tempfile.mkdtemp())
+ap_audit = ap_dir / "audit.jsonl"
+usage.configure(str(ap_audit))                 # ledger → ap_dir/usage_ledger.jsonl
+usage.record("claude-opus-4-8", 5000, 5000, 0.0, "builder")   # today = 10000 tokens
+
+intake_calls = {"n": 0}
+autopilot.notify.configured = lambda: False    # no Telegram / decisions thread in the test
+autopilot.notify.send = lambda *a, **k: None
+def _fake_drain(cfg, app_name, n):
+    intake_calls["n"] += 1
+    return []                                   # empty worklist → "queue clear" → once-break
+autopilot.intake.from_drain = _fake_drain
+
+# (1) OVER budget: cap below today's 10000 burn → pause, hold tickets (intake never called).
+over_cfg = Config(apps=[], audit_path=str(ap_audit), daily_token_budget=100, dry_run=False)
+asyncio.run(autopilot.autopilot(over_cfg, once=True))
+ap_log = ap_audit.read_text(encoding="utf-8") if ap_audit.exists() else ""
+chk("autopilot logs budget_pause when over the ceiling", '"budget_pause"' in ap_log)
+chk("autopilot HOLDS new tickets when paused (intake not reached)", intake_calls["n"] == 0)
+
+# (2) Raise the cap above the burn → resumes past the gate and pulls the worklist.
+under_cfg = Config(apps=[], audit_path=str(ap_audit), daily_token_budget=10_000_000, dry_run=False)
+asyncio.run(autopilot.autopilot(under_cfg, once=True))
+chk("autopilot RESUMES once the ceiling is raised (intake reached)", intake_calls["n"] == 1)
 
 print("\n=============== COST GOVERNOR v2 QA ===============")
 passed = sum(1 for _, ok, _ in results if ok)
