@@ -77,24 +77,54 @@ Medium/low hardening does NOT block. End your response with EXACTLY one line, no
 Above that line, briefly list any findings (severity · where · why · fix)."""
 
 
+def _gate_passed(report: str) -> bool:
+    """Fail-CLOSED verdict parse — the mirror of the Reviewer, never the inverse.
+
+    A diff passes the security gate ONLY when the Provost emits an explicit, unambiguous
+    `SECURITY GATE: PASS` and does NOT also emit `SECURITY GATE: BLOCK`. Everything else —
+    a missing marker, an empty/truncated/garbled reply, or a BLOCK verdict — fails closed
+    (returns False) so an unsafe diff is never waved through on silence.
+    """
+    if not report:
+        return False
+    up = report.upper()
+    has_pass = "SECURITY GATE: PASS" in up
+    has_block = "SECURITY GATE: BLOCK" in up
+    # Pass requires the explicit PASS marker AND the absence of any BLOCK marker. If both
+    # appear (a contradictory reply) we treat it as parse-uncertainty and block.
+    return has_pass and not has_block
+
+
 async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
-    """Security-gate a diff before merge. Returns (passed, report). BLOCK only on CRITICAL/HIGH."""
-    options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
-        system_prompt=memory.preamble() + PROVOST_GATE_SYSTEM,
-        cwd=app.workdir or app.repo_path,
-        permission_mode="bypassPermissions",
-        allowed_tools=["Read", "Grep", "Glob", "Bash"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],
-        setting_sources=["project"],
-        max_turns=18,
-        effort="high",
-    )
-    prompt = "\n".join([
-        f"Security-gate this diff before it merges to '{app.base_branch}':", "",
-        "```diff", diff[:60000], "```", "", "Issue your gate verdict.",
-    ])
-    run = await run_agent(prompt, options, tag="provost-gate")
-    report = (run.final or run.text or "(no report)").strip()
-    blocked = "SECURITY GATE: BLOCK" in report.upper()
-    return (not blocked, report)
+    """Security-gate a diff before merge. Returns (passed, report).
+
+    BLOCK on CRITICAL/HIGH findings. Fails CLOSED in the unsafe direction: only an explicit
+    `SECURITY GATE: PASS` passes; absence / BLOCK / empty / parse-uncertainty all block, and
+    ANY exception at the gate also blocks (the caller opens a PR rather than landing on DEV).
+    """
+    try:
+        options = ClaudeAgentOptions(
+            model=cfg.reviewer_model,
+            system_prompt=memory.preamble() + PROVOST_GATE_SYSTEM,
+            cwd=app.workdir or app.repo_path,
+            permission_mode="bypassPermissions",
+            allowed_tools=["Read", "Grep", "Glob", "Bash"],
+            disallowed_tools=["Write", "Edit", "NotebookEdit"],
+            setting_sources=["project"],
+            max_turns=18,
+            effort="high",
+        )
+        prompt = "\n".join([
+            f"Security-gate this diff before it merges to '{app.base_branch}':", "",
+            "```diff", diff[:60000], "```", "", "Issue your gate verdict.",
+        ])
+        run = await run_agent(prompt, options, tag="provost-gate")
+        report = (run.final or run.text or "").strip()
+        if not report:
+            return (False, "SECURITY GATE: BLOCK — Provost returned an empty report; failing closed.")
+        return (_gate_passed(report), report)
+    except Exception as exc:
+        # An exception is never a PASS. Block, report the reason (the caller logs it to audit
+        # and opens a PR for human review), and never error the ticket on the unsafe side.
+        return (False, f"SECURITY GATE: BLOCK — Provost gate raised {type(exc).__name__}: {exc}; "
+                       "failing closed (no verdict obtained).")

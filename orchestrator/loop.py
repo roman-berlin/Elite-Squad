@@ -475,7 +475,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 if not sec_ok:
                     print("  security · Provost BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
                     _notify(cfg, f"🛡️ {ticket.id} — Provost blocked the merge (security).\n\n{sec_report[:1200]}")
-                    audit.record("security_block", ticket_id=ticket.id, iteration=iteration)
+                    audit.record("security_block", ticket_id=ticket.id, iteration=iteration,
+                                 reason=(sec_report or "")[:2500])
                     security_block = sec_report
                 else:
                     print("  security · Provost PASS ✓", flush=True)
