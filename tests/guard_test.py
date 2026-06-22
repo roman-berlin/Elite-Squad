@@ -100,6 +100,46 @@ s = Path("./orchestrator/squad.py").read_text()
 chk("builder attaches the guard", "hooks=guard.hooks_config()" in b)
 chk("soldier attaches the guard", "hooks=guard.hooks_config()" in s)
 
+# --- EU-2 F7: fail LOUD when the guard isn't installed ---
+chk("is_installed() True when SDK supports hooks", guard.is_installed() is True)
+# builder + soldier emit the loud start-up warning when the guard is absent
+chk("builder calls warn_if_absent", "guard.warn_if_absent(" in b)
+chk("soldier calls warn_if_absent", "guard.warn_if_absent(" in s)
+
+# simulate the guard vanishing (SDK too old / import failure -> hooks_config() returns None)
+import io, contextlib
+_orig = guard.hooks_config
+guard.hooks_config = lambda: None
+try:
+    chk("is_installed() False when hooks_config() is None", guard.is_installed() is False)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fired = guard.warn_if_absent("builder")
+    out = buf.getvalue()
+    chk("warn_if_absent returns True when guard absent", fired is True)
+    chk("warn_if_absent logs a loud one-line warning", "GUARD NOT INSTALLED" in out, out.strip())
+    chk("warning is a single line", out.strip().count("\n") == 0, out)
+    # health surfaces a guard check that reads 'warn' (not bad -> doesn't block builds) when absent
+    class _App:
+        name = "demo"; repo_path = "/nope"; base_branch = "DEV"; gate_commands = []
+        backlog_backend = "none"
+    class _Cfg:
+        apps = []; use_worktree = False
+        def detected_auth(self): return "token"
+    from orchestrator import health
+    guard_check = next(x for x in health.checks(_Cfg()) if x["name"] == "Tool-call guard")
+    chk("health guard check reads 'warn' when absent", guard_check["status"] == "warn", str(guard_check))
+finally:
+    guard.hooks_config = _orig
+
+# with the guard installed, health reports the guard check as 'ok'
+class _Cfg2:
+    apps = []; use_worktree = False
+    def detected_auth(self): return "token"
+from orchestrator import health as _health
+_gc = next(x for x in _health.checks(_Cfg2()) if x["name"] == "Tool-call guard")
+chk("health guard check reads 'ok' today", _gc["status"] == "ok", str(_gc))
+
 print("\n=================== GUARDRAIL QA ===================")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

@@ -220,6 +220,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
     # still apply — BUILDER_SYSTEM tells it to read CLAUDE.md + .claude/rules and follow them.
     eff = effort_for(cfg, req.iteration, req.ticket)
     from . import models, guard
+    guard.warn_if_absent("builder")   # EU-2 F7: loud one-liner if bypassPermissions runs with no guard
     model, mreason = models.for_builder(cfg, req.ticket, eff)
     if getattr(cfg, "auto_model", False):
         print(f"  · builder model: {mreason}", flush=True)
