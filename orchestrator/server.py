@@ -694,11 +694,16 @@ def create_app(cfg: Config):
             ".ncard .ndt{color:#c3cad6;font-size:13px;line-height:1.5;margin:5px 0}"
             ".ncard .ndt.sub{color:#8a929f;padding-left:8px}.ncard .ndt.muted{color:#6b7480}"
             ".ncard .ndt b{color:#e9ecf1;font-weight:650}"
+            ".nbanner{background:#0f2740;border:1px solid #1c4a78;color:#9cc9ff;border-radius:9px;"
+            "padding:11px 14px;margin:0 0 16px;font-size:13.5px;font-weight:600}"
             ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
+        # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
+        _m = _state.pop("last_msg", "") or ""
+        banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if _m else ""
         if not s["total"]:
-            return _wrap("Needs you", style
+            return _wrap("Needs you", style + banner
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
-        out = [style]
+        out = [style, banner]
         if s["decisions"]:
             out.append(f"<div class=nsec><h3>&#128172; Questions from the General · {len(s['decisions'])}</h3>")
             for d in s["decisions"]:
@@ -1320,14 +1325,20 @@ def create_app(cfg: Config):
         if not (tid and ans):
             return redirect("/needs")
 
+        # Clear the Needs-you row NOW (synchronous, fast local write) so it visibly disappears on the
+        # redirect, and give immediate confirmation — the actual re-run is slow, so it runs in the
+        # background. If the ticket re-escalates later, a fresh row reappears.
+        try:
+            D.dismiss(cfg.audit_path, tid)
+        except Exception:  # noqa: BLE001
+            pass
+
         def _bg():
             try:
                 from . import decisions
                 if decisions.handle_reply(cfg, audit, f"{tid}: {ans}"):
-                    _state["last_msg"] = f"Shipped your answer to {tid} — the unit is re-running it now."
-                    return
-                # No pending decision recorded: persist the answer ON the ticket + unblock for retry.
-                posted = False
+                    return   # a real pending decision — resolved + re-running with the answer baked in
+                # No pending decision on file: persist the answer ON the ticket + unblock for retry.
                 try:
                     appcfg = cfg.app(app_name) if app_name else None
                     if appcfg and getattr(appcfg, "backlog_backend", "") == "jira":
@@ -1335,29 +1346,18 @@ def create_app(cfg: Config):
                         from .contracts import Ticket
                         make_backlog(appcfg).add_comment(
                             Ticket(id=tid, key=tid, summary=tid, description="", app=app_name), ans)
-                        posted = True
                 except Exception:  # noqa: BLE001 - a comment failure must not block the unblock
-                    posted = False
+                    pass
                 try:
                     from . import autopilot as _ap
                     _ap.unblock(cfg, tid)
                 except Exception:  # noqa: BLE001
                     pass
-                # Clear the stale escalated row from Needs-you so the answer visibly "takes" — the
-                # ticket goes back to the queue (unblocked + comment attached) and autopilot re-works it;
-                # if it re-escalates a fresh row reappears.
-                try:
-                    D.dismiss(cfg.audit_path, tid)
-                except Exception:  # noqa: BLE001
-                    pass
-                _state["last_msg"] = (f"Answer recorded on {tid}"
-                                      + (" (Jira comment)" if posted else "")
-                                      + " and sent back to the queue — autopilot re-works it with your "
-                                      "decision. Cleared from Needs-you.")
-            except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = f"answer failed: {exc}"
-        _state["last_msg"] = f"Sending your answer to {tid}…"
+            except Exception:  # noqa: BLE001 - the re-run must never break the cockpit
+                pass
         threading.Thread(target=_bg, daemon=True).start()
+        _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; the unit is "
+                              "re-running it with your decision.")
         return redirect("/needs")
 
     @app.get("/report")

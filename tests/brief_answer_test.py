@@ -74,8 +74,9 @@ D.dismiss = lambda audit_path, tid: dismissed.__setitem__("tid", tid)
 
 client.post("/api/answer", data={"ticket": "AUTO-9", "app": "automatixy", "text": "go with the 8/5 scheme"})
 chk("answer (no decision) -> dismisses the Needs-you row", dismissed.get("tid") == "AUTO-9")
-chk("answer (no decision) -> says it cleared + re-queued",
-    "Cleared from Needs-you" in server._state.get("last_msg", "") and "queue" in server._state.get("last_msg", ""))
+chk("answer (no decision) -> says it cleared + re-running",
+    "cleared from Needs-you" in server._state.get("last_msg", "")
+    and "re-running" in server._state.get("last_msg", ""))
 
 print("\n============ BRIEF + ANSWER QA ============")
 passed = sum(1 for _, ok, _ in results if ok)

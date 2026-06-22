@@ -59,8 +59,9 @@ autopilot.unblock = lambda c, tid: (unblocked.__setitem__("tid", tid) or "unbloc
 client.post("/api/answer", data={"ticket": "AUTO-9", "app": "automatixy", "text": "go with option A"})
 chk("no decision -> answer posted as a ticket comment", posted.get("key") == "AUTO-9" and posted.get("body") == "go with option A")
 chk("no decision -> ticket unblocked for retry", unblocked.get("tid") == "AUTO-9")
-chk("no decision -> message says recorded + re-queued + cleared",
-    "queue" in server._state.get("last_msg", "") and "Cleared from Needs-you" in server._state.get("last_msg", ""))
+chk("no decision -> message says sent + cleared + re-running",
+    "cleared from Needs-you" in server._state.get("last_msg", "")
+    and "re-running" in server._state.get("last_msg", ""))
 
 # --- Case 3: empty ticket/answer -> no-op ---
 calls.clear()
@@ -82,6 +83,12 @@ chk("/needs decisions form ships to /api/answer", "action=/api/answer" in body)
 chk("/needs parked card has a Ship-answer box", "Ship answer" in body and "Answer the unit" in body)
 chk("/needs answer form carries the app", "value='automatixy'" in body)
 chk("/needs still offers Discuss + Dismiss", "Discuss with the General" in body and "Dismiss" in body)
+
+# --- Case 5: the confirmation banner renders on /needs (one-shot), so the answer visibly "took" ---
+server._state["last_msg"] = "✓ Answer sent to AUTO-77 — cleared from Needs-you; re-running."
+body2 = client.get("/needs").get_data(as_text=True)
+chk("/needs shows the confirmation banner", "nbanner" in body2 and "Answer sent to AUTO-77" in body2)
+chk("banner is one-shot (cleared after showing)", not server._state.get("last_msg"))
 
 print("\n============ NEEDS-YOU ANSWER QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
