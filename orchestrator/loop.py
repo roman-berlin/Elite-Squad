@@ -436,6 +436,15 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         review = await reviewer_mod.review(diff, ticket, app, cfg)
         cost += review.cost_usd
         budget.add(review.cost_usd)
+        # Unparseable reviewer output fails closed. Before paying for a full rebuild+review pass
+        # (up to 4 Opus passes), retry JUST the review once — a parse miss is near-zero with Opus
+        # and re-running the read-only review is far cheaper than rebuilding (EU-11).
+        if review.parse_failed:
+            print("  review · unparseable verdict → re-reviewing once (no rebuild)", flush=True)
+            audit.record("review_parse_retry", ticket_id=ticket.id, iteration=iteration)
+            review = await reviewer_mod.review(diff, ticket, app, cfg)
+            cost += review.cost_usd
+            budget.add(review.cost_usd)
         audit.record("review", ticket_id=ticket.id, iteration=iteration,
                      verdict=review.verdict.value, spec_met=review.spec_met,
                      blocking=len(review.blocking_issues), cost_usd=review.cost_usd,

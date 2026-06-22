@@ -112,6 +112,7 @@ def _parse(text: str) -> ReviewResult:
             summary="Could not parse reviewer verdict; failing safe.",
             required_changes=["Reviewer output was unparseable; re-run review."],
             raw=text,
+            parse_failed=True,
         )
     spec = data.get("spec_conformance", {}) or {}
     quality = (data.get("quality", {}) or {}).get("issues", []) or []

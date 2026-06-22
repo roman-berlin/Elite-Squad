@@ -97,6 +97,7 @@ class ReviewResult:
     question: str = ""            # the decision being asked, if needs_human
     cost_usd: float = 0.0
     raw: str = ""
+    parse_failed: bool = False    # reviewer output was unparseable (fail-safe FAIL) -> re-review, don't rebuild
 
     @property
     def blocking_issues(self) -> list[QualityIssue]:
