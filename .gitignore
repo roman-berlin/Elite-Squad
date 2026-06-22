@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 .env
 config.yaml
+# Config backups carry the SAME secrets as config.yaml (Jira/Supabase creds) — never track them.
+config.yaml.bak
+*.bak
 audit.jsonl
 run.log
 # runtime artifacts
@@ -52,6 +55,8 @@ recent_projects.json
 jira_connections.json
 # Auto-written failure post-mortems — runtime diagnostics regenerated from the audit log (forensics.py).
 postmortems/
+# Patrol cron/launchd runtime logs (the scheduled Scout/Provost/Quartermaster sweep writes cron.log here).
+/patrol/
 usage_ledger.jsonl
 ROSTER.md
 # macOS
