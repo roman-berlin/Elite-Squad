@@ -44,6 +44,13 @@ sync_base_after_merge: true # after a green live merge, bring <base> in your mai
                             # (ff if you're on <base> & clean, else advance the ref; never clobbers dirty work)
 security_gate: false        # true = the Provost Marshal reviews each diff before merge; a CRITICAL/HIGH security
                             # finding (secrets, tenant-isolation, authz, injection) opens a PR instead of landing
+
+# --- post-merge safety net (Sentinel) ---
+sentinel_enabled: true      # ARMED: after a feature lands on <base>, Sentinel runs that app's `postmerge_commands`
+                            # (below) on the landed branch. If they go RED it reverts the merge forward-only
+                            # (git revert — no force-push, no history rewrite) and hands the ticket back, so DEV is
+                            # never left runtime-broken. NO-OP for any app without a `postmerge_commands:` suite.
+                            # Keep the suite NARROW + STABLE: a flaky test here triggers an auto-revert.
 # worktree_dir: "..."       # optional parent for worktrees (default: <repo_parent>/.general-worktrees/<app>)
 # worktree_setup_cmd: "npm install"   # optional: run ONCE when a fresh worktree is created (deps for the gate)
 
@@ -58,10 +65,19 @@ apps:
     branch_prefix: "autodev"
     gate_commands:                   # your own tests/lint/typecheck (run on the branch AND on dev)
       - "npm run lint"
-      # memory-safe vitest (vitest defaults to one worker per CPU core -> can OOM):
-      # - "npx vitest run --pool=forks --poolOptions.forks.maxForks=4"
+      - "npx tsc --noEmit"           # typecheck (the old typecheck-only gate)
+      # BOUNDED runtime net so typechecking-but-broken code can't auto-merge. vitest defaults to one
+      # worker PER CPU CORE -> it can OOM/freeze the box; pin --pool=forks + a low maxForks. Keep it
+      # FAST + STABLE (a slow/flaky gate stalls or bounces every build):
+      - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
+    gate_timeout_sec: 900            # per-command hard cap (default 1800). Kills a hung/runaway test run.
     gate_env:                        # extra env for gate commands so tests can't exhaust RAM
       NODE_OPTIONS: "--max-old-space-size=3072"
+    postmerge_commands:              # Sentinel's heavier post-merge net on the landed <base> (e2e/integration
+                                     # that only makes sense after the code is actually on DEV). RAM-capped via
+                                     # gate_env + bounded by gate_timeout_sec, same as the gate. Keep it NARROW
+                                     # + STABLE — a red here auto-reverts the merge and hands the ticket back:
+      - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
     backlog_backend: "jira"          # "jira" | "notion" | "none"
     backlog:
       base_url: "https://YOURTEAM.atlassian.net"
