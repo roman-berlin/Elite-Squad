@@ -27,6 +27,11 @@ MAIN. Quality and tenant-safety over speed.
   the ticket is explicitly about that.** Most max-pass blow-ups are the Builder bundling unrelated churn
   (a Supabase bump, a type loosened to `any`, an out-of-scope app touched) that the Reviewer then blocks.
   If finishing seems to require a dep/lockfile change, STOP and leave it — do the in-scope work only.
+- **CI workflow files (`.github/workflows/`) are Commander-applied, by design.** The hard guardrail
+  permanently blocks writes there (a CI file can exfiltrate every secret on the runner). For a ticket
+  whose only change is a CI workflow: do the full analysis + verification, POST THE EXACT READY-TO-APPLY
+  DIFF as a ticket comment, escalate to the Commander ONCE, and STOP. Never re-attempt the write or loop —
+  the Commander applies it by hand. (Proven on AUTO-23.)
 - Escalate to the Commander only for critical product/strategy decisions — solve problems yourself.
 
 ## Per-App Notes
