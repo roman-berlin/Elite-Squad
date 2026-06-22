@@ -106,12 +106,10 @@ def handle_reply(cfg, audit, text: str) -> bool:
         return False
     notify.send(f"▶️ Resuming {resolved['id']} with your decision: {answer}")
     audit.record("decision_resumed", ticket_id=resolved["id"], answer=answer)
-    from .loop import run as run_loop   # lazy import avoids a cycle
     worklist = to_worklist(cfg, resolved)
-    try:
-        asyncio.run(run_loop(cfg, worklist, audit))
-    except Exception as exc:  # noqa: BLE001
-        notify.send(f"⚠️ Resume of {resolved['id']} failed: {exc}")
+    # Run the resumed build in a background thread so we never block the Telegram
+    # poll thread — /unblock and other replies keep being processed meanwhile.
+    _run_bg(cfg, audit, worklist)
     return True
 
 
