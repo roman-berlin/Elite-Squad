@@ -51,6 +51,21 @@ for c in ["rm -rf node_modules", "rm -rf dist", "rm -rf build/cache", "rm -rf .n
           "ls -la", "mkdir -p src/components", "git checkout -b autodev/AUTO-9"]:
     chk(f"allow shell: {c[:32]}", not blocked("Bash", command=c), c)
 
+# --- EU-18: MUST BLOCK non-frozen bun installs that can rewrite bun.lock (deps drift off DEV's pin) ---
+for c in ["bun install", "bun i", "bun add lodash", "bun a zod", "bun add -d vitest",
+          "bun update", "bun up", "bun upgrade", "bun remove lodash", "bun rm zod", "bun uninstall pkg",
+          "CI=1 bun install", "cd apps/web && bun add react", "bun install && bun run build",
+          "bun add lodash --frozen-lockfile",  # add ALWAYS drifts the lock — flag can't rescue it
+          "/usr/local/bin/bun install"]:
+    chk(f"BLOCK bun lock-write: {c[:32]}", blocked("Bash", command=c), c)
+
+# --- EU-18: MUST ALLOW the one safe form + non-mutating bun calls (no false positives) ---
+for c in ["bun install --frozen-lockfile", "bun i --frozen-lockfile",
+          "cd apps/web && bun install --frozen-lockfile", "CI=1 bun install --frozen-lockfile",
+          "bun run build", "bun test", "bun run install",  # `run install` is a script, not the installer
+          "bun x prettier", "bunx tsc --noEmit", "bun pm ls"]:
+    chk(f"allow bun: {c[:32]}", not blocked("Bash", command=c), c)
+
 # --- MUST BLOCK: secret READS (Read tool) — EU-2 F1(a) ---
 for p in [".env", "/Users/roman/project/.env", "apps/web/.env.local", ".env.production",
           "backend/secrets.yaml", "deploy/id_rsa", "certs/server.pem", "certs/tls.key",
