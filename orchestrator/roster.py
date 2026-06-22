@@ -28,11 +28,11 @@ _OFFICERS = [
     ("Inspector General", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
      "guards the standard before anything merges.", "reviewer_model"),
     ("Scout", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
-     "accessibility — and files findings as tickets.", "discussion_model"),
+     "accessibility — and files findings as tickets.", "reviewer_model"),
     ("Provost Marshal", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
-     "(secrets, tenant-isolation, injection, vulnerable deps).", "discussion_model"),
+     "(secrets, tenant-isolation, injection, vulnerable deps).", "reviewer_model"),
     ("Quartermaster", "S-4 · Deploy readiness", "Certifies whether DEV can actually ship to MAIN — build, "
-     "types, migrations, deps, env, deploy config.", "discussion_model"),
+     "types, migrations, deps, env, deploy config.", "reviewer_model"),
     ("Sentinel", "S-3 · Integration & rollback", "Runs the heavier post-merge suite on the landed DEV and "
      "reverts the merge forward-only if it breaks. Deterministic — no model.", None),
     ("Drillmaster", "Doctrine & Training", "The unit studies every day — proposes the one drill (an edit to "
