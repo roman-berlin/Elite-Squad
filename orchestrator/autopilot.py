@@ -26,7 +26,17 @@ from .config import Config
 from .contracts import Outcome
 from .loop import run as run_loop
 
-_PARKED = (Outcome.ESCALATED, Outcome.PR_OPENED, Outcome.ERRORED)
+# Outcomes that park a ticket IMMEDIATELY (a human decision / a PR is waiting — no point retrying).
+# ERRORED is handled separately: a transient blip shouldn't sideline a ticket, so we retry it a few
+# times (with a short backoff) before parking. See _MAX_TICKET_ERRORS.
+_PARKED = (Outcome.ESCALATED, Outcome.PR_OPENED)
+
+# Consecutive ERRORs tolerated before an errored ticket is parked. The first errors are retried
+# next cycle; the Nth consecutive error parks it. Counter resets the moment the ticket stops
+# erroring (a success or any other progress). Trade-off: a genuinely broken ticket wastes a
+# couple of passes before parking.
+_MAX_TICKET_ERRORS = 3
+_ERROR_BACKOFF_SEC = 10   # short pause before re-picking a transiently-errored ticket next cycle
 
 
 def _sleep(seconds: float, stop_event=None) -> None:
@@ -57,6 +67,27 @@ def save_blocked(cfg: Config, blocked: set[str]) -> None:
         pass
 
 
+def _error_counts_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("error_counts.json")
+
+
+def load_error_counts(cfg: Config) -> dict[str, int]:
+    """Per-ticket count of CONSECUTIVE ERRORs, so a transient blip is retried (not parked)."""
+    p = _error_counts_file(cfg)
+    try:
+        data = json.loads(p.read_text())
+        return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
+    try:
+        _error_counts_file(cfg).write_text(json.dumps(counts, indent=2, sort_keys=True))
+    except OSError:
+        pass
+
+
 def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     """Clear a parked ticket (or all). Autopilot will retry it next cycle."""
     blocked = load_blocked(cfg)
@@ -75,6 +106,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     once: bool = False, interval: int = 60, stop_event=None) -> None:
     audit = AuditLog(cfg.audit_path)
     blocked = load_blocked(cfg)
+    error_counts = load_error_counts(cfg)   # per-ticket consecutive-ERROR tally (retry-before-park)
     cap = max(1, cfg.max_tickets_per_run)
     mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
 
@@ -142,7 +174,32 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             print(f"  · taking {ids}", flush=True)
             reports = await run_loop(cfg, worklist, audit)
 
-            newly = [r.ticket_id for r in reports if r.outcome in _PARKED]
+            # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
+            # parking so a transient blip doesn't sideline a ticket for hours.
+            park_now = [r.ticket_id for r in reports if r.outcome in _PARKED]
+            retrying: list[str] = []
+            counts_changed = False
+            for r in reports:
+                if r.outcome is Outcome.ERRORED:
+                    n = error_counts.get(r.ticket_id, 0) + 1
+                    if n >= _MAX_TICKET_ERRORS:
+                        park_now.append(r.ticket_id)
+                        error_counts.pop(r.ticket_id, None)   # parked -> reset for a future /unblock
+                    else:
+                        error_counts[r.ticket_id] = n
+                        retrying.append(r.ticket_id)
+                    counts_changed = True
+                elif error_counts.pop(r.ticket_id, None) is not None:
+                    counts_changed = True   # made progress (didn't error) -> reset its tally
+            if counts_changed:
+                save_error_counts(cfg, error_counts)
+
+            if retrying:
+                print(f"  · ERRORED, retrying next cycle (not parked): "
+                      + ", ".join(f"{t} [{error_counts[t]}/{_MAX_TICKET_ERRORS}]" for t in retrying),
+                      flush=True)
+
+            newly = [t for t in park_now if t not in blocked]
             if newly:
                 blocked.update(newly)
                 save_blocked(cfg, blocked)
@@ -151,7 +208,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             await events.after_cycle(cfg, reports, audit, blocked)   # the unit may convene itself
             if once:
                 break
-            _sleep(3, stop_event)   # brief breath, then look for the next ticket
+            # A transient error gets a short backoff before the next look; otherwise a brief breath.
+            _sleep(_ERROR_BACKOFF_SEC if retrying else 3, stop_event)
     except KeyboardInterrupt:
         print("\n🛸 Autopilot stood down. Nothing left mid-flight.", flush=True)
     audit.record("autopilot_stop")
