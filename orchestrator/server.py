@@ -413,7 +413,8 @@ def create_app(cfg: Config):
             def _bg():
                 _state["scribing"] = True
                 try:
-                    asyncio.run(memory.scribe(cfg))
+                    msg = asyncio.run(memory.scribe(cfg))
+                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Scribe.")
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"scribe failed: {exc}"
                 finally:
@@ -425,7 +426,8 @@ def create_app(cfg: Config):
     def consolidate_api():
         from . import consolidate
         try:
-            consolidate.run(cfg)
+            r = consolidate.run(cfg)
+            _state["last_msg"] = "✓ " + (str(r).strip() if r else "Consolidated Unit Memory — deduped/pruned the log and folded in recurring lessons.")
         except Exception as exc:  # noqa: BLE001
             _state["last_msg"] = f"consolidate failed: {exc}"
         return redirect("/memory")
@@ -462,7 +464,13 @@ def create_app(cfg: Config):
                 "rejecting these</h3><p style='color:#8a929f;font-size:12.5px;margin:0 0 10px'>Folded "
                 "into the log on Consolidate. Each is a drill candidate.</p>"
                 f"<div class=lrej>{rows}</div>")
-        body = (act + top + pat_html + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>"
+        # One-shot confirmation banner ("✓ Scribe folded … into Unit Memory") — shown once the Scribe
+        # finishes (not mid-fold), so the action visibly "took" instead of silently returning here.
+        _m = "" if _state.get("scribing") else (_state.pop("last_msg", "") or "")
+        banner = (f"<div style='background:#10371f;border:1px solid #1c5238;color:#7fe3a6;border-radius:9px;"
+                  f"padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
+                  f"{html.escape(str(_m))}</div>" if _m else "")
+        body = (banner + act + top + pat_html + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>"
                 "Lessons &amp; doctrine</h3><pre class=rep>"
                 + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>")
         return _wrap("Unit Memory", body)
