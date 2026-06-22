@@ -70,6 +70,21 @@ apps:
       # worker PER CPU CORE -> it can OOM/freeze the box; pin --pool=forks + a low maxForks. Keep it
       # FAST + STABLE (a slow/flaky gate stalls or bounces every build):
       - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
+    # --- MONOREPO: per-app gates (EU-19) ---------------------------------------------------
+    # If this repo is a monorepo (apps/<x>/, packages/<x>/), set per-app gate commands here.
+    # The gate detects which apps/packages a ticket's diff touched and runs ONLY their gates
+    # (each failure is reported by component name). A landing-page/microsite ticket is then
+    # typechecked on landing-page + microsite and is NOT blocked by an unrelated zeltivo-crm
+    # error. Detection falls back to the repo-wide `gate_commands` above when nothing under
+    # apps/ or packages/ changed, or no touched component is configured here.
+    gate_commands_by_app:
+      zeltivo-crm:  ["cd apps/zeltivo-crm && bunx tsc -b --noEmit"]
+      landing-page: ["cd apps/landing-page && bunx tsc -b --noEmit"]
+      microsite:    ["cd apps/microsite && bunx tsc -b --noEmit"]
+    # A changed shared package re-gates the apps that depend on it (so a shared dependency that
+    # links two apps still typechecks both). Key = packages/<pkg> dir name; value = dependent apps.
+    gate_shared_packages:
+      ui: ["zeltivo-crm", "landing-page", "microsite"]
     gate_timeout_sec: 900            # per-command hard cap (default 1800). Kills a hung/runaway test run.
     gate_env:                        # extra env for gate commands so tests can't exhaust RAM
       NODE_OPTIONS: "--max-old-space-size=3072"

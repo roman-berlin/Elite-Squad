@@ -463,7 +463,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _notify(cfg, f"🔧 {ticket.id} — Engineer implemented (pass {iteration})")
 
         # 2) VERIFICATION GATE on the feature branch (cheap filter, before review)
-        gate = run_gate(app)
+        # Gate only the monorepo apps/packages this ticket actually touched (EU-19) —
+        # falls back to the repo-wide gate when no per-app config matches the diff.
+        gate = run_gate(app, git.changed_paths())
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
                      report=("" if gate.passed else (gate.report or "")[:2500]))
         if not gate.passed:
@@ -606,7 +608,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     _bar(3, active=3)
 
     clean = bool(cfg.merge_to_dev) and git.trial_merge(branch, temp, merge_msg)
-    green = clean and run_gate(app).passed          # gate runs on the trial branch, not on DEV
+    green = clean and run_gate(app, git.changed_paths()).passed   # gate runs on the trial branch, not on DEV (EU-19: per-app)
     if not clean:
         reason = "could not merge cleanly into dev" if cfg.merge_to_dev else "merge_to_dev disabled"
     elif not green:

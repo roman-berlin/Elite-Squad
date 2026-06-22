@@ -129,6 +129,15 @@ class Git:
         merge_base = self._run("merge-base", self.base_ref, "HEAD")
         return self._run("diff", "--cached", merge_base)
 
+    def changed_paths(self) -> list[str]:
+        """Repo-relative paths of all feature work vs base (staged, incl. new files).
+        Used by the gate to detect which monorepo apps/packages a ticket touches so it
+        only typechecks those. Same staging rationale as diff_against_base(). (EU-19)"""
+        self._run("add", "-A")
+        merge_base = self._run("merge-base", self.base_ref, "HEAD")
+        out = self._run("diff", "--cached", "--name-only", merge_base)
+        return [line.strip() for line in out.splitlines() if line.strip()]
+
     def commit_all(self, message: str) -> Optional[str]:
         # `add -A` honours the target repo's .gitignore — stray ignored builder
         # artifacts are never staged. See diff_against_base() for the F14 rationale.
