@@ -141,3 +141,28 @@ def hooks_config():
                                            hooks=[_pretooluse])]}
     except Exception:  # noqa: BLE001
         return None
+
+
+def is_installed() -> bool:
+    """True when the PreToolUse guard hook can actually be attached (the SDK supports hooks). When this
+    is False the guard silently vanishes while ``bypassPermissions`` stays on — a fail-OPEN condition.
+    EU-2 F7 surfaces it via a health check and a loud start-up log instead of letting it pass unnoticed."""
+    return hooks_config() is not None
+
+
+# One-line, deliberately loud — the whole point of EU-2 F7 is that a missing guard never passes silently.
+_GUARD_ABSENT_WARNING = (
+    "GUARD NOT INSTALLED — the PreToolUse hard guardrail could not be attached "
+    "(claude_agent_sdk hooks unavailable); this write-capable officer is running under "
+    "bypassPermissions with NO code-level denylist. Run `general doctor` and update the SDK."
+)
+
+
+def warn_if_absent(officer: str = "officer") -> bool:
+    """Emit a single loud warning line and return True when a write-capable officer starts WITHOUT the
+    guard installed. No-op returning False when the guard is present — so callers can wire it inline
+    before launching an agent. Deliberately a warn (not a hard stop): an SDK bump must not block builds."""
+    if is_installed():
+        return False
+    print(f"⚠️  [{officer}] {_GUARD_ABSENT_WARNING}", flush=True)
+    return True

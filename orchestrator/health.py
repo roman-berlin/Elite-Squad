@@ -46,6 +46,15 @@ def checks(cfg) -> list[dict[str, str]]:
         add("Agent SDK", "ok", "importable")
     except Exception:  # noqa: BLE001
         add("Agent SDK", "bad", "not installed — pip install -r requirements.txt")
+
+    # EU-2 F7: the hard tool-call guard rides on SDK hooks. If hooks_config() is None it silently isn't
+    # installed while bypassPermissions stays on (fail-open). Surface it — warn (not bad) so an SDK bump
+    # flags the gap without blocking builds.
+    from . import guard
+    guard_ok = guard.is_installed()
+    add("Tool-call guard", "ok" if guard_ok else "warn",
+        "PreToolUse denylist installed" if guard_ok
+        else "NOT installed — bypassPermissions has no code-level guardrail (SDK hooks unavailable)")
     add("git", "ok" if _has("git") else "bad", "" if _has("git") else "not found on PATH")
     add("gh CLI", "ok" if _has("gh") else "warn",
         "present" if _has("gh") else "missing — PRs will be skipped")

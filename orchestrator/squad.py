@@ -165,6 +165,7 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
 async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, idx: int, total: int):
     from .builder import turns_for
     from . import guard
+    guard.warn_if_absent(f"soldier·{st.role}")   # EU-2 F7: loud one-liner if guard is absent under bypass
     cwd = app.workdir or app.repo_path
     label, focus = SQUAD[st.role]
     options = ClaudeAgentOptions(
