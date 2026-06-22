@@ -59,7 +59,19 @@ class AppConfig:
     protected_branch: str = "main"      # NEVER touched by the pipeline
     branch_prefix: str = "autodev"
     qa_url: Optional[str] = None         # base URL where this app's DEV is testable; shown on merge -> QA
-    gate_commands: list[str] = field(default_factory=list)   # tests/lint/typecheck (pre-review gate)
+    gate_commands: list[str] = field(default_factory=list)   # tests/lint/typecheck (pre-review gate; repo-wide default)
+    # Per-app gate commands for a MONOREPO, keyed by the directory name under apps/ or packages/
+    # (e.g. "landing-page", "microsite", "zeltivo-crm"). When a ticket's diff touches one of these
+    # components, ONLY the gates for the touched components (plus any apps a changed shared package
+    # links to, see gate_shared_packages) run — so an AUTO-9-style landing-page/microsite ticket is
+    # typechecked on landing-page + microsite and is NOT blocked by an unrelated zeltivo-crm error.
+    # Falls back to the repo-wide `gate_commands` when detection is ambiguous (nothing under
+    # apps/ or packages/ changed, or no touched component has a per-app entry). (EU-19)
+    gate_commands_by_app: dict[str, list[str]] = field(default_factory=dict)
+    # Shared-package -> dependent apps. When a changed path lands under packages/<pkg>/, also run the
+    # gates for the apps listed here (they depend on it), so a shared dependency correctly re-gates its
+    # consumers. e.g. {"ui": ["zeltivo-crm", "landing-page"]}. (EU-19)
+    gate_shared_packages: dict[str, list[str]] = field(default_factory=dict)
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
     postmerge_commands: list[str] = field(default_factory=list)  # Sentinel's heavier post-merge suite (e2e/integration); empty = skip
