@@ -297,7 +297,15 @@ def _finding_str(x: Any) -> str:
 
 def _short(s: Any, n: int) -> str:
     s = " ".join(str(s or "").split())
-    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+    if len(s) <= n:
+        return s
+    cut = s[: n - 1]
+    # back up to the previous word boundary unless we already cut exactly at one
+    if not s[n - 1].isspace():
+        sp = cut.rfind(" ")
+        if sp > 0:
+            cut = cut[:sp]
+    return cut.rstrip() + "…"
 
 
 def brief(text: Any, n: int = 360) -> str:
