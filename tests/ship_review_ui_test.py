@@ -51,6 +51,21 @@ server._state["shipreview"] = False
 idle = client.get("/council").get_data(as_text=True)
 chk("idle /council has no ship-review indicator", "Ship-review in session" not in idle)
 
+# --- EU-30: no shippable product configured -> guard, no empty "running for " banner ---
+cfg_empty = Config(apps=[], audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
+cfg_empty.detected_auth = lambda: "test"
+empty_client = server.create_app(cfg_empty).test_client()
+server._state["shipreview"] = False
+server._state.pop("last_msg", None)
+resp = empty_client.post("/api/ship-review", data={"app": "*"})
+chk("POST ship-review w/o product redirects to /council", resp.status_code in (301, 302)
+    and "/council" in resp.headers.get("Location", ""))
+chk("no shippable product => _state['shipreview'] not set", not server._state.get("shipreview"))
+chk("last_msg explains why ship-review didn't run",
+    "No shippable product configured" in server._state.get("last_msg", ""))
+chk("no empty 'running for ' banner appears",
+    "running for " not in server._state.get("last_msg", ""))
+
 print("\n============ SHIP-REVIEW UX QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

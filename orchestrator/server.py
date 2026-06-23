@@ -608,6 +608,12 @@ def create_app(cfg: Config):
         appq = (request.form.get("app") or "").strip()
         # Ship-review is per-PRODUCT; "*"/all/empty -> the first shippable product (never cfg.app("*")).
         app_name = appq if (appq and appq != "*") else _first_shippable(cfg)
+        if not app_name:
+            # No product repo distinct from the unit's own — don't launch ship-review or flash an
+            # empty "running for  …" banner; explain why and bail out.
+            _state["last_msg"] = ("No shippable product configured — ship-review needs a product repo "
+                                  "distinct from the unit.")
+            return redirect("/council")
         if not _state.get("shipreview"):
             _state["shipreview"] = True   # set BEFORE redirect so /council shows the in-session indicator
             _state["last_msg"] = (f"🚀 Ship-review running for {app_name} — the Release Manager + officers are "
