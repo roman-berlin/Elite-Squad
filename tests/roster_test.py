@@ -23,8 +23,8 @@ cfg = Config(apps=[], audit_path=str(Path(tempfile.mkdtemp()) / "audit.jsonl"))
 
 # --- structure is read from the code (can't drift) ---
 doc = roster.build_doc(cfg, "Shipped 3 tickets to DEV today.")
-for officer in ["The General", "Adjutant", "Product Manager", "Field Engineer", "Inspector General",
-                "Scout", "Provost Marshal", "Quartermaster", "Sentinel", "Drillmaster"]:
+for officer in ["CTO", "Engineering Manager", "Product Manager", "Dev Team Lead", "Code Reviewer",
+                "QA Engineer", "Security Engineer", "Release Manager", "SRE", "Engineering Coach"]:
     chk(f"doc lists {officer}", officer in doc)
 chk("doc lists every soldier from squad.SQUAD",
     all(label in doc for label, _ in SQUAD.values()), str(list(SQUAD)))
@@ -34,7 +34,7 @@ chk("doc dated 'As of'", "_As of" in doc)
 # --- mermaid hierarchy chart ---
 mer = roster.mermaid_chart()
 chk("chart is mermaid flowchart", mer.startswith("```mermaid") and "flowchart TD" in mer)
-chk("chart roots at the Commander -> General", "Commander · Roman" in mer and "G[The General" in mer)
+chk("chart roots at the Commander -> CTO", "Commander · Roman" in mer and "G[CTO" in mer)
 chk("chart hangs every officer off the General", mer.count("G --> ") == 9)   # 10 officers minus the General
 chk("chart hangs soldiers off the Field Engineer", mer.count("FE --> S") == len(SQUAD))
 
@@ -46,10 +46,10 @@ chk("model auto -> marked (auto)", roster._model_for(auto, "builder_model") == "
 chk("deterministic officer (Sentinel) shows no model", roster._model_for(cfg, None) == "—")
 
 # --- F15 regression: the roster's model label must match the model each officer actually runs on ---
-# The recon officers (Scout/Provost/Quartermaster) run their recon on cfg.reviewer_model (Opus), not
+# The recon officers (QA Engineer/Security Engineer/Release Manager) run their recon on cfg.reviewer_model (Opus), not
 # discussion_model — verified against the officer source so doc-vs-code can't drift again.
 _attr = {name: mattr for name, _role, _duty, mattr in roster._OFFICERS}
-_recon_src = {"Scout": "scout", "Provost Marshal": "provost", "Quartermaster": "quartermaster"}
+_recon_src = {"QA Engineer": "scout", "Security Engineer": "provost", "Release Manager": "quartermaster"}
 for _name, _mod in _recon_src.items():
     chk(f"{_name} roster label says reviewer_model", _attr[_name] == "reviewer_model", _attr[_name])
     _src = (Path("orchestrator") / f"{_mod}.py").read_text(encoding="utf-8")
@@ -63,9 +63,9 @@ for _name in _recon_src:
 
 # --- html cockpit view ---
 html = roster.html_view(cfg, "all quiet")
-chk("html view renders the tree", "Chain of command" in html and "The General" in html)
-chk("html view renders the officer table", "Officers &amp; duties" in html and "Provost Marshal" in html)
-chk("html view renders soldiers", "Vanguard FE" in html and "Sapper" in html)
+chk("html view renders the tree", "Chain of command" in html and "CTO" in html)
+chk("html view renders the officer table", "Officers &amp; duties" in html and "Security Engineer" in html)
+chk("html view renders engineers", "Vanguard FE" in html and "Sapper" in html)  # SQUAD labels — renamed by the code-strings fragment
 chk("html view shows the status", "all quiet" in html)
 chk("html view escapes (no raw angle injection)", "<script>" not in roster.html_view(cfg, "<script>x"))
 
@@ -74,7 +74,7 @@ async def _no_status(c): return "Quiet day — 2 merges, 0 parks."
 roster._status_line = _no_status
 p = asyncio.run(roster.refresh(cfg))
 chk("refresh wrote ROSTER.md", p.exists() and p.name == "ROSTER.md")
-chk("written doc has the chart + officers", "flowchart TD" in p.read_text() and "Drillmaster" in p.read_text())
+chk("written doc has the chart + officers", "flowchart TD" in p.read_text() and "Engineering Coach" in p.read_text())
 chk("latest_status reads the status back", roster.latest_status(cfg) == "Quiet day — 2 merges, 0 parks.")
 
 # --- cockpit /roster-doc route ---
