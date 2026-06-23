@@ -1029,7 +1029,7 @@ background:#0d1119;text-decoration:none;color:inherit}
 <div id=board>{{BOARD}}</div>
 <script>
 var APP="{{APP}}";
-function proj(v){APP=v;location.search="?app="+encodeURIComponent(v);}
+function proj(v){APP=v;var p=new URLSearchParams(location.search);p.set("app",v);location.search="?"+p.toString();}
 document.addEventListener("click",function(e){
   document.querySelectorAll("details[open]").forEach(function(d){
     if(!d.classList.contains("collapse") && !d.contains(e.target)) d.removeAttribute("open");
