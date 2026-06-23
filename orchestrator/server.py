@@ -1254,7 +1254,7 @@ def create_app(cfg: Config):
     @app.get("/ship-preview")
     def ship_preview_page():
         from . import sync as _sync
-        appq = (request.args.get("app") or "").strip() or app0
+        appq = (request.args.get("app") or "").strip() or (cfg.apps[0].name if cfg.apps else "")
         style = (
             "<style>"
             ".shp{max-width:940px}.shhead{background:#171226;border:1px solid #2c2148;border-radius:12px;"
