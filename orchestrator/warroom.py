@@ -245,7 +245,7 @@ def feed(cfg, tasks: list[dict], app: Optional[str], limit: int = 16) -> list[di
             "when": when, "tone": tone,
             "ticket": str(t.get("ticket_id") or ""),
             "app": str(t.get("app") or ""),
-            "text": label + (f" — {note[:80]}" if note and tone in ("warn", "bad") else ""),
+            "text": label + (f" — {D._short(note, 80)}" if note and tone in ("warn", "bad") else ""),
         })
     # Councils (unit-wide, not app-scoped)
     try:
@@ -254,7 +254,7 @@ def feed(cfg, tasks: list[dict], app: Optional[str], limit: int = 16) -> list[di
             dt = _parse(h.get("ts", ""))
             if dt:
                 items.append({"when": dt, "tone": "info", "ticket": "council",
-                              "app": "", "text": (h.get("summary") or "daily council").strip()[:90]})
+                              "app": "", "text": D._short(h.get("summary") or "daily council", 90)})
     except Exception:  # noqa: BLE001
         pass
     items.sort(key=lambda x: x["when"].timestamp() if x["when"] else 0.0, reverse=True)

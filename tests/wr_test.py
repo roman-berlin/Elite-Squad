@@ -56,4 +56,20 @@ assert "BAR" in page, "control bar not injected"
 assert "Merged" in page, "kpi missing"
 assert "AUTO-13" in board_sd, "signaldesk active run missing"
 assert "AUTO-12" not in board_sd, "scope leak: automatixy task showed under signaldesk"
+
+# EU-33: a long feed note is trimmed to a word boundary + ellipsis, not a mid-word cut.
+long_note = ("The reviewer blocked this run because the tenant filter was missing on the "
+             "leads query and several types were loosened to any during the build")
+errored = [dict(ticket_id="AUTO-99", app="automatixy", outcome="errored",
+                ended=now, started=now, note=long_note)]
+fnote = next(f for f in warroom.feed(cfg, errored, None) if f["ticket"] == "AUTO-99")["text"]
+print("FEED_trim", repr(fnote))
+assert fnote.endswith("…"), "long feed note should end with an ellipsis"
+assert " any" not in fnote and "…" in fnote, "feed note should be trimmed before the end"
+assert "wa…" not in fnote and "missin…" not in fnote, "feed note cut mid-word"
+# the kept text (sans trailing …) must end on a whole word from the source
+kept = fnote.split("—", 1)[1].strip().rstrip("…").rstrip()
+assert long_note.startswith(kept), "trim is not a clean prefix of the original note"
+assert kept.split()[-1] in long_note.split(), "feed note cut mid-word"
+
 print("OK")
