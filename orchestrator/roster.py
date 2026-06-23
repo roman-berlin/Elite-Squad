@@ -17,26 +17,26 @@ from .config import Config
 
 # (name, role, duty, which configured model attribute it runs on — None = deterministic, no model)
 _OFFICERS = [
-    ("The General", "Orchestrator", "Chairs the unit, talks 1:1 with you, synthesises the daily council, "
+    ("CTO", "Orchestrator", "Chairs the unit, talks 1:1 with you, synthesises the daily council, "
      "and routes your guidance to the officers.", "discussion_model"),
-    ("Adjutant", "S-1 · Personnel", "Owns the roster — proposes hires/retirements when a real capability "
-     "gap appears (you approve and apply).", "reviewer_model"),
+    ("Engineering Manager", "S-1 · Personnel", "Owns the roster — proposes hires/retirements when a real "
+     "capability gap appears (you approve and apply).", "reviewer_model"),
     ("Product Manager", "S-5 · Product", "Makes the product / IA / scope calls the Builder can't make "
      "alone, so the unit keeps shipping; escalates only the critical, irreversible ones.", "reviewer_model"),
-    ("Field Engineer", "Builder", "Implements each ticket on an isolated worktree; for a big ticket, "
-     "splits the work across its squad of soldiers.", "builder_model"),
-    ("Inspector General", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
+    ("Dev Team Lead", "Builder", "Implements each ticket on an isolated worktree; for a big ticket, "
+     "splits the work across its squad of engineers.", "builder_model"),
+    ("Code Reviewer", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
      "guards the standard before anything merges.", "reviewer_model"),
-    ("Scout", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
+    ("QA Engineer", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
      "accessibility — and files findings as tickets.", "reviewer_model"),
-    ("Provost Marshal", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
+    ("Security Engineer", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
      "(secrets, tenant-isolation, injection, vulnerable deps).", "reviewer_model"),
-    ("Quartermaster", "S-4 · Deploy readiness", "Certifies whether DEV can actually ship to MAIN — build, "
+    ("Release Manager", "S-4 · Deploy readiness", "Certifies whether DEV can actually ship to MAIN — build, "
      "types, migrations, deps, env, deploy config.", "reviewer_model"),
-    ("Sentinel", "S-3 · Integration & rollback", "Runs the heavier post-merge suite on the landed DEV and "
+    ("SRE", "S-3 · Integration & rollback", "Runs the heavier post-merge suite on the landed DEV and "
      "reverts the merge forward-only if it breaks. Deterministic — no model.", None),
-    ("Drillmaster", "Doctrine & Training", "The unit studies every day — proposes the one drill (an edit to "
-     "an officer's charter) with the most compounding gain; owns onboarding.", "reviewer_model"),
+    ("Engineering Coach", "Doctrine & Training", "The unit studies every day — proposes the one drill (an "
+     "edit to an officer's charter) with the most compounding gain; owns onboarding.", "reviewer_model"),
 ]
 
 # soldiers a squad can field (read from squad.SQUAD so this can't drift)
@@ -59,12 +59,12 @@ def _model_for(cfg: Config, attr: str | None) -> str:
 def mermaid_chart() -> str:
     """Chain-of-command flowchart (renders on GitHub and any Mermaid viewer)."""
     lines = ["```mermaid", "flowchart TD",
-             "  C([Commander · Roman]) --> G[The General · orchestrator]"]
-    short = {"The General": "G", "Adjutant": "ADJ", "Product Manager": "PM", "Field Engineer": "FE",
-             "Inspector General": "IG", "Scout": "SC", "Provost Marshal": "PR", "Quartermaster": "QM",
-             "Sentinel": "SN", "Drillmaster": "DM"}
+             "  C([Commander · Roman]) --> G[CTO · orchestrator]"]
+    short = {"CTO": "G", "Engineering Manager": "ADJ", "Product Manager": "PM", "Dev Team Lead": "FE",
+             "Code Reviewer": "IG", "QA Engineer": "SC", "Security Engineer": "PR", "Release Manager": "QM",
+             "SRE": "SN", "Engineering Coach": "DM"}
     for name, role, _d, _m in _OFFICERS:
-        if name == "The General":
+        if name == "CTO":
             continue
         lines.append(f"  G --> {short[name]}[{name} · {role}]")
     for i, (label, _focus) in enumerate(_soldiers(), 1):
@@ -85,10 +85,11 @@ def build_doc(cfg: Config, status: str = "") -> str:
         out.append(f"| **{name}** | {role} | {_model_for(cfg, mattr)} | {duty} |")
     sol = _soldiers()
     if sol:
-        out += ["", "## Soldiers — the Field Engineer's squad (and recon squads)", "",
-                "Fielded on demand: a big ticket is split across the relevant soldiers; the read-only "
-                "recon officers (Scout · Provost · Quartermaster) can field their own soldiers too.", "",
-                "| Soldier | Lane |", "|---|---|"]
+        out += ["", "## Engineers — the Dev Team Lead's squad (and recon squads)", "",
+                "Fielded on demand: a big ticket is split across the relevant engineers; the read-only "
+                "recon officers (QA Engineer · Security Engineer · Release Manager) can field their own "
+                "engineers too.", "",
+                "| Engineer | Lane |", "|---|---|"]
         for label, focus in sol:
             out.append(f"| **{label}** | {focus} |")
     out += ["", "_Living document — regenerated daily after the council. Structure & duties are read "
@@ -131,12 +132,12 @@ def html_view(cfg: Config, status: str = "") -> str:
         "table.rtbl td.md{font-family:ui-monospace,Menlo,monospace;color:#7aa2ff}</style>")
     # chain-of-command tree (no JS)
     tree = ['<div class=rtree>', '<span class=cmd>Commander · Roman</span>',
-            '<br>└─ <span class=gen>The General</span> · orchestrator']
-    offs = [o for o in _OFFICERS if o[0] != "The General"]
+            '<br>└─ <span class=gen>CTO</span> · orchestrator']
+    offs = [o for o in _OFFICERS if o[0] != "CTO"]
     for i, (name, role, _d, _m) in enumerate(offs):
         elbow = "   └─" if i == len(offs) - 1 else "   ├─"
         tree.append(f'<br>{elbow} <span class=off>{esc(name)}</span> · {esc(role)}')
-        if name == "Field Engineer":
+        if name == "Dev Team Lead":
             sol = _soldiers()
             for j, (label, _f) in enumerate(sol):
                 send = "      └─" if j == len(sol) - 1 else "      ├─"
@@ -156,8 +157,8 @@ def html_view(cfg: Config, status: str = "") -> str:
     parts.append('<div class=rsec>Officers &amp; duties</div>')
     parts.append(f'<table class=rtbl><tr><th>Officer</th><th>Role</th><th>Model</th><th>Duty</th></tr>{rows}</table>')
     if sol_rows:
-        parts.append('<div class=rsec>Soldiers — fielded on demand by the Field Engineer (and recon squads)</div>')
-        parts.append(f'<table class=rtbl><tr><th>Soldier</th><th>Lane</th></tr>{sol_rows}</table>')
+        parts.append('<div class=rsec>Engineers — fielded on demand by the Dev Team Lead (and recon squads)</div>')
+        parts.append(f'<table class=rtbl><tr><th>Engineer</th><th>Lane</th></tr>{sol_rows}</table>')
     parts.append('</div>')
     return "".join(parts)
 
