@@ -72,4 +72,33 @@ kept = fnote.split("—", 1)[1].strip().rstrip("…").rstrip()
 assert long_note.startswith(kept), "trim is not a clean prefix of the original note"
 assert kept.split()[-1] in long_note.split(), "feed note cut mid-word"
 
+# EU-35: the health pill appends "· N warnings" in BOTH branches. An unhealthy summary with
+# warnings must surface them in the label (matching the healthy branch), not hide them behind the
+# dropdown. Singular/plural is respected on each count.
+unhealthy_warns = {"healthy": False, "checks": [
+    {"status": "bad", "name": "db", "detail": ""},
+    {"status": "bad", "name": "auth", "detail": ""},
+    {"status": "warn", "name": "cache", "detail": ""},
+]}
+pill = warroom.health_pill(unhealthy_warns)
+print("HPILL_unhealthy", repr(pill[:90]))
+assert "2 problems · 1 warning" in pill, "unhealthy pill must show the warning count"
+assert "1 warnings" not in pill, "warning count must be singular for one warning"
+
+# Single problem + multiple warnings, still unhealthy — plural warnings, singular problem.
+one_prob = {"healthy": False, "checks": [
+    {"status": "bad", "name": "db", "detail": ""},
+    {"status": "warn", "name": "cache", "detail": ""},
+    {"status": "warn", "name": "disk", "detail": ""},
+]}
+assert "1 problem · 2 warnings" in warroom.health_pill(one_prob), "plural warnings on unhealthy pill"
+
+# Healthy branch is unchanged (regression guard).
+healthy_warn = {"healthy": True, "checks": [{"status": "warn", "name": "cache", "detail": ""}]}
+assert "System healthy · 1 warning" in warroom.health_pill(healthy_warn), "healthy pill warning suffix regressed"
+
+# No warnings → no suffix in either branch.
+no_warn = {"healthy": False, "checks": [{"status": "bad", "name": "db", "detail": ""}]}
+assert "warning" not in warroom.health_pill(no_warn), "no-warning pill must not mention warnings"
+
 print("OK")
