@@ -377,13 +377,29 @@ def needs_chat_summary(t: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None) -> str:
+def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
+                active_filter: str | None = None, blocked: list[str] | None = None) -> str:
+    # Cards summarize the FULL run set, regardless of any active scope filter.
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
     needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
     cards = [("Tasks", total, "all"), ("Merged → dev", merged, "merged"), ("Needs you", len(needs), "needs")]
     if show_cost:
         cards.append(("Est. cost", f"${sum(t['cost'] for t in tasks):.2f}", None))
+
+    # A KPI card deep-links here with ?filter=<scope>; scope the visible rows so the destination
+    # honors the click ("show me these"). 'parked' matches the auto-skipped blocked_tickets set.
+    flt = (active_filter or "").strip().lower()
+    blocked_set = {str(b) for b in (blocked or [])}
+    _FILTER_LABEL = {"merged": "Merged → dev", "needs": "Needs you", "parked": "Parked"}
+    if flt == "merged":
+        tasks = [t for t in tasks if t["outcome"] == "merged→dev"]
+    elif flt == "needs":
+        tasks = [t for t in tasks if t["outcome"] in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
+    elif flt == "parked":
+        tasks = [t for t in tasks if str(t.get("ticket_id")) in blocked_set]
+    else:
+        flt = ""
 
     head = ["<th></th>", "<th>Status</th>", "<th>Ticket</th>", "<th>App</th>", "<th>Branch</th>",
             "<th>Started</th>", "<th>Dur</th>", "<th class=num>Passes</th>", "<th class=num>Turns</th>"]
@@ -429,8 +445,14 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
         (f'<div class="card clk" onclick="kfilter(\'{kind}\')">' if kind else '<div class=card>')
         + f'<div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
         for l, v, kind in cards)
-    rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>No tasks yet — run the General.</td></tr>'
+    banner = ""
+    if flt:
+        banner = (f'<div class=fltbar>Showing <b>{html.escape(_FILTER_LABEL.get(flt, flt))}</b> only '
+                  f'· <a href="/tasks">show all</a></div>')
+    empty = "No tasks match this filter." if flt else "No tasks yet — run the General."
+    rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>{empty}</td></tr>'
     return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{PANEL}}", panel)
+            .replace("{{FILTER}}", banner)
             .replace("{{HEAD}}", "".join(head)).replace("{{ROWS}}", rows_html)
             .replace("{{GEN}}", datetime.now().strftime("%Y-%m-%d %H:%M")))
 
@@ -469,9 +491,11 @@ th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-
 .passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:#8a909c;font-weight:400;font-size:12px;margin-left:6px}
 .sub{font-size:13px;color:#c4c9d2;margin:3px 0}.sub b{color:#e8eaed}
 .sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:#fbbf24;font-weight:600;text-transform:uppercase;font-size:11px}
+.fltbar{margin:6px 30px 0;color:#c4c9d2;font-size:13px}
 </style></head><body>
 <header><h1>★ CTO — cockpit</h1><div class=sub>generated {{GEN}} · re-run <code>./general dashboard</code> (or use <code>./general serve</code>) · click a row for the full transcript</div></header>
 <div class=cards>{{CARDS}}</div>
+{{FILTER}}
 {{PANEL}}
 <div class=wrap>
 <input id=f placeholder="filter by ticket / app / branch…" oninput="flt()">

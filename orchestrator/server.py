@@ -175,8 +175,12 @@ def create_app(cfg: Config):
 
     @app.get("/tasks")
     def tasks_page():
+        flt = (request.args.get("filter") or "").strip()
+        # 'parked' scopes to the auto-skipped blocked set, which lives outside the task log.
+        blocked = warroom._load_blocked(cfg) if flt.lower() == "parked" else None
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
-                             dismissed=D.load_dismissed(cfg.audit_path))
+                             dismissed=D.load_dismissed(cfg.audit_path),
+                             active_filter=flt, blocked=blocked)
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
         back = "<p style='margin:14px 30px 4px'><a href='/' style='color:#6aa9ff'>&larr; cockpit</a></p>"
@@ -1214,6 +1218,32 @@ def create_app(cfg: Config):
         """Why tickets fail — a taxonomy of causes, repeat offenders, and the auto-written post-mortems."""
         from . import forensics as _fx
         esc = html.escape
+        cat = (request.args.get("cat") or "").strip()
+        if cat:  # a KPI/taxonomy deep-link: show only the failed runs in this cause category
+            label = _fx._LABELS.get(cat, cat)
+            runs = [r for r in _fx.scan(cfg) if r.get("category") == cat]
+            action = _fx._ACTIONS.get(cat, "")
+            head = (f"<p><a href='/forensics'>&larr; forensics</a></p>"
+                    f"<h2 style='font-size:16px;margin:4px 0 2px'>{esc(label)}</h2>"
+                    f"<p style='color:#8a929f'>{len(runs)} matching run(s)."
+                    + (f" &#8594; {esc(action)}" if action else "") + "</p>")
+            if not runs:
+                inner = head + ("<p style='color:#8a929f'>None on record — nothing flagged in this "
+                                "category.</p>")
+                return _wrap(f"Forensics — {label}", inner)
+            trs = []
+            for r in runs:
+                when = r["started"].strftime("%b %d %H:%M") if r.get("started") else "—"
+                trs.append(f"<tr><td><b>{esc(str(r.get('ticket_id') or '?'))}</b></td>"
+                           f"<td>{esc(str(r.get('app') or '—'))}</td><td>{esc(when)}</td>"
+                           f"<td>{esc(str(r.get('outcome') or ''))}</td>"
+                           f"<td>{esc((r.get('note') or r.get('verdict') or '').strip()[:160])}</td></tr>")
+            table = ("<table class=fxtbl><tr><th>ticket</th><th>app</th><th>when</th>"
+                     "<th>outcome</th><th>note</th></tr>" + "".join(trs) + "</table>")
+            style = ("<style>.fxtbl{width:100%;border-collapse:collapse;margin:8px 0;font-size:13px}"
+                     ".fxtbl th{color:#6b7480;text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid #232936}"
+                     ".fxtbl td{color:#c3cad6;padding:6px 8px;border-bottom:1px solid #1a1f2a}</style>")
+            return _wrap(f"Forensics — {label}", style + head + table)
         pm = (request.args.get("pm") or "").strip()
         if pm:  # view one post-mortem
             try:
