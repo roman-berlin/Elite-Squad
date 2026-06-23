@@ -536,9 +536,26 @@ def _liveness(state: dict, active: bool) -> str:
     return f'<span class="lv stuck">&#9888; no step for {m}m — may be stuck</span>'
 
 
+# The synced badge globs + stat()s every peer file; its text is minute-precision ("Xm ago"), so there is
+# no point recomputing it on every ~2s SSE frame. Cache the rendered string per audit-path for ~45s.
+_SYNC_CACHE: dict[str, tuple[float, str]] = {}   # audit_path -> (fetched_ts, html)
+_SYNC_TTL = 45.0
+
+
 def _sync_html(cfg) -> str:
     """Subtle one-line badge: which machines' audits are merged into this view, and how fresh.
     Empty (no clutter) when the state clone isn't set up yet — i.e. a stand-alone machine."""
+    key = str(getattr(cfg, "audit_path", ""))
+    now = time.time()
+    hit = _SYNC_CACHE.get(key)
+    if hit and now - hit[0] < _SYNC_TTL:
+        return hit[1]
+    html_out = _sync_html_uncached(cfg)
+    _SYNC_CACHE[key] = (now, html_out)
+    return html_out
+
+
+def _sync_html_uncached(cfg) -> str:
     try:
         from . import sync
         files = sync.shared_files(cfg)
