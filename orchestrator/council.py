@@ -101,12 +101,13 @@ COUNCIL = [
 ]
 
 _CHAIR_SYSTEM = (
-    "You are THE GENERAL, chairing the Elite Unit's daily council. You have heard each "
-    "officer. Produce a tight commander's briefing in disciplined tone, in this exact "
-    "markdown shape and nothing else:\n\n"
-    "**SITREP** — 3–5 lines on the unit's recent operations from the record.\n\n"
-    "**ORDERS FOR TODAY** — 2–5 bullets: the concrete actions the unit will take (who does "
-    "what). Fold in the officers' best recommendations; resolve conflicts.\n\n"
+    "You are THE GENERAL, chairing the Elite Unit's daily council. You have heard each officer. "
+    "Produce a SHORT commander's briefing — it lands on Roman's phone, so if he can't skim it in ~15 "
+    "seconds it's too long. Keep the WHOLE thing under ~90 words. Summarize; do NOT restate the debate "
+    "or recap officer-by-officer. Exactly this markdown shape and nothing else:\n\n"
+    "**SITREP** — at most 2 short lines on recent operations from the record.\n\n"
+    "**ORDERS** — at most 3 short bullets: the concrete actions the unit will take (who does what). "
+    "Fold in the officers' best recommendations; resolve conflicts.\n\n"
     "**FOR THE COMMANDER** — ONLY decisions that are genuinely Roman's: product direction, "
     "business/strategy, or an irreversible call with no safe default. NOT technical or process "
     "choices the unit should make itself. Hold a high bar — most days this is 'None.' One "
@@ -115,12 +116,13 @@ _CHAIR_SYSTEM = (
 
 _MEETING_CHAIR_SYSTEM = (
     "You are THE GENERAL, chairing a focused meeting of the Elite Unit on a single topic. You "
-    "have heard the officers debate. Produce a tight decision record in disciplined tone, in "
-    "this exact markdown shape and nothing else:\n\n"
+    "have heard the officers debate. Produce a SHORT decision record — it lands on Roman's phone, so "
+    "keep the WHOLE thing under ~80 words, skimmable in 15 seconds; summarize, do NOT replay the "
+    "debate. Exactly this markdown shape and nothing else:\n\n"
     "**TOPIC** — one line.\n\n"
     "**DECISION** — what the unit will do, who owns it, and the one-line why. Resolve the debate "
     "and take a clear position; do not fence-sit.\n\n"
-    "**ACTIONS** — 1–4 bullets: concrete next steps (file a ticket, propose a drill, add a "
+    "**ACTIONS** — 1–3 bullets: concrete next steps (file a ticket, propose a drill, add a "
     "check, draft a hire). Name the officer who owns each.\n\n"
     "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product / strategy / "
     "irreversible, no safe default). One question per line ending in '?', else 'None.'"
@@ -892,6 +894,15 @@ def _standup_text(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
     return "\n".join(body)
 
 
+def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
+    """Phone-sized stand-up: a one-line roll-up + only the hand-offs/blockers (the part that needs the
+    Commander). The full per-officer round-table is NOT pushed to Telegram — it stays in the cockpit
+    (last-standup.md + the saved transcript), so the daily ping is skimmable instead of a wall of chat."""
+    hb = "\n".join(f"- {h}" for h in handoffs) or "- none"
+    return (f"🫡 *Daily stand-up* — {len(rows)} officer(s) reported.\n\n"
+            f"*Hand-offs & blockers:*\n{hb[:1500]}\n\n_Full round-table in the cockpit._")
+
+
 async def hold_standup(cfg: Config, audit=None) -> str:
     """On-demand stand-up (the daily one now runs inside the muster). Saves last-standup.md + notifies."""
     from . import governor
@@ -899,7 +910,7 @@ async def hold_standup(cfg: Config, audit=None) -> str:
     text = _standup_text(rows, handoffs)
     _standup_file(cfg).write_text(text, encoding="utf-8")
     _save_transcript(cfg, "stand-up", digest, rows, "Daily stand-up — see the round-table below.")
-    notify.send("🫡 *Daily stand-up*\n\n" + text[:3200])
+    notify.send(_standup_telegram(rows, handoffs))
     governor.note_call(cfg, len(rows))
     if audit is not None:
         audit.record("standup", officers=[r for r, _ in rows], handoffs=len(handoffs))
