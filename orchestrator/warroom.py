@@ -223,6 +223,10 @@ _FEED_META = {
     "dry-run": ("muted", "dry-run landed"),
 }
 
+# Terminal outcomes that mean the run STOPPED because it failed (not merged, not still pending a
+# human decision). Used to light the phase bar's stopping node red.
+_FAILED_OUTCOMES = {"errored", "escalated"}
+
 
 def feed(cfg, tasks: list[dict], app: Optional[str], limit: int = 16) -> list[dict]:
     ts = _scope(tasks, app)
@@ -280,6 +284,20 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         reached = 3
     if merged:             # security passed and landed
         reached = 5
+    # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
+    # the phases behind it as cleanly-done. Derive the phase the run died at so the bar shows where
+    # it actually broke instead of implying it sailed through review and just didn't deploy.
+    failed_phase = None
+    if not live and t.get("outcome") in _FAILED_OUTCOMES:
+        verdict = (t.get("verdict") or "").upper()
+        if not has_build:
+            failed_phase = 0                                   # Build never finished
+        elif not has_review:
+            failed_phase = 1                                   # built, then died at the Gate
+        elif "FAIL" in verdict or "REJECT" in verdict:
+            failed_phase = 2                                   # review verdict was a rejection
+        else:
+            failed_phase = 3                                   # passed review, broke at Security/Land
     return {
         "live": live,
         "ticket": str(t.get("ticket_id") or "—"),
@@ -291,6 +309,7 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         "cost": t.get("cost") or 0,
         "phases": phases,
         "reached": reached,
+        "failed_phase": failed_phase,
     }
 
 
@@ -352,8 +371,16 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
         return ('<div class=runempty><div class=dot2></div>'
                 'No runs yet for this project. Launch one from the bar above.</div>')
     bar = []
+    failed_phase = run.get("failed_phase")
     for i, ph in enumerate(run["phases"]):
-        state = "done" if i < run["reached"] else ("now" if i == run["reached"] and run["live"] else "")
+        if failed_phase is not None and i == failed_phase:
+            state = "failed"               # the run died here — show it red, not greyed-done
+        elif i < run["reached"]:
+            state = "done"
+        elif i == run["reached"] and run["live"]:
+            state = "now"
+        else:
+            state = ""
         bar.append(f'<div class="ph {state}"><span></span>{_esc(ph)}</div>')
     # Stop is offered only for a manual run in flight — Autopilot has its own Stop in the header.
     stop = ('<form method=post action=/api/stop-run class=stoprun '
@@ -866,6 +893,9 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .phasebar.idle .ph.done::after{background:#2b3543}
 .phasebar .ph.now{color:var(--warn)}
 .phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
+/* failed = the run terminated at this phase -> red stopping node, never reads as cleanly-done */
+.phasebar .ph.failed,.phasebar.idle .ph.failed{color:var(--bad)}
+.phasebar .ph.failed span,.phasebar.idle .ph.failed span{background:var(--bad);border-color:var(--bad);box-shadow:0 0 8px rgba(240,103,107,.5)}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(245,179,74,.28)}50%{box-shadow:0 0 0 8px rgba(245,179,74,0)}}
 .runmeta{display:flex;gap:24px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);flex-wrap:wrap}
 .meta{font-size:12px;color:var(--dim)}.meta b{color:var(--ink);font-weight:600;font-family:var(--mono)}
