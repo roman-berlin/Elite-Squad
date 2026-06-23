@@ -425,16 +425,16 @@ def create_app(cfg: Config):
     def drill_page():
         rep = Path(cfg.audit_path).with_name("drill-report.md")
         if _state.get("drilling"):
-            body = _working("Drillmaster is reviewing the unit's record and proposing officer upgrades…")
+            body = _working("Engineering Coach is reviewing the unit's record and proposing officer upgrades…")
         else:
             act = _actbar(_actbtn("/api/drill", "&#127894; Run drill"))
             if rep.exists():
                 body = act + "<pre class=rep>" + html.escape(rep.read_text(encoding="utf-8")) + "</pre>"
             else:
-                body = act + ("<p style='color:#8a909c'>No drill yet. Run one — the Drillmaster reviews "
+                body = act + ("<p style='color:#8a909c'>No drill yet. Run one — the Engineering Coach reviews "
                               "the unit's record and proposes officer upgrades, which you Approve in the "
                               "<a href='/approvals'>Approvals</a> inbox.</p>")
-        return _wrap("Drillmaster report", body)
+        return _wrap("Engineering Coach report", body)
 
     @app.post("/api/council")
     def council_api():
@@ -456,7 +456,7 @@ def create_app(cfg: Config):
         from . import council
         hist = council.history(cfg, limit=25)
         if _state.get("shipreview"):
-            top = _working("&#128640; Ship-review in session — the Quartermaster + officers are checking if "
+            top = _working("&#128640; Ship-review in session — the Release Manager + officers are checking if "
                            "DEV is ready for MAIN. The verdict will appear below and on Telegram.")
         elif _state.get("councilling"):
             top = _working("The officers are in session — reading the record and debating…")
@@ -488,7 +488,7 @@ def create_app(cfg: Config):
                 _state["scribing"] = True
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
-                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Scribe.")
+                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Technical Writer.")
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"scribe failed: {exc}"
                 finally:
@@ -510,7 +510,7 @@ def create_app(cfg: Config):
     def memory_page():
         memory.ensure()
         from . import consolidate
-        top = (_working("The Scribe is folding recent lessons into Unit Memory…")
+        top = (_working("The Technical Writer is folding recent lessons into Unit Memory…")
                if _state.get("scribing") else "")
         act = ("" if _state.get("scribing")
                else _actbar(_actbtn("/api/scribe", "&#128221; Update memory"),
@@ -605,7 +605,7 @@ def create_app(cfg: Config):
         app_name = appq if (appq and appq != "*") else _first_shippable(cfg)
         if not _state.get("shipreview"):
             _state["shipreview"] = True   # set BEFORE redirect so /council shows the in-session indicator
-            _state["last_msg"] = (f"🚀 Ship-review running for {app_name} — the Quartermaster + officers are "
+            _state["last_msg"] = (f"🚀 Ship-review running for {app_name} — the Release Manager + officers are "
                                   "checking if DEV is ready for MAIN. The verdict posts here and to Telegram.")
 
             def _bg():
@@ -712,8 +712,8 @@ def create_app(cfg: Config):
             inner = _working(f"Applying the {_state.get('approving')} recommendation — editing officer "
                              "doctrine, then committing + pushing…")
         elif not pend:
-            inner = ("<p style='color:#8a909c'>No pending recommendations. When the Drillmaster or "
-                     "Adjutant proposes something (after a drill or council), it lands here for your "
+            inner = ("<p style='color:#8a909c'>No pending recommendations. When the Engineering Coach or "
+                     "Engineering Manager proposes something (after a drill or council), it lands here for your "
                      "Approve / Disapprove — Approve applies it and pushes the doctrine.</p>")
         else:
             style = ("<style>.apcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 16px;margin:12px 0}"

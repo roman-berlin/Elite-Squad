@@ -531,16 +531,16 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                     notes="stopped by Commander before merge")
             security_block = None
             if getattr(cfg, "security_gate", False):
-                print("  security · Provost gating the diff…", flush=True)
+                print("  security · Security Engineer gating the diff…", flush=True)
                 sec_ok, sec_report = await provost_mod.gate(cfg, app, diff)
                 if not sec_ok:
-                    print("  security · Provost BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
-                    _notify(cfg, f"🛡️ {ticket.id} — Provost blocked the merge (security).\n\n{sec_report[:1200]}")
+                    print("  security · Security Engineer BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
+                    _notify(cfg, f"🛡️ {ticket.id} — Security Engineer blocked the merge (security).\n\n{sec_report[:1200]}")
                     audit.record("security_block", ticket_id=ticket.id, iteration=iteration,
                                  reason=(sec_report or "")[:2500])
                     security_block = sec_report
                 else:
-                    print("  security · Provost PASS ✓", flush=True)
+                    print("  security · Security Engineer PASS ✓", flush=True)
             result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                            review, security_block=security_block)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
@@ -633,7 +633,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     elif not green:
         reason = "dev gate fails after merge"
     elif security_block:
-        reason = "Provost blocked — CRITICAL/HIGH security finding"
+        reason = "Security Engineer blocked — CRITICAL/HIGH security finding"
     else:
         reason = ""
 
@@ -679,8 +679,8 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             if not ok:
                 if not ticket.ephemeral:
                     backlog.set_status(ticket, "Needs Human")
-                    backlog.add_comment(ticket, f"⚠️ Sentinel rolled this back from {app.base_branch}. {snote[:900]}")
-                print(f"  🛡️ {ticket.id}: Sentinel reverted the merge — needs you.", flush=True)
+                    backlog.add_comment(ticket, f"⚠️ SRE rolled this back from {app.base_branch}. {snote[:900]}")
+                print(f"  🛡️ {ticket.id}: SRE reverted the merge — needs you.", flush=True)
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                     notes=f"sentinel reverted: {snote[:160]}")
 
@@ -720,7 +720,7 @@ async def _after_merge_scout(cfg, app, ticket, audit) -> None:
         Path(cfg.audit_path).with_name("scout-report.md").write_text(clean, encoding="utf-8")
         if audit is not None:
             audit.record("scout_smoke", ticket_id=ticket.id, app=app.name)
-        _notify(cfg, f"🛰️ Scout smoke after {ticket.id} on {app.base_branch}:\n{clean[:700]}"
+        _notify(cfg, f"🛰️ QA Engineer smoke after {ticket.id} on {app.base_branch}:\n{clean[:700]}"
                 + (("\n\n" + block) if block else ""))
     except Exception as exc:  # noqa: BLE001 - after-merge recon must never break the run
         print(f"  scout smoke skipped: {exc}", flush=True)

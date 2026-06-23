@@ -145,7 +145,7 @@ def handle_command(cfg, audit, text: str) -> bool:
     elif cmd == "status":
         notify.send(D.render_status(D.load_tasks(cfg.audit_path), limit=10, show_cost=False))
     elif cmd == "drill":
-        notify.send("🎖️ Drillmaster working…")
+        notify.send("🎖️ Engineering Coach working…")
 
         def _d():
             try:

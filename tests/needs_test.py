@@ -46,7 +46,7 @@ check("count() matches total", needs.count(cfg) == 3)
 
 side = warroom._needs_side_html(s)
 check("side panel shows the decision", "DD/MM" in side)
-check("side panel shows the approval", "Drillmaster" in side)
+check("side panel shows the approval", "Engineering Coach" in side)
 check("side panel shows the failed run", "AUTO-7" in side and "errored" in side)
 check("side panel links to the inbox", "/needs" in side and "Open inbox" in side)
 

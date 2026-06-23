@@ -263,7 +263,7 @@ async def scribe(cfg) -> str:
     run = await run_agent(prompt, options, tag="scribe")
     bullets = (run.final or "").strip()
     if not bullets:
-        return "Scribe: no update produced."
+        return "Technical Writer: no update produced."
     # Guard: if the model wrapped output in markers/headings, strip them.
     for junk in (_BEGIN, _END, _LOG_HEADING, "## Lessons & Decisions"):
         bullets = bullets.replace(junk, "")
@@ -285,4 +285,4 @@ async def scribe(cfg) -> str:
             note = " · consolidated (" + ", ".join(bits) + ")"
     except Exception:  # noqa: BLE001
         note = ""
-    return f"Scribe: Unit Memory updated ({UNIT_PATH}){note}."
+    return f"Technical Writer: Unit Memory updated ({UNIT_PATH}){note}."

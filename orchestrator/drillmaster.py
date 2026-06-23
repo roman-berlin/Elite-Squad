@@ -135,7 +135,7 @@ async def drill(cfg: Config) -> str:
         effort="high",
     )
     run = await run_agent(_prompt(sig, cfg), options, tag="drillmaster")
-    return run.final or "(Drillmaster produced no report.)"
+    return run.final or "(Engineering Coach produced no report.)"
 
 
 # --------------------------------------------------------------------------- #

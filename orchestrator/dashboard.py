@@ -370,7 +370,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
 
 
 _TEMPLATE = """<!doctype html><html><head><meta charset=utf-8>
-<title>The General — cockpit</title>
+<title>CTO — cockpit</title>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
@@ -404,7 +404,7 @@ th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-
 .sub{font-size:13px;color:#c4c9d2;margin:3px 0}.sub b{color:#e8eaed}
 .sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:#fbbf24;font-weight:600;text-transform:uppercase;font-size:11px}
 </style></head><body>
-<header><h1>★ The General — cockpit</h1><div class=sub>generated {{GEN}} · re-run <code>./general dashboard</code> (or use <code>./general serve</code>) · click a row for the full transcript</div></header>
+<header><h1>★ CTO — cockpit</h1><div class=sub>generated {{GEN}} · re-run <code>./general dashboard</code> (or use <code>./general serve</code>) · click a row for the full transcript</div></header>
 <div class=cards>{{CARDS}}</div>
 {{PANEL}}
 <div class=wrap>

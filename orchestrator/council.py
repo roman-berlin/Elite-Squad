@@ -320,7 +320,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     else:
         # The DAILY muster IS the stand-up + the General's briefing — council and stand-up merged into
         # one daily. Each officer reports Yesterday/Today/Blockers; the General synthesises from it.
-        print("\n🎖️  Daily muster — officers reporting; the General will brief…\n", flush=True)
+        print("\n🎖️  Daily muster — officers reporting; the CTO will brief…\n", flush=True)
         _sd, said, handoffs = await _gather_standup(cfg)
         try:
             _standup_file(cfg).write_text(_standup_text(said, handoffs), encoding="utf-8")
@@ -328,7 +328,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
             pass
 
     # The General chairs and synthesizes the briefing.
-    print("  · The General sums up…", flush=True)
+    print("  · CTO sums up…", flush=True)
     chair_prompt = "\n".join([
         "The Elite Unit's record:", "", digest, "",
         *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
@@ -363,7 +363,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
     except Exception as exc:  # noqa: BLE001
-        print(f"  Scribe skipped: {exc}", flush=True)
+        print(f"  Technical Writer skipped: {exc}", flush=True)
     # Refresh the living roster (daily, info-only, cheapest model) — best-effort.
     try:
         from . import roster
@@ -461,7 +461,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
     except Exception as exc:  # noqa: BLE001
-        print(f"  Scribe skipped: {exc}", flush=True)
+        print(f"  Technical Writer skipped: {exc}", flush=True)
     print(f"\n  meeting saved → {saved}\n", flush=True)
     return decision
 
@@ -478,10 +478,10 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     qm_report = ""
     try:
         from . import quartermaster
-        print("  · Quartermaster certifying deploy-readiness…", flush=True)
+        print("  · Release Manager certifying deploy-readiness…", flush=True)
         qm_report = await quartermaster.inspect(cfg, name)
     except Exception as exc:  # noqa: BLE001
-        qm_report = f"(Quartermaster check unavailable: {exc})"
+        qm_report = f"(Release Manager check unavailable: {exc})"
 
     digest = format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
@@ -510,7 +510,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
     except Exception as exc:  # noqa: BLE001
-        print(f"  Scribe skipped: {exc}", flush=True)
+        print(f"  Technical Writer skipped: {exc}", flush=True)
     print(f"\n  ship-review saved → {saved}\n", flush=True)
     return decision
 

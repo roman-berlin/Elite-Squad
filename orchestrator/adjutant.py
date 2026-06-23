@@ -103,7 +103,7 @@ async def propose(cfg: Config) -> str:
         "Propose only; the Commander approves.",
     ])
     run = await run_agent(prompt, options, tag="adjutant")
-    return run.final or "(Adjutant produced no report.)"
+    return run.final or "(Engineering Manager produced no report.)"
 
 
 ADJUTANT_APPLY_SYSTEM = """\

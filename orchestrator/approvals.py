@@ -20,8 +20,8 @@ from .config import Config
 
 # kind -> (label, report filename). Each report maps to an officer `apply` coroutine.
 KINDS = {
-    "drill": ("Drillmaster — doctrine upgrade", "drill-report.md"),
-    "adjutant": ("Adjutant — personnel action", "adjutant-report.md"),
+    "drill": ("Engineering Coach — doctrine upgrade", "drill-report.md"),
+    "adjutant": ("Engineering Manager — personnel action", "adjutant-report.md"),
 }
 
 

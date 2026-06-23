@@ -52,8 +52,8 @@ async def recon(cfg: Config, app_name: str, url: str | None = None, audit=None) 
     # Read-only QA recon. With delegation armed, the Scout decides whether to field a squad (a soldier
     # per user-flow / area) on a big surface and synthesize, else a single solo pass (unchanged).
     return await _recon.run_officer(
-        officer="scout", label="Scout",
+        officer="scout", label="QA Engineer",
         system=SCOUT_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app, url),
         cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
-        empty="(Scout produced no report.)", audit=audit)
+        empty="(QA Engineer produced no report.)", audit=audit)

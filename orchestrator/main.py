@@ -31,7 +31,7 @@ from .contracts import Outcome
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="general",
-        description="The General — commands the Builder and Reviewer officers across your apps")
+        description="CTO — commands the Builder and Reviewer officers across your apps")
     p.add_argument("--config", default="config.yaml", help="path to config.yaml (default: ./config.yaml)")
     p.add_argument("--live", action="store_true", help="disable dry-run: push, merge to dev, write to Jira")
     p.add_argument("--max-tickets", type=int, default=None, help="override max_tickets_per_run")
@@ -67,12 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
     st = sub.add_parser("standup", help="daily-meeting report (shipped / needs-you / decisions)")
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
-    dr = sub.add_parser("drill", help="Drillmaster: review the unit's record, propose officer upgrades")
+    dr = sub.add_parser("drill", help="Engineering Coach: review the unit's record, propose officer upgrades")
     dr.add_argument("--telegram", action="store_true", help="also send a summary to Telegram")
     dr.add_argument("--apply", action="store_true", help="EXECUTE the approved drill (writes the officer/squad edits; originals backed up first)")
     cnl = sub.add_parser("council", help="hold the Elite Unit's daily council (officers muster, brief you)")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
-    sub.add_parser("scribe", help="Scribe: fold recent council + runs into Unit Memory (memory/UNIT.md)")
+    sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + soldiers + hierarchy chart) -> ROSTER.md")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
     mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the General decides)")
@@ -88,23 +88,23 @@ def build_parser() -> argparse.ArgumentParser:
     pmp.add_argument("--telegram", action="store_true", help="also send an ESCALATE proposal to Telegram")
     sr = sub.add_parser("ship-review", help="ready-to-prod review: QM certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
     sr.add_argument("app", nargs="?", help="app to review (default: first configured)")
-    adj = sub.add_parser("adjutant", help="Adjutant (S-1): personnel review — propose hires/retirements")
+    adj = sub.add_parser("adjutant", help="Engineering Manager (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
-    sct = sub.add_parser("scout", help="Scout (S-2): smoke-test DEV in a browser (e2e / a11y) and report")
+    sct = sub.add_parser("scout", help="QA Engineer (S-2): smoke-test DEV in a browser (e2e / a11y) and report")
     sct.add_argument("app")
     sct.add_argument("--url", help="a deployed DEV URL to test (else the app's local dev server)")
     sct.add_argument("--telegram", action="store_true", help="also send the recon report to Telegram")
     sct.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
-    prv = sub.add_parser("provost", help="Provost Marshal: security recon of the latest DEV changes")
+    prv = sub.add_parser("provost", help="Security Engineer: security recon of the latest DEV changes")
     prv.add_argument("app")
     prv.add_argument("--telegram", action="store_true", help="also send the security report to Telegram")
     prv.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
-    qm = sub.add_parser("quartermaster", help="Quartermaster (S-4): certify DEV is deploy-ready before DEV->MAIN")
+    qm = sub.add_parser("quartermaster", help="Release Manager (S-4): certify DEV is deploy-ready before DEV->MAIN")
     qm.add_argument("app")
     qm.add_argument("--telegram", action="store_true", help="also send the readiness report to Telegram")
     qm.add_argument("--file", action="store_true", help="file ticket-worthy findings as Jira tickets (assigned to you)")
-    ptl = sub.add_parser("patrol", help="Scheduled patrol: Scout + Provost + Quartermaster sweep DEV and file findings")
+    ptl = sub.add_parser("patrol", help="Scheduled patrol: QA Engineer + Security Engineer + Release Manager sweep DEV and file findings")
     ptl.add_argument("app")
     ptl.add_argument("--officers", default=None, help="comma subset (scout,provost,quartermaster); default all three")
     ptl.add_argument("--no-file", action="store_true", help="propose-only — don't create Jira tickets")
@@ -354,7 +354,7 @@ async def _main(argv: list[str]) -> int:
         out.write_text(report, encoding="utf-8")
         print(f"\n(written to {out})")
         if getattr(args, "telegram", False):
-            notify.send("🎖️ Drillmaster report ready:\n\n" + report[:1500])
+            notify.send("🎖️ Engineering Coach report ready:\n\n" + report[:1500])
         return 0
 
     if args.command == "council":
@@ -439,7 +439,7 @@ async def _main(argv: list[str]) -> int:
         print(clean + (("\n\n" + filed) if filed else ""))
         Path(cfg.audit_path).with_name("scout-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("🛰️ Scout — DEV recon:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
+            notify.send("🛰️ QA Engineer — DEV recon:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
         return 0
 
     if args.command == "provost":
@@ -449,7 +449,7 @@ async def _main(argv: list[str]) -> int:
         print(clean + (("\n\n" + filed) if filed else ""))
         Path(cfg.audit_path).with_name("provost-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("🛡️ Provost — security recon:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
+            notify.send("🛡️ Security Engineer — security recon:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
         return 0
 
     if args.command == "quartermaster":
@@ -459,7 +459,7 @@ async def _main(argv: list[str]) -> int:
         print(clean + (("\n\n" + filed) if filed else ""))
         Path(cfg.audit_path).with_name("quartermaster-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("📦 Quartermaster — deploy readiness:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
+            notify.send("📦 Release Manager — deploy readiness:\n\n" + clean[:2800] + (("\n\n" + filed) if filed else ""))
         return 0
 
     if args.command == "patrol":
@@ -494,7 +494,7 @@ async def _main(argv: list[str]) -> int:
         print(report)
         Path(cfg.audit_path).with_name("adjutant-report.md").write_text(report, encoding="utf-8")
         if getattr(args, "telegram", False):
-            notify.send("🪖 Adjutant — personnel review:\n\n" + report[:3000])
+            notify.send("🪖 Engineering Manager — personnel review:\n\n" + report[:3000])
         return 0
 
     if args.command in ("dashboard", "status"):
