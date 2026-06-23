@@ -45,6 +45,44 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
+def _audit_ship(audit, app_name: str, r: dict) -> None:
+    """Record an app DEV→MAIN ship in the audit so it shows up in the logs/history — until now a ship's
+    only trace was the in-memory cockpit banner, so 'check the logs' came up empty. Best-effort."""
+    try:
+        audit.record("ship", app=app_name, base=r.get("base"), prot=r.get("prot"),
+                     ahead=int(r.get("ahead_before", 0) or 0), ok=bool(r.get("ok")),
+                     error=(r.get("error") or "")[:300])
+    except Exception:  # noqa: BLE001 - logging a ship must never break the ship
+        pass
+
+
+def _audit_promote(audit, r: dict) -> None:
+    """Record a unit dev→main promote ('Update unit') in the audit, same rationale as _audit_ship."""
+    try:
+        audit.record("promote", target="unit", ahead=int(r.get("ahead_before", 0) or 0),
+                     ok=bool(r.get("ok")), error=(r.get("error") or "")[:300])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _first_shippable(cfg) -> str:
+    """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
+    'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
+    ('All projects'), so we never call cfg.app('*'). Falls back to the first app."""
+    try:
+        from . import sync as _sync
+        root = _sync._repo_root(cfg)
+        for a in (getattr(cfg, "apps", None) or []):
+            try:
+                if Path(a.repo_path).resolve() != root:
+                    return a.name
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return cfg.apps[0].name if getattr(cfg, "apps", None) else ""
+
+
 def create_app(cfg: Config):
     from flask import Flask, redirect, request
     app = Flask(__name__)
@@ -417,8 +455,14 @@ def create_app(cfg: Config):
     def council_page():
         from . import council
         hist = council.history(cfg, limit=25)
-        top = _working("The officers are in session — reading the record and debating…") if _state.get("councilling") else ""
-        acts = "" if _state.get("councilling") else _actbar(
+        if _state.get("shipreview"):
+            top = _working("&#128640; Ship-review in session — the Quartermaster + officers are checking if "
+                           "DEV is ready for MAIN. The verdict will appear below and on Telegram.")
+        elif _state.get("councilling"):
+            top = _working("The officers are in session — reading the record and debating…")
+        else:
+            top = ""
+        acts = "" if (_state.get("councilling") or _state.get("shipreview")) else _actbar(
             _actbtn("/api/council", "&#128172; Hold a council now"))
         intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The officers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
@@ -556,10 +600,15 @@ def create_app(cfg: Config):
 
     @app.post("/api/ship-review")
     def ship_review_api():
-        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        appq = (request.form.get("app") or "").strip()
+        # Ship-review is per-PRODUCT; "*"/all/empty -> the first shippable product (never cfg.app("*")).
+        app_name = appq if (appq and appq != "*") else _first_shippable(cfg)
         if not _state.get("shipreview"):
+            _state["shipreview"] = True   # set BEFORE redirect so /council shows the in-session indicator
+            _state["last_msg"] = (f"🚀 Ship-review running for {app_name} — the Quartermaster + officers are "
+                                  "checking if DEV is ready for MAIN. The verdict posts here and to Telegram.")
+
             def _bg():
-                _state["shipreview"] = True
                 try:
                     from . import council
                     asyncio.run(council.ship_review(cfg, app_name, audit=audit))
@@ -585,6 +634,7 @@ def create_app(cfg: Config):
             def _bg():
                 try:
                     r = sync.promote(cfg)
+                    _audit_promote(audit, r)
                     if r.get("ok"):
                         n = r.get("ahead_before", 0)
                         _state["last_msg"] = (f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
@@ -623,6 +673,7 @@ def create_app(cfg: Config):
             def _bg():
                 try:
                     r = sync.promote_app(cfg.app(app_name))
+                    _audit_ship(audit, app_name, r)
                     if r.get("ok"):
                         n = r.get("ahead_before", 0)
                         _state["last_msg"] = (f"Shipped {app_name} {r['base']}→{r['prot']} "
