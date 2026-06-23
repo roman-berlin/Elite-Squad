@@ -1,6 +1,6 @@
 # The Elite Unit — chain of command, mission flow & daily council
 
-An elite autonomous software unit. The General commands the officers; the officers build,
+An elite autonomous software unit. The CTO commands the officers; the officers build,
 verify, train, and manage the corps; and every morning they muster, study their record, and
 brief the Commander. Officers are text files (`officers/*.md`) in Identity / Knowledge /
 Skills form — sharpen the file, sharpen the officer.
@@ -13,18 +13,18 @@ Skills form — sharpen the file, sharpen the officer.
 ```mermaid
 graph TD
     C["COMMANDER — you<br/>sets the mission · QAs DEV · owns MAIN"]
-    G["THE GENERAL — orchestrator<br/>git custody · the loop · keep-DEV-green merge"]
+    G["CTO — orchestrator<br/>git custody · the loop · keep-DEV-green merge"]
     C --> G
 
-    G --> ADJ["Adjutant · S-1 Personnel (HR)<br/>recruits / retires officers · propose-only"]
-    G --> ENG["Field Engineer · Builder<br/>Sonnet · full tools · builds on a worktree"]
-    G --> INS["Inspector General · Reviewer<br/>Opus · read-only · independent audit"]
-    G --> DRL["Drillmaster · Doctrine & Training<br/>improves the officers from the record"]
-    G --> SCT["Scout · S-2 Recon (QA)<br/>browser / e2e on DEV"]
-    G --> PRV["Provost Marshal · Security<br/>secrets · tenant-isolation · CVEs"]
-    G --> QM["Quartermaster · S-4 DevOps<br/>CI / deploy readiness"]
+    G --> ADJ["Engineering Manager · S-1 Personnel (HR)<br/>recruits / retires officers · propose-only"]
+    G --> ENG["Dev Team Lead · Builder<br/>Sonnet · full tools · builds on a worktree"]
+    G --> INS["Code Reviewer · Reviewer<br/>Opus · read-only · independent audit"]
+    G --> DRL["Engineering Coach · Doctrine & Training<br/>improves the officers from the record"]
+    G --> SCT["QA Engineer · S-2 Recon (QA)<br/>browser / e2e on DEV"]
+    G --> PRV["Security Engineer · Security<br/>secrets · tenant-isolation · CVEs"]
+    G --> QM["Release Manager · S-4 DevOps<br/>CI / deploy readiness"]
 
-    ENG --> SQ["Field Engineer's squad — your repo's .claude/agents<br/>Vanguard FE · Ordnance BE · Logistics DB<br/>Scribe Docs · AI · Judge Advocate Legal · Growth"]
+    ENG --> SQ["Dev Team Lead's squad — your repo's .claude/agents<br/>Frontend Engineer · Ordnance BE · Logistics DB<br/>Technical Writer Docs · AI · Judge Advocate Legal · Growth"]
 
     classDef command fill:#3b2f0b,stroke:#f59e0b,color:#fde68a;
     classDef active fill:#0b3d2e,stroke:#10b981,color:#d1fae5;
@@ -34,26 +34,26 @@ graph TD
 ```
 
 **Build vs. check (no one signs off their own bridge):** officers that *build* live inside the
-Field Engineer (the FE/BE/DB/AI squad). Officers that *independently verify* — Inspector
-General, and the planned Scout & Provost — are separate and read-only. Defense in depth. The
-**Adjutant** changes the *composition* of the corps (hire/retire); the **Drillmaster** sharpens
+Dev Team Lead (the FE/BE/DB/AI squad). Officers that *independently verify* — Code
+Reviewer, and the planned QA Engineer & Security Engineer — are separate and read-only. Defense in depth. The
+**Engineering Manager** changes the *composition* of the corps (hire/retire); the **Engineering Coach** sharpens
 the officers already in post.
 
-**Ranks & chain of recruitment.** Commander → General → **major officers** (sit on the council)
-→ **junior officers / sub-leads** → **soldiers**. A major may recruit its own soldiers (its
+**Ranks & chain of recruitment.** Commander → CTO → **major officers** (sit on the council)
+→ **junior officers / sub-leads** → **engineers**. A major may recruit its own engineers (its
 `.claude/agents` squad) and, when a focus area needs its own leadership, junior officers who are
-handed soldiers for sub-tasks — **every hire is gated by the Adjutant's (HR) approval**. Standing
-up a new *major* officer needs the General's call and your sign-off. Only majors sit on the daily
+handed engineers for sub-tasks — **every hire is gated by the Engineering Manager's (HR) approval**. Standing
+up a new *major* officer needs the CTO's call and your sign-off. Only majors sit on the daily
 council; everyone below reports up the chain.
 
 ## Mission flow (one ticket)
 
 ```mermaid
 flowchart LR
-    BL["Backlog · Jira<br/>In Progress, then To Do<br/>assignee = you · by Rank"] --> GEN["The General<br/>takes one → In Progress"]
-    GEN --> BUILD["Field Engineer builds<br/>isolated worktree"]
+    BL["Backlog · Jira<br/>In Progress, then To Do<br/>assignee = you · by Rank"] --> GEN["CTO<br/>takes one → In Progress"]
+    GEN --> BUILD["Dev Team Lead builds<br/>isolated worktree"]
     BUILD --> GATE["Gate<br/>tests · lint · types"]
-    GATE --> REV{"Inspector General<br/>pass?"}
+    GATE --> REV{"Code Reviewer<br/>pass?"}
     REV -- "fail · up to 4 passes" --> BUILD
     REV -- "pass" --> LAND["Land<br/>ff-push DEV · retire branch<br/>sync your DEV · ticket → QA · Telegram"]
     REV -- "exhausted / needs human" --> ESC["Escalate to you<br/>PR or Needs Human"]
@@ -67,13 +67,13 @@ flowchart LR
 ## Daily council (the unit studies every day)
 
 At **10:00** the officers muster: each gives a short SITREP from its lens on the unit's recent
-record, the Drillmaster names the one drill worth running, the Adjutant covers personnel, and
-the General chairs — producing a briefing, the day's orders, and the questions only you can
+record, the Engineering Coach names the one drill worth running, the Engineering Manager covers personnel, and
+the CTO chairs — producing a briefing, the day's orders, and the questions only you can
 answer. The unit can also call an **ad-hoc muster** to work a specific improvement
 (`general council --topic "…"`).
 
 Only the **major officers** sit on the council — the squads do not attend; each major consults
-and reports for its own soldiers, keeping the muster sharp. The unit solves its own technical
+and reports for its own engineers, keeping the muster sharp. The unit solves its own technical
 and process problems and escalates to you **only** for genuinely Commander-level calls (product
 direction, business strategy, irreversible decisions). Most mornings, that's *None*.
 
@@ -81,7 +81,7 @@ direction, business strategy, irreversible decisions). Most mornings, that's *No
 flowchart LR
     REC["Record<br/>(audit log)"] --> M["10:00 Muster<br/>officers' round-table"]
     NOTES["Your standing<br/>guidance"] --> M
-    M --> BRF["The General's<br/>briefing"]
+    M --> BRF["CTO's<br/>briefing"]
     BRF --> TG["Telegram summary"]
     BRF --> DASH["Cockpit history"]
     BRF --> Q["FOR THE COMMANDER<br/>open questions → you"]
@@ -95,19 +95,19 @@ Run it: `general council` (now) · scheduled 10:00 via `scripts/com.roman.genera
 
 | Officer | Codename | Role | Status | Defined in |
 |---|---|---|---|---|
-| The General | — | Orchestrator: git, the loop, the merge | **active** | `orchestrator/` |
-| Adjutant | S-1 | Personnel (HR): recruit / retire officers | **active** | `officers/adjutant.md`, `adjutant.py` |
-| Field Engineer | Builder | Implements the ticket on a worktree | **active** | `officers/engineer.md`, `builder.py` |
-| Inspector General | Reviewer | Independent read-only spec + quality audit | **active** | `officers/inspector.md`, `reviewer.py` |
-| Drillmaster | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
-| Scout | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
-| Provost Marshal | — | Security: secrets, tenant-isolation, authz, CVEs | **active** | `officers/provost.md`, `provost.py` |
-| Quartermaster | S-4 | CI / deploy readiness (build, migrations, env) | **active** | `officers/quartermaster.md`, `quartermaster.py` |
+| CTO | — | Orchestrator: git, the loop, the merge | **active** | `orchestrator/` |
+| Engineering Manager | S-1 | Personnel (HR): recruit / retire officers | **active** | `officers/adjutant.md`, `adjutant.py` |
+| Dev Team Lead | Builder | Implements the ticket on a worktree | **active** | `officers/engineer.md`, `builder.py` |
+| Code Reviewer | Reviewer | Independent read-only spec + quality audit | **active** | `officers/inspector.md`, `reviewer.py` |
+| Engineering Coach | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
+| QA Engineer | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
+| Security Engineer | — | Security: secrets, tenant-isolation, authz, CVEs | **active** | `officers/provost.md`, `provost.py` |
+| Release Manager | S-4 | CI / deploy readiness (build, migrations, env) | **active** | `officers/quartermaster.md`, `quartermaster.py` |
 
 ## Jira lifecycle (a ticket's path)
 
 ```
-To Do ──(General picks it up)──▶ In Progress ──(green merge to DEV)──▶ QA ──(your sign-off)──▶ Done
+To Do ──(CTO picks it up)──▶ In Progress ──(green merge to DEV)──▶ QA ──(your sign-off)──▶ Done
                                       ▲                                   │
                                       └──────────(you send it back)───────┘
 ```
@@ -121,5 +121,5 @@ board Rank, only tickets **assigned to you**.
 2. Turn it into `Identity / Knowledge / Skills` with `officers/_TEMPLATE.md`.
 3. Drop a build-specialist in your repo's `.claude/agents/<name>.md`; a verifier gets its own
    `officers/<name>.md` and a hook in the loop.
-4. Manage it — review its work; the Drillmaster refines the file, the Adjutant decides whether
+4. Manage it — review its work; the Engineering Coach refines the file, the Engineering Manager decides whether
    it stays in post.
