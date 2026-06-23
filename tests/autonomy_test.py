@@ -50,7 +50,8 @@ check("pending: reads latest transcript", src == "council-1.md" and topics == ["
 # ===================== 3) _autospawn_tickets =====================
 DEC = ('**DECISION** Do the thing.\n\n===TICKETS===\n'
        '[{"title":"Add authz probe test","type":"Task","severity":"HIGH","body":"b"}]\n===END===')
-filing.file_findings = lambda app, label, report: ["✓ AUTO-201 filed — Add authz probe test"]
+filing.file_findings = lambda app, label, report: filing.FilingResult(
+    filed=["AUTO-201"], lines=["✓ AUTO-201 filed — Add authz probe test"])
 cfg.meeting_autospawn = True
 audit3 = FakeAudit()
 clean, note = council._autospawn_tickets(cfg, DEC, audit3)

@@ -409,10 +409,11 @@ def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None) -> tuple[str,
     if not getattr(cfg, "meeting_autospawn", False) or not getattr(cfg, "apps", None):
         listed = "\n".join(f"  • [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
         return clean, "\n\n📋 Proposed tickets (set meeting_autospawn to file these):\n" + listed
-    filed = filing.file_findings(cfg.apps[0], "meeting", decision_raw)
+    result = filing.file_findings(cfg.apps[0], "meeting", decision_raw)
     if audit is not None:
-        audit.record("meeting_autospawn", filed=sum(1 for f in filed if f.startswith("✓")))
-    return clean, "\n\n🗂️ Auto-filed by the unit:\n" + "\n".join(filed)
+        audit.record("meeting_autospawn", filed=result.filed_n,
+                     deduped=result.deduped_n, failed=result.failed_n)
+    return clean, "\n\n🗂️ Auto-filed by the unit:\n" + "\n".join(result.lines)
 
 
 async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,

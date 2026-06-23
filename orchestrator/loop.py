@@ -716,7 +716,7 @@ async def _after_merge_scout(cfg, app, ticket, audit) -> None:
         print(f"  scout · smoke-testing {app.base_branch} after {ticket.id}…", flush=True)
         report = await scout.recon(cfg, app.name)
         _proposals, clean = filing.parse_tickets(report)
-        _clean, block = filing.present(report, app, "scout", do_file=not cfg.dry_run)
+        _clean, block, _result = filing.present(report, app, "scout", do_file=not cfg.dry_run)
         Path(cfg.audit_path).with_name("scout-report.md").write_text(clean, encoding="utf-8")
         if audit is not None:
             audit.record("scout_smoke", ticket_id=ticket.id, app=app.name)
