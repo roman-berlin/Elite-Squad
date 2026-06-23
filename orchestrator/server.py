@@ -40,6 +40,7 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _group_inner,
+    _result_banner,
     _wrap,
     _working,
 )
@@ -99,8 +100,10 @@ def create_app(cfg: Config):
         except Exception:  # noqa: BLE001
             pass
         h = health.summary(cfg)
-        return warroom.render_page(cfg, appq, _state, _control_bar(cfg, appq, h["healthy"]), h,
-                                   log_lines=recent_log())
+        # One-shot result banner for ship/promote/patrol — shown once, then cleared (read-and-clear),
+        # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
+        bar = _result_banner(_state) + _control_bar(cfg, appq, h["healthy"])
+        return warroom.render_page(cfg, appq, _state, bar, h, log_lines=recent_log())
 
     @app.get("/api/health")
     def health_api():
@@ -637,7 +640,7 @@ def create_app(cfg: Config):
         if not sync.can_promote():
             return Response("Deploy is disabled on this cockpit (read-only box).", status=403)
         if _state.get("active"):
-            _state["last_msg"] = "finish the active run before deploying DEV → main"
+            _state["last_result"] = "finish the active run before deploying DEV → main"
             return redirect("/")
         if not _state.get("promoting"):
             _state["promoting"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
@@ -648,12 +651,12 @@ def create_app(cfg: Config):
                     _audit_promote(audit, r)
                     if r.get("ok"):
                         n = r.get("ahead_before", 0)
-                        _state["last_msg"] = (f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
-                                              if n else "Unit already current — nothing to deploy.")
+                        _state["last_result"] = (f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
+                                                 if n else "Unit already current — nothing to deploy.")
                     else:
-                        _state["last_msg"] = "Deploy failed: " + (r.get("error") or "unknown")
+                        _state["last_result"] = "Deploy failed: " + (r.get("error") or "unknown")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"Deploy error: {exc}"
+                    _state["last_result"] = f"Deploy error: {exc}"
                 finally:
                     _state["promoting"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -666,7 +669,7 @@ def create_app(cfg: Config):
         from flask import jsonify
         active = bool(_state.get("promoting") or _state.get("shipping"))
         kind = "ship" if _state.get("shipping") else ("promote" if _state.get("promoting") else "")
-        return jsonify({"active": active, "kind": kind, "msg": _state.get("last_msg", "")})
+        return jsonify({"active": active, "kind": kind, "msg": _state.get("last_result", "")})
 
     @app.post("/api/ship-main")
     def ship_main_api():
@@ -676,7 +679,7 @@ def create_app(cfg: Config):
             return Response("Shipping is disabled on this cockpit (read-only box).", status=403)
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         if _state.get("active"):
-            _state["last_msg"] = "finish the active run before shipping to production"
+            _state["last_result"] = "finish the active run before shipping to production"
             return redirect("/")
         if not _state.get("shipping"):
             _state["shipping"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
@@ -687,13 +690,13 @@ def create_app(cfg: Config):
                     _audit_ship(audit, app_name, r)
                     if r.get("ok"):
                         n = r.get("ahead_before", 0)
-                        _state["last_msg"] = (f"Shipped {app_name} {r['base']}→{r['prot']} "
-                                              f"({n} commit(s)) to PRODUCTION." if n else
-                                              f"{app_name} already shipped — nothing ahead.")
+                        _state["last_result"] = (f"Shipped {app_name} {r['base']}→{r['prot']} "
+                                                 f"({n} commit(s)) to PRODUCTION." if n else
+                                                 f"{app_name} already shipped — nothing ahead.")
                     else:
-                        _state["last_msg"] = "Ship failed: " + (r.get("error") or "unknown")
+                        _state["last_result"] = "Ship failed: " + (r.get("error") or "unknown")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"Ship error: {exc}"
+                    _state["last_result"] = f"Ship error: {exc}"
                 finally:
                     _state["shipping"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -714,8 +717,11 @@ def create_app(cfg: Config):
                     from . import patrol as patrol_mod
                     for name in targets:
                         asyncio.run(patrol_mod.patrol(cfg, name, do_file=True, audit=audit))
+                    scope = "all projects" if sweep_all else targets[0]
+                    _state["last_result"] = (f"✓ Patrol finished for {scope} — any findings were filed as "
+                                             "Jira tickets assigned to you (see Needs you / your backlog).")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"patrol failed: {exc}"
+                    _state["last_result"] = f"patrol failed: {exc}"
                 finally:
                     _state["patrolling"] = False
             threading.Thread(target=_bg, daemon=True).start()

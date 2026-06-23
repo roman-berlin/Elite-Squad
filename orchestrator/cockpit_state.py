@@ -12,9 +12,12 @@ import collections as _collections
 import threading
 import time
 
-_state = {"active": False, "last_msg": "", "drilling": False, "dry_run": None,
+_state = {"active": False, "last_msg": "", "last_result": "", "drilling": False, "dry_run": None,
           "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
           "approving": None}
+# ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
+# ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions
+#                  (ship / promote / patrol) — set by their _bg, shown once on /, then cleared.
 
 # Guards the active check-then-set so two near-simultaneous run POSTs can't both pass the
 # `_state["active"]` guard and start two runs (TOCTOU race). Acquire it whenever you claim a run.
