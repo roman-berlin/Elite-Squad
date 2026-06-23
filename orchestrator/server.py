@@ -84,7 +84,7 @@ def _first_shippable(cfg) -> str:
 
 
 def create_app(cfg: Config):
-    from flask import Flask, redirect, request
+    from flask import Flask, Response, redirect, request
     app = Flask(__name__)
     audit = AuditLog(cfg.audit_path)
     from . import usage
