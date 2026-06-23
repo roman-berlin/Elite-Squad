@@ -86,7 +86,7 @@ def rejection_patterns(cfg, *, min_count: int = 2) -> list[dict]:
         if len(tickets) >= min_count:
             out.append({"theme": theme, "label": _LABELS[theme], "count": len(tickets),
                         "tickets": sorted(tickets), "action": _ACTIONS[theme],
-                        "drill": f"Drill the Field Engineer on {_LABELS[theme]}: {_ACTIONS[theme]}"})
+                        "drill": f"Drill the Dev Team Lead on {_LABELS[theme]}: {_ACTIONS[theme]}"})
     out.sort(key=lambda p: -p["count"])
     return out
 

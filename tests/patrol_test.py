@@ -61,7 +61,7 @@ FakeBacklog.created = 0
 audit = FakeAudit()
 summary = asyncio.run(patrol.patrol(cfg, "automatixy", do_file=True, audit=audit))
 check("summary names all three officers",
-      all(x in summary for x in ("Scout", "Provost Marshal", "Quartermaster")))
+      all(x in summary for x in ("QA Engineer", "Security Engineer", "Release Manager")))
 check("summary shows filed counts (2 + 1) and a clean one",
       "filed 2" in summary and "filed 1" in summary and "clean" in summary, summary)
 check("filed exactly 3 tickets (Scout 2 + Provost 1; QM 0)", FakeBacklog.created == 3, str(FakeBacklog.created))
@@ -79,16 +79,16 @@ check("all three report files written",
 FakeBacklog.created = 0
 _fail["who"] = "provost"
 summary2 = asyncio.run(patrol.patrol(cfg, "automatixy", do_file=True, audit=FakeAudit()))
-check("a failing officer doesn't abort the patrol", "patrol error" in summary2 and "Provost Marshal" in summary2)
+check("a failing officer doesn't abort the patrol", "patrol error" in summary2 and "Security Engineer" in summary2)
 check("other officers still ran + filed (Scout's 2)", FakeBacklog.created == 2, str(FakeBacklog.created))
-check("Scout + Quartermaster still reported", "Scout" in summary2 and "Quartermaster" in summary2)
+check("QA Engineer + Release Manager still reported", "QA Engineer" in summary2 and "Release Manager" in summary2)
 _fail["who"] = None
 
 # ===================== officers subset =====================
 FakeBacklog.created = 0
 summary3 = asyncio.run(patrol.patrol(cfg, "automatixy", officers=["scout"], do_file=True, audit=FakeAudit()))
-check("subset runs only the chosen officer", "Scout" in summary3 and "Provost Marshal" not in summary3
-      and "Quartermaster" not in summary3)
+check("subset runs only the chosen officer", "QA Engineer" in summary3 and "Security Engineer" not in summary3
+      and "Release Manager" not in summary3)
 check("subset filed only Scout's 2", FakeBacklog.created == 2, str(FakeBacklog.created))
 
 # ===================== propose-only (do_file=False) =====================

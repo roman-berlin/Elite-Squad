@@ -56,11 +56,11 @@ async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     # Read-only security recon. With delegation armed, the Provost decides for itself whether to field
     # a squad on a big surface (a soldier per area) and synthesize, else a single solo pass (unchanged).
     return await recon.run_officer(
-        officer="provost", label="Provost Marshal",
+        officer="provost", label="Security Engineer",
         system=PROVOST_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
         cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
-        empty="(Provost produced no report.)", audit=audit)
+        empty="(Security Engineer produced no report.)", audit=audit)
 
 
 PROVOST_GATE_SYSTEM = """\
@@ -121,10 +121,10 @@ async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
         run = await run_agent(prompt, options, tag="provost-gate")
         report = (run.final or run.text or "").strip()
         if not report:
-            return (False, "SECURITY GATE: BLOCK — Provost returned an empty report; failing closed.")
+            return (False, "SECURITY GATE: BLOCK — Security Engineer returned an empty report; failing closed.")
         return (_gate_passed(report), report)
     except Exception as exc:
         # An exception is never a PASS. Block, report the reason (the caller logs it to audit
         # and opens a PR for human review), and never error the ticket on the unsafe side.
-        return (False, f"SECURITY GATE: BLOCK — Provost gate raised {type(exc).__name__}: {exc}; "
+        return (False, f"SECURITY GATE: BLOCK — Security Engineer gate raised {type(exc).__name__}: {exc}; "
                        "failing closed (no verdict obtained).")

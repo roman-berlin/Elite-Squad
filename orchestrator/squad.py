@@ -29,11 +29,11 @@ from .contracts import BuildRequest, BuildResult
 
 # Squad roles (from officers/engineer.md). key -> (label, focus line for the soldier's system).
 SQUAD: dict[str, tuple[str, str]] = {
-    "vanguard-fe": ("Vanguard FE", "Frontend — React/Vite, TypeScript, Tailwind, components, UI state."),
+    "vanguard-fe": ("Frontend Engineer", "Frontend — React/Vite, TypeScript, Tailwind, components, UI state."),
     "ordnance-be": ("Ordnance BE", "Backend — FastAPI/Python: routes, services, repositories, schemas."),
     "logistics-db": ("Logistics DB", "Data — Supabase/Postgres: SQL migrations, RLS policies, types."),
     "devops": ("DevOps", "CI / build / deploy / config — package scripts, env, Docker, Vercel/Turbo."),
-    "generalist": ("Sapper", "General-purpose — anything outside the specialist lanes, or glue work."),
+    "generalist": ("Software Engineer", "General-purpose — anything outside the specialist lanes, or glue work."),
 }
 
 # subtask size -> builder effort (task-adaptive effort, extended to the soldiers; capped at high).

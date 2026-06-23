@@ -27,16 +27,16 @@ from . import dashboard as D
 # --------------------------------------------------------------------------- #
 # The roster: (key, display name, role line). Order = chain of command.
 _OFFICERS = [
-    ("general",       "The General",     "Orchestrator"),
-    ("adjutant",      "Adjutant",        "S-1 · personnel"),
-    ("pm",            "Product Manager", "S-5 · product"),
-    ("builder",       "Field Engineer",  "Builder"),
-    ("reviewer",      "Inspector General", "Reviewer"),
-    ("scout",         "Scout",           "S-2 · QA / recon"),
-    ("provost",       "Provost Marshal", "Security gate"),
-    ("quartermaster", "Quartermaster",   "S-4 · deploy"),
-    ("sentinel",      "Sentinel",        "S-3 · integration & rollback"),
-    ("drill",         "Drillmaster",     "Doctrine / training"),
+    ("general",       "CTO",                "Orchestrator"),
+    ("adjutant",      "Engineering Manager", "S-1 · personnel"),
+    ("pm",            "Product Manager",    "S-5 · product"),
+    ("builder",       "Dev Team Lead",      "Builder"),
+    ("reviewer",      "Code Reviewer",      "Reviewer"),
+    ("scout",         "QA Engineer",        "S-2 · QA / recon"),
+    ("provost",       "Security Engineer",  "Security gate"),
+    ("quartermaster", "Release Manager",    "S-4 · deploy"),
+    ("sentinel",      "SRE",                "S-3 · integration & rollback"),
+    ("drill",         "Engineering Coach",  "Doctrine / training"),
 ]
 
 
@@ -167,7 +167,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
         {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
          "tone": "warn" if blocked else None, "href": "/tasks"},
-        {"label": "Security blocks", "value": sec_blocks, "hint": "Provost gate (all time)",
+        {"label": "Security blocks", "value": sec_blocks, "hint": "Security Engineer gate (all time)",
          "tone": "bad" if sec_blocks else None, "href": "/council"},
     ]
     return cards
@@ -198,7 +198,7 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
     # roster key -> the officer's council name (so a click consults that exact officer).
     group_name = {"adjutant": "Adjutant", "builder": "Field Engineer", "reviewer": "Inspector General",
                   "scout": "Scout", "provost": "Provost Marshal", "quartermaster": "Quartermaster",
-                  "drill": "Drillmaster"}
+                  "sentinel": "Sentinel", "drill": "Drillmaster"}
     out = []
     for key, name, role in _OFFICERS:
         dt = seen.get(key)

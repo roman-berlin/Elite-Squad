@@ -25,7 +25,7 @@ def guard(cfg: Config, app: AppConfig, ticket, git, merge_sha: str, audit=None) 
     return (False, reason). Never raises into the loop — a Sentinel hiccup must not corrupt a run."""
     tid = getattr(ticket, "id", "?")
     cmds = list(getattr(app, "postmerge_commands", []) or [])
-    print(f"  🛡️ Sentinel · post-merge suite on {app.base_branch}…", flush=True)
+    print(f"  🛡️ SRE · post-merge suite on {app.base_branch}…", flush=True)
     result = None
     try:
         result = gate.run_commands(app, cmds)
@@ -34,12 +34,12 @@ def guard(cfg: Config, app: AppConfig, ticket, git, merge_sha: str, audit=None) 
         report = f"sentinel suite could not run: {exc}"
 
     if result is not None and result.passed:
-        print(f"  🛡️ Sentinel · {app.base_branch} green after merge ✓", flush=True)
+        print(f"  🛡️ SRE · {app.base_branch} green after merge ✓", flush=True)
         if audit is not None:
             audit.record("sentinel_pass", ticket_id=tid, app=app.name)
         return True, "post-merge suite green"
 
-    print(f"  🛡️ Sentinel · post-merge RED → reverting {tid} on {app.base_branch}", flush=True)
+    print(f"  🛡️ SRE · post-merge RED → reverting {tid} on {app.base_branch}", flush=True)
     reverted = False
     try:
         reverted = git.revert_merge_on_base(merge_sha)
@@ -49,9 +49,9 @@ def guard(cfg: Config, app: AppConfig, ticket, git, merge_sha: str, audit=None) 
         audit.record("sentinel_revert", ticket_id=tid, app=app.name, reverted=reverted)
     tail = (report or "").strip()[-1200:]
     if reverted:
-        notify.send(f"🛡️ Sentinel reverted {tid} — post-merge suite failed on {app.base_branch}; "
+        notify.send(f"🛡️ SRE reverted {tid} — post-merge suite failed on {app.base_branch}; "
                     f"DEV rolled back, ticket handed back.\n\n{tail}")
         return False, f"post-merge suite failed → merge reverted; DEV restored.\n{tail}"
-    notify.send(f"⛔ Sentinel: {tid} post-merge suite failed on {app.base_branch} AND the auto-revert "
+    notify.send(f"⛔ SRE: {tid} post-merge suite failed on {app.base_branch} AND the auto-revert "
                 f"did not apply cleanly — DEV needs you.\n\n{tail}")
     return False, f"post-merge suite failed AND revert failed — manual rollback needed.\n{tail}"

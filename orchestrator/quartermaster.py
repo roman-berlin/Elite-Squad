@@ -55,8 +55,8 @@ async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     # Read-only deploy-readiness certification. With delegation armed, the Quartermaster decides whether
     # to field a squad (a soldier per readiness area) on a big surface and synthesize, else solo (unchanged).
     return await recon.run_officer(
-        officer="quartermaster", label="Quartermaster",
+        officer="quartermaster", label="Release Manager",
         system=QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
         cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
-        empty="(Quartermaster produced no report.)", audit=audit)
+        empty="(Release Manager produced no report.)", audit=audit)

@@ -127,19 +127,19 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         if _sync.can_promote():
             _ahead = _sync.promote_status(cfg).get("ahead", 0)
             if _ahead:
-                _pc = (f"Update THE UNIT itself — promote The General (this tool\\u2019s own code, the "
+                _pc = (f"Update THE UNIT itself — promote the CTO (this tool\\u2019s own code, the "
                        f"~/Projects/General repo) dev \\u2192 main, {_ahead} commit(s). The 24/7 server "
                        f"self-updates within ~15 min. This is the unit\\u2019s brain, NOT your app.")
                 promote_html = (
                     '<span class=tbdiv></span>'
                     '<form method=post action=/api/promote class=tbf '
                     f'''onsubmit="return confirm('{_pc}')">'''
-                    f'<button class="btn deploy" title="Promote The General — this tool&#39;s OWN code — '
+                    f'<button class="btn deploy" title="Promote the CTO — this tool&#39;s OWN code — '
                     f'dev&#8594;main. The VPS self-updates. NOT your app." {busy("promoting")}>'
                     f'&#9881;&#65039; Update unit<span class=cbadge>{_ahead}</span></button></form>')
             else:
                 promote_html = ('<span class=tbdiv></span><span class="tbnote ok" '
-                                'title="The General (the unit\'s own code) is in sync with the server">'
+                                'title="The CTO (the unit\'s own code) is in sync with the server">'
                                 '&#10003; unit current</span>')
     except Exception:  # noqa: BLE001
         promote_html = ""
@@ -302,7 +302,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     </div>
   </details>
 
-  <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? Scout + Provost + Quartermaster will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
+  <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
   <a class="btn" href="/onboard" title="Scaffold a new product into the unit (config + Jira)">&#10133; Product</a>
@@ -370,12 +370,12 @@ def _chat_inner(cfg: Config) -> str:
         notes = ""
     bubbles = ""
     for who, text in _chat_bubbles(notes):
-        label = "You" if who == "you" else "The General"
+        label = "You" if who == "you" else "CTO"
         bubbles += (f'<div class="msg {who}"><div class=who>{label}</div>'
                     f'<div class=bub>{html.escape(text)}</div></div>')
     if not bubbles and not cards:
         bubbles = ('<div class=cempty>No messages yet. When an officer needs a decision it shows '
-                   'up here — or send the General a message below.</div>')
+                   'up here — or send the CTO a message below.</div>')
     return pending_html + f'<div class=thread>{bubbles}</div>'
 
 
@@ -407,7 +407,7 @@ def _chat_tabs(active: str, npend: int = 0) -> str:
     badge = f'<span class=cbadge>{npend}</span>' if npend else ""
     g = "on" if active == "general" else ""
     gr = "on" if active == "group" else ""
-    return (f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; The General{badge}</a>'
+    return (f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a>'
             f'<a class="ctab {gr}" href="/group">&#128101; Group room</a></div>')
 
 
@@ -416,7 +416,7 @@ def _group_inner(cfg: Config) -> str:
     msgs = council.group_messages(cfg, limit=200)
     if not msgs:
         return ('<div class=cempty>No messages yet. Ask the unit anything — the relevant officers '
-                'weigh in, others can add a comment. (The General is your 1:1 chat.)</div>')
+                'weigh in, others can add a comment. (The CTO is your 1:1 chat.)</div>')
     out = ""
     for who, text in msgs:
         side = "you" if who == "you" else "unit"

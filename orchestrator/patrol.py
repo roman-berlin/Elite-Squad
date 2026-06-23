@@ -1,6 +1,6 @@
 """Scheduled patrols — the recon officers sweep DEV on a cadence and file findings unprompted.
 
-Scout (runtime / UX / a11y), Provost Marshal (security), and the Quartermaster (deploy-readiness)
+QA Engineer (runtime / UX / a11y), Security Engineer (security), and the Release Manager (deploy-readiness)
 each inspect the app and file ticket-worthy findings as Jira tickets — de-duped, assigned to you,
 To Do — so the unit continuously finds → files → (with autopilot armed) fixes, without being told.
 
@@ -17,9 +17,9 @@ from .config import Config
 
 # patrol order: recon -> security -> readiness. (key, label, report-file)
 PATROL_OFFICERS = [
-    ("scout", "Scout", "scout-report.md"),
-    ("provost", "Provost Marshal", "provost-report.md"),
-    ("quartermaster", "Quartermaster", "quartermaster-report.md"),
+    ("scout", "QA Engineer", "scout-report.md"),
+    ("provost", "Security Engineer", "provost-report.md"),
+    ("quartermaster", "Release Manager", "quartermaster-report.md"),
 ]
 
 
