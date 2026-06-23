@@ -92,6 +92,23 @@ def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
     return desc
 
 
+def _result_banner(state: dict) -> str:
+    """One-shot read-and-clear result banner for the side-effectful / actions (ship/promote/patrol).
+
+    Mirrors the /memory banner: the outcome of a ship/promote/patrol is shown ONCE on the next load
+    of /, then cleared — unlike the sticky shared ``last_msg`` rendered as a control-bar note, which
+    would otherwise persist across unrelated later actions. Pops ``last_result`` so a subsequent
+    reload (with no new action) no longer shows it."""
+    msg = (state.pop("last_result", "") or "").strip()
+    if not msg:
+        return ""
+    bad = any(w in msg.lower() for w in ("fail", "error"))
+    fg, border, bg = (("#f0676b", "#5a1f22", "#2a1417") if bad
+                      else ("#7fe3a6", "#1c5238", "#10371f"))
+    return (f"<div style='background:{bg};border-bottom:1px solid {border};color:{fg};"
+            f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
+
+
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
     # "*" is the "All projects" selector — it is truthy but NOT a real app, so it must never become
     # app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
