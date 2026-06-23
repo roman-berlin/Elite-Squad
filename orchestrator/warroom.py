@@ -725,7 +725,7 @@ def health_pill(h: dict) -> str:
     cls = "ok" if healthy else "bad"
     n = len(probs)
     label = "&#9679; System healthy" if healthy else f"&#9679; {n} problem" + ("s" if n != 1 else "")
-    if healthy and warns:
+    if warns:
         label += f" · {len(warns)} warning" + ("s" if len(warns) != 1 else "")
     items = probs + warns
     if not items:
