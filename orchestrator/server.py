@@ -317,7 +317,12 @@ def create_app(cfg: Config):
             _state["active"] = False
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
-        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        appq = (request.form.get("app") or "").strip()
+        # "*" (the "All projects" selector) is truthy, so a bare `or` fallback never fires and "*"
+        # would flow into intake -> cfg.app("*") -> KeyError ("could not start: '*'"). Map "*"/empty
+        # to a concrete app for a single-app run; for a drain, "*"/empty means "every app" (None).
+        app_name = appq if (appq and appq != "*") else (cfg.apps[0].name if cfg.apps else "")
+        drain_app = appq if (appq and appq != "*") else None
         kind = request.form.get("kind", "task")
         text = (request.form.get("text") or "").strip()
         ttype = (request.form.get("type") or "feature").strip()
@@ -338,7 +343,7 @@ def create_app(cfg: Config):
             elif kind == "ticket":
                 worklist = intake.from_tickets(rcfg, app_name, text.split())
             else:
-                worklist = intake.from_drain(rcfg, app_name or None, rcfg.max_tickets_per_run)
+                worklist = intake.from_drain(rcfg, drain_app, rcfg.max_tickets_per_run)
         except Exception as exc:  # noqa: BLE001
             _state["active"] = False
             _state["last_msg"] = f"could not start: {exc}"
@@ -690,13 +695,19 @@ def create_app(cfg: Config):
 
     @app.post("/api/patrol")
     def patrol_api():
-        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        appq = (request.form.get("app") or "").strip()
+        # "*"/empty is the "All projects" selector — it is truthy, so a bare `or` fallback never fires
+        # and "*" would reach patrol -> cfg.app("*") -> KeyError. Honour the "All projects" intent by
+        # sweeping EVERY app; a single selected project patrols just that one.
+        sweep_all = appq in ("", "*")
+        targets = [a.name for a in cfg.apps] if sweep_all else [appq]
         if not _state.get("patrolling"):
             def _bg():
                 _state["patrolling"] = True
                 try:
                     from . import patrol as patrol_mod
-                    asyncio.run(patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                    for name in targets:
+                        asyncio.run(patrol_mod.patrol(cfg, name, do_file=True, audit=audit))
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"patrol failed: {exc}"
                 finally:

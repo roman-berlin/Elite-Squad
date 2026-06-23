@@ -93,7 +93,10 @@ def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
-    app0 = current_app or (cfg.apps[0].name if cfg.apps else "")
+    # "*" is the "All projects" selector — it is truthy but NOT a real app, so it must never become
+    # app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
+    # cfg.app("*") -> KeyError). Normalize once here to a concrete app (or "").
+    app0 = current_app if (current_app and current_app != "*") else (cfg.apps[0].name if cfg.apps else "")
     apps = "".join(
         f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
         f"{html.escape(a.name)}</option>" for a in cfg.apps)
