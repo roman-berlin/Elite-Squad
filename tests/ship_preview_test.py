@@ -64,6 +64,22 @@ chk("page has the final Ship button posting to /api/ship-main",
     "/api/ship-main" in body and "Ship automatixy to production" in body)
 chk("page summarises ticket count", "2 tickets" in body or "2 ticket" in body)
 
+# --- EU-26 regression: /ship-preview with NO ?app= must not 500 (app0 NameError) ---
+# direct hit / bookmark / refresh drops the query string -> appq falls back to cfg.apps[0].name
+r_noq = client.get("/ship-preview")
+b_noq = r_noq.get_data(as_text=True)
+chk("EU-26: /ship-preview (no ?app=) returns 200, not 500", r_noq.status_code == 200, str(r_noq.status_code))
+chk("EU-26: no-query falls back to first app's preview",
+    "Ship automatixy" in b_noq and "AUTO-7" in b_noq)
+
+# empty-state branch: no apps configured -> 'No app selected', still 200
+cfg_empty = Config(apps=[], audit_path=str(tmp / "a3.jsonl"), use_worktree=False)
+cfg_empty.detected_auth = lambda: "test"
+r_empty = server.create_app(cfg_empty).test_client().get("/ship-preview")
+b_empty = r_empty.get_data(as_text=True)
+chk("EU-26: no apps -> /ship-preview (no ?app=) returns 200", r_empty.status_code == 200, str(r_empty.status_code))
+chk("EU-26: no apps -> renders 'No app selected' empty state", "No app selected" in b_empty)
+
 # in-sync app -> 'nothing to ship'
 r2 = client.get("/ship-preview?app=automatixy")   # still ahead; check the empty path via a synced app
 cfg2 = Config(apps=[app_sync], audit_path=str(tmp / "a2.jsonl"), use_worktree=False)
