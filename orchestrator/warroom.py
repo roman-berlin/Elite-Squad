@@ -708,7 +708,9 @@ def project_selector(cfg, app: Optional[str]) -> str:
              for a in cfg.apps]
     opts.append("</optgroup>")
     if disc:
-        opts.append('<optgroup label="Found nearby (＋ Product page → click to onboard)">')
+        # Informational only — a <select> option can't navigate, so don't promise "click to onboard"
+        # here. Onboarding lives on the ＋ Product page (these repos are click-to-onboard links there).
+        opts.append('<optgroup label="Found nearby (add via &#10133; Product)">')
         opts += [f'<option value="*" disabled>{_esc(r["name"])} &mdash; {_esc(r["path"])}</option>'
                  for r in disc[:12]]
         opts.append("</optgroup>")

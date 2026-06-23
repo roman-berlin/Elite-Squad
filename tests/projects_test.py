@@ -54,6 +54,9 @@ selhtml = warroom.project_selector(cfg, "automatixy")
 chk("switcher has a Recent group", "Recent" in selhtml and "&#9733;" in selhtml)
 chk("switcher lists the configured projects", "automatixy" in selhtml and "zelmero" in selhtml)
 chk("switcher surfaces nearby repos", "Found nearby" in selhtml and "repoA" in selhtml, "")
+# EU-34: a disabled <option> can't navigate, so the dropdown must not promise "click to onboard".
+chk("switcher drops the dead click-to-onboard promise", "click to onboard" not in selhtml.lower(),
+    selhtml)
 
 print("\n================ PROJECT SWITCHER QA ================")
 passed = sum(1 for _, ok, _ in results if ok)
