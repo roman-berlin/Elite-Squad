@@ -64,8 +64,14 @@ chk("board: a finished run shows 'last run', not running", "last run" in board2 
 chk("board: Activity is a collapsible panel", "id=actpanel" in board and 'class="panel collapse"' in board)
 page = warroom.render_page(cfg, "automatixy", {}, "", {"healthy": True, "checks": []}, log_lines=[])
 chk("page: terminal is taller + resizable", "height:380px" in page and "resize:vertical" in page)
-chk("page: collapse state persists (applyUi + localStorage)", "applyUi" in page and "ui.act" in page)
+chk("page: collapse state persists (applyUi + localStorage)", "applyUi" in page and "ui.open." in page)
+chk("page: Tickets-to-work panel persists collapse + resize (blpanel/blbox)",
+    "blpanel" in page and "id=blbox" in page)
+chk("page: Live feed renders before Tickets-to-work before Activity",
+    0 < board.find("Live feed") < board.find("id=blpanel") < board.find("id=actpanel"))
 chk("page: collapsible panels excluded from menu auto-close", 'classList.contains("collapse")' in page)
+chk("page: scroll position preserved across the 2s refresh (no jump while reading)",
+    "_atBottom" in page and "keep[id]" in page)
 
 print("\n============== LIVE-RUN STATUS QA ==============")
 passed = sum(1 for _, ok, _ in results if ok)

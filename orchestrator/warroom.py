@@ -628,13 +628,13 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         '<div class=cols>'
         f'<div class=col-main>'
         f'<section class=panel><div class=ph>Active run</div><div class=run>{run}</div></section>'
+        f'{log_panel}'
         f'<details class="panel collapse" id=blpanel open>'
         f'<summary class=ph>Tickets to work &middot; '
         f'{"all projects" if (not app or app == "*") else _esc(app)}</summary>'
-        f'<div class=backlog>{_backlog_html(cfg, app)}</div></details>'
-        f'{log_panel}'
+        f'<div class=backlog id=blbox>{_backlog_html(cfg, app)}</div></details>'
         f'<details class="panel collapse" id=actpanel open><summary class=ph>Activity</summary>'
-        f'<div class=feed>{fd}</div></details>'
+        f'<div class=feed id=actbox>{fd}</div></details>'
         '</div>'
         f'<div class=col-side>'
         f'<section class="panel needspanel"><div class=ph>Needs you{ncount}</div>'
@@ -888,9 +888,9 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .offrole{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
 .offlast{font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap}
 /* feed */
-.feed{padding:5px 0;max-height:430px;overflow:auto}
+.feed{padding:5px 0;height:360px;min-height:120px;max-height:74vh;resize:vertical;overflow:auto}
 /* backlog — tickets to work, scoped to the project selector (all projects = every backlogged Jira) */
-.backlog{padding:4px 0 6px;max-height:340px;overflow:auto}
+.backlog{padding:4px 0 6px;height:260px;min-height:110px;max-height:74vh;resize:vertical;overflow:auto}
 .blhead{padding:6px 16px 4px}
 .blmore{font-size:11.5px;font-weight:700;color:var(--info)}
 .bllist{display:flex;flex-direction:column}
@@ -986,17 +986,37 @@ document.addEventListener("click",function(e){
 // Collapsible Activity panel + resizable terminal live INSIDE #board, which the SSE feed re-renders
 // every frame — so persist their state and re-apply it after each refresh (otherwise it resets).
 function saveUi(){try{
-  var a=document.getElementById("actpanel");if(a)localStorage.setItem("ui.act",a.open?"1":"0");
-  var lb=document.getElementById("logbox");if(lb&&lb.style.height)localStorage.setItem("ui.logh",lb.style.height);
+  ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
+    if(p)localStorage.setItem("ui.open."+id,p.open?"1":"0");});
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+    if(el&&el.style.height)localStorage.setItem("ui.h."+id,el.style.height);});
 }catch(e){}}
 function applyUi(){try{
-  var a=document.getElementById("actpanel");
-  if(a){var v=localStorage.getItem("ui.act");if(v==="0")a.removeAttribute("open");else if(v==="1")a.setAttribute("open","");a.addEventListener("toggle",saveUi);}
-  var lb=document.getElementById("logbox");
-  if(lb){var h=localStorage.getItem("ui.logh");if(h)lb.style.height=h;if(window.ResizeObserver)new ResizeObserver(saveUi).observe(lb);}
+  ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
+    if(p){var v=localStorage.getItem("ui.open."+id);
+      if(v==="0")p.removeAttribute("open");else if(v==="1")p.setAttribute("open","");
+      p.addEventListener("toggle",saveUi);}});
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+    if(el){var h=localStorage.getItem("ui.h."+id);if(h)el.style.height=h;
+      if(window.ResizeObserver)new ResizeObserver(saveUi).observe(el);}});
 }catch(e){}}
 function scrollLog(){var lb=document.getElementById("logbox");if(lb)lb.scrollTop=lb.scrollHeight;}
-function applyBoard(html){saveUi();var b=document.getElementById("board");if(b){b.innerHTML=html;scrollLog();applyUi();}}
+function _atBottom(el){return (el.scrollHeight-el.scrollTop-el.clientHeight)<24;}
+function applyBoard(html){
+  saveUi();
+  var b=document.getElementById("board");if(!b)return;
+  // Remember each scroll panel's position so the 2s refresh doesn't yank you around while you read:
+  // if you were at the bottom (following live output) we keep you pinned there; otherwise we restore
+  // your exact scroll position instead of jumping to the top/bottom.
+  var keep={};
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+    if(el)keep[id]={top:el.scrollTop,bottom:_atBottom(el)};});
+  b.innerHTML=html;
+  applyUi();
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
+    if(el&&k)el.scrollTop=k.bottom?el.scrollHeight:k.top;
+    else if(el&&id==="logbox")el.scrollTop=el.scrollHeight;});
+}
 async function tick(){
   try{
     var r=await fetch("/api/board?app="+encodeURIComponent(APP),{cache:"no-store"});
