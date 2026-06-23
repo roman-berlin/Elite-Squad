@@ -557,11 +557,20 @@ def _backlog_items(cfg, app: Optional[str]) -> tuple[list, Optional[str]]:
 def _backlog_html(cfg, app: Optional[str]) -> str:
     items, err = _backlog_items(cfg, app)
     scope = "all projects" if (not app or app == "*") else _esc(app)
+    # Surface any board the last drain couldn't read — so an unreachable/misconfigured Jira shows as a
+    # loud warning here instead of silently looking like "nothing of yours open".
+    from . import intake as _intake
+    derrs = dict(getattr(_intake, "LAST_DRAIN_ERRORS", {}) or {})
+    if app and app != "*":
+        derrs = {n: m for n, m in derrs.items() if n == app}
+    warn = "".join(
+        f'<div class=blempty style="color:var(--bad,#f0676b)">&#9888; {_esc(n)} backlog unreachable — '
+        f'{_esc(m)}</div>' for n, m in derrs.items())
     if err:
-        return f'<div class=blempty>Backlog unavailable for {scope} — {_esc(err)}</div>'
+        return warn + f'<div class=blempty>Backlog unavailable for {scope} — {_esc(err)}</div>'
     if not items:
-        return (f'<div class=blempty>&#10003; Nothing of yours open in {scope} '
-                '(In&nbsp;Progress / To&nbsp;Do).</div>')
+        return warn + (f'<div class=blempty>&#10003; Nothing of yours open in {scope} '
+                       '(In&nbsp;Progress / To&nbsp;Do).</div>')
     multi = (not app or app == "*")
     rows = []
     for a, t in items:
@@ -574,7 +583,7 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
             f'<span class=blkey>{tid}</span><span class=blsum>{summ}</span>{badge}</a>')
     head = (f'<a class=blmore href="/tickets?app={quote(app) if (app and app!="*") else "*"}">'
             f'{len(items)} open &middot; develop &rarr;</a>')
-    return f'<div class=blhead>{head}</div><div class=bllist>{"".join(rows)}</div>'
+    return warn + f'<div class=blhead>{head}</div><div class=bllist>{"".join(rows)}</div>'
 
 
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:

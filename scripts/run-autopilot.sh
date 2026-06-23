@@ -9,4 +9,4 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/opt/homebrew
 cd "$HOME/Projects/General" || exit 1
 mkdir -p council
 echo "----- autopilot start $(date) -----" >> council/autopilot.log
-exec ./general --live autopilot automatixy >> council/autopilot.log 2>&1
+exec ./general --live autopilot >> council/autopilot.log 2>&1

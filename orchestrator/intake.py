@@ -64,10 +64,18 @@ def from_tickets(cfg: Config, app_name: str, keys: list[str],
     return items
 
 
+# Per-app backlog-fetch failures from the most recent from_drain() call (app name -> message). The
+# cockpit panel + autopilot read this so an unreachable/misconfigured board surfaces as an explicit
+# warning instead of silently looking like "queue clear · nothing of yours". Cleared per app on a
+# clean fetch.
+LAST_DRAIN_ERRORS: dict[str, str] = {}
+
+
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
     """Pull ready tickets. With ``app_name=None`` this spans EVERY app that has a backlog — i.e. all
     connected Jiras — so Autopilot works across several Jira accounts at once. One connection failing
-    (bad creds, network, a renamed project) is skipped, never fatal — the other Jiras still drain."""
+    (bad creds, network, a renamed project) is skipped, never fatal — the other Jiras still drain, and
+    the failure is recorded in ``LAST_DRAIN_ERRORS`` so it's visible instead of silent."""
     apps = [cfg.app(app_name)] if app_name else [a for a in cfg.apps if a.backlog_backend != "none"]
     items: list[WorkItem] = []
     for app in apps:
@@ -75,6 +83,8 @@ def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
             backlog = make_backlog(app)
             for ticket in backlog.get_ready_tasks(limit):
                 items.append((app, ticket))
+            LAST_DRAIN_ERRORS.pop(app.name, None)   # a clean fetch clears any prior error
         except Exception as exc:  # noqa: BLE001 - one Jira/connection must not abort the others
-            print(f"  · backlog '{app.name}' skipped this cycle: {str(exc)[:160]}", flush=True)
+            LAST_DRAIN_ERRORS[app.name] = str(exc)[:200]
+            print(f"  · backlog '{app.name}' UNREACHABLE this cycle: {str(exc)[:160]}", flush=True)
     return items
