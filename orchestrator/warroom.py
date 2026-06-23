@@ -157,18 +157,21 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     blocked = _load_blocked(cfg)
     sec_blocks = _scan(cfg.audit_path)["count"].get("security_block", 0)
 
+    # Each card deep-links to a view scoped to the count it shows: the /tasks log auto-applies the
+    # ?filter= (merged / needs / parked) so the destination honors the click, and Security blocks
+    # opens the forensics view scoped to the security-block findings that produced the number.
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
-         "href": "/tasks"},
+         "href": "/tasks?filter=merged"},
         {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok",
-         "href": "/tasks"},
+         "href": "/tasks?filter=merged"},
         {"label": "Needs you", "value": len(needs), "hint": "PR · escalated · errored",
-         "tone": "warn" if needs else None, "href": "/tasks"},          # -> the tickets that need you
+         "tone": "warn" if needs else None, "href": "/tasks?filter=needs"},   # -> the tickets that need you
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
         {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
-         "tone": "warn" if blocked else None, "href": "/tasks"},
+         "tone": "warn" if blocked else None, "href": "/tasks?filter=parked"},
         {"label": "Security blocks", "value": sec_blocks, "hint": "Security Engineer gate (all time)",
-         "tone": "bad" if sec_blocks else None, "href": "/council"},
+         "tone": "bad" if sec_blocks else None, "href": "/forensics?cat=security_block"},
     ]
     return cards
 
