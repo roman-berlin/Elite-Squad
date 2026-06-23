@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -50,18 +51,68 @@ def _human_dur(seconds: Optional[float]) -> str:
     return f"{h}h {m}m"
 
 
+# --------------------------------------------------------------------------- #
+# Audit read cache. render_board (server.py's SSE gen, ≥ every 2s, PER open tab) fans out to the audit
+# THREE times per frame — load_tasks, warroom._run_in_flight and warroom._scan (KPIs) each re-read +
+# JSON-split the WHOLE merged history (local audit.jsonl + every synced shared/<host>.jsonl peer). With a
+# 50k-line audit and duplicate/tunnelled tabs that pins a core on the stream thread. Cache the merged
+# split and the assembled task list, keyed on the source files' (size, mtime_ns) so it auto-invalidates
+# the instant any audit (local or peer) is appended to / rewritten; a short TTL is a coarse-mtime
+# backstop. A burst of SSE frames and K tabs then share ONE read/parse per interval.
+_AUDIT_TTL = 1.5
+_audit_cache: dict[str, tuple[tuple, float, list[str]]] = {}              # path -> (sig, ts, lines)
+_tasks_cache: dict[str, tuple[tuple, float, list[dict[str, Any]]]] = {}   # path -> (sig, ts, runs)
+
+# Instrumentation (see tests/cockpit_cache_test.py): total audit_lines() calls vs. real disk reads. The
+# acceptance is ≤1 read per cache interval no matter how many frames/tabs call it.
+audit_lines_calls = 0
+audit_lines_reads = 0
+
+
+def _audit_paths(audit_path: str | Path) -> list[Path]:
+    """The files merged into the unified audit view: this machine's audit.jsonl plus every synced
+    ``shared/<host>.jsonl`` peer. Synced peers live in the state clone's shared/ (orphan unit-state
+    branch); the bare shared/ form is accepted too so tests / any local-only layout work without it."""
+    p = Path(audit_path)
+    paths: list[Path] = [p]
+    for shared in (p.parent / ".unit-state" / "shared", p.parent / "shared"):
+        if shared.is_dir():
+            paths += sorted(shared.glob("*.jsonl"))
+    return paths
+
+
+def _audit_sig(paths: list[Path]) -> tuple:
+    """A cheap fingerprint of the source files — (path, size, mtime_ns) each. Changes the instant any
+    file is appended to or rewritten, so the cache can never serve stale audit data. Globbing + stat() is
+    far cheaper than re-reading + JSON-parsing tens of thousands of lines on every frame."""
+    sig: list[tuple] = []
+    for fp in paths:
+        try:
+            st = fp.stat()
+            sig.append((str(fp), st.st_size, st.st_mtime_ns))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
 def audit_lines(audit_path: str | Path) -> list[str]:
     """Every audit line for the unified view: this machine's live ``audit.jsonl`` PLUS each synced
     ``shared/<host>.jsonl`` published by the other machines (see orchestrator/sync.py). Exact-duplicate
     lines are collapsed — a host's own events live in both its audit.jsonl and its published copy, so
-    they are counted once. Order is local-first then shared; callers that care sort by ts."""
-    p = Path(audit_path)
-    paths: list[Path] = [p]
-    # Synced peers: the state clone's shared/ (orphan unit-state branch); the bare shared/ form is
-    # accepted too so tests and any future local-only layout work without the clone.
-    for shared in (p.parent / ".unit-state" / "shared", p.parent / "shared"):
-        if shared.is_dir():
-            paths += sorted(shared.glob("*.jsonl"))
+    they are counted once. Order is local-first then shared; callers that care sort by ts.
+
+    TTL/mtime-cached so a burst of SSE board frames (and K open tabs) share a single read+merge instead
+    of re-parsing the whole history several times a second."""
+    global audit_lines_calls, audit_lines_reads
+    audit_lines_calls += 1
+    key = str(audit_path)
+    paths = _audit_paths(audit_path)
+    sig = _audit_sig(paths)
+    now = time.time()
+    hit = _audit_cache.get(key)
+    if hit is not None and hit[0] == sig and (now - hit[1]) < _AUDIT_TTL:
+        return hit[2]
+    audit_lines_reads += 1
     seen: set[str] = set()
     out: list[str] = []
     for fp in paths:
@@ -74,10 +125,25 @@ def audit_lines(audit_path: str | Path) -> list[str]:
             if s and s not in seen:
                 seen.add(s)
                 out.append(s)
+    _audit_cache[key] = (sig, now, out)
     return out
 
 
 def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
+    # Same (size, mtime_ns)-keyed TTL cache as audit_lines, so the per-frame JSON parse + run assembly is
+    # done once per interval and shared across SSE frames / tabs. Read-only for every caller.
+    key = str(audit_path)
+    sig = _audit_sig(_audit_paths(audit_path))
+    now = time.time()
+    hit = _tasks_cache.get(key)
+    if hit is not None and hit[0] == sig and (now - hit[1]) < _AUDIT_TTL:
+        return hit[2]
+    runs = _load_tasks_uncached(audit_path)
+    _tasks_cache[key] = (sig, now, runs)
+    return runs
+
+
+def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
     lines = audit_lines(audit_path)
     if not lines:
         return []
