@@ -33,12 +33,24 @@ MAIN. Quality and tenant-safety over speed.
   DIFF as a ticket comment, escalate to the Commander ONCE, and STOP. Never re-attempt the write or loop —
   the Commander applies it by hand. (Proven on AUTO-23.)
 - Escalate to the Commander only for critical product/strategy decisions — solve problems yourself.
+- **Elite-Unit / the EU Jira project IS this orchestrator tool — NOT a product.** It is a Python 3.12 /
+  Flask (cockpit) / Jira / Telegram CLI app. It has NO Supabase, NO Vercel, NO web frontend, NO
+  multi-tenant DB / RLS, and is NOT part of the Automatixy monorepo. NEVER scaffold `apps/eu-app/`, a
+  Supabase backend, RLS, a Vercel/HTTP probe, or any product/web infrastructure for EU, and never ask
+  the Commander for Supabase keys "for EU". EU tickets are improvements to the unit's OWN Python
+  codebase (`orchestrator/`, the cockpit, the officers, `tests/`).
 
 ## Per-App Notes
 
 ### automatixy
 - Stack: React/Vite + FastAPI + Supabase. Branches: DEV / MAIN (uppercase). Jira project AUTO.
 - (Add conventions, gotchas, and hot spots here as the unit learns them.)
+
+### Elite-Unit (EU)
+- This IS the orchestrator itself — a Python 3.12 / Flask cockpit / Jira / Telegram CLI tool. Repo:
+  `~/Projects/General` (GitHub `roman-berlin/Elite-Unit`), branches `dev`/`main` (lowercase). Jira project EU.
+- NO Supabase, NO Vercel, NO web app, NO database, NO RLS — it is not a SaaS product and not in the
+  Automatixy monorepo. EU tickets = fixes/features in `orchestrator/` + `tests/`. Tests: `python3 tests/run_all.py`.
 
 <!-- SCRIBE:BEGIN -->
 ## Lessons & Decisions  _(Scribe-maintained — newest first)_
