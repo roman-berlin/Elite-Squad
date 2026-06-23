@@ -103,6 +103,23 @@ class JiraAdapter(BacklogAdapter):
             clauses.append(f'labels = "{self.label}"')
         return " AND ".join(clauses) + " ORDER BY Rank ASC"     # board order, top first
 
+    def _raise_if_unauthenticated(self, resp) -> None:
+        """Guard against Jira's auth-blind 200. POST search/jql answers an UNAUTHENTICATED request with
+        HTTP 200 and an EMPTY issue list (NOT 401), so an invalid/expired token — or one whose account
+        can't reach the site — is indistinguishable from 'no ready tickets': the drain comes back empty,
+        raise_for_status() passes, and the cockpit/autopilot silently reports 'queue clear - nothing of
+        yours'. Atlassian still flags the real state in the Seraph login-reason header even on that 200,
+        so raise on it and let from_drain record the board as UNREACHABLE (visible) instead of clear
+        (silent). Real cause this caught: a dead JIRA_API_TOKEN hiding EU's whole To Do column."""
+        reason = (resp.headers.get("X-Seraph-LoginReason") or "").upper()
+        if "FAILED" in reason or "DENIED" in reason:
+            raise RuntimeError(
+                f"Jira auth failed for app '{self.app_name}' (X-Seraph-LoginReason={reason}) - the API "
+                f"token is invalid/expired or its account can't access {self.base_url}. Rotate "
+                f"JIRA_API_TOKEN (id.atlassian.com -> Security -> API tokens) or reconnect this Jira in "
+                f"the cockpit. Jira answers an unauthenticated search with HTTP 200 and no issues, so "
+                f"this otherwise masquerades as 'queue clear - nothing of yours'.")
+
     # -- interface -------------------------------------------------------- #
     def get_ready_tasks(self, limit: int) -> list[Ticket]:
         """Resume In Progress first, then pull To Do top-to-bottom (board Rank),
@@ -119,6 +136,7 @@ class JiraAdapter(BacklogAdapter):
                 "jql": jql, "maxResults": max(1, limit - len(out)), "fields": self._fields(),
             })
             resp.raise_for_status()
+            self._raise_if_unauthenticated(resp)   # a 200-empty here can mean 'bad token', not 'no work'
             for issue in resp.json().get("issues", []):
                 t = self._to_ticket(issue)
                 if t.key not in seen:

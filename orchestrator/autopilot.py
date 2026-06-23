@@ -181,10 +181,23 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             worklist = [(a, t) for (a, t) in worklist if t.id not in blocked][:cap]
 
             if not worklist:
-                if not idle_announced:   # say it once, then stay quiet until work appears
-                    print("  · queue clear — nothing of yours in In Progress / To Do"
-                          + (f" (parked: {', '.join(sorted(blocked))})" if blocked else "")
-                          + " — idling; I'll pick up new or unblocked tickets automatically.", flush=True)
+                # An empty worklist is NOT necessarily a clear queue: a board that failed to drain
+                # (bad/expired token, network, renamed project) yields zero items too. Surface that as
+                # UNREACHABLE instead of the misleading "queue clear — nothing of yours", which is exactly
+                # what hid EU's whole To Do column behind a dead JIRA_API_TOKEN. (Jira answers an
+                # unauthenticated search with HTTP 200 + no issues — see backlog/jira._raise_if_unauthenticated.)
+                unreachable = dict(intake.LAST_DRAIN_ERRORS)
+                if not idle_announced:   # say it once, then stay quiet until the state changes
+                    if unreachable:
+                        boards = "; ".join(f"{name} — {msg}" for name, msg in unreachable.items())
+                        print(f"  ⚠ NOT a clear queue: {len(unreachable)} board(s) UNREACHABLE this cycle, "
+                              f"so your backlog is HIDDEN, not empty → {boards}", flush=True)
+                        notify.send(f"⚠️ Autopilot can't read your backlog — {len(unreachable)} Jira "
+                                    f"board(s) unreachable:\n{boards}")
+                    else:
+                        print("  · queue clear — nothing of yours in In Progress / To Do"
+                              + (f" (parked: {', '.join(sorted(blocked))})" if blocked else "")
+                              + " — idling; I'll pick up new or unblocked tickets automatically.", flush=True)
                     idle_announced = True
                 if once:
                     break
