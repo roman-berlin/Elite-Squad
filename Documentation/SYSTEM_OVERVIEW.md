@@ -1,4 +1,4 @@
-# The General (Elite Unit) — System Overview
+# The CTO (Elite Unit) — System Overview
 
 > A from-zero reference for the autonomous software-delivery unit in this repo.
 > Every claim below is grounded in the code with `file:line` citations. Anything I could not
@@ -11,13 +11,13 @@
 
 ## 1. What it is — the mental model
 
-**The General** is an autonomous unit that pulls the Commander's Jira tickets and implements them
+**The CTO** is an autonomous unit that pulls the Commander's Jira tickets and implements them
 end-to-end — build → gate → review → security → land on **DEV** → move to **QA** — using a team of
 Claude-Agent-SDK "officer" agents, and **never touches MAIN autonomously** (`memory/UNIT.md` mission,
 `orchestrator/memory.py:43-46`; enforced in `orchestrator/git_ops.py`).
 
 - The **Commander** is Roman — the human in command. He owns the DEV → MAIN promotion.
-- The **General** is the orchestrator: the Python loop that owns git, the iteration bounds, the
+- The **CTO** is the orchestrator: the Python loop that owns git, the iteration bounds, the
   cost budget, every backlog transition, and the keep-DEV-green merge (`orchestrator/loop.py:1-6`),
   *plus* the chair of the daily council (`orchestrator/council.py`).
 
@@ -32,7 +32,7 @@ remote control (`orchestrator/notify.py`, `orchestrator/decisions.py`).
 
 ---
 
-## 2. The cast — officers, soldiers, and recon squads
+## 2. The cast — officers, engineers, and recon squads
 
 ### Officers
 
@@ -43,46 +43,46 @@ on Haiku (`smalltalk_model`, `config.py:99`).
 
 | Officer (army name) | Staff role | What it does | When invoked | Model · effort | Input → Output |
 |---|---|---|---|---|---|
-| **The General** | Orchestrator | Owns git + the loop; chairs the council; talks 1:1 with the Commander | Always (the loop) + every council/chat | Loop = Python; chair = Sonnet (`council.py:312-316`) | worklist → `TicketReport`s; briefings |
-| **Field Engineer** | Builder | Implements one ticket on the feature branch; can split a big ticket across soldiers | Step 1 of every build iteration (`loop.py:329`) | **Opus** (`builder_model`) · sized XS→`low`…`high`, escalates on retry (`builder.py:140-156`) | `BuildRequest` → `BuildResult` (`contracts.py:46-61`) |
-| **Inspector General** | Reviewer | Adversarial read-only review of the diff: spec conformance + quality | Step 3 of every iteration (`loop.py:412`) | **Opus** (`reviewer_model`) · `reviewer_effort`=high, read-only (`reviewer.py:84-97`) | diff+ticket → `ReviewResult` (PASS/FAIL, issues, `needs_human`) |
-| **Provost Marshal** | Security | Read-only security gate on the diff (secrets, tenant-isolation, authz, injection, deps) | Pre-merge, when `security_gate` on (`loop.py:452-462`); also `provost`/patrol | **Opus** (`reviewer_model`) · effort high, `max_turns=18` (`provost.py:80-92`) | diff → `(passed, report)` via `SECURITY GATE: BLOCK/PASS` |
+| **The CTO** | Orchestrator | Owns git + the loop; chairs the council; talks 1:1 with the Commander | Always (the loop) + every council/chat | Loop = Python; chair = Sonnet (`council.py:312-316`) | worklist → `TicketReport`s; briefings |
+| **Dev Team Lead** | Builder | Implements one ticket on the feature branch; can split a big ticket across engineers | Step 1 of every build iteration (`loop.py:329`) | **Opus** (`builder_model`) · sized XS→`low`…`high`, escalates on retry (`builder.py:140-156`) | `BuildRequest` → `BuildResult` (`contracts.py:46-61`) |
+| **Code Reviewer** | Reviewer | Adversarial read-only review of the diff: spec conformance + quality | Step 3 of every iteration (`loop.py:412`) | **Opus** (`reviewer_model`) · `reviewer_effort`=high, read-only (`reviewer.py:84-97`) | diff+ticket → `ReviewResult` (PASS/FAIL, issues, `needs_human`) |
+| **Security Engineer** | Security | Read-only security gate on the diff (secrets, tenant-isolation, authz, injection, deps) | Pre-merge, when `security_gate` on (`loop.py:452-462`); also `provost`/patrol | **Opus** (`reviewer_model`) · effort high, `max_turns=18` (`provost.py:80-92`) | diff → `(passed, report)` via `SECURITY GATE: BLOCK/PASS` |
 | **Product Manager** | S-5 · Product | Decides the everyday product/IA calls so the build resumes; escalates only critical/irreversible ones | On a deliberate Builder halt (`loop.py:291-304, 347-371`) | **Opus** (`reviewer_model`) · effort high (`pm.py:98-104`) | halt report → `{verdict: DECIDE\|ESCALATE, body}` |
-| **Sentinel** | S-3 · Integration & rollback | Runs the heavier post-merge suite on landed DEV; forward-only `git revert` if red | After a live merge, if `should_run` (`loop.py:547-549`, `sentinel.py:18-20`) | **No model** — deterministic (`sentinel.py`) | `postmerge_commands` → green / reverted |
-| **Scout** | S-2 · Recon / QA | Smoke-tests the *running* app on DEV (flows + a11y); files findings as tickets | `scout` CLI, `scout_after_merge` (`loop.py:582-597`), patrol | **Opus** (`reviewer_model`, `scout.py:57`) — note ⚠ below | app → recon report (+filed tickets) |
-| **Provost (recon)** | Security | Full security recon of recent DEV changes | `provost` CLI, patrol (`provost.py:53-63`) | **Opus** (`reviewer_model`) | DEV → security report |
-| **Quartermaster** | S-4 · Deploy readiness | Certifies DEV can ship to MAIN (build/types/migrations/deps/env) | `quartermaster` CLI, patrol, ship-review (`quartermaster.py:52-62`) | **Opus** (`reviewer_model`) | DEV → READY/NOT-READY report |
-| **Adjutant** | S-1 · Personnel (HR) | Proposes hires/retirements of officers; applies an approved one | `adjutant` CLI, council (`adjutant.py:80-105`) | **Opus** (`reviewer_model`) · effort high | record → personnel proposal → `approvals.json` |
-| **Drillmaster** | Doctrine & Training | Finds recurring weaknesses; proposes precise officer-charter upgrades; applies approved drills | `drill` CLI, council (`drillmaster.py:123-138`) | **Opus** (`reviewer_model`) · effort high | signals → drill report → `approvals.json` |
-| **Scribe** | (memory keeper) | Rewrites the Lessons & Decisions log after a council | After each council (`council.py:334-337`, `memory.scribe`) | **Sonnet** (`discussion_model`, `memory.py:221`), read-only | council+audit → `UNIT.live.md` bullets |
+| **SRE** | S-3 · Integration & rollback | Runs the heavier post-merge suite on landed DEV; forward-only `git revert` if red | After a live merge, if `should_run` (`loop.py:547-549`, `sentinel.py:18-20`) | **No model** — deterministic (`sentinel.py`) | `postmerge_commands` → green / reverted |
+| **QA Engineer** | S-2 · Recon / QA | Smoke-tests the *running* app on DEV (flows + a11y); files findings as tickets | `scout` CLI, `scout_after_merge` (`loop.py:582-597`), patrol | **Opus** (`reviewer_model`, `scout.py:57`) — note ⚠ below | app → recon report (+filed tickets) |
+| **Security Engineer (recon)** | Security | Full security recon of recent DEV changes | `provost` CLI, patrol (`provost.py:53-63`) | **Opus** (`reviewer_model`) | DEV → security report |
+| **Release Manager** | S-4 · Deploy readiness | Certifies DEV can ship to MAIN (build/types/migrations/deps/env) | `quartermaster` CLI, patrol, ship-review (`quartermaster.py:52-62`) | **Opus** (`reviewer_model`) | DEV → READY/NOT-READY report |
+| **Engineering Manager** | S-1 · Personnel (HR) | Proposes hires/retirements of officers; applies an approved one | `adjutant` CLI, council (`adjutant.py:80-105`) | **Opus** (`reviewer_model`) · effort high | record → personnel proposal → `approvals.json` |
+| **Engineering Coach** | Doctrine & Training | Finds recurring weaknesses; proposes precise officer-charter upgrades; applies approved drills | `drill` CLI, council (`drillmaster.py:123-138`) | **Opus** (`reviewer_model`) · effort high | signals → drill report → `approvals.json` |
+| **Technical Writer** | (memory keeper) | Rewrites the Lessons & Decisions log after a council | After each council (`council.py:334-337`, `memory.scribe`) | **Sonnet** (`discussion_model`, `memory.py:221`), read-only | council+audit → `UNIT.live.md` bullets |
 
-> ⚠ **Doc-vs-code drift to know:** `roster.py:30-35` lists Scout / Provost / Quartermaster under
+> ⚠ **Doc-vs-code drift to know:** `roster.py:30-35` lists QA Engineer / Security Engineer / Release Manager under
 > `discussion_model` (Sonnet), but their dedicated *recon* runs actually use `reviewer_model` (Opus)
 > — `scout.py:57`, `provost.py:62`, `quartermaster.py:60`. When these three merely *speak* in a council
 > they run on Sonnet (`council.py:204-215`); when they *inspect*, they run on Opus. The cast table
 > above reflects the verified recon model.
 
-### The Field Engineer's 5 build SOLDIERS (`orchestrator/squad.py:31-37`)
+### The Dev Team Lead's 5 build ENGINEERS (`orchestrator/squad.py:31-37`)
 
 Armed by one switch, `delegation_enabled` (on in `config.yaml:10`). On **iteration 1 of a sized-big
-ticket** (size L/XL, or ≥ `delegation_min_ac` acceptance criteria — `squad.py:180-191`), the Field
-Engineer plans a split and dispatches soldiers **sequentially on the same branch** (`squad.py:194-226`).
-Any hiccup falls back to a solo build (`builder.py:203-210`). Soldiers run on **Opus** with the same
+ticket** (size L/XL, or ≥ `delegation_min_ac` acceptance criteria — `squad.py:180-191`), the Dev Team
+Lead plans a split and dispatches engineers **sequentially on the same branch** (`squad.py:194-226`).
+Any hiccup falls back to a solo build (`builder.py:203-210`). Engineers run on **Opus** with the same
 guard hook as the Builder (`squad.py:170-176`).
 
-| Soldier | Lane |
+| Engineer | Lane |
 |---|---|
-| **Vanguard FE** | Frontend — React/Vite, TypeScript, Tailwind, components, UI state |
-| **Ordnance BE** | Backend — FastAPI/Python: routes, services, repositories, schemas |
-| **Logistics DB** | Data — Supabase/Postgres: SQL migrations, RLS policies, types |
+| **Frontend Engineer** | Frontend — React/Vite, TypeScript, Tailwind, components, UI state |
+| **Backend Engineer** | Backend — FastAPI/Python: routes, services, repositories, schemas |
+| **Database Engineer** | Data — Supabase/Postgres: SQL migrations, RLS policies, types |
 | **DevOps** | CI / build / deploy / config |
-| **Sapper** (generalist) | Anything outside the specialist lanes, or glue work |
+| **Software Engineer** (generalist) | Anything outside the specialist lanes, or glue work |
 
 ### The recon officers' ad-hoc read-only squads (`orchestrator/recon.py`)
 
-The read-only sibling of the build squad. When delegation is armed, Scout / Provost / Quartermaster
+The read-only sibling of the build squad. When delegation is armed, QA Engineer / Security Engineer / Release Manager
 each decide *for themselves* (a cheap read-only planning pass) whether to recruit read-only
-sub-inspectors for a big surface or run solo; < 2 slices ⇒ solo (`recon.py:108-127`). Soldiers are
+sub-inspectors for a big surface or run solo; < 2 slices ⇒ solo (`recon.py:108-127`). Engineers are
 read-only and sequential; the lead synthesizes one report in the officer's own format
 (`recon.py:134-155`).
 
@@ -90,21 +90,21 @@ read-only and sequential; the lead synthesizes one report in the officer's own f
 
 ```mermaid
 flowchart TD
-  C(["Commander · Roman"]) --> G["The General · orchestrator"]
-  G --> ADJ["Adjutant · S-1 Personnel"]
+  C(["Commander · Roman"]) --> G["The CTO · orchestrator"]
+  G --> ADJ["Engineering Manager · S-1 Personnel"]
   G --> PM["Product Manager · S-5"]
-  G --> FE["Field Engineer · Builder"]
-  G --> IG["Inspector General · Reviewer"]
-  G --> SC["Scout · S-2 QA"]
-  G --> PR["Provost Marshal · Security"]
-  G --> QM["Quartermaster · S-4"]
-  G --> SN["Sentinel · S-3"]
-  G --> DM["Drillmaster · Training"]
-  FE --> F1(["Vanguard FE"])
-  FE --> F2(["Ordnance BE"])
-  FE --> F3(["Logistics DB"])
+  G --> FE["Dev Team Lead · Builder"]
+  G --> IG["Code Reviewer · Reviewer"]
+  G --> SC["QA Engineer · S-2 QA"]
+  G --> PR["Security Engineer · Security"]
+  G --> QM["Release Manager · S-4"]
+  G --> SN["SRE · S-3"]
+  G --> DM["Engineering Coach · Training"]
+  FE --> F1(["Frontend Engineer"])
+  FE --> F2(["Backend Engineer"])
+  FE --> F3(["Database Engineer"])
   FE --> F4(["DevOps"])
-  FE --> F5(["Sapper · generalist"])
+  FE --> F5(["Software Engineer · generalist"])
   SC -.->|"ad-hoc recon squad"| R1(["read-only sub-inspectors"])
   PR -.->|"ad-hoc recon squad"| R1
   QM -.->|"ad-hoc recon squad"| R1
@@ -128,7 +128,7 @@ Driven by `orchestrator/loop.py`. Per ticket: `process_ticket` (`loop.py:252`) �
    status → Needs Human + comment, parked decision (`loop.py:259-275`). **PARK.**
 3. **Branch.** Status → In Progress; `git.checkout_feature(branch)` creates the feature branch off
    `origin/<base>` in the isolated worktree (`loop.py:277-279`, `git_ops.py:100-112`).
-4. **Build** *(owner: Field Engineer / squad, Opus)*. Effort is sized from the ticket and escalates on
+4. **Build** *(owner: Dev Team Lead / squad, Opus)*. Effort is sized from the ticket and escalates on
    retry (`loop.py:324`, `builder.py:140-156`). If the builder errors → **ERRORED** (`loop.py:336-338`).
    If it made **no changes**: a "deliberate halt" (≥ 2 halt markers, `loop.py:53-63`) routes to the
    **PM** once (`loop.py:347-371`) — `DECIDE` injects the decision and rebuilds; `ESCALATE` **PARKs**.
@@ -137,12 +137,12 @@ Driven by `orchestrator/loop.py`. Per ticket: `process_ticket` (`loop.py:252`) �
    `gate.py:41-44`). **Fail → back to the builder** with the failure as feedback (`loop.py:400-404`).
    ⚠ With no `gate_commands` the gate trivially passes (`gate.py:42-44`); the live app's gate is
    typecheck-only (`config.yaml:52`).
-6. **Review** *(owner: Inspector General, Opus, read-only)*. Judges the staged diff (`loop.py:411-412`).
+6. **Review** *(owner: Code Reviewer, Opus, read-only)*. Judges the staged diff (`loop.py:411-412`).
    - `needs_human=true` → record a decision + **PARK** (`loop.py:434-443`).
    - Not ship-ready (`verdict!=PASS`, spec gap, or blocker/major issue — `contracts.py:101-106`) →
      **retry** with `required_changes` (`loop.py:469-473`).
    - **Ship-ready** → continue.
-7. **Security gate** *(owner: Provost, opt-in `security_gate`, **on** in live config)*. `provost.gate`
+7. **Security gate** *(owner: Security Engineer, opt-in `security_gate`, **on** in live config)*. `provost.gate`
    inspects the diff (`loop.py:452-462`). A `BLOCK` sets `security_block`, which makes `_land` open a PR
    instead of landing — **DEV untouched** (`loop.py:503-504`, `loop.py:562-579`).
 8. **Land** *(owner: `git_ops.py`)*. `_land` (`loop.py:487`) commits, then **trial-merges on a throwaway
@@ -153,11 +153,11 @@ Driven by `orchestrator/loop.py`. Per ticket: `process_ticket` (`loop.py:252`) �
    the trial is abandoned and nothing lands (`loop.py:509-516`).
 9. **Move to QA.** On a live merge the ticket goes to **QA** (or **Done** if `mark_done_on_merge`),
    with a test link, plus Telegram (`loop.py:530-543`).
-10. **Sentinel** *(owner: `sentinel.py`, opt-in, off in live config)*. If armed + `postmerge_commands`,
+10. **SRE** *(owner: `sentinel.py`, opt-in, off in live config)*. If armed + `postmerge_commands`,
     runs the heavier suite on landed DEV; red → forward-only revert + Needs Human (`loop.py:545-556`).
 11. **Forensics + memory.** After every ticket, `forensics.maybe_postmortem` writes a post-mortem once a
     ticket has failed `postmortem_after` times (`loop.py:242-246`, `forensics.py:171-189`). Memory is
-    folded by the Scribe after each council (`council.py:334-337`).
+    folded by the Technical Writer after each council (`council.py:334-337`).
 
 **Outcomes** (`contracts.py:112-117`): `MERGED`, `PR_OPENED`, `ESCALATED` (parked / hit caps),
 `ERRORED` (builder/infra failure), `SKIPPED` (dry-run / stopped / deferred).
@@ -167,7 +167,7 @@ flowchart TD
   A["Ticket: In Progress or To Do"] --> B{"Readiness gate (opt-in)"}
   B -->|"not ready"| P1["PARK: Needs Human + comment"]
   B -->|"ready / disabled"| C["In Progress · checkout feature branch in worktree"]
-  C --> D["BUILD · Field Engineer / squad · Opus"]
+  C --> D["BUILD · Dev Team Lead / squad · Opus"]
   D --> E{"changes made?"}
   E -->|"halt (2+ markers)"| PM{"consult PM (once)"}
   PM -->|"DECIDE"| D
@@ -175,16 +175,16 @@ flowchart TD
   E -->|"none, no halt"| ER["ERRORED"]
   E -->|"yes"| F{"GATE: tests / typecheck"}
   F -->|"fail"| D
-  F -->|"pass"| R{"REVIEW · Inspector · Opus"}
+  F -->|"pass"| R{"REVIEW · Code Reviewer · Opus"}
   R -->|"needs_human"| P3["PARK: decision"]
   R -->|"FAIL"| D
-  R -->|"PASS + spec met + no blockers"| S{"SECURITY gate · Provost (opt-in)"}
+  R -->|"PASS + spec met + no blockers"| S{"SECURITY gate · Security Engineer (opt-in)"}
   S -->|"BLOCK"| PR1["PR into DEV · DEV untouched"]
   S -->|"PASS / disabled"| L["trial-merge on throwaway branch"]
   L --> G2{"trial gate green?"}
   G2 -->|"no"| PR1
   G2 -->|"yes"| LAND["LAND: ff-push origin/DEV · move ticket to QA"]
-  LAND --> SEN{"Sentinel (opt-in)"}
+  LAND --> SEN{"SRE (opt-in)"}
   SEN -->|"red"| REV["revert merge · Needs Human"]
   SEN -->|"green / disabled"| DONE["Merged to DEV · forensics + memory"]
   R -.->|"max_iterations reached"| P4["PARK: escalated"]
@@ -207,7 +207,7 @@ flowchart TD
 3. **Telegram** (`decisions.handle_command`, `decisions.py:129`): `/run <app> <what>`, `/drain`,
    `/unblock <id>`, `/council`, `/drill`, `/standup`, `/status`, `/help`; a `TICKET: decision` reply
    resumes a parked ticket (`decisions.handle_reply`, `decisions.py:100`); any other free-text goes to
-   the General as 1:1 chat (`decisions.route_message`, `decisions.py:199`).
+   the CTO as 1:1 chat (`decisions.route_message`, `decisions.py:199`).
 4. **Scheduled — VPS cron** (`scripts/install-server-cron.sh`, `CRON_TZ=Asia/Jerusalem`):
    self-update every 15 min, state sync every 15 min + 06:30, **daily council/muster 06:30**, corridor
    small-talk 11:00/14:30-ish/16:00-ish, weekly patrol Mon 09:00. The Mac launchd council is **retired**
@@ -227,9 +227,9 @@ ring buffer (`server.py:46-64`) and pushed to the browser via Server-Sent Events
   (`loop._bar`, `loop.py:99-108`).
 - **Live feed** — the unit's stdout stream.
 - **Activity** — recent steps (collapsible).
-- **Needs-you** (`/needs`, `server.py:1074`) — questions from the General, officer recommendations to
+- **Needs-you** (`/needs`, `server.py:1074`) — questions from the CTO, officer recommendations to
   approve, and runs that need you; **badge** count from `needs.count` (`server.py:160-165`).
-- **Talk-to-the-unit** — `/chat` (1:1 with the General, `server.py:1626`) and `/group` (the whole unit,
+- **Talk-to-the-unit** — `/chat` (1:1 with the CTO, `server.py:1626`) and `/group` (the whole unit,
   `server.py:1648`).
 
 **Action buttons** (`server._control_bar`, `server.py:142-367`):
@@ -237,11 +237,11 @@ ring buffer (`server.py:46-64`) and pushed to the browser via Server-Sent Events
 |---|---|---|
 | Choose a ticket | `/tickets` → `/api/run-selected` | Pick assigned tickets and develop them |
 | + New task | `/api/run` | Free-text feature/bug (optional screenshot) |
-| Patrol | `/api/patrol` | Scout + Provost + Quartermaster sweep DEV and **file** Jira tickets |
-| Ship review | `/api/ship-review` | QM certifies + officers debate → GO/NO-GO (advisory) |
+| Patrol | `/api/patrol` | QA Engineer + Security Engineer + Release Manager sweep DEV and **file** Jira tickets |
+| Ship review | `/api/ship-review` | Release Manager certifies + officers debate → GO/NO-GO (advisory) |
 | Jira | `/jira` | Pick/quick-connect the Jira a project uses |
 | + Product | `/onboard` | Scaffold a new product into `config.yaml` |
-| **Update unit** | `/api/promote` | Promote **The General's own** code dev → main; the VPS self-updates |
+| **Update unit** | `/api/promote` | Promote **The CTO's own** code dev → main; the VPS self-updates |
 | **Ship → production** | `/ship-preview` → `/api/ship-main` | Ship an **app's** DEV → MAIN (production) |
 | Autopilot Start/Stop | `/api/autopilot` | Toggle the continuous drain |
 
@@ -283,7 +283,7 @@ buttons short-circuit with a banner if unhealthy (`server.py:617-619, 656-658`).
 
 | Invariant | Enforced by | Could it bypass? |
 |---|---|---|
-| **Never lands on MAIN autonomously** | `AppConfig.validate` rejects base==protected (`config.py:76-78`); `Git.__init__` same (`git_ops.py:21`); `_guard` + `merge_no_ff` + `land_trial` all refuse the protected branch (`git_ops.py:55-57, 142, 219`); the autonomous land only ff-pushes `origin/<base>` i.e. DEV (`git_ops.py:222`). | **No** for the loop/autopilot/Telegram. The **only** MAIN pushes are the cockpit buttons `sync.promote` (the General's own dev→main) and `sync.promote_app` (an app's DEV→MAIN) — both gated by `can_promote()` and human-confirmed (`sync.py:261-291, 336-382`). |
+| **Never lands on MAIN autonomously** | `AppConfig.validate` rejects base==protected (`config.py:76-78`); `Git.__init__` same (`git_ops.py:21`); `_guard` + `merge_no_ff` + `land_trial` all refuse the protected branch (`git_ops.py:55-57, 142, 219`); the autonomous land only ff-pushes `origin/<base>` i.e. DEV (`git_ops.py:222`). | **No** for the loop/autopilot/Telegram. The **only** MAIN pushes are the cockpit buttons `sync.promote` (the CTO's own dev→main) and `sync.promote_app` (an app's DEV→MAIN) — both gated by `can_promote()` and human-confirmed (`sync.py:261-291, 336-382`). |
 | **Isolated git worktrees** | Each app runs in a dedicated linked worktree on a detached `origin/<base>` (`use_worktree`, on in live config; `git_ops.setup`, `git_ops.py:60-84`; `loop._make_git`, `loop.py:119-139`). An exclusive `flock` per app stops two runs resetting each other's tree (`loop.py:158-207`). | Falls back to in-tree only if `origin/<base>` can't resolve (`loop.py:134-137`). |
 | **Tool-call guardrail** | A `PreToolUse` hook on every write-capable officer (`guard.hooks_config`, wired in `builder.py:233`, `squad.py:175`) denies, in code, writes to secret paths and a denylist of destructive shell (`guard.py:23-65`). | **Best-effort denylist, not a sandbox.** See §7.1. |
 | **Security gate** | `provost.gate` blocks a CRITICAL/HIGH diff before merge (`loop.py:452-462`, `provost.py:80-100`). On in live config. | Parses a substring `SECURITY GATE: BLOCK` and otherwise **passes** — a misformatted reply lands (see §7.1). |
@@ -323,7 +323,7 @@ The guard is honest about being a **denylist that fails open** for anything it d
 `memory.preamble()` prepends both to **every** officer's system prompt (`memory.py:115-123`), so the
 whole unit shares one memory.
 
-**The Scribe** (`memory.scribe`, `memory.py:172-256`) is a read-only Sonnet agent that, after each
+**The Technical Writer** (`memory.scribe`, `memory.py:172-256`) is a read-only Sonnet agent that, after each
 council, proposes new log bullets from the latest transcript + recent audit; **Python** does the
 marker-bounded write (deterministic, safe).
 
@@ -339,7 +339,7 @@ after a ticket has failed `postmortem_after` (default 3) times, `maybe_postmorte
 `postmortems/<TICKET>.md` with a pattern, timeline, dominant cause, and the fix (`forensics.py:135-189`).
 
 **The daily roster doc** (`orchestrator/roster.py`) regenerates `ROSTER.md` after each council: a
-deterministic chain-of-command + officer/soldier tables (read from code so it can't drift), plus one
+deterministic chain-of-command + officer/engineer tables (read from code so it can't drift), plus one
 cheap Haiku status line (`roster.py:165-198`).
 
 ---
@@ -348,9 +348,9 @@ cheap Haiku status line (`roster.py:165-198`).
 
 **Tiers** (`config.py:92-99`):
 - **Opus** (`claude-opus-4-8`) — Builder + Reviewer (all implementation), and the dedicated recon of
-  Scout/Provost/Quartermaster + PM + Adjutant + Drillmaster.
-- **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, group chat, the General's
-  chair/1:1, the Scribe.
+  QA Engineer/Security Engineer/Release Manager + PM + Engineering Manager + Engineering Coach.
+- **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, group chat, the CTO's
+  chair/1:1, the Technical Writer.
 - **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — corridor small-talk and the roster
   status line.
 
@@ -367,7 +367,7 @@ with effort (`builder.turns_for`, `builder.py:169-172`).
 `budget_alert_pct` heads-up (`usage.py:120-134`).
 
 > **The daily-budget knob (auto-pause).** `daily_token_budget` is the runaway-loop guard: the autopilot
-> sums **today's** ledger burn — input + output tokens across every officer/builder/soldier/council/chat
+> sums **today's** ledger burn — input + output tokens across every officer/builder/engineer/council/chat
 > call, *including cache reads* — and once it crosses the ceiling it logs `budget_pause`, holds new
 > tickets, and Telegrams the Commander; it resumes after local midnight (the ledger's "today" rolls over,
 > `usage._day_start`) or as soon as the ceiling is raised (`autopilot.py:104-126`). `budget_alert_pct`
@@ -402,8 +402,8 @@ conflicts; the cockpit reads local audit + every peer's file. The Mac also `scp`
 `UNIT.live.md` down so its builds read the latest server-learned lessons (`sync.pull_server_state`,
 `sync.py:205-231`).
 
-**The General's own self-deploy:** the cockpit **Update unit** button (`sync.promote`, `sync.py:261-291`)
-ff-pushes the General's `dev → main`; the VPS picks it up via `self-update.sh`.
+**The CTO's own self-deploy:** the cockpit **Update unit** button (`sync.promote`, `sync.py:261-291`)
+ff-pushes the CTO's `dev → main`; the VPS picks it up via `self-update.sh`.
 
 ```mermaid
 flowchart LR
@@ -446,7 +446,7 @@ All live beside `audit_path` (the repo root) and are **gitignored** unless noted
 | `last-standup.md` | `council` (`council.py:764-766`) | Latest stand-up |
 | `group_chat.jsonl` | `council._append_group` (`council.py:686-689`) | Group-room thread |
 | `autonomy.json` | `events._save` (`events.py:33-37`) | Autonomy cooldown state |
-| `memory/UNIT.md` | Commander + Scribe-region (`memory.py`) | **Versioned** doctrine |
+| `memory/UNIT.md` | Commander + Technical Writer-region (`memory.py`) | **Versioned** doctrine |
 | `memory/UNIT.live.md` | `memory.update_log` (`memory.py:143-152`) | Gitignored living lessons log |
 | `postmortems/<TICKET>.md` | `forensics.write_postmortem` (`forensics.py:135-168`) | Auto post-mortems |
 | `ROSTER.md` | `roster.refresh` (`roster.py:188-198`) | Daily roster doc |
@@ -468,9 +468,9 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 
 | Knob | Default | What it does |
 |---|---|---|
-| `builder_model` | `claude-opus-4-8` | Builder + soldiers + build-squad planner |
-| `reviewer_model` | `claude-opus-4-8` | Reviewer + PM + Provost/Scout/QM recon + Adjutant/Drillmaster |
-| `discussion_model` | `claude-sonnet-4-6` | Council / stand-up / meetings / chair / Scribe |
+| `builder_model` | `claude-opus-4-8` | Builder + engineers + build-squad planner |
+| `reviewer_model` | `claude-opus-4-8` | Reviewer + PM + Security Engineer/QA Engineer/Release Manager recon + Engineering Manager/Engineering Coach |
+| `discussion_model` | `claude-sonnet-4-6` | Council / stand-up / meetings / chair / Technical Writer |
 | `smalltalk_model` | `claude-haiku-4-5-…` | Corridor small-talk + roster status line |
 | `builder_effort` / `reviewer_effort` | `high` | Base effort when sizing is off |
 | `builder_max_turns` | `60` | Base build turn budget (scaled by effort) |
@@ -482,7 +482,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `readiness_gate` | `false` | Hand back under-specified tickets before building |
 | `postmortem_after` | `3` | Auto-write a post-mortem after N failures (0 = off) |
 | `delegation_enabled` | `false` | Arm build + recon squads (**`true` in live config**) |
-| `delegation_min_ac` / `delegation_max_soldiers` | `3` / `4` | Delegate threshold / soldier cap |
+| `delegation_min_ac` / `delegation_max_soldiers` | `3` / `4` | Delegate threshold / engineer cap |
 | `pm_enabled` | `true` | Consult the PM on a Builder halt |
 | `council_rounds` | `2` | Council discussion rounds |
 | `usage_cap_per_hour` | `40` | Cap discretionary officer chatter / hour (0 = off) |
@@ -490,11 +490,11 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `budget_alert_pct` | `0.8` | Telegram heads-up at this fraction of the ceiling |
 | `autonomy_enabled` | `true` | Officers may auto-convene between cycles |
 | `autonomy_cooldown_min` | `45` | Min minutes between auto-convened sessions |
-| `meeting_on_security_block` | `true` | A security block → Provost+Engineer+Inspector huddle |
+| `meeting_on_security_block` | `true` | A security block → Security Engineer+Dev Team Lead+Code Reviewer huddle |
 | `parks_meeting_threshold` | `3` | This many parked tickets → a "why are we stuck" meeting |
 | `smalltalk_prob` / `random_meeting_prob` | `0.15` / `0.06` | Quiet-cycle chatter probabilities |
 | `meeting_autospawn` | `false` | Meetings may file the tickets they propose |
-| `scout_after_merge` | `false` | Scout smoke-tests DEV after a live merge |
+| `scout_after_merge` | `false` | QA Engineer smoke-tests DEV after a live merge |
 | `max_iterations` | `4` | Build/review passes per ticket |
 | `max_cost_usd` | `0.0` | USD cost cap (0 = no cap; for API billing only) |
 | `max_tickets_per_run` | `1` | Tickets per app per run |
@@ -504,7 +504,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `use_worktree` | `true` | Isolated linked worktree per app |
 | `worktree_setup_cmd` | `None` | Run once when a worktree is first created (e.g. `bun install`) |
 | `sync_base_after_merge` | `true` | Bring the Mac's local base up to date after a merge |
-| `security_gate` | `false` | Provost gates each diff (**`true` in live config**) |
+| `security_gate` | `false` | Security Engineer gates each diff (**`true` in live config**) |
 | `dry_run` | `false` | LIVE by default; `--dry`/`--live` flips it |
 | `notify_verbose` | `false` | Telegram on every beat, not just key events |
 | `audit_path` | `./audit.jsonl` | Where audit + sibling state files live |
@@ -512,7 +512,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 ### `AppConfig` (per app, `config.py:54-80`)
 `name`, `repo_path`, `base_branch` (default `dev`), `protected_branch` (default `main`, **never
 touched**), `branch_prefix` (`autodev`), `qa_url`, `gate_commands` (pre-review gate),
-`gate_timeout_sec` (1800), `gate_env`, `postmerge_commands` (Sentinel suite), `backlog_backend`
+`gate_timeout_sec` (1800), `gate_env`, `postmerge_commands` (SRE suite), `backlog_backend`
 (`jira`/`notion`/`none`), `backlog` (per-backend block: `base_url`, `project_key`, `ready_status`,
 `queue_statuses`, `assignee`, `status_map`, …).
 
@@ -523,23 +523,23 @@ touched**), `branch_prefix` (`autodev`), `qa_url`, `gate_commands` (pre-review g
 | Term | Plain meaning |
 |---|---|
 | **Commander** | Roman — the human in command; owns DEV → MAIN |
-| **The General** | The orchestrator: the Python loop (`loop.py`) + the council chair (`council.py`) |
-| **Officer** | A major role-specific agent (S-1…S-5, Builder, Reviewer, Sentinel, Drillmaster, PM) |
-| **Soldier** | A build sub-agent (`squad.py` SQUAD) or a read-only recon sub-inspector (`recon.py`) |
-| **Squad / delegation** | Splitting a big ticket/inspection across soldiers (`delegation_enabled`) |
-| **Muster / council** | The daily officer meeting + the General's briefing (`council.hold_council`) |
+| **The CTO** | The orchestrator: the Python loop (`loop.py`) + the council chair (`council.py`) |
+| **Officer** | A major role-specific agent (S-1…S-5, Builder, Reviewer, SRE, Engineering Coach, PM) |
+| **Engineer** | A build sub-agent (`squad.py` SQUAD) or a read-only recon sub-inspector (`recon.py`) |
+| **Squad / delegation** | Splitting a big ticket/inspection across engineers (`delegation_enabled`) |
+| **Muster / council** | The daily officer meeting + the CTO's briefing (`council.hold_council`) |
 | **Stand-up** | Each officer's Yesterday/Today/Blockers, folded into the muster |
-| **Patrol** | A scheduled recon sweep (Scout+Provost+QM) that files Jira tickets (`patrol.py`) |
-| **Drill** | A Drillmaster training proposal — a precise edit to an officer's charter |
+| **Patrol** | A scheduled recon sweep (QA Engineer+Security Engineer+Release Manager) that files Jira tickets (`patrol.py`) |
+| **Drill** | An Engineering Coach training proposal — a precise edit to an officer's charter |
 | **Recon** | Read-only inspection (flag, never edit) |
 | **Gate** | The pre-review tests/typecheck check (`gate.py`) |
 | **Land** | Fast-forward-push the validated trial merge to `origin/<base>` (DEV) — the only moment DEV changes (`git_ops.land_trial`) |
 | **Park** | Stop and escalate to the Commander (a pending decision or a blocked ticket) |
-| **Promote / Ship** | Human-only cockpit pushes to MAIN: "Update unit" (the General's own code) and "Ship" (an app to production) |
-| **Scribe** | The agent that maintains the Unit Memory lessons log |
-| **Provost Marshal** | The security officer / gate |
-| **Quartermaster** | The deploy-readiness officer |
-| **Sentinel** | The post-merge integration/rollback guard (deterministic) |
+| **Promote / Ship** | Human-only cockpit pushes to MAIN: "Update unit" (the CTO's own code) and "Ship" (an app to production) |
+| **Technical Writer** | The agent that maintains the Unit Memory lessons log |
+| **Security Engineer** | The security officer / gate |
+| **Release Manager** | The deploy-readiness officer |
+| **SRE** | The post-merge integration/rollback guard (deterministic) |
 
 ---
 
