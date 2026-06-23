@@ -108,8 +108,10 @@ chk("ticket facts injected into the General's prompt",
     "AUTO-14" in captured["prompt"] and "Summary of AUTO-14" in captured["prompt"])
 chk("General's chat runs bypassPermissions (no remote wall)",
     captured["options"].permission_mode == "bypassPermissions", captured["options"].permission_mode)
-chk("General steered off ambient trackers",
-    "NO live Jira" in captured["options"].system_prompt)
+chk("General steered off opening external trackers itself",
+    "external tracker" in captured["options"].system_prompt)
+chk("General grounded on ALL products, not just one (live cross-project board)",
+    "MULTIPLE products" in captured["options"].system_prompt)
 chk("General's chat stays read-only",
     set(captured["options"].disallowed_tools) >= {"Write", "Edit", "Bash"})
 

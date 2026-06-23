@@ -620,6 +620,33 @@ async def _ticket_context(cfg: Config, message: str) -> str:
     return "\n\n".join(found)
 
 
+# A status / board / ticket question from the Commander → pull a LIVE snapshot of EVERY product's Jira
+# board, so the General answers across ALL projects, not just the last council's single-app briefing.
+_BOARD_Q = re.compile(
+    r"(?i)\b(status|tickets?|jira|boards?|backlog|projects?|progress|queue|pipeline|sprint|merged|"
+    r"in[\s-]?progress|to[\s-]?do|todo|blocked|where are we|"
+    r"what'?s\s+(the|on|left|next|going|happening))\b")
+
+
+async def _board_status(cfg: Config) -> str:
+    """Live, cross-project snapshot of EVERY configured Jira board (open work assigned to the Commander),
+    so the General answers 'status across all projects' with real data instead of guessing from the last
+    council. Best-effort per app — one unreachable board never blanks the rest."""
+    from . import intake
+    lines: list[str] = []
+    for a in (getattr(cfg, "apps", None) or []):
+        if getattr(a, "backlog_backend", "none") != "jira":
+            continue
+        pk = (getattr(a, "backlog", None) or {}).get("project_key", "?")
+        try:
+            items = intake.from_drain(cfg, a.name, 15)
+            keys = ", ".join(getattr(t, "id", "?") for _, t in items[:10]) or "nothing open"
+            lines.append(f"- {a.name} (Jira {pk}): {len(items)} open assigned to you — {keys}")
+        except Exception as exc:  # noqa: BLE001 - one board down must not sink the others
+            lines.append(f"- {a.name} (Jira {pk}): board unreachable — {str(exc)[:60]}")
+    return "\n".join(lines)
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The General answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs
@@ -636,10 +663,12 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "let him steer. Raise AT MOST ONE thing — and only when it genuinely needs him: a real "
         "decision that's his to make, or a problem the unit can't resolve itself. Otherwise do not "
         "manufacture orders or briefings — the unit runs its own work and the daily council already "
-        "covers status. You may quietly Read a file to ground a point. You have NO live Jira/Atlassian "
-        "connection in this chat — when the Commander names a ticket, its current details are provided "
-        "to you below; rely on those plus the files you can Read, and never try to open an external "
-        "tracker. Reply in English.\n\n"
+        "covers status. You may quietly Read a file to ground a point. The unit tracks MULTIPLE products "
+        "(every one is listed below) — NEVER claim it tracks only one. When the Commander asks about "
+        "status, tickets, a board, or 'all projects', a LIVE snapshot of EVERY product's Jira backlog is "
+        "provided to you below — answer from it, across all projects; when he names a specific ticket its "
+        "live details are provided too. Don't try to open an external tracker yourself — rely on what's "
+        "provided plus the files you can Read. Reply in English.\n\n"
         "HOW THE UNIT WORKS — ground every answer in this, never improvise around it: **YOU are the unit "
         "that builds the tickets.** The unit implements the Commander's Jira tickets ITSELF — its Builder "
         "writes the code on an isolated git worktree, the gate + Reviewer + Provost check it, and it lands "
@@ -652,6 +681,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "to run it elsewhere. NEVER invent a file path: the unit's products and their real repo paths are "
         "listed below — use those exact paths or none.")
     ticket_ctx = await _ticket_context(cfg, message)
+    board_ctx = await _board_status(cfg) if _BOARD_Q.search(message or "") else ""
     apps_brief = "\n".join(
         f"- {a.name}: repo {getattr(a, 'repo_path', '?')} · branches "
         f"{getattr(a, 'base_branch', '?')}/{getattr(a, 'protected_branch', '?')}"
@@ -660,6 +690,8 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         for a in cfg.apps) or "(no products configured yet)"
     prompt = "\n".join([
         f"The unit's products and where they REALLY live (use these exact paths — never invent one):\n{apps_brief}\n",
+        *([f"LIVE board status across ALL the unit's products — open work assigned to the Commander, "
+           f"pulled from each Jira just now:\n{board_ctx}\n"] if board_ctx else []),
         *([f"Background you may lean on if relevant — do NOT recite or summarize it:\n{context[:1200]}\n"]
           if context else []),
         *([f"Ticket(s) the Commander referenced — live from the unit's own backlog:\n{ticket_ctx}\n"]
