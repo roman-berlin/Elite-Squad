@@ -40,8 +40,12 @@ patrol._inspect = fake_inspect
 
 class FakeBacklog:
     created = 0
-    def find_open_by_summary(self, title): return None
+    mode = "file"   # "file" -> create new; "dedupe" -> all already-open; "fail" -> create_task raises
+    def find_open_by_summary(self, title):
+        return "AUTO-999" if FakeBacklog.mode == "dedupe" else None
     def create_task(self, title, body, labels=None, issue_type="Task"):
+        if FakeBacklog.mode == "fail":
+            raise RuntimeError("403 Forbidden — bad token")
         FakeBacklog.created += 1
         return f"AUTO-{100 + FakeBacklog.created}"
 filing.make_backlog = lambda app: FakeBacklog()
@@ -56,18 +60,20 @@ app = AppConfig(name="automatixy", repo_path=str(d), base_branch="DEV", protecte
                 backlog_backend="none")
 cfg = Config(apps=[app], audit_path=str(d / "audit.jsonl"), use_worktree=False)
 
-# ===================== full patrol, do_file=True =====================
+# ===================== full patrol, do_file=True — genuinely NEW findings =====================
+FakeBacklog.mode = "file"
 FakeBacklog.created = 0
 audit = FakeAudit()
 summary = asyncio.run(patrol.patrol(cfg, "automatixy", do_file=True, audit=audit))
 check("summary names all three officers",
       all(x in summary for x in ("QA Engineer", "Security Engineer", "Release Manager")))
-check("summary shows filed counts (2 + 1) and a clean one",
-      "filed 2" in summary and "filed 1" in summary and "clean" in summary, summary)
+check("NEW path: summary shows 'N new' counts (2 + 1) and a clean one — never 'filed N'",
+      "2 new" in summary and "1 new" in summary and "clean" in summary and "filed 2" not in summary, summary)
 check("filed exactly 3 tickets (Scout 2 + Provost 1; QM 0)", FakeBacklog.created == 3, str(FakeBacklog.created))
-check("audit records one patrol event w/ findings=3, filed=True",
+check("audit records one patrol event w/ findings=3, filed=3, deduped=0, failed=0",
       sum(1 for e, _ in audit.events if e == "patrol") == 1
-      and audit.events[0][1].get("findings") == 3 and audit.events[0][1].get("filed") is True,
+      and audit.events[0][1].get("findings") == 3 and audit.events[0][1].get("filed") == 3
+      and audit.events[0][1].get("deduped") == 0 and audit.events[0][1].get("failed") == 0,
       str(audit.events))
 scout_md = (d / "scout-report.md").read_text(encoding="utf-8")
 check("officer report written, ===TICKETS=== block stripped",
@@ -92,12 +98,48 @@ check("subset runs only the chosen officer", "QA Engineer" in summary3 and "Secu
 check("subset filed only Scout's 2", FakeBacklog.created == 2, str(FakeBacklog.created))
 
 # ===================== propose-only (do_file=False) =====================
+FakeBacklog.mode = "file"
 FakeBacklog.created = 0
 audit4 = FakeAudit()
 summary4 = asyncio.run(patrol.patrol(cfg, "automatixy", do_file=False, audit=audit4))
 check("propose-only creates NO tickets", FakeBacklog.created == 0, str(FakeBacklog.created))
-check("propose-only says 'proposed' + audit filed=False",
-      "proposed 2" in summary4 and audit4.events[0][1].get("filed") is False, summary4)
+check("propose-only says 'proposed' + audit filed=0",
+      "proposed 2" in summary4 and audit4.events[0][1].get("filed") == 0, summary4)
+
+# ===================== DEDUPE path: every finding already open =====================
+# AC: reports "0 new · N already-open" (NOT "filed N"); audit filed:0, deduped:N.
+FakeBacklog.mode = "dedupe"
+FakeBacklog.created = 0
+audit5 = FakeAudit()
+summary5 = asyncio.run(patrol.patrol(cfg, "automatixy", officers=["scout"], do_file=True, audit=audit5))
+check("DEDUPE: creates NO new tickets", FakeBacklog.created == 0, str(FakeBacklog.created))
+check("DEDUPE: reports 'already-open', never 'new' or 'filed'",
+      "already-open" in summary5 and " new" not in summary5 and "filed" not in summary5, summary5)
+check("DEDUPE: audit filed=0, deduped=2, failed=0",
+      audit5.events[0][1].get("filed") == 0 and audit5.events[0][1].get("deduped") == 2
+      and audit5.events[0][1].get("failed") == 0, str(audit5.events))
+
+# ===================== FAILURE path: create_task raises =====================
+# AC: reports "✗ failed", escalates to Telegram + Needs-you; audit failed:>=1.
+FakeBacklog.mode = "fail"
+FakeBacklog.created = 0
+sent = []
+notify.send = lambda text, *a, **k: sent.append(text)
+audit6 = FakeAudit()
+summary6 = asyncio.run(patrol.patrol(cfg, "automatixy", officers=["scout"], do_file=True, audit=audit6))
+notify.send = lambda *a, **k: None  # restore quiet default
+check("FAILURE: creates NO tickets", FakeBacklog.created == 0, str(FakeBacklog.created))
+check("FAILURE: summary marks '✗' failed (Scout's 2)",
+      "✗ 2 failed" in summary6, summary6)
+check("FAILURE: audit failed>=1 (and filed=0)",
+      audit6.events[0][1].get("failed") == 2 and audit6.events[0][1].get("filed") == 0, str(audit6.events))
+check("FAILURE: a DISTINCT escalation Telegram is sent",
+      any("FAILED" in s for s in sent), str(sent))
+from orchestrator import decisions as _dec
+_pending = _dec.load(cfg)
+check("FAILURE: surfaced in Needs-you (a pending decision exists)",
+      any("filing-failure" in (i.get("id") or "") for i in _pending), str(_pending))
+_dec._save(cfg, [])  # clean up so it doesn't leak into other surfaces
 
 # ===================== report =====================
 print("\n================ SCHEDULED PATROL QA ================")

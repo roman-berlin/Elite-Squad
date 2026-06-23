@@ -435,7 +435,7 @@ async def _main(argv: list[str]) -> int:
     if args.command == "scout":
         from . import scout, notify, filing
         report = await scout.recon(cfg, args.app, url=getattr(args, "url", None))
-        clean, filed = filing.present(report, cfg.app(args.app), "scout", getattr(args, "file", False))
+        clean, filed, _ = filing.present(report, cfg.app(args.app), "scout", getattr(args, "file", False))
         print(clean + (("\n\n" + filed) if filed else ""))
         Path(cfg.audit_path).with_name("scout-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
@@ -445,7 +445,7 @@ async def _main(argv: list[str]) -> int:
     if args.command == "provost":
         from . import provost, notify, filing
         report = await provost.inspect(cfg, args.app)
-        clean, filed = filing.present(report, cfg.app(args.app), "provost", getattr(args, "file", False))
+        clean, filed, _ = filing.present(report, cfg.app(args.app), "provost", getattr(args, "file", False))
         print(clean + (("\n\n" + filed) if filed else ""))
         Path(cfg.audit_path).with_name("provost-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
@@ -455,7 +455,7 @@ async def _main(argv: list[str]) -> int:
     if args.command == "quartermaster":
         from . import quartermaster, notify, filing
         report = await quartermaster.inspect(cfg, args.app)
-        clean, filed = filing.present(report, cfg.app(args.app), "quartermaster", getattr(args, "file", False))
+        clean, filed, _ = filing.present(report, cfg.app(args.app), "quartermaster", getattr(args, "file", False))
         print(clean + (("\n\n" + filed) if filed else ""))
         Path(cfg.audit_path).with_name("quartermaster-report.md").write_text(clean, encoding="utf-8")
         if getattr(args, "telegram", False):
