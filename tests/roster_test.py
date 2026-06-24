@@ -24,7 +24,8 @@ cfg = Config(apps=[], audit_path=str(Path(tempfile.mkdtemp()) / "audit.jsonl"))
 # --- structure is read from the code (can't drift) ---
 doc = roster.build_doc(cfg, "Shipped 3 tickets to DEV today.")
 for officer in ["CTO", "Engineering Manager", "Product Manager", "Dev Team Lead", "Code Reviewer",
-                "QA Engineer", "Security Engineer", "Release Manager", "SRE", "Engineering Coach"]:
+                "Test Engineer", "QA Engineer", "Security Engineer", "Release Manager", "SRE",
+                "Engineering Coach"]:
     chk(f"doc lists {officer}", officer in doc)
 chk("doc lists every soldier from squad.SQUAD",
     all(label in doc for label, _ in SQUAD.values()), str(list(SQUAD)))
@@ -35,7 +36,7 @@ chk("doc dated 'As of'", "_As of" in doc)
 mer = roster.mermaid_chart()
 chk("chart is mermaid flowchart", mer.startswith("```mermaid") and "flowchart TD" in mer)
 chk("chart roots at the Commander -> CTO", "Commander · Roman" in mer and "G[CTO" in mer)
-chk("chart hangs every officer off the General", mer.count("G --> ") == 9)   # 10 officers minus the General
+chk("chart hangs every officer off the General", mer.count("G --> ") == 10)   # 11 officers minus the General
 chk("chart hangs soldiers off the Field Engineer", mer.count("FE --> S") == len(SQUAD))
 
 # --- model column is auto-aware ---

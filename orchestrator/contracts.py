@@ -108,6 +108,23 @@ class ReviewResult:
 
 
 # --------------------------------------------------------------------------- #
+# Test Engineer <-> Orchestrator
+# --------------------------------------------------------------------------- #
+@dataclass
+class TestEngineerResult:
+    """The Test Engineer's output: it runs AFTER the Builder and BEFORE the Reviewer,
+    ensures the change is covered (happy-path + regression), and owns the coverage
+    artifact that goes into the PR description."""
+    ok: bool                      # did the Test Engineer process complete without error
+    coverage: str = ""            # coverage artifact for the PR description (plain before→after numbers)
+    summary: str = ""             # the officer's own description of the tests it added
+    cost_usd: float = 0.0
+    num_turns: int = 0
+    raw: str = ""                 # final assistant text, for the audit log
+    tools: list[str] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
 # Final per-ticket outcome
 # --------------------------------------------------------------------------- #
 class Outcome(str, Enum):

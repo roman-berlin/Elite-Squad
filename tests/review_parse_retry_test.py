@@ -12,7 +12,7 @@ import orchestrator.loop as loop
 from orchestrator import reviewer as reviewer_mod
 from orchestrator.config import Config, AppConfig
 from orchestrator.contracts import (Ticket, BuildResult, ReviewResult, GateResult,
-                                     Verdict, Outcome, TicketReport)
+                                     TestEngineerResult, Verdict, Outcome, TicketReport)
 
 results = []
 def chk(n, c, d=""):
@@ -38,6 +38,11 @@ loop._notify = lambda c, t: None
 loop.run_gate = lambda app, changed_paths=None: GateResult(passed=True, report="")  # EU-19: gate now takes the diff's changed paths
 # Don't exercise real merge/git plumbing — certify the decision routed to land.
 loop._land = lambda *a, **k: TicketReport("EU-11", Outcome.MERGED, 1, 0.0, "automatixy", "b")
+# EU-37: the Test Engineer coverage stage runs between gate and review — stub it out here so this
+# test stays focused on the review-retry path (it has its own dedicated harness).
+async def fake_te(ticket, app, cfg):
+    return TestEngineerResult(ok=True, coverage="lines 80%→85%")
+loop.test_engineer_mod.ensure_coverage = fake_te
 
 built = []
 class FakeBuilder:

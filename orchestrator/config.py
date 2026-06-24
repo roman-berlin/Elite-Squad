@@ -177,6 +177,8 @@ class Config:
     worktree_setup_cmd: Optional[str] = None  # run ONCE when a worktree is first created (e.g. "bun install")
     sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
     security_gate: bool = False         # Provost reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
+    test_gate: bool = True              # ARMED: Test Engineer runs after build, before review — adds happy-path + regression tests and owns the PR coverage artifact
+    test_engineer_effort: str = "medium"  # thinking depth for the Test Engineer's coverage pass
 
     # --- safety ---
     dry_run: bool = False               # default LIVE (build + merge to DEV); pass --dry for a no-changes preview

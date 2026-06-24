@@ -18,6 +18,7 @@ from . import decisions
 from . import notify
 from . import provost as provost_mod
 from . import reviewer as reviewer_mod
+from . import test_engineer as test_engineer_mod
 from .audit import AuditLog
 from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
@@ -370,6 +371,7 @@ def _already_pm_triaged(cfg, ticket_id: str) -> bool:
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
     cost = 0.0
     last_changes: list[str] = []
+    coverage_artifact = ""        # Test Engineer's PR coverage line for this ticket (latest pass)
     pm_used = False
 
     for iteration in range(1, cfg.max_iterations + 1):
@@ -477,6 +479,37 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             print("  gate · passed", flush=True)
         _bar(2, active=2)
 
+        # 2.5) TEST ENGINEER — coverage gate: after the build, before review, ensure the change is
+        # proven (happy-path + regression test) and own the coverage artifact for the PR description.
+        if getattr(cfg, "test_gate", True):
+            print("  tests · Test Engineer covering the change…", flush=True)
+            te = await test_engineer_mod.ensure_coverage(ticket, app, cfg)
+            cost += te.cost_usd
+            budget.add(te.cost_usd)
+            audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
+                         coverage=te.coverage, cost_usd=te.cost_usd, turns=te.num_turns,
+                         tools=te.tools, summary=(te.summary or "")[:1000])
+            if te.coverage:
+                coverage_artifact = te.coverage
+                print(f"  tests · coverage {te.coverage}", flush=True)
+            elif te.ok:
+                print("  tests · Test Engineer added tests (no coverage delta reported)", flush=True)
+            else:
+                print("  tests · Test Engineer errored — proceeding to review", flush=True)
+            # The Test Engineer may have added test files. Re-run the SAME verification gate the
+            # build passed — run_gate over the app's configured gate_commands. That re-gate catches a
+            # newly-broken test ONLY when those commands actually run the repo's tests (e.g.
+            # automatixy's vitest, the EU repo's `python3 tests/run_all.py`); when the gate is
+            # lint/typecheck-only it instead catches type/lint breakage the new test files introduced,
+            # and a failing test would surface later (the Test Engineer's own run, or CI). Either way a
+            # red here goes back to the builder now rather than as a confusing review failure.
+            te_gate = run_gate(app, git.changed_paths())
+            if not te_gate.passed:
+                print("  gate · FAILED after tests → sending fixes back to builder", flush=True)
+                _bar(1, fail=1)
+                last_changes = [f"Verification failed after the coverage pass; fix these:\n{te_gate.report}"]
+                continue
+
         # 3) REVIEW (spec + quality) on the diff
         print("  review · reviewer reading the diff…", flush=True)
         diff = git.diff_against_base()
@@ -542,7 +575,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 else:
                     print("  security · Security Engineer PASS ✓", flush=True)
             result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                           review, security_block=security_block)
+                           review, security_block=security_block, coverage=coverage_artifact)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
             return result
@@ -617,7 +650,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
-          security_block=None) -> TicketReport:
+          security_block=None, coverage="") -> TicketReport:
     """Passed review. Validate the merge on a THROWAWAY trial branch so DEV is never
     touched until the single, final, validated merge."""
     git.commit_all(f"{ticket.id}: {ticket.summary}\n\n{build.summary}\n\nReviewed-by: autodev-reviewer")
@@ -691,7 +724,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)
     git.push(branch)
-    pr_url = git.open_pr(branch, f"{ticket.id}: {ticket.summary}", _pr_body(ticket, app, review)) \
+    pr_url = git.open_pr(branch, f"{ticket.id}: {ticket.summary}", _pr_body(ticket, app, review, coverage)) \
         if cfg.open_pr_on_block else None
     print(f"  land · not auto-merged ({reason}) → "
           + (f"PR {pr_url}" if pr_url else "open a PR manually"), flush=True)
@@ -745,11 +778,12 @@ def _cleanup(cfg, git, audit, report) -> None:
         audit.record("cleanup_failed", error=str(exc))
 
 
-def _pr_body(ticket: Ticket, app: AppConfig, review) -> str:
+def _pr_body(ticket: Ticket, app: AppConfig, review, coverage: str = "") -> str:
     ac = "\n".join(f"- [x] {c}" for c in ticket.acceptance_criteria)
+    cov = f"\n## Coverage\n{coverage}\n" if coverage else ""
     return (f"Automated implementation of **{ticket.id}** for `{app.name}`, targeting "
             f"`{app.base_branch}`.\n\n{ticket.url or ''}\n\n"
-            f"## Acceptance criteria\n{ac}\n\n## Reviewer summary\n{review.summary}\n")
+            f"## Acceptance criteria\n{ac}\n{cov}\n## Reviewer summary\n{review.summary}\n")
 
 
 def _escalation_comment(last_changes: list[str]) -> str:
