@@ -53,7 +53,8 @@ flowchart LR
     BL["Backlog · Jira<br/>In Progress, then To Do<br/>assignee = you · by Rank"] --> GEN["CTO<br/>takes one → In Progress"]
     GEN --> BUILD["Dev Team Lead builds<br/>isolated worktree"]
     BUILD --> GATE["Gate<br/>tests · lint · types"]
-    GATE --> REV{"Code Reviewer<br/>pass?"}
+    GATE --> TE["Test Engineer<br/>coverage gate · happy-path + regression"]
+    TE --> REV{"Code Reviewer<br/>pass?"}
     REV -- "fail · up to 4 passes" --> BUILD
     REV -- "pass" --> LAND["Land<br/>ff-push DEV · retire branch<br/>sync your DEV · ticket → QA · Telegram"]
     REV -- "exhausted / needs human" --> ESC["Escalate to you<br/>PR or Needs Human"]
@@ -98,6 +99,7 @@ Run it: `general council` (now) · scheduled 10:00 via `scripts/com.roman.genera
 | CTO | — | Orchestrator: git, the loop, the merge | **active** | `orchestrator/` |
 | Engineering Manager | S-1 | Personnel (HR): recruit / retire officers | **active** | `officers/adjutant.md`, `adjutant.py` |
 | Dev Team Lead | Builder | Implements the ticket on a worktree | **active** | `officers/engineer.md`, `builder.py` |
+| Test Engineer | Tests | Coverage gate after build, before review: happy-path + regression tests, owns the PR coverage artifact | **active** | `officers/test-engineer.md`, `test_engineer.py` |
 | Code Reviewer | Reviewer | Independent read-only spec + quality audit | **active** | `officers/inspector.md`, `reviewer.py` |
 | Engineering Coach | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
 | QA Engineer | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
