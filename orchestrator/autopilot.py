@@ -156,14 +156,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # once today's burn hits the ceiling (resumes after midnight / when the ceiling is raised).
             bs = usage.budget_status(cfg)
             if bs["over"]:
-                if not budget_paused:
+                if not budget_paused:   # announce the pause ONCE — not once per idle cycle (was log spam)
                     notify.send(f"⛔ Autopilot paused — daily token budget reached "
                                 f"({bs['used']:,}/{bs['cap']:,}). Resumes after midnight, or raise "
                                 f"`daily_token_budget`.")
                     audit.record("budget_pause", used=bs["used"], cap=bs["cap"])
+                    print(f"  · token budget reached ({bs['used']:,}/{bs['cap']:,} today) — holding new "
+                          "tickets (resumes after midnight, or raise daily_token_budget).", flush=True)
                     budget_paused = True
-                print(f"  · token budget reached ({bs['used']:,}/{bs['cap']:,} today) — holding new "
-                      "tickets", flush=True)
                 if once:
                     break
                 _sleep(max(30, interval), stop_event)

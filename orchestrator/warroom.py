@@ -756,12 +756,21 @@ def health_banner(h: dict) -> str:
 
 def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
     ap = (state or {}).get("autopilot") or {}
+    if ap.get("on") and ap.get("stopping"):
+        return ('<div class="apsw on" title="The current ticket finishes landing on DEV, then the '
+                'autopilot stands down — it takes no new tickets.">'
+                '<span class="apdot on"></span><span class=aplabel>&#9203; Stopping &middot; finishing the '
+                'current ticket, then standing down…</span></div>')
     if ap.get("on"):
         scope = _esc(ap.get("app") or "all projects")
         return ('<form method=post action=/api/autopilot class="apsw on">'
-                '<input type=hidden name=action value=stop>'
                 f'<span class="apdot on"></span><span class=aplabel>Autopilot&nbsp;<b>ON</b> · {scope}</span>'
-                '<button class="apbtn stop">Stop</button></form>')
+                '<button class="apbtn drain" name=action value=drain '
+                'title="Let the current ticket finish landing on DEV, then stand down — takes no new tickets">'
+                'Finish&nbsp;&amp;&nbsp;stop</button>'
+                '<button class="apbtn stop" name=action value=stop '
+                'title="Mark the autopilot off now — the in-flight build still finishes in the background">'
+                'Stop</button></form>')
     appq = _esc(app if app and app != "*" else "")
     dis = "" if healthy else "disabled"
     confirm = ('onsubmit="return confirm(\'Start Autopilot? The unit will work the queue '
@@ -850,6 +859,7 @@ border-radius:99px;background:#0d1119}
 .apbtn.start{background:var(--accent);color:#fff}
 .apbtn.start:disabled{background:#222a37;color:var(--faint);cursor:not-allowed}
 .apbtn.stop{background:var(--bad);color:#fff}
+.apbtn.drain{background:var(--warn);color:#1a1205;margin-right:7px}
 /* health banner */
 .healthbar{padding:13px 26px}
 .healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid #15351f}

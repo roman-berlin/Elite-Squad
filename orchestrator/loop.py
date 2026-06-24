@@ -88,7 +88,7 @@ def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exceptio
             pass
         audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=note)
         _notify(cfg, f"🛑 {ticket.id} — ran out of turns (too big to finish in one pass). "
-                     "Split it, or raise builder_max_turns.")
+                     "Split it, or raise builder_max_turns.\n\n" + decisions.reply_hint(ticket.id))
         print(f"  🛑 {ticket.id}: ran out of turns — ticket too big; escalated to you.", flush=True)
         return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name,
                             notes="ran out of turns — ticket too big for one pass")
@@ -311,7 +311,8 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
                 except Exception:  # noqa: BLE001 - a comment failure must not break the run
                     pass
             decisions.add(cfg, ticket, app.name, note)
-            _notify(cfg, f"🚧 {ticket.id} — handed back, not ready to build:\n\n{note}")
+            _notify(cfg, f"🚧 {ticket.id} — handed back, not ready to build:\n\n{notify.clip(note, 600)}"
+                         f"\n\n{decisions.reply_hint(ticket.id)}")
             audit.record("not_ready", ticket_id=ticket.id, missing=missing)
             print(f"  🚧 {ticket.id}: not ready — handed back (no build spent).", flush=True)
             return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name, branch,
@@ -451,7 +452,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                              question=proposal[:1500], reason="product blocker — escalated to Commander")
                 _notify(cfg, f"🛑 {ticket.id} — needs your product call"
                              + (" (the PM recommends):" if pm_outcome is not None else ":")
-                             + f"\n\n{proposal[:1400]}")
+                             + f"\n\n{notify.clip(proposal, 600)}"
+                             + f"\n\n{decisions.reply_hint(ticket.id)}")
                 print(f"  🛑 {ticket.id}: parked — escalated to you; the unit moves to the next ticket.",
                       flush=True)
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
@@ -546,8 +548,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # A product/scope decision only the Commander can make -> stop and ask, don't loop.
         if review.needs_human:
             decisions.add(cfg, ticket, app.name, review.question or review.summary)
-            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{review.question or review.summary}\n"
-                         f"Reply in Telegram:  {ticket.id}: <your decision>")
+            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{notify.clip(review.question or review.summary, 600)}"
+                         f"\n\n{decisions.reply_hint(ticket.id)}")
             if not cfg.dry_run and not ticket.ephemeral:
                 backlog.set_status(ticket, "Needs Human")
                 backlog.add_comment(ticket, f"Needs a product decision: {review.question}")
@@ -642,7 +644,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         backlog.set_status(ticket, "Needs Human")
         backlog.add_comment(ticket, ("🎖️ [PM] " + esc[:1400]) if triage else esc)
     print("  ✗ escalated — needs you (max passes reached without a clean review)", flush=True)
-    _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{_D.brief(esc)}")
+    _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{_D.brief(esc)}\n\n{decisions.reply_hint(ticket.id)}")
     audit.record("needs_human", ticket_id=ticket.id, iterations=cfg.max_iterations,
                  reason="max passes — PM escalated", question=esc[:1500])
     return TicketReport(ticket.id, Outcome.ESCALATED, cfg.max_iterations, cost, app.name, branch,

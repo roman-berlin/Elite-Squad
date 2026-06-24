@@ -135,8 +135,14 @@ def create_app(cfg: Config):
                     st = _state.get("autopilot")
                     if st:
                         st["on"] = False
-            _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "all projects"}
+                        st["stopping"] = False
+            _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "all projects", "stopping": False}
             threading.Thread(target=_bg, daemon=True).start()
+        elif action == "drain" and cur.get("on") and cur.get("stop"):
+            # Graceful stop: let the in-flight ticket finish landing on DEV, then stand down (take no new
+            # tickets). Stays "stopping" in the UI until the worker thread exits (its finally clears it).
+            cur["stop"].set()
+            cur["stopping"] = True
         elif cur.get("on") and cur.get("stop"):
             cur["stop"].set()
             cur["on"] = False

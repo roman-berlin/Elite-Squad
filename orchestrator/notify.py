@@ -20,6 +20,24 @@ def configured() -> bool:
     return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
 
 
+def clip(text: str, limit: int = 700, more: str = "…  (full report in the cockpit)") -> str:
+    """Trim a long officer report to a phone-skimmable size.
+
+    Telegram is the skimmable lens; the full text always stays in the cockpit (saved transcripts /
+    last-*.md). Cuts at the last paragraph / line / sentence boundary inside the window so a message
+    never ends mid-word or mid-thought, then appends a short 'more in the cockpit' footer."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    best = max(cut.rfind("\n"), cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if best < limit // 2:          # no decent boundary in the back half -> fall back to last space
+        best = cut.rfind(" ")
+    if best > 0:
+        cut = cut[:best + 1]
+    return cut.rstrip(" \n.,;") + "\n" + more
+
+
 def send(text: str) -> bool:
     """Send a Telegram message. Returns True if sent, False if not configured or
     failed. Never raises — notifications must not break the pipeline."""

@@ -58,6 +58,8 @@ postmortems/
 # Patrol cron/launchd runtime logs (the scheduled Scout/Provost/Quartermaster sweep writes cron.log here).
 /patrol/
 usage_ledger.jsonl
+# Autopilot per-ticket error tally — runtime state, must not be versioned (caused dev/Mac merge churn).
+error_counts.json
 ROSTER.md
 # macOS
 .DS_Store

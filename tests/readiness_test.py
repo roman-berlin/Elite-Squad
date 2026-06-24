@@ -47,7 +47,7 @@ async def fake_attempt(*a, **k):
 loop._attempt = fake_attempt
 loop._cleanup = lambda *a, **k: None
 loop._notify = lambda *a, **k: None
-loop.decisions = ns(add=lambda *a, **k: None)
+loop.decisions = ns(add=lambda *a, **k: None, reply_hint=lambda *a, **k: "↩️ reply")
 
 class Backlog:
     def __init__(s): s.status = None; s.comment = None

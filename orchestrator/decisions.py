@@ -56,6 +56,16 @@ def add(cfg, ticket: Ticket, app_name: str, question: str) -> None:
     _save(cfg, items)
 
 
+def reply_hint(ticket_id: str | None = None) -> str:
+    """One-liner telling the Commander how to answer THIS question in Telegram. Single source of
+    truth for the reply syntax (kept in lock-step with parse_reply): prefix with the ticket id to
+    target a specific pending question; a bare reply answers the OLDEST pending one. Matters when
+    several questions are stacked and you're away from the cockpit."""
+    if ticket_id:
+        return f"↩️ Reply  {ticket_id}: <your decision>  — or reply plainly to answer the oldest pending."
+    return "↩️ Reply  TICKET-ID: <your decision>  to target one — or reply plainly for the oldest pending."
+
+
 def resolve(cfg, answer: str, ticket_id: str | None = None) -> dict | None:
     """Pop and return the matching pending decision (by id, else oldest)."""
     items = load(cfg)
