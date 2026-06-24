@@ -27,6 +27,9 @@ _OFFICERS = [
      "splits the work across its squad of engineers.", "builder_model"),
     ("Code Reviewer", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
      "guards the standard before anything merges.", "reviewer_model"),
+    ("Test Engineer", "Tests & coverage gate", "Owns the test suite — writes a happy-path and a "
+     "regression test with every code change, and puts the `bun test --coverage` delta in the PR "
+     "description as a real gate.", "reviewer_model"),
     ("QA Engineer", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
      "accessibility — and files findings as tickets.", "reviewer_model"),
     ("Security Engineer", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
@@ -61,8 +64,8 @@ def mermaid_chart() -> str:
     lines = ["```mermaid", "flowchart TD",
              "  C([Commander · Roman]) --> G[CTO · orchestrator]"]
     short = {"CTO": "G", "Engineering Manager": "ADJ", "Product Manager": "PM", "Dev Team Lead": "FE",
-             "Code Reviewer": "IG", "QA Engineer": "SC", "Security Engineer": "PR", "Release Manager": "QM",
-             "SRE": "SN", "Engineering Coach": "DM"}
+             "Code Reviewer": "IG", "Test Engineer": "TE", "QA Engineer": "SC", "Security Engineer": "PR",
+             "Release Manager": "QM", "SRE": "SN", "Engineering Coach": "DM"}
     for name, role, _d, _m in _OFFICERS:
         if name == "CTO":
             continue
