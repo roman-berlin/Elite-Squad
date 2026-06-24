@@ -369,9 +369,18 @@ def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     return False
 
 
+def _changes_sig(changes: list[str]) -> str:
+    """A stable fingerprint of a review's required changes, so two passes that get the SAME blocking
+    feedback can be detected as 'stuck' (the build isn't addressing it) and escalated instead of burning
+    more identical passes. Order-independent; tolerant of trivial whitespace/case drift."""
+    norm = sorted({" ".join((c or "").lower().split())[:160] for c in (changes or []) if (c or "").strip()})
+    return "|".join(norm)
+
+
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
     cost = 0.0
     last_changes: list[str] = []
+    prev_reject_sig: str | None = None     # retry guard: detect the same rejection coming back unaddressed
     coverage_artifact = ""        # Test Engineer's PR coverage line for this ticket (latest pass)
     pm_used = False
 
@@ -585,6 +594,15 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         last_changes = review.required_changes or review.spec_gaps or [
             q.detail for q in review.blocking_issues]
         audit.record("retry", ticket_id=ticket.id, iteration=iteration, required_changes=last_changes)
+        # Retry guard: if the SAME blocking feedback returns a second time, the build isn't making
+        # progress on it — stop burning identical passes and hand it to the PM / Commander instead.
+        sig = _changes_sig(last_changes)
+        if sig and sig == prev_reject_sig:
+            audit.record("retry_stuck", ticket_id=ticket.id, iteration=iteration, repeats=2)
+            print("  ⚠ same review feedback twice — escalating instead of looping another identical pass",
+                  flush=True)
+            break
+        prev_reject_sig = sig
         _bar(2, fail=2)
         print("  ↻ changes requested → rebuilding", flush=True)
 

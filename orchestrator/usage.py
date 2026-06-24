@@ -117,6 +117,26 @@ def today_tokens(cfg: Config | None = None) -> int:
     return rollup(cfg, _day_start())["total"]
 
 
+_CODE_TAGS = ("builder", "reviewer", "soldier")
+
+
+def code_mix(cfg: Config | None, since: float) -> dict:
+    """How the cost-driving CODE work (builder, reviewer, soldiers) split across model tiers since
+    `since` — the readout that shows whether the economical ladder is actually shifting builds off Opus.
+    `cheap_pct` = share of code calls that ran below Opus (Sonnet/Haiku); higher = more savings."""
+    rows = [r for r in _rows(cfg, since)
+            if any(str(r.get("g", "")).startswith(t) for t in _CODE_TAGS)]
+    by = {"opus": 0, "sonnet": 0, "haiku": 0, "other": 0}
+    for r in rows:
+        m = str(r.get("m", "")).lower()
+        by[m if m in by else "other"] += 1
+    total = len(rows)
+    cheap = by["sonnet"] + by["haiku"]
+    return {"total": total, "by_tier": by, "cheap": cheap,
+            "cheap_pct": (cheap / total) if total else 0.0,
+            "opus_pct": (by["opus"] / total) if total else 0.0}
+
+
 def budget_status(cfg: Config) -> dict:
     """Today's burn against the daily token ceiling. cap<=0 disables the budget (status 'off')."""
     cap = int(getattr(cfg, "daily_token_budget", 0) or 0)

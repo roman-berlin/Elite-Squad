@@ -95,6 +95,23 @@ chk("/usage returns 200", r.status_code == 200, str(r.status_code))
 chk("/usage shows the three windows", "Today" in body and "Last 7 days" in body and "Last 30 days" in body)
 chk("/usage shows the daily budget bar", "Daily budget" in body and "tokens" in body)
 chk("/usage shows a per-model breakdown", "opus" in body and "model" in body)
+chk("/usage shows the model-ladder readout (measures the economy change)", "Model ladder today" in body)
+
+# --- code_mix: the model-ladder readout (builder / reviewer / soldiers by tier) ---
+mixfresh = Path(tempfile.mkdtemp()) / "audit.jsonl"
+usage.configure(str(mixfresh))
+usage.record("claude-sonnet-4-6", 100, 10, 0.0, "builder")            # cheap first-pass build
+usage.record("claude-opus-4-8", 100, 10, 0.0, "builder")              # escalated build
+usage.record("claude-sonnet-4-6", 100, 10, 0.0, "soldier·vanguard-fe")
+usage.record("claude-opus-4-8", 100, 10, 0.0, "reviewer")
+usage.record("claude-sonnet-4-6", 100, 10, 0.0, "the-general")        # NOT code → excluded
+mx = usage.code_mix(None, usage._day_start())
+chk("code_mix counts only code work (excludes the General)", mx["total"] == 4, str(mx["total"]))
+chk("code_mix tiers: 2 sonnet, 2 opus", mx["by_tier"]["sonnet"] == 2 and mx["by_tier"]["opus"] == 2)
+chk("code_mix cheap_pct = Sonnet/Haiku share", abs(mx["cheap_pct"] - 0.5) < 1e-9)
+mx0 = usage.code_mix(None, usage._day_start() + 10 ** 12)             # window in the future → empty
+chk("code_mix on an empty window → zeroes, no divide-by-zero", mx0["total"] == 0 and mx0["cheap_pct"] == 0.0)
+usage.configure(str(audit))   # restore the suite's ledger
 
 # --- agent.run_agent records to the ledger from its one choke-point ---
 import asyncio

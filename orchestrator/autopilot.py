@@ -38,6 +38,27 @@ _PARKED = (Outcome.ESCALATED, Outcome.PR_OPENED)
 _MAX_TICKET_ERRORS = 3
 _ERROR_BACKOFF_SEC = 10   # short pause before re-picking a transiently-errored ticket next cycle
 
+# Local git state meaning the Commander is editing history by hand RIGHT NOW (a rebase/merge in
+# progress). While that's true the autopilot must NOT ff-push origin/<base> — doing so is exactly what
+# moves dev under him and turns his `git pull --rebase` into a non-fast-forward (he hit this 3×). These
+# marker files only exist on the machine running the operation, so the check naturally no-ops on the
+# unattended server (which has no Commander doing manual git).
+_GIT_BUSY_MARKERS = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+
+
+def _commander_mid_git(cfg) -> str | None:
+    """Name of a local repo where the Commander is mid-Git (rebase/merge/cherry-pick), else None."""
+    seen: set[str] = set()
+    for app in getattr(cfg, "apps", []) or []:
+        repo = getattr(app, "repo_path", "") or ""
+        if not repo or repo in seen:
+            continue
+        seen.add(repo)
+        gitdir = Path(repo) / ".git"
+        if gitdir.is_dir() and any((gitdir / m).exists() for m in _GIT_BUSY_MARKERS):
+            return app.name
+    return None
+
 
 def _sleep(seconds: float, stop_event=None) -> None:
     """Sleep, but wake immediately if asked to stop (so the cockpit toggle is responsive)."""
@@ -146,6 +167,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
     budget_alerted = False
     idle_announced = False   # print "queue clear" once per idle stretch, not every interval
+    git_held = False         # hold (once-announced) while the Commander is mid-rebase/merge locally
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -175,6 +197,24 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 budget_alerted = True
             elif not bs["alert"]:
                 budget_alerted = False
+
+            # Don't race the Commander's manual git. While he's mid-rebase/merge in a local checkout,
+            # stand down for a cycle instead of ff-pushing origin/<base> and turning his pull into a
+            # non-fast-forward. Builds aren't started, so nothing lands until his tree is clean again.
+            busy_repo = _commander_mid_git(cfg)
+            if busy_repo:
+                if not git_held:
+                    notify.send(f"✋ Autopilot holding — you're mid-Git in {busy_repo} (rebase/merge). "
+                                f"I won't move its branch under you; resumes once it's clean.")
+                    print(f"  ✋ holding — Commander mid-Git in {busy_repo}; not landing so I don't race your "
+                          "rebase.", flush=True)
+                    audit.record("git_hold", app=busy_repo)
+                    git_held = True
+                if once:
+                    break
+                _sleep(max(10, interval), stop_event)
+                continue
+            git_held = False
 
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
             worklist = intake.from_drain(cfg, app_name, cap + len(blocked) + 5)

@@ -29,6 +29,13 @@ def stamp(secs_ago=0):
     return (datetime.now() - timedelta(seconds=secs_ago)).strftime("%Y-%m-%dT%H:%M:%S")
 def write(*events):
     audit.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    # This test rewrites the SAME audit path repeatedly within one filesystem mtime tick. The audit cache
+    # keys on (size, mtime_ns); on coarse-mtime filesystems (CI containers, mounted/overlay FS) two
+    # same-size rewrites collide and the cache serves stale data — so bust it here. Real audits are
+    # append-only (size grows every write), so this collision can't happen in production; we're isolating
+    # the render logic under test from the cache, which has its own coverage in cockpit_cache_test.py.
+    D._audit_cache.clear()
+    D._tasks_cache.clear()
 
 cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp), base_branch="DEV",
                              protected_branch="MAIN", backlog_backend="none")],

@@ -942,7 +942,19 @@ def create_app(cfg: Config):
                       "<span class=mono>daily_token_budget: 0</span>. Set it in config.yaml so Autopilot "
                       "auto-pauses runaway spend.</div></div>")
 
-        body = (style + budget + "<div class=ugrid>"
+        mix = _usage.code_mix(cfg, _usage._day_start())
+        if mix["total"]:
+            bt = mix["by_tier"]
+            mixbanner = (
+                f"<div class=budget><div class=bl>Model ladder today — <b>{mix['total']}</b> code calls: "
+                f"<b>{int(mix['cheap_pct'] * 100)}%</b> Sonnet/Haiku · {int(mix['opus_pct'] * 100)}% Opus</div>"
+                f"<div class=bnote>builder / reviewer / soldiers — opus {bt['opus']} · sonnet {bt['sonnet']} · "
+                f"haiku {bt['haiku']}. A higher Sonnet/Haiku share = the economical ladder working "
+                f"(complex work still escalates to Opus).</div></div>")
+        else:
+            mixbanner = ""
+
+        body = (style + budget + mixbanner + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
