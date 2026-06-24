@@ -56,7 +56,7 @@ for _name, _mod in _recon_src.items():
     _src = (Path("orchestrator") / f"{_mod}.py").read_text(encoding="utf-8")
     chk(f"{_name} source actually runs on cfg.reviewer_model", "model=cfg.reviewer_model" in _src)
 # and the labelled model resolves to Opus, not Sonnet, when the two configs differ
-_drift = Config(apps=[], audit_path="/tmp/x.jsonl", discussion_model="claude-sonnet-4-5",
+_drift = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, discussion_model="claude-sonnet-4-5",
                 reviewer_model="claude-opus-4-8")
 for _name in _recon_src:
     chk(f"{_name} model column shows opus (recon model)",

@@ -116,7 +116,9 @@ class Config:
     builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
-    auto_model: bool = False                # pick cheapest model that fits each task (<=ceiling); see models.py
+    auto_model: bool = True                 # ON by default: cheapest model that fits each task, escalating to the
+                                            # ceiling on retry (<=ceiling, Sonnet floor for code). Fleet-wide econ;
+                                            # set false to pin every officer to its configured model. See models.py.
     sentinel_enabled: bool = True           # ARMED by default: Sentinel runs an app's postmerge_commands after a
                                             # land and auto-reverts (forward-only) if red. Still a NO-OP for any app
                                             # without a `postmerge_commands:` suite (see sentinel.should_run), so

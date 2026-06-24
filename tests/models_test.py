@@ -51,6 +51,8 @@ chk("no size signal -> uses effort", M.optimize(M.OPUS, effort="high", floor_tie
     and M.optimize(M.OPUS, effort="low", floor_tier=1)[0] == M.SONNET)
 
 # --- for_builder: off = fixed; on = cheap-first WITH escalation, floored at Sonnet ---
+chk("auto_model is ON by default (fleet-wide economy ladder)",
+    Config(apps=[], audit_path="/tmp/x.jsonl").auto_model is True)
 off = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, builder_model=M.OPUS)
 chk("auto OFF -> builder uses the exact configured model (no behaviour change)",
     M.for_builder(off, BIG, "high")[0] == M.OPUS and M.for_builder(off, SMALL, "low")[0] == M.OPUS)
