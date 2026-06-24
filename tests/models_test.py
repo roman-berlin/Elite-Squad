@@ -50,30 +50,38 @@ chk("floor 0 lets a discussion drop to haiku when over budget",
 chk("no size signal -> uses effort", M.optimize(M.OPUS, effort="high", floor_tier=1)[0] == M.OPUS
     and M.optimize(M.OPUS, effort="low", floor_tier=1)[0] == M.SONNET)
 
-# --- for_builder: off = fixed; on = sized, floored at sonnet ---
+# --- for_builder: off = fixed; on = cheap-first WITH escalation, floored at Sonnet ---
 off = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, builder_model=M.OPUS)
 chk("auto OFF -> builder uses the exact configured model (no behaviour change)",
     M.for_builder(off, BIG, "high")[0] == M.OPUS and M.for_builder(off, SMALL, "low")[0] == M.OPUS)
 
 on = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, builder_model=M.OPUS)
-mb_small, why_small = M.for_builder(on, SMALL, "low")
-mb_big, _ = M.for_builder(on, BIG, "high")
-chk("auto ON, healthy budget -> small ticket STILL builds on Opus (Opus is best for code)",
-    mb_small == M.OPUS, mb_small)
-chk("auto ON, healthy budget -> big ticket builds on Opus", mb_big == M.OPUS, mb_big)
+mb_small, why_small = M.for_builder(on, SMALL, "low")          # pass 1, low effort
+mb_big, _ = M.for_builder(on, BIG, "high")                     # heavy → Opus from the start
+chk("auto ON: a small/normal ticket ATTEMPTS Sonnet first (economical)", mb_small == M.SONNET, mb_small)
+chk("auto ON: a heavy (high-effort) ticket starts on Opus", mb_big == M.OPUS, mb_big)
+chk("a rejected cheap pass ESCALATES to Opus on retry (effective)",
+    M.for_builder(on, SMALL, "low", iteration=2)[0] == M.OPUS)
+chk("medium effort also attempts Sonnet first", M.for_builder(on, SMALL, "medium")[0] == M.SONNET)
+chk("xhigh / max effort (architecture) starts on Opus",
+    M.for_builder(on, BIG, "max")[0] == M.OPUS and M.for_builder(on, BIG, "xhigh")[0] == M.OPUS)
 chk("builder floor is Sonnet, never Haiku for code", mb_small != M.HAIKU)
-chk("reason names the model", "opus" in why_small.lower())
+chk("escalation never exceeds the ceiling (a Sonnet-ceiling shop never jumps to Opus)",
+    M.for_builder(Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, builder_model=M.SONNET),
+                  SMALL, "low", iteration=5)[0] == M.SONNET)
+chk("reason names the model", "sonnet" in why_small.lower())
 
-# conserve_only policy directly: Opus normally, Sonnet only under budget pressure
+# conserve_only policy (still used by optimize() for non-code sizing): Opus normally, Sonnet when tight
 chk("conserve_only: Opus on a healthy budget",
     M.optimize(M.OPUS, budget_pct=0.1, floor_tier=1, conserve_only=True)[0] == M.OPUS)
 chk("conserve_only: drops to Sonnet only when budget tight",
     M.optimize(M.OPUS, budget_pct=0.85, floor_tier=1, conserve_only=True)[0] == M.SONNET)
 
-# --- for_reviewer: same policy — Opus for code unless budget tight ---
+# --- for_reviewer: sized by the diff — Sonnet for small, Opus for large/complex, Sonnet floor ---
 chk("auto OFF reviewer fixed", M.for_reviewer(off, "x" * 50000)[0] == M.OPUS)
-chk("auto ON, healthy budget -> reviewer stays Opus (small diff)", M.for_reviewer(on, "tiny diff")[0] == M.OPUS)
-chk("auto ON, healthy budget -> reviewer Opus (huge diff)", M.for_reviewer(on, "x" * 20000)[0] == M.OPUS)
+chk("auto ON: a small diff is reviewed on Sonnet (economical)", M.for_reviewer(on, "tiny diff")[0] == M.SONNET)
+chk("auto ON: a large diff is reviewed on Opus (effective)", M.for_reviewer(on, "x" * 20000)[0] == M.OPUS)
+chk("reviewer re-review escalates a small diff on retry", M.for_reviewer(on, "tiny diff", iteration=2)[0] == M.OPUS)
 
 # --- budget signal flows from the real ledger ---
 tmp = Path(tempfile.mkdtemp()); led = tmp / "audit.jsonl"

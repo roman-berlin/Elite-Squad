@@ -221,7 +221,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
     eff = effort_for(cfg, req.iteration, req.ticket)
     from . import models, guard
     guard.warn_if_absent("builder")   # EU-2 F7: loud one-liner if bypassPermissions runs with no guard
-    model, mreason = models.for_builder(cfg, req.ticket, eff)
+    model, mreason = models.for_builder(cfg, req.ticket, eff, req.iteration)
     if getattr(cfg, "auto_model", False):
         print(f"  · builder model: {mreason}", flush=True)
     options = ClaudeAgentOptions(

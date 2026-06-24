@@ -84,20 +84,52 @@ def _budget_pct(cfg) -> float:
         return 0.0
 
 
-def for_builder(cfg, ticket, effort: str) -> tuple[str, str]:
-    """The builder's model. Opus is the better coder, so it stays Opus for ALL code — dropping to
-    Sonnet only when the day's token budget is tight (to keep working, not to save on easy tickets).
-    Floor = Sonnet (never Haiku for code)."""
+# effort levels that warrant Opus from the first pass (heavy / architecture work)
+_HEAVY_EFFORT = {"high", "xhigh", "ultra", "max", "maximum"}
+
+
+def _escalating(ceiling_model: str, *, base_tier: int, iteration: int, budget_pct: float,
+                floor_tier: int, why: str) -> tuple[str, str]:
+    """Cheap-first-with-escalation ladder for CODE (builder & reviewer) when auto_model is on.
+
+    Economical AND effective: start at the tier the task size warrants, then climb one tier per retry
+    — a rejected cheap pass re-runs on a stronger model, so a wrong cheap attempt is *corrected*, not
+    repeated. Never exceeds the configured ceiling, never drops below the floor (Sonnet for code —
+    a too-weak coder fails review and burns MORE on retries). A tight daily budget lowers the ceiling
+    so the unit keeps shipping on a cheaper model instead of hard-pausing."""
+    ceiling = tier_of(ceiling_model)
+    drop = 2 if budget_pct >= 1.0 else (1 if budget_pct >= 0.8 else 0)
+    eff_ceiling = max(floor_tier, ceiling - drop)
+    want = base_tier + max(0, iteration - 1)          # escalate one tier per retry
+    chosen = max(floor_tier, min(want, eff_ceiling))
+    bits = [why]
+    if chosen > base_tier and iteration > 1:
+        bits.append(f"retry {iteration}→escalated")
+    if drop:
+        bits.append("budget tight→conserve")
+    return model_at(chosen), f"{_short(model_at(chosen))} ({'; '.join(bits)})"
+
+
+def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]:
+    """The Builder's model. Off: the configured ceiling, unchanged. On (economical): a small/normal
+    ticket attempts Sonnet first and escalates to Opus only if that pass is rejected; a heavy ticket
+    (high+ effort / architecture) starts on Opus. Floor = Sonnet (never Haiku for code). A tight
+    budget pins it to Sonnet to keep shipping rather than hard-pausing."""
     ceiling = getattr(cfg, "builder_model", OPUS)
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
-    return optimize(ceiling, budget_pct=_budget_pct(cfg), floor_tier=1, conserve_only=True)
+    base = 2 if (effort or "").lower() in _HEAVY_EFFORT else 1   # heavy→Opus, else Sonnet-first
+    return _escalating(ceiling, base_tier=base, iteration=iteration,
+                       budget_pct=_budget_pct(cfg), floor_tier=1, why=f"{effort or '?'} effort")
 
 
-def for_reviewer(cfg, diff: str = "") -> tuple[str, str]:
-    """The reviewer's model — same policy as the builder: Opus for code, Sonnet only under budget
-    pressure. Floor = Sonnet."""
+def for_reviewer(cfg, diff: str = "", iteration: int = 1) -> tuple[str, str]:
+    """The Reviewer's model. Off: the configured ceiling. On: sized by the diff — a small diff is
+    reviewed on Sonnet, a large/complex one on Opus — escalating on re-review and conserving under a
+    tight budget. Floor = Sonnet."""
     ceiling = getattr(cfg, "reviewer_model", OPUS)
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
-    return optimize(ceiling, budget_pct=_budget_pct(cfg), floor_tier=1, conserve_only=True)
+    big = len(diff or "") >= 12000 or (diff or "").count("\n") >= 300   # large/complex diff → Opus
+    return _escalating(ceiling, base_tier=2 if big else 1, iteration=iteration,
+                       budget_pct=_budget_pct(cfg), floor_tier=1, why="large diff" if big else "small diff")
