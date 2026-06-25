@@ -25,9 +25,9 @@ all_off = council._select_officers(None)
 check("select None -> all officers", len(all_off) == len(council.COUNCIL))
 sel = council._select_officers(["provost", "scout"])
 names = [o[0] for o in sel]
-check("select by key -> Provost + Scout", "Provost Marshal" in names and "Scout" in names and len(sel) == 2, str(names))
-sel2 = council._select_officers(["Field Engineer"])
-check("select by name", sel2 and sel2[0][0] == "Field Engineer")
+check("select by key -> Security + QA", "Security Engineer" in names and "QA Engineer" in names and len(sel) == 2, str(names))
+sel2 = council._select_officers(["Dev Team Lead"])
+check("select by name", sel2 and sel2[0][0] == "Dev Team Lead")
 
 # --- discuss(): stub run_agent to script statements ---
 SCRIPT = {}   # (rank, round) -> text
@@ -43,7 +43,7 @@ async def fake_run_agent(prompt, options, tag=None):
 
 council.run_agent = fake_run_agent
 
-two = council.COUNCIL[:2]   # Adjutant, Field Engineer
+two = council.COUNCIL[:2]   # Engineering Manager, Dev Team Lead
 a_key = council._officer_key(two[0][0])
 b_key = council._officer_key(two[1][0])
 # round 2: A passes, B adds; round 3: both pass -> convergence
@@ -58,7 +58,7 @@ texts = " ".join(t for _, t in transcript)
 
 check("round 1: both officers open", sum(1 for s in speakers if "· r" not in s) == 2, str(speakers))
 check("round 2: PASS skipped (only B speaks)", any("r2" in s for s in speakers) and sum(1 for s in speakers if "r2" in s) == 1)
-check("round 2 speaker is Field Engineer", any(s.startswith("Field Engineer") and "r2" in s for s in speakers))
+check("round 2 speaker is Dev Team Lead", any(s.startswith("Dev Team Lead") and "r2" in s for s in speakers))
 check("round 3 fully passed -> converged (no r3 entries)", not any("r3" in s for s in speakers), str(speakers))
 check("officers reference each other (debate)", "disagree" in texts.lower())
 check("converged early: stopped after round 3 had 0 speakers", max(r for _, r in calls) == 3)

@@ -20,7 +20,7 @@ class Git:
         self.protected = protected_branch
         if self.base == self.protected:
             raise GitError("base branch must not be the protected branch")
-        # Isolated mode: the General works in its OWN linked worktree and treats
+        # Isolated mode: the CTO works in its OWN linked worktree and treats
         # origin/<base> as the integration point — so it never touches the branch or
         # working tree the user has checked out. In-tree mode keeps the original
         # behaviour: operate directly in repo_path on the local base branch.
@@ -176,7 +176,7 @@ class Git:
         self._run("push", "origin", self.base)
 
     def revert_merge_on_base(self, merge_sha: str) -> bool:
-        """Forward-only undo of a landed merge commit (Sentinel's rollback). Builds a branch at the
+        """Forward-only undo of a landed merge commit (SRE's rollback). Builds a branch at the
         current origin/<base>, reverts the merge (keeping the pre-merge first parent), and ff-pushes
         the revert to <base>. No force-push, no history rewrite. Returns False if the revert can't be
         applied cleanly (caller then escalates to a human)."""

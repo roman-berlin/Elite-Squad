@@ -1,10 +1,10 @@
-"""Quartermaster — S-4, the Elite Unit's logistics / deploy-readiness officer.
+"""Release Manager — S-4, the Elite Unit's logistics / deploy-readiness officer.
 
-Before the Commander promotes DEV -> MAIN, the Quartermaster certifies the unit can actually
+Before the Commander promotes DEV -> MAIN, the Release Manager certifies the unit can actually
 ship: the build compiles, types pass, DB migrations apply cleanly, dependencies install from a
 lockfile, required env/config is present (not placeholder), and the deploy config is sane. It
 runs the cheap checks read-only and reports READY / NOT-READY — it certifies, it never changes
-code. (Promotion to MAIN stays the Commander's call; the Quartermaster just tells you if it's safe.)
+code. (Promotion to MAIN stays the Commander's call; the Release Manager just tells you if it's safe.)
 
   general quartermaster automatixy
 """
@@ -14,8 +14,8 @@ from .config import Config
 from .filing import TICKET_BLOCK_RULE
 
 QUARTERMASTER_SYSTEM = """\
-You are the Quartermaster (S-4) — logistics and deploy-readiness officer of an elite autonomous
-software unit, reporting to THE GENERAL. Methodical, conservative, supply-chain-minded. Your
+You are the Release Manager (S-4) — logistics and deploy-readiness officer of an elite autonomous
+software unit, reporting to THE CTO. Methodical, conservative, supply-chain-minded. Your
 charge: certify that the integration branch (DEV) can be promoted to MAIN and shipped without a
 failed deploy or a broken environment. You are READ-ONLY — you certify, you never change code.
 
@@ -52,7 +52,7 @@ def _prompt(app) -> str:
 async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     app = cfg.app(app_name)
     from . import recon
-    # Read-only deploy-readiness certification. With delegation armed, the Quartermaster decides whether
+    # Read-only deploy-readiness certification. With delegation armed, the Release Manager decides whether
     # to field a squad (a soldier per readiness area) on a big surface and synthesize, else solo (unchanged).
     return await recon.run_officer(
         officer="quartermaster", label="Release Manager",

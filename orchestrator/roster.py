@@ -14,33 +14,41 @@ from pathlib import Path
 import time
 
 from .config import Config
+from .officers import display
 
-# (name, role, duty, which configured model attribute it runs on — None = deterministic, no model)
-_OFFICERS = [
-    ("CTO", "Orchestrator", "Chairs the unit, talks 1:1 with you, synthesises the daily council, "
+# (internal officers key, role, duty, which configured model attribute it runs on — None = deterministic).
+# The human-facing display NAME for each key is NOT stored here: it's resolved from officers.OFFICER_NAMES
+# (the single source of truth) when the roster is built (see _OFFICERS), so renaming an officer is one edit
+# there and this doc can never drift. Keys are stable identifiers and never change.
+_OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
+    ("general", "Orchestrator", "Chairs the unit, talks 1:1 with you, synthesises the daily council, "
      "and routes your guidance to the officers.", "discussion_model"),
-    ("Engineering Manager", "S-1 · Personnel", "Owns the roster — proposes hires/retirements when a real "
+    ("adjutant", "S-1 · Personnel", "Owns the roster — proposes hires/retirements when a real "
      "capability gap appears (you approve and apply).", "reviewer_model"),
-    ("Product Manager", "S-5 · Product", "Makes the product / IA / scope calls the Builder can't make "
+    ("pm", "S-5 · Product", "Makes the product / IA / scope calls the Builder can't make "
      "alone, so the unit keeps shipping; escalates only the critical, irreversible ones.", "reviewer_model"),
-    ("Dev Team Lead", "Builder", "Implements each ticket on an isolated worktree; for a big ticket, "
+    ("field_engineer", "Builder", "Implements each ticket on an isolated worktree; for a big ticket, "
      "splits the work across its squad of engineers.", "builder_model"),
-    ("Code Reviewer", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
+    ("inspector", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
      "guards the standard before anything merges.", "reviewer_model"),
-    ("Test Engineer", "Tests & coverage gate", "Owns the test suite — writes a happy-path and a "
+    ("test_engineer", "Tests & coverage gate", "Owns the test suite — writes a happy-path and a "
      "regression test with every code change, and puts the `bun test --coverage` delta in the PR "
      "description as a real gate.", "reviewer_model"),
-    ("QA Engineer", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
+    ("scout", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
      "accessibility — and files findings as tickets.", "reviewer_model"),
-    ("Security Engineer", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
+    ("provost", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
      "(secrets, tenant-isolation, injection, vulnerable deps).", "reviewer_model"),
-    ("Release Manager", "S-4 · Deploy readiness", "Certifies whether DEV can actually ship to MAIN — build, "
+    ("quartermaster", "S-4 · Deploy readiness", "Certifies whether DEV can actually ship to MAIN — build, "
      "types, migrations, deps, env, deploy config.", "reviewer_model"),
-    ("SRE", "S-3 · Integration & rollback", "Runs the heavier post-merge suite on the landed DEV and "
+    ("sentinel", "S-3 · Integration & rollback", "Runs the heavier post-merge suite on the landed DEV and "
      "reverts the merge forward-only if it breaks. Deterministic — no model.", None),
-    ("Engineering Coach", "Doctrine & Training", "The unit studies every day — proposes the one drill (an "
+    ("drillmaster", "Doctrine & Training", "The unit studies every day — proposes the one drill (an "
      "edit to an officer's charter) with the most compounding gain; owns onboarding.", "reviewer_model"),
 ]
+
+# (display name, role, duty, model attr) — the display name is read from the single source of truth
+# (officers.OFFICER_NAMES) so a rename is genuinely one edit there. Order = chain of command.
+_OFFICERS = [(display(key), role, duty, mattr) for key, role, duty, mattr in _OFFICER_ROWS]
 
 # soldiers a squad can field (read from squad.SQUAD so this can't drift)
 def _soldiers() -> list[tuple[str, str]]:
@@ -62,14 +70,15 @@ def _model_for(cfg: Config, attr: str | None) -> str:
 def mermaid_chart() -> str:
     """Chain-of-command flowchart (renders on GitHub and any Mermaid viewer)."""
     lines = ["```mermaid", "flowchart TD",
-             "  C([Commander · Roman]) --> G[CTO · orchestrator]"]
-    short = {"CTO": "G", "Engineering Manager": "ADJ", "Product Manager": "PM", "Dev Team Lead": "FE",
-             "Code Reviewer": "IG", "Test Engineer": "TE", "QA Engineer": "SC", "Security Engineer": "PR",
-             "Release Manager": "QM", "SRE": "SN", "Engineering Coach": "DM"}
-    for name, role, _d, _m in _OFFICERS:
-        if name == "CTO":
+             f"  C([Commander · Roman]) --> G[{display('general')} · orchestrator]"]
+    # node ids are keyed by the STABLE internal key (not the display name) so a rename can't break the chart
+    short = {"general": "G", "adjutant": "ADJ", "pm": "PM", "field_engineer": "FE",
+             "inspector": "IG", "test_engineer": "TE", "scout": "SC", "provost": "PR",
+             "quartermaster": "QM", "sentinel": "SN", "drillmaster": "DM"}
+    for key, role, _d, _m in _OFFICER_ROWS:
+        if key == "general":
             continue
-        lines.append(f"  G --> {short[name]}[{name} · {role}]")
+        lines.append(f"  G --> {short[key]}[{display(key)} · {role}]")
     for i, (label, _focus) in enumerate(_soldiers(), 1):
         lines.append(f"  FE --> S{i}([{label}])")
     lines.append("```")
@@ -135,12 +144,12 @@ def html_view(cfg: Config, status: str = "") -> str:
         "table.rtbl td.md{font-family:ui-monospace,Menlo,monospace;color:#7aa2ff}</style>")
     # chain-of-command tree (no JS)
     tree = ['<div class=rtree>', '<span class=cmd>Commander · Roman</span>',
-            '<br>└─ <span class=gen>CTO</span> · orchestrator']
-    offs = [o for o in _OFFICERS if o[0] != "CTO"]
-    for i, (name, role, _d, _m) in enumerate(offs):
+            f'<br>└─ <span class=gen>{esc(display("general"))}</span> · orchestrator']
+    offs = [r for r in _OFFICER_ROWS if r[0] != "general"]
+    for i, (key, role, _d, _m) in enumerate(offs):
         elbow = "   └─" if i == len(offs) - 1 else "   ├─"
-        tree.append(f'<br>{elbow} <span class=off>{esc(name)}</span> · {esc(role)}')
-        if name == "Dev Team Lead":
+        tree.append(f'<br>{elbow} <span class=off>{esc(display(key))}</span> · {esc(role)}')
+        if key == "field_engineer":
             sol = _soldiers()
             for j, (label, _f) in enumerate(sol):
                 send = "      └─" if j == len(sol) - 1 else "      ├─"

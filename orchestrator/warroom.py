@@ -23,21 +23,40 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import dashboard as D
+from .officers import display as _display
 
 # --------------------------------------------------------------------------- #
-# The roster: (key, display name, role line). Order = chain of command.
-_OFFICERS = [
-    ("general",       "CTO",                "Orchestrator"),
-    ("adjutant",      "Engineering Manager", "S-1 · personnel"),
-    ("pm",            "Product Manager",    "S-5 · product"),
-    ("builder",       "Dev Team Lead",      "Builder"),
-    ("reviewer",      "Code Reviewer",      "Reviewer"),
-    ("scout",         "QA Engineer",        "S-2 · QA / recon"),
-    ("provost",       "Security Engineer",  "Security gate"),
-    ("quartermaster", "Release Manager",    "S-4 · deploy"),
-    ("sentinel",      "SRE",                "S-3 · integration & rollback"),
-    ("drill",         "Engineering Coach",  "Doctrine / training"),
+# Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
+# from the officer key (builder=field_engineer, reviewer=inspector, drill=drillmaster). Display names are
+# NEVER hard-coded below — they're resolved from the single source of truth via display(), so renaming an
+# officer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
+_OFFICER_KEY = {
+    "general": "general", "adjutant": "adjutant", "pm": "pm",
+    "builder": "field_engineer", "reviewer": "inspector", "scout": "scout",
+    "provost": "provost", "quartermaster": "quartermaster", "sentinel": "sentinel",
+    "drill": "drillmaster",
+}
+
+# (cockpit key, role line). Order = chain of command. The display-name column is built from the SOT below.
+_OFFICER_ROLES = [
+    ("general",       "Orchestrator"),
+    ("adjutant",      "S-1 · personnel"),
+    ("pm",            "S-5 · product"),
+    ("builder",       "Builder"),
+    ("reviewer",      "Reviewer"),
+    ("scout",         "S-2 · QA / recon"),
+    ("provost",       "Security gate"),
+    ("quartermaster", "S-4 · deploy"),
+    ("sentinel",      "S-3 · integration & rollback"),
+    ("drill",         "Doctrine / training"),
 ]
+
+# The roster: (key, display name, role line). Display name resolved from officers.OFFICER_NAMES (SOT).
+_OFFICERS = [(key, _display(_OFFICER_KEY[key]), role) for key, role in _OFFICER_ROLES]
+
+# cockpit key -> the officer's display name (the council name a click consults). Derived from the SAME
+# source of truth, so it can never drift from the board labels above. (general opens /chat, not /group.)
+_GROUP_NAME = {key: _display(ik) for key, ik in _OFFICER_KEY.items() if key != "general"}
 
 
 def _parse(ts: str) -> Optional[datetime]:
@@ -198,10 +217,9 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
     # An active run means the Builder/Reviewer are on duty right now.
     on_duty = {"builder", "reviewer"} if active else set()
 
-    # roster key -> the officer's council name (so a click consults that exact officer).
-    group_name = {"adjutant": "Adjutant", "builder": "Field Engineer", "reviewer": "Inspector General",
-                  "scout": "Scout", "provost": "Provost Marshal", "quartermaster": "Quartermaster",
-                  "sentinel": "Sentinel", "drill": "Drillmaster"}
+    # roster key -> the officer's council name (so a click consults that exact officer). Read from the
+    # single source of truth (see _GROUP_NAME) so it never drifts from the board / roster labels.
+    group_name = _GROUP_NAME
     out = []
     for key, name, role in _OFFICERS:
         dt = seen.get(key)
@@ -211,7 +229,7 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
             dot = "recent"
         else:
             dot = "idle"
-        # The General is your 1:1 chat; every other officer opens a focused consult with just them.
+        # The CTO is your 1:1 chat; every other officer opens a focused consult with just them.
         href = "/chat" if key == "general" else "/group?officer=" + quote(group_name.get(key, name))
         out.append({"name": name, "role": role, "dot": dot, "last": _rel(dt), "href": href})
     return out
@@ -502,7 +520,7 @@ def _needs_side_html(ns: dict) -> str:
 _TALK_HTML = (
     '<div class=talk>'
     '<a class=talkbtn href="/chat"><span class=tki>&#128172;</span>'
-    '<div><b>General</b><i>ask the orchestrator 1:1</i></div></a>'
+    '<div><b>CTO</b><i>ask the orchestrator 1:1</i></div></a>'
     '<a class=talkbtn href="/group"><span class=tki>&#128101;</span>'
     '<div><b>Group room</b><i>convene all the officers</i></div></a>'
     '</div>')

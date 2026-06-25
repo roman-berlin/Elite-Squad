@@ -10,7 +10,7 @@ Two deterministic, zero-cost passes that compound the unit's learning over time:
    the mistakes its own Reviewer keeps catching.
 
 No model call — it reads the audit log and the log file it already keeps, so it runs unattended and free.
-The Scribe calls ``run()`` after it writes, and ``general consolidate`` / the cockpit expose it directly.
+The Technical Writer calls ``run()`` after it writes, and ``general consolidate`` / the cockpit expose it directly.
 """
 from __future__ import annotations
 

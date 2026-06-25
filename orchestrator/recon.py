@@ -1,6 +1,6 @@
-"""Recon delegation — any READ-ONLY recon officer (Scout, Provost, Quartermaster) can field a SQUAD
+"""Recon delegation — any READ-ONLY recon officer (QA Engineer, Security Engineer, Release Manager) can field a SQUAD
 when the surface is big enough to warrant it, then synthesize one report. The read-only sibling of
-the Field Engineer's squad.py, with the same discipline (Roman's reflexes):
+the Dev Team Lead's squad.py, with the same discipline (Roman's reflexes):
 
 - **Solo is the default.** With `delegation_enabled` off, this is byte-for-byte the old single-agent
   run — no extra cost, no behaviour change.
@@ -13,7 +13,7 @@ the Field Engineer's squad.py, with the same discipline (Roman's reflexes):
   the officer's OWN format — the officer's system prompt carries the verdict format through planning,
   the soldiers, and the synthesis, so the output is identical in shape to a solo run.
 
-One master switch (`delegation_enabled`) arms both the Field Engineer's squad and these recon squads.
+One master switch (`delegation_enabled`) arms both the Dev Team Lead's squad and these recon squads.
 """
 from __future__ import annotations
 
@@ -61,15 +61,15 @@ def parse_slices(text: str | None, cap: int = 4) -> list[Slice]:
 _PLAN = """\
 
 --- SQUAD PLANNING (read-only) ---
-You may recruit SOLDIERS — read-only sub-inspectors — to cover a large surface faster, each owning ONE
+You may recruit ENGINEERS — read-only sub-inspectors — to cover a large surface faster, each owning ONE
 non-overlapping slice. Decide for yourself: if this inspection is small or single-focus, do it
 yourself — reply with EXACTLY `SOLO`. Otherwise reply with ONLY a JSON array (2-{cap} items), no prose:
-[{{"area":"<short focus>","detail":"<exactly what this soldier inspects + where>"}}]
+[{{"area":"<short focus>","detail":"<exactly what this engineer inspects + where>"}}]
 The slices must not overlap and together must cover the whole surface."""
 
 _SOLDIER = """\
 
---- YOU ARE A SOLDIER ({i}/{n}) ---
+--- YOU ARE AN ENGINEER ({i}/{n}) ---
 Inspect ONLY your assigned slice and report its findings in your normal format — do NOT inspect other
 slices and do NOT write the final verdict (the {label} synthesizes that). Read only what you need.
 YOUR SLICE — {area}: {detail}"""
@@ -77,11 +77,11 @@ YOUR SLICE — {area}: {detail}"""
 _SYNTH = """\
 
 --- SYNTHESIS ---
-Your soldiers inspected the surface in slices; their findings are below. Produce your SINGLE final
+Your engineers inspected the surface in slices; their findings are below. Produce your SINGLE final
 report now, in your standard format (verdict + findings), de-duplicating and reconciling overlaps.
 Synthesize from their reports — Read a file only to resolve a conflict, do not re-inspect everything.
 
-SOLDIER FINDINGS:
+ENGINEER FINDINGS:
 {findings}"""
 
 

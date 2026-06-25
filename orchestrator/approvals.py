@@ -1,6 +1,6 @@
 """Approvals inbox — the officers PROPOSE, the Commander approves, the unit APPLIES.
 
-The Drillmaster (doctrine upgrades) and the Adjutant (personnel actions) are propose-only: they
+The Engineering Coach (doctrine upgrades) and the Engineering Manager (personnel actions) are propose-only: they
 write a report and stop. This collects those pending recommendations so the Commander can
 **Approve** (the unit runs the matching `--apply`, then commits + pushes the doctrine to The-General)
 or **Disapprove** (cleared, and the reason is logged to Unit Memory so it isn't re-proposed).

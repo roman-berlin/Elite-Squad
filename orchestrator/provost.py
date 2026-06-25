@@ -1,9 +1,9 @@
-"""Provost Marshal — the Elite Unit's security officer.
+"""Security Engineer — the Elite Unit's security officer.
 
 A read-only gate: inspects the recent changes on DEV for the things that get a SaaS breached
 — hardcoded secrets, injection, broken authn/authz, **tenant-isolation** violations (the
 zero-trust core of a multi-tenant CRM), dangerous patterns, and known-vulnerable dependencies.
-It flags with severity and the fix; it never edits code — the Field Engineer remediates.
+It flags with severity and the fix; it never edits code — the Dev Team Lead remediates.
 
   general provost automatixy        # security recon of the latest changes on DEV
 """
@@ -17,9 +17,9 @@ from .config import Config
 from .filing import TICKET_BLOCK_RULE
 
 PROVOST_SYSTEM = """\
-You are the Provost Marshal — the Elite Unit's security officer, reporting to THE GENERAL.
+You are the Security Engineer — the Elite Unit's security officer, reporting to THE CTO.
 Disciplined, precise, adversarial in the right way. You gate code before it reaches the
-Commander. You are READ-ONLY: you flag, you never edit — the Field Engineer remediates.
+Commander. You are READ-ONLY: you flag, you never edit — the Dev Team Lead remediates.
 
 Inspect the most recent changes for, in priority order:
 1. **Secrets** — hardcoded API keys, tokens, passwords, private keys, connection strings.
@@ -53,7 +53,7 @@ def _prompt(app) -> str:
 async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     app = cfg.app(app_name)
     from . import recon
-    # Read-only security recon. With delegation armed, the Provost decides for itself whether to field
+    # Read-only security recon. With delegation armed, the Security Engineer decides for itself whether to field
     # a squad on a big surface (a soldier per area) and synthesize, else a single solo pass (unchanged).
     return await recon.run_officer(
         officer="provost", label="Security Engineer",
@@ -64,7 +64,7 @@ async def inspect(cfg: Config, app_name: str, audit=None) -> str:
 
 
 PROVOST_GATE_SYSTEM = """\
-You are the Provost Marshal security-gating a diff before it merges to the integration branch.
+You are the Security Engineer security-gating a diff before it merges to the integration branch.
 Same doctrine as a full recon but FAST and decisive: hunt secrets, tenant-isolation breaks,
 authz/IDOR gaps, injection / unsafe execution, and obviously-vulnerable dependencies in THIS
 diff. Read surrounding files only as needed to judge exploitability. You are read-only — flag,
@@ -80,7 +80,7 @@ Above that line, briefly list any findings (severity · where · why · fix)."""
 def _gate_passed(report: str) -> bool:
     """Fail-CLOSED verdict parse — the mirror of the Reviewer, never the inverse.
 
-    A diff passes the security gate ONLY when the Provost emits an explicit, unambiguous
+    A diff passes the security gate ONLY when the Security Engineer emits an explicit, unambiguous
     `SECURITY GATE: PASS` and does NOT also emit `SECURITY GATE: BLOCK`. Everything else —
     a missing marker, an empty/truncated/garbled reply, or a BLOCK verdict — fails closed
     (returns False) so an unsafe diff is never waved through on silence.

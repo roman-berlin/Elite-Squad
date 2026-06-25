@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+# Re-export the officer name map so the rest of the unit can import the single source of truth
+# straight from config (the hub everything already imports). Defined in officers.py.
+from .officers import OFFICER_NAMES, display as officer_display  # noqa: F401
+
 # --------------------------------------------------------------------------- #
 # Effort (model reasoning depth) — single source of truth.
 # The SDK's EffortLevel = Literal["low","medium","high","xhigh","max"].
@@ -74,7 +78,7 @@ class AppConfig:
     gate_shared_packages: dict[str, list[str]] = field(default_factory=dict)
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
-    postmerge_commands: list[str] = field(default_factory=list)  # Sentinel's heavier post-merge suite (e2e/integration); empty = skip
+    postmerge_commands: list[str] = field(default_factory=list)  # SRE's heavier post-merge suite (e2e/integration); empty = skip
     backlog_backend: str = "jira"       # "jira" | "notion" | "none"
     backlog: dict[str, Any] = field(default_factory=dict)
     # runtime-resolved working dir for officers + gate (the worktree in isolated mode).
@@ -98,8 +102,8 @@ class Config:
 
     # --- models (default: all-Opus across the unit) ---
     # builder_model drives the Builder + the council round-table; reviewer_model drives the
-    # Reviewer + every verifier/staff officer (Scout, Provost, Quartermaster, Adjutant,
-    # Drillmaster, the General/chair). Both default to Opus. On Opus, the "xhigh"/ultra effort
+    # Reviewer + every verifier/staff officer (QA Engineer, Security Engineer, Release Manager,
+    # Engineering Manager, Engineering Coach, the CTO/chair). Both default to Opus. On Opus, the "xhigh"/ultra effort
     # tier is real (it falls back to high only on non-Opus models).
     builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
@@ -119,7 +123,7 @@ class Config:
     auto_model: bool = True                 # ON by default: cheapest model that fits each task, escalating to the
                                             # ceiling on retry (<=ceiling, Sonnet floor for code). Fleet-wide econ;
                                             # set false to pin every officer to its configured model. See models.py.
-    sentinel_enabled: bool = True           # ARMED by default: Sentinel runs an app's postmerge_commands after a
+    sentinel_enabled: bool = True           # ARMED by default: the SRE runs an app's postmerge_commands after a
                                             # land and auto-reverts (forward-only) if red. Still a NO-OP for any app
                                             # without a `postmerge_commands:` suite (see sentinel.should_run), so
                                             # arming the framework here costs nothing until an app opts in a suite.
@@ -135,12 +139,12 @@ class Config:
     builder_feedback_max_chars: int = 6000  # ...and at most this many total chars of feedback
     builder_preamble_max_chars: int = 4000  # bound the unit-memory preamble fed into the builder system prompt
 
-    # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
-    #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether
-    #     to recruit soldiers or run solo). See squad.py (build) and recon.py (recon). ---
+    # --- squad delegation: ONE switch arms both the Dev Team Lead's build squad AND the recon
+    #     officers' read-only squads (QA Engineer / Security Engineer / Release Manager each decide
+    #     per-task whether to recruit engineers or run solo). See squad.py (build) and recon.py (recon). ---
     delegation_enabled: bool = False        # OFF by default — flip true to arm all squad delegation
-    delegation_min_ac: int = 3              # Field Engineer: delegate if >= this many AC (or size L/XL)
-    delegation_max_soldiers: int = 4        # cap soldiers per ticket (build) / per inspection (recon)
+    delegation_min_ac: int = 3              # Dev Team Lead: delegate if >= this many AC (or size L/XL)
+    delegation_max_soldiers: int = 4        # cap engineers per ticket (build) / per inspection (recon)
 
     # --- Product Manager officer: when the Builder halts on a product/IA blocker, consult the PM first
     #     — it either DECIDES (the build resumes with its decision) or ESCALATES one recommendation to
@@ -162,12 +166,12 @@ class Config:
     # --- autonomy (officers convene themselves between autopilot cycles) ---
     autonomy_enabled: bool = True
     autonomy_cooldown_min: int = 45         # min minutes between auto-convened sessions (anti-spam)
-    meeting_on_security_block: bool = True   # a security block -> Provost + Engineer + Inspector huddle
+    meeting_on_security_block: bool = True   # a security block -> Security Engineer + Dev Team Lead + Code Reviewer huddle
     parks_meeting_threshold: int = 3         # this many parked tickets -> a "why are we stuck" meeting
     smalltalk_prob: float = 0.15             # chance of corridor small-talk on a quiet cycle
     random_meeting_prob: float = 0.06        # chance of a spontaneous meeting on a quiet cycle
     meeting_autospawn: bool = False          # a meeting may FILE the tickets it proposes (de-duped); drills/hires stay proposal-only
-    scout_after_merge: bool = False          # after a live merge, Scout smoke-tests DEV (extra cost; off by default)
+    scout_after_merge: bool = False          # after a live merge, the QA Engineer smoke-tests DEV (extra cost; off by default)
 
     # --- loop bounds / cost ---
     max_iterations: int = 4
@@ -180,12 +184,12 @@ class Config:
     mark_done_on_merge: bool = False    # False = leave In Progress for your manual QA on dev;
                                         # True = move the ticket to Done as soon as it merges to dev
 
-    # --- isolation (so the General never fights your manual git checkout) ---
+    # --- isolation (so the CTO never fights your manual git checkout) ---
     use_worktree: bool = True           # run each app in a dedicated linked git worktree based on origin/<base>
     worktree_dir: Optional[str] = None  # parent dir for worktrees; default: <repo_parent>/.general-worktrees/<app>
     worktree_setup_cmd: Optional[str] = None  # run ONCE when a worktree is first created (e.g. "bun install")
     sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
-    security_gate: bool = False         # Provost reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
+    security_gate: bool = False         # the Security Engineer reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
     test_gate: bool = True              # ARMED: Test Engineer runs after build, before review — adds happy-path + regression tests and owns the PR coverage artifact
     test_engineer_effort: str = "medium"  # thinking depth for the Test Engineer's coverage pass
 

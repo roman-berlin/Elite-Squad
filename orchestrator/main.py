@@ -1,6 +1,6 @@
-"""CLI entrypoint — the General you command from the terminal.
+"""CLI entrypoint — the CTO you command from the terminal.
 
-The General directs two officers (the Builder and the Reviewer) across your unit
+The CTO directs two officers (the Builder and the Reviewer) across your unit
 of apps, and lands passing work on dev. You stay in command of dev -> main.
 
   general doctor                              # one-time preflight: config, keys, repos
@@ -73,9 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
     cnl = sub.add_parser("council", help="hold the Elite Unit's daily council (officers muster, brief you)")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
-    sub.add_parser("roster", help="regenerate the living roster (officers + soldiers + hierarchy chart) -> ROSTER.md")
+    sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
-    mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the General decides)")
+    mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the CTO decides)")
     mtg.add_argument("--topic", required=True, help="what the meeting is about")
     mtg.add_argument("--officers", help="comma-separated officer names/keys to attend (default: all relevant)")
     mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     pmp.add_argument("ticket")
     pmp.add_argument("question", nargs="?", default="")
     pmp.add_argument("--telegram", action="store_true", help="also send an ESCALATE proposal to Telegram")
-    sr = sub.add_parser("ship-review", help="ready-to-prod review: QM certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
+    sr = sub.add_parser("ship-review", help="ready-to-prod review: Release Manager certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
     sr.add_argument("app", nargs="?", help="app to review (default: first configured)")
     adj = sub.add_parser("adjutant", help="Engineering Manager (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")

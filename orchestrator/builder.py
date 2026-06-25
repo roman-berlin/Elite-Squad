@@ -240,7 +240,7 @@ def _prompt(req: BuildRequest, cfg=None) -> str:
 
 async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None) -> BuildResult:
     """Implement the ticket. For a sized-big ticket on its first pass (and only when delegation is
-    armed), the Field Engineer splits it across sized soldiers; otherwise a single focused builder
+    armed), the Dev Team Lead splits it across sized soldiers; otherwise a single focused builder
     pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build."""
     from . import squad
     if squad.should_delegate(cfg, req):

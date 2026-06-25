@@ -1,8 +1,8 @@
 """The Daily Council — the Elite Unit's morning muster (compounding improvement).
 
 At 10:00 the officers assemble. Each gives a short SITREP from its lens on the unit's
-recent operations; the Drillmaster proposes one improvement (the unit studies every day);
-the Adjutant covers personnel; and THE GENERAL chairs — synthesizing a briefing, the
+recent operations; the Engineering Coach proposes one improvement (the unit studies every day);
+the Engineering Manager covers personnel; and THE CTO chairs — synthesizing a briefing, the
 decisions taken, and the questions only the Commander can answer (product / strategy /
 business). The briefing goes to Telegram, the full transcript is saved for the cockpit,
 and open questions are pushed to you.
@@ -11,7 +11,7 @@ and open questions are pushed to you.
   general council --topic "…"     # an ad-hoc improvement muster on a specific topic
 
 Officers are read-only here (they Read the record + their own files; they do not write).
-The Adjutant only *proposes* hires/retirements — you approve and apply.
+The Engineering Manager only *proposes* hires/retirements — you approve and apply.
 
 Permission mode is ``bypassPermissions`` for every officer here: they run UNATTENDED (the VPS on
 a schedule, the Mac via autopilot / Telegram), so there is never a human present to answer a tool
@@ -32,17 +32,23 @@ from . import memory
 from .agent import run_agent
 from .config import Config
 from .drillmaster import collect_signals, format_signals
+from .officers import OFFICER_NAMES, display
 from . import notify
+
+# Reverse map (display name -> stable internal key). Officer display names are renamed in
+# OFFICER_NAMES (EU-17/EU-40); the internal keys are immutable, so selection and run-tags resolve
+# through the stable key regardless of what the human-facing name happens to be today.
+_NAME_TO_KEY = {name.lower(): key for key, name in OFFICER_NAMES.items()}
 
 # --------------------------------------------------------------------------- #
 # The officers who sit on the council (active roster). Each speaks once, briefly,
 # in character. Army terminology; disciplined tone. Read-only.
 # --------------------------------------------------------------------------- #
 _OFFICER_RULES = (
-    "You are an officer of an ELITE autonomous software unit reporting to THE GENERAL "
+    "You are an officer of an ELITE autonomous software unit reporting to THE CTO "
     "(who reports to the Commander, Roman). Speak in a disciplined, military tone, briefly "
     "(3–6 sentences), strictly from your lens. Only major officers sit on this council; if you "
-    "command a squad, consult it as needed but report for it yourself — soldiers do not speak "
+    "command a squad, consult it as needed but report for it yourself — engineers do not speak "
     "here. Ground every claim in the record or files you read — no invention. End with ONE "
     "concrete recommendation for today. Solve technical and process problems YOURSELVES; "
     "escalate to the Commander ONLY when the call is genuinely his — product direction, "
@@ -57,51 +63,51 @@ _OFFICER_RULES = (
 )
 
 COUNCIL = [
-    ("Adjutant", "S-1 · Personnel (HR)",
+    ("Engineering Manager", "S-1 · Personnel (HR)",
      "Your lens is the roster. Are the right officers in post for the work coming in? Read "
      "officers/*.md and the record. Recommend at most one personnel action — recruit a new "
      "officer ONLY if a real, repeated capability gap has no owner (draft its role in one "
      "line), or retire/retrain an officer that is idle or underperforming. Propose only."),
-    ("Field Engineer", "Builder",
+    ("Dev Team Lead", "Builder",
      "Your lens is delivery. You command a squad (Vanguard FE · Ordnance BE · Logistics DB · "
      "DevOps · …) — consult their status, but you alone report for them here. What shipped, "
      "what fought back, where did the build burn passes or hit max effort? Name the friction "
-     "and the one change that makes the next build cleaner. If the squad needs a new soldier — "
-     "or a junior officer (sub-lead) to own a focus area and command soldiers of its own — "
-     "request it; the Adjutant approves the hire."),
-    ("Inspector General", "Reviewer",
+     "and the one change that makes the next build cleaner. If the squad needs a new engineer — "
+     "or a junior officer (sub-lead) to own a focus area and command engineers of its own — "
+     "request it; the Engineering Manager approves the hire."),
+    ("Code Reviewer", "Reviewer",
      "Your lens is quality and risk. What recurring defects or spec-gaps are you catching, and "
      "what is slipping through? Call the single quality risk the unit must close, and whether "
      "standards should tighten or ease."),
-    ("Scout", "S-2 · Recon (QA)",
+    ("QA Engineer", "S-2 · Recon (QA)",
      "Your lens is what actually breaks in the running app on DEV — runtime, UX, accessibility "
      "— the defects unit tests and diff review miss. From the record (and any e2e results), name "
      "the biggest live-QA blind spot and the one smoke test worth standing up first. If there is "
      "no browser/e2e coverage yet, say so plainly."),
-    ("Provost Marshal", "Security",
+    ("Security Engineer", "Security",
      "Your lens is security and exposure. From the record and recent changes, name the single "
      "biggest risk the unit is carrying — a secret in code, a tenant-isolation or authz gap, "
      "injection, or a known-vulnerable dependency — and the one control to add. If you have no "
      "signal yet, say so plainly."),
-    ("Quartermaster", "S-4 · Deploy readiness",
+    ("Release Manager", "S-4 · Deploy readiness",
      "Your lens is whether DEV can actually ship to MAIN — build, types, migrations, deps, env, "
      "deploy config. Name the single biggest thing standing between DEV and a clean promotion, "
      "and the one readiness check to add. If readiness is unknown, say what to verify."),
-    ("Sentinel", "S-3 · Integration & rollback",
+    ("SRE", "S-3 · Integration & rollback",
      "Your lens is the health of DEV right after each landing — does the integrated branch actually "
      "build, test and run once the merge is in? You own the post-merge suite and the rollback: a land "
      "that breaks DEV gets reverted and handed back. Name the biggest integration risk and the one "
      "post-merge check worth standing up. If there's no post-merge suite yet, say so plainly."),
-    ("Drillmaster", "Doctrine & Training",
+    ("Engineering Coach", "Doctrine & Training",
      "Your lens is improvement and training — the unit studies every day. From recurring "
      "weaknesses, name the ONE drill (a precise edit to an officer's Identity/Knowledge/Skills "
      "file) that yields the most compounding gain tomorrow. You also own onboarding for any "
-     "newly recruited officer/soldier and refresher drills for existing ones — flag if anyone is "
+     "newly recruited officer/engineer and refresher drills for existing ones — flag if anyone is "
      "due one."),
 ]
 
 _CHAIR_SYSTEM = (
-    "You are THE GENERAL, chairing the Elite Unit's daily council. You have heard each officer. "
+    "You are THE CTO, chairing the Elite Unit's daily council. You have heard each officer. "
     "Produce a SHORT commander's briefing — it lands on Roman's phone, so if he can't skim it in ~15 "
     "seconds it's too long. Keep the WHOLE thing under ~90 words. Summarize; do NOT restate the debate "
     "or recap officer-by-officer. Exactly this markdown shape and nothing else:\n\n"
@@ -115,7 +121,7 @@ _CHAIR_SYSTEM = (
 )
 
 _MEETING_CHAIR_SYSTEM = (
-    "You are THE GENERAL, chairing a focused meeting of the Elite Unit on a single topic. You "
+    "You are THE CTO, chairing a focused meeting of the Elite Unit on a single topic. You "
     "have heard the officers debate. Produce a SHORT decision record — it lands on Roman's phone, so "
     "keep the WHOLE thing under ~80 words, skimmable in 15 seconds; summarize, do NOT replay the "
     "debate. Exactly this markdown shape and nothing else:\n\n"
@@ -129,8 +135,8 @@ _MEETING_CHAIR_SYSTEM = (
 )
 
 _SHIP_REVIEW_CHAIR_SYSTEM = (
-    "You are THE GENERAL, chairing a SHIP-REVIEW: is DEV ready to promote to MAIN (production)? "
-    "You have the Quartermaster's readiness report and the officers' debate. CRITICAL: the unit "
+    "You are THE CTO, chairing a SHIP-REVIEW: is DEV ready to promote to MAIN (production)? "
+    "You have the Release Manager's readiness report and the officers' debate. CRITICAL: the unit "
     "NEVER promotes to MAIN — that is the Commander's (Roman's) call alone. You only recommend. "
     "Output exactly this markdown shape and nothing else:\n\n"
     "**VERDICT** — GO / NO-GO / GO WITH CAVEATS (one blunt line).\n\n"
@@ -163,7 +169,7 @@ def _notes_file(cfg: Config) -> Path:
 
 def recent_commander_notes(cfg: Config, lines: int = 12) -> str:
     """The last few decisions/guidance, one note per line. Bounded so old chatter doesn't pile up
-    in every officer's prompt and pull the General back toward report-mode."""
+    in every officer's prompt and pull the CTO back toward report-mode."""
     p = _notes_file(cfg)
     if not p.exists():
         return ""
@@ -172,7 +178,7 @@ def recent_commander_notes(cfg: Config, lines: int = 12) -> str:
 
 
 def add_commander_note(cfg: Config, text: str) -> None:
-    """Append one note from the Commander/General exchange. Collapsed to a single bounded line so a
+    """Append one note from the Commander/CTO exchange. Collapsed to a single bounded line so a
     long answer can never become a wall of 'standing guidance' that feeds back into later prompts."""
     p = _notes_file(cfg)
     stamp = time.strftime("%Y-%m-%d %H:%M")
@@ -182,8 +188,8 @@ def add_commander_note(cfg: Config, text: str) -> None:
 
 
 # --- Cockpit chat transcript --------------------------------------------------------------------- #
-# The FULL Commander<->General exchange, separate from commander_notes.md (which is truncated standing
-# guidance fed into prompts). The cockpit chat reads THIS so it shows the General's real reply inline
+# The FULL Commander<->CTO exchange, separate from commander_notes.md (which is truncated standing
+# guidance fed into prompts). The cockpit chat reads THIS so it shows the CTO's real reply inline
 # instead of the answer only landing in Telegram. Format matches cockpit_views._chat_bubbles.
 def _chat_file(cfg: Config) -> Path:
     return Path(cfg.audit_path).with_name("commander_chat.md")
@@ -245,7 +251,9 @@ def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
 
 
 def _officer_key(rank: str) -> str:
-    return rank.lower().replace(" ", "-")
+    # Prefer the immutable internal key for the display name; fall back to a slug so an
+    # unknown/ad-hoc rank (e.g. a name parsed out of a 'MEETING:' line) never crashes a lookup.
+    return _NAME_TO_KEY.get(rank.lower(), rank.lower().replace(" ", "-"))
 
 
 def _select_officers(keys):
@@ -306,7 +314,7 @@ async def discuss(cfg: Config, officers, digest: str, notes: str,
 
 
 async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str:
-    """Run the muster as a multi-round debate; the General chairs. Returns the briefing,
+    """Run the muster as a multi-round debate; the CTO chairs. Returns the briefing,
     saves the full transcript, and sends the briefing to Telegram."""
     sig = collect_signals(cfg)
     digest = format_signals(sig)
@@ -318,8 +326,8 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         said = await discuss(cfg, COUNCIL, digest, notes, topic, getattr(cfg, "council_rounds", 2))
         handoffs: list[str] = []
     else:
-        # The DAILY muster IS the stand-up + the General's briefing — council and stand-up merged into
-        # one daily. Each officer reports Yesterday/Today/Blockers; the General synthesises from it.
+        # The DAILY muster IS the stand-up + the CTO's briefing — council and stand-up merged into
+        # one daily. Each officer reports Yesterday/Today/Blockers; the CTO synthesises from it.
         print("\n🎖️  Daily muster — officers reporting; the CTO will brief…\n", flush=True)
         _sd, said, handoffs = await _gather_standup(cfg)
         try:
@@ -327,7 +335,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         except OSError:
             pass
 
-    # The General chairs and synthesizes the briefing.
+    # The CTO chairs and synthesizes the briefing.
     print("  · CTO sums up…", flush=True)
     chair_prompt = "\n".join([
         "The Elite Unit's record:", "", digest, "",
@@ -359,7 +367,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     if audit is not None:
         audit.record("council", topic=topic or "daily", officers=[r for r, _, _ in COUNCIL],
                      questions=len(questions), transcript=saved.name)
-    # The Scribe folds this council's lessons into Unit Memory (best-effort — never break the muster).
+    # The Technical Writer folds this council's lessons into Unit Memory (best-effort — never break the muster).
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
     except Exception as exc:  # noqa: BLE001
@@ -418,7 +426,7 @@ def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None) -> tuple[str,
 
 async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,
                        audit=None) -> str:
-    """An ad-hoc meeting: the relevant officers debate ONE topic, the General decides, and the
+    """An ad-hoc meeting: the relevant officers debate ONE topic, the CTO decides, and the
     outcome is logged to Unit Memory + Telegram. `officers` is a list of names/keys (None = all);
     any officer can request one by ending a council turn with a 'MEETING:' line."""
     sig = collect_signals(cfg)
@@ -468,8 +476,8 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
 
 
 async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> str:
-    """A 'ready to prod?' review: the Quartermaster certifies deploy-readiness, then QM + Provost
-    + Inspector debate it, and the General issues a GO / NO-GO recommendation. The unit NEVER
+    """A 'ready to prod?' review: the Release Manager certifies deploy-readiness, then Release Manager + Security Engineer
+    + Code Reviewer debate it, and the CTO issues a GO / NO-GO recommendation. The unit NEVER
     promotes to MAIN — this only tells the Commander whether it's safe; the promotion is his."""
     app = cfg.app(app_name) if app_name else (cfg.apps[0] if getattr(cfg, "apps", None) else None)
     name = app.name if app else (app_name or "the app")
@@ -486,14 +494,14 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
 
     digest = format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
-    context = digest + "\n\nQuartermaster readiness report:\n" + (qm_report or "(none)")[:3500]
+    context = digest + "\n\nRelease Manager readiness report:\n" + (qm_report or "(none)")[:3500]
     topic = f"Is {name}'s DEV ready to promote to MAIN (production)?"
     roster = _select_officers(["quartermaster", "provost", "inspector"])
     said = await discuss(cfg, roster, context, notes, topic, rounds=1)
 
     chair_prompt = "\n".join([
         f"Ship-review for {name}. The unit's record:", "", digest, "",
-        "Quartermaster readiness report:", "", (qm_report or "(none)")[:3500], "",
+        "Release Manager readiness report:", "", (qm_report or "(none)")[:3500], "",
         "The officers debated:", "", *[f"### {who}\n{what}\n" for who, what in said],
         "Now write the recommendation. Remember: only the Commander promotes to MAIN.",
     ])
@@ -592,8 +600,8 @@ _TICKET_KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")
 
 async def _ticket_context(cfg: Config, message: str) -> str:
     """If the Commander names a ticket (e.g. AUTO-14), fetch it through the unit's OWN backlog
-    adapter — the Jira token it already holds — and hand the General the facts inline. That way the
-    General answers 'is this ticket ok?' from the unit's own access, instead of reaching for an
+    adapter — the Jira token it already holds — and hand the CTO the facts inline. That way the
+    CTO answers 'is this ticket ok?' from the unit's own access, instead of reaching for an
     ambient Atlassian MCP that would stall on a permission prompt the headless server can't answer.
     Best-effort: an unmatched key, wrong project, or transient failure just yields no context."""
     keys = list(dict.fromkeys(_TICKET_KEY.findall(message or "")))
@@ -624,7 +632,7 @@ async def _ticket_context(cfg: Config, message: str) -> str:
 
 
 # A status / board / ticket question from the Commander → pull a LIVE snapshot of EVERY product's Jira
-# board, so the General answers across ALL projects, not just the last council's single-app briefing.
+# board, so the CTO answers across ALL projects, not just the last council's single-app briefing.
 _BOARD_Q = re.compile(
     r"(?i)\b(status|tickets?|jira|boards?|backlog|projects?|progress|queue|pipeline|sprint|merged|"
     r"in[\s-]?progress|to[\s-]?do|todo|blocked|where are we|"
@@ -633,7 +641,7 @@ _BOARD_Q = re.compile(
 
 async def _board_status(cfg: Config) -> str:
     """Live, cross-project snapshot of EVERY configured Jira board (open work assigned to the Commander),
-    so the General answers 'status across all projects' with real data instead of guessing from the last
+    so the CTO answers 'status across all projects' with real data instead of guessing from the last
     council. Best-effort per app — one unreachable board never blanks the rest."""
     from . import intake
     lines: list[str] = []
@@ -651,7 +659,7 @@ async def _board_status(cfg: Config) -> str:
 
 
 async def respond_to_commander(cfg: Config, message: str) -> str:
-    """The General answers a message from the Commander (a reply to a council question, or
+    """The CTO answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs
     the exchange as standing guidance for the unit."""
     append_chat(cfg, "Q", message)   # show the Commander's message in the cockpit chat right away
@@ -659,7 +667,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     context = transcript_text(cfg, latest[0]["file"]) if latest else format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
     system = (
-        "You are THE GENERAL of an elite autonomous software unit, talking 1:1 with the Commander "
+        "You are THE CTO of an elite autonomous software unit, talking 1:1 with the Commander "
         "(Roman) — like a sharp, trusted colleague, NOT writing a report. Talk naturally and SHORT: "
         "2–4 sentences, plain language, no headers, no bullet lists, no status dumps, no restating "
         "his message. If he's just greeting you or making conversation, chat back like a human and "
@@ -674,7 +682,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "provided plus the files you can Read. Reply in English.\n\n"
         "HOW THE UNIT WORKS — ground every answer in this, never improvise around it: **YOU are the unit "
         "that builds the tickets.** The unit implements the Commander's Jira tickets ITSELF — its Builder "
-        "writes the code on an isolated git worktree, the gate + Reviewer + Provost check it, and it lands "
+        f"writes the code on an isolated git worktree, the gate + Reviewer + {display('provost')} check it, and it lands "
         "on DEV for the Commander's QA. The Commander NEVER hand-implements a ticket, never pastes a prompt "
         "into another tool, never opens 'Claude Code', and the unit never needs to SSH anywhere — building "
         "IS the unit's job. To get a ticket worked, the right answer is one of: autopilot drains it "
@@ -708,9 +716,9 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         # Room to glance at a few files before replying — 6 was too tight and errored out when the
-        # Commander's message invited a quick look ("investigate…"), so the General couldn't answer.
+        # Commander's message invited a quick look ("investigate…"), so the CTO couldn't answer.
         max_turns=14, effort="low"), tag="the-general")
-    answer = (run.final or run.text or "(the General had no answer)").strip()
+    answer = (run.final or run.text or "(the CTO had no answer)").strip()
     notify.send(f"🎖️ {notify.clip(answer)}")
     # Log compactly — a colleague chat, not a briefing to be replayed verbatim into future prompts.
     add_commander_note(cfg, f"Q: {message[:120]} → A: {answer[:200]}")
@@ -721,7 +729,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
 # --------------------------------------------------------------------------- #
 # Group chat — the Commander consults the whole unit (brainstorm). The relevant
 # officers answer; others may add a short comment; off-lane officers PASS. The
-# General is NOT in this room — the Commander talks to the General 1:1 in /chat.
+# The CTO is NOT in this room — the Commander talks to the CTO 1:1 in /chat.
 # --------------------------------------------------------------------------- #
 _GROUP_SYSTEM = (
     "You are an officer of an ELITE autonomous software unit in a GROUP CHAT with the Commander "
@@ -835,7 +843,7 @@ async def group_chat(cfg: Config, message: str, officers=None, audit=None,
 # --------------------------------------------------------------------------- #
 _STANDUP_SYSTEM = (
     "You are an officer of an ELITE autonomous software unit at the daily STAND-UP, reporting to "
-    "THE GENERAL. Report ONLY from your lens, grounded in the unit's record — no invention. Output "
+    "THE CTO. Report ONLY from your lens, grounded in the unit's record — no invention. Output "
     "exactly three labelled lines and nothing else:\n"
     "Yesterday: <what you or your squad actually did — or 'quiet'>\n"
     "Today: <the one thing you'll focus on>\n"
@@ -924,7 +932,7 @@ def _save_transcript(cfg: Config, topic, digest, said, briefing) -> Path:
     f = d / f"council-{stamp}.md"
     title = topic or "Daily council"
     body = [f"# {title} — {time.strftime('%Y-%m-%d %H:%M')}", "",
-            "## The General's briefing", "", briefing, "",
+            "## The CTO's briefing", "", briefing, "",
             "## The record", "", "```", digest, "```", "",
             "## Round-table", ""]
     for who, what in said:

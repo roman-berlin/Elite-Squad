@@ -28,7 +28,7 @@ You judge a diff on TWO axes:
    that don't clean up in afterEach/afterAll).
 
 Engage your specialist audit lenses on the diffs that warrant them (skip the rest):
-- Security (Provost): authz, secret leakage, input validation, injection, unsafe queries → area "security".
+- Security (Security Engineer): authz, secret leakage, input validation, injection, unsafe queries → area "security".
 - Accessibility: UI changes — keyboard/focus, ARIA, contrast, labels, RTL → area "a11y".
 - Performance: N+1 queries, hot loops, render thrash, unbounded memory → area "performance".
 - Test-coverage: is the changed behaviour actually tested? → area "tests".
