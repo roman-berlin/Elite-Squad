@@ -19,6 +19,17 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
+# This harness is a pure source-scan + string round-trip — it never runs an agent. Stub the Agent SDK
+# (as every other test does) so importing an officer module like drillmaster works WITHOUT the SDK
+# installed; otherwise the suite is red in any environment that lacks it (CI, a fresh checkout).
+import types as _types
+_sdk = _types.ModuleType("claude_agent_sdk")
+class _SDKStub:
+    def __init__(self, *a, **k): pass
+    def __call__(self, *a, **k): return self
+_sdk.__getattr__ = lambda n: _SDKStub
+sys.modules["claude_agent_sdk"] = _sdk
+
 from orchestrator.officers import OFFICER_NAMES, display
 from orchestrator import config
 
