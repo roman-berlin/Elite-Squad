@@ -27,7 +27,7 @@ PLAN = ('Here is the split:\n```json\n'
         '{"role":"ordnance-be","title":"endpoint","detail":"POST /exports uses the table","size":"L"},'
         '{"role":"frontend","title":"button","detail":"Export button on /leads","size":"S"}]\n```')
 _mode = {"plan": PLAN, "raise_plan": False}
-async def fake_run_agent(prompt, options, tag=""):
+async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
     if tag == "squad-lead":
         if _mode["raise_plan"]:
             raise RuntimeError("planner exploded")

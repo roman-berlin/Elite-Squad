@@ -38,21 +38,35 @@ def _path(cfg: Config | None = None) -> Optional[Path]:
 
 
 def record(model: str, input_tokens: int, output_tokens: int,
-           cost_usd: float = 0.0, tag: str = "") -> None:
-    """Log one agent call's token burn. Best-effort; silent on any failure."""
+           cost_usd: float = 0.0, tag: str = "",
+           ticket_id: str | None = None, pass_number: int | None = None) -> None:
+    """Log one agent call's token burn. Best-effort; silent on any failure.
+
+    EU-38: a build/soldier pass also stamps its ticket id (`k`) + pass number (`p`) so per-pass
+    INPUT tokens are sliceable by ticket — the real cost lever. Both are optional and only written
+    when present, so officer/chat lines stay lean and the old ledger shape is unchanged.
+    See scripts/ledger_analysis.py for the per-pass rollup."""
     p = _path()
     if p is None:
         return
     try:
+        row = {
+            "t": round(time.time(), 1),
+            "m": (model or "").split("-")[1] if model and "-" in model else (model or "?"),
+            "i": int(input_tokens or 0),
+            "o": int(output_tokens or 0),
+            "c": round(float(cost_usd or 0.0), 6),
+            "g": tag or "",
+        }
+        if ticket_id:
+            row["k"] = str(ticket_id)
+        if pass_number is not None:
+            try:
+                row["p"] = int(pass_number)
+            except (TypeError, ValueError):
+                pass
         with p.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "t": round(time.time(), 1),
-                "m": (model or "").split("-")[1] if model and "-" in model else (model or "?"),
-                "i": int(input_tokens or 0),
-                "o": int(output_tokens or 0),
-                "c": round(float(cost_usd or 0.0), 6),
-                "g": tag or "",
-            }) + "\n")
+            f.write(json.dumps(row) + "\n")
     except OSError:
         pass
 

@@ -25,7 +25,10 @@ Approach, in order:
    ticket lists image paths (mockups/screenshots), Read each image to SEE the intended design or
    the bug before you start — never guess at visuals.
 1. LOCATE: grep/glob for the specific files and functions the ticket touches. Do not
-   read the whole repo.
+   read the whole repo, and do NOT open large or generated files — lockfiles
+   (bun.lock/package-lock), build artifacts under dist/build/coverage, minified bundles,
+   or big fixtures/snapshots. They cost a lot of input tokens and rarely help; read only
+   the source the ticket actually needs.
 2. PLAN: choose the smallest change that fully satisfies the acceptance criteria.
 3. IMPLEMENT: make that minimal change. Match existing conventions (style, structure,
    libraries). Do NOT refactor unrelated code or expand scope.
@@ -172,7 +175,46 @@ def turns_for(cfg: Config, effort: str) -> int:
     return max(base, int(base * _TURN_SCALE.get(effort, 1.0)))
 
 
-def _prompt(req: BuildRequest) -> str:
+# EU-38: prior_issues/feedback is the single biggest input-token contributor on retries — it grows
+# every iteration and is fed back verbatim. Cap it (configurable; keep the NEWEST, which is the most
+# relevant review feedback) so a deep ticket on pass 4 doesn't blow past the input-token budget.
+_FEEDBACK_MAX_ITEMS = 12       # keep at most this many prior-issue lines (newest)
+_FEEDBACK_MAX_CHARS = 6000     # ...and at most this many total chars of feedback
+_PREAMBLE_MAX_CHARS = 4000     # trim the unit-memory preamble into the builder prompt if oversized
+
+
+def _cap_feedback(issues, cfg=None) -> list[str]:
+    """Cap the prior_issues fed back on retry, keeping the NEWEST items (the latest review's points
+    are the ones to fix). Bounds by item count first, then by total chars — both configurable via
+    `builder_feedback_max_items` / `builder_feedback_max_chars`. Returns the trimmed list, with a
+    leading marker line when anything was dropped so the Builder knows older points were elided."""
+    items = [str(i) for i in (issues or [])]
+    if not items:
+        return []
+    max_items = int(getattr(cfg, "builder_feedback_max_items", _FEEDBACK_MAX_ITEMS) or _FEEDBACK_MAX_ITEMS)
+    max_chars = int(getattr(cfg, "builder_feedback_max_chars", _FEEDBACK_MAX_CHARS) or _FEEDBACK_MAX_CHARS)
+    dropped = max(0, len(items) - max_items)
+    kept = items[-max_items:] if max_items > 0 else []
+    # Char budget: drop from the OLDEST end (front of `kept`) until under budget.
+    while kept and sum(len(x) for x in kept) > max_chars:
+        kept.pop(0)
+        dropped += 1
+    if dropped:
+        kept.insert(0, f"(+{dropped} older point(s) elided to bound context — newest kept below)")
+    return kept
+
+
+def _trim_preamble(text: str, cfg=None) -> str:
+    """Bound the unit-memory preamble concatenated into the system prompt. The Standing Orders at the
+    top matter most, so keep the head and truncate the (oldest) tail when oversized — configurable via
+    `builder_preamble_max_chars`. A no-op when the preamble already fits."""
+    limit = int(getattr(cfg, "builder_preamble_max_chars", _PREAMBLE_MAX_CHARS) or _PREAMBLE_MAX_CHARS)
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n… (unit memory truncated to bound builder context)\n\n"
+
+
+def _prompt(req: BuildRequest, cfg=None) -> str:
     ac = "\n".join(f"  - {c}" for c in req.ticket.acceptance_criteria) or "  (none specified)"
     parts = [
         f"TICKET {req.ticket.id}: {req.ticket.summary}",
@@ -183,8 +225,9 @@ def _prompt(req: BuildRequest) -> str:
         "ACCEPTANCE CRITERIA:",
         ac,
     ]
-    if req.prior_issues:
-        issues = "\n".join(f"  - {i}" for i in req.prior_issues)
+    capped = _cap_feedback(req.prior_issues, cfg)
+    if capped:
+        issues = "\n".join(f"  - {i}" for i in capped)
         parts += [
             "",
             f"THIS IS ITERATION {req.iteration}. The previous attempt was REJECTED in review.",
@@ -226,7 +269,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
         print(f"  · builder model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
         model=model,                   # the configured ceiling, or auto-chosen <= ceiling
-        system_prompt=memory.preamble() + BUILDER_SYSTEM,
+        system_prompt=_trim_preamble(memory.preamble(), cfg) + BUILDER_SYSTEM,
         cwd=workdir,                   # the isolated worktree when enabled
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
@@ -235,7 +278,10 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
         max_turns=turns_for(cfg, eff),
         effort=eff,
     )
-    run = await run_agent(_prompt(req), options, tag="builder")
+    # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
+    # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
+    run = await run_agent(_prompt(req, cfg), options, tag="builder",
+                          ticket_id=req.ticket.id, pass_number=req.iteration)
     return BuildResult(
         ok=not run.is_error,
         summary=run.final,

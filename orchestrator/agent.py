@@ -43,7 +43,11 @@ def _tool_brief(name: str, inp) -> str:
     return name or "tool"
 
 
-async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "") -> AgentRun:
+async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
+                    ticket_id: str | None = None, pass_number: int | None = None) -> AgentRun:
+    # EU-38: `ticket_id` + `pass_number` let a build/soldier pass tag its ledger line so per-pass
+    # input tokens are sliceable by ticket (the real cost lever). Optional + keyword-defaulted, so
+    # every existing caller (officers/chat that pass only `tag`) is unaffected.
     chunks: list[str] = []
     tools: list[str] = []
     final = ""
@@ -86,7 +90,8 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "") -> 
     # One choke-point for the token ledger: every officer/builder/soldier/chat call lands here.
     try:
         from . import usage as _usage
-        _usage.record(getattr(options, "model", "") or "", in_tok, out_tok, cost, tag)
+        _usage.record(getattr(options, "model", "") or "", in_tok, out_tok, cost, tag,
+                      ticket_id=ticket_id, pass_number=pass_number)
     except Exception:  # noqa: BLE001 — metering must never break a run
         pass
 
