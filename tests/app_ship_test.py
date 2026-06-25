@@ -48,7 +48,7 @@ os.environ["GENERAL_COCKPIT_PROMOTE"] = "1"
 
 # --- the cockpit Ship button renders (Mac, app ahead) ---
 bar = server._control_bar(cfg, "automatixy", True)
-chk("Ship button present for the current app", "action=/api/ship-main" in bar and "Ship automatixy" in bar, "")
+chk("Ship button present for the current app", "/ship-preview?app=automatixy" in bar and "Ship automatixy" in bar, "")
 chk("Ship button shows the ahead count", "<span class=cbadge>2</span>" in bar)
 
 # --- ship: ff MAIN to DEV, push, return to DEV ---
