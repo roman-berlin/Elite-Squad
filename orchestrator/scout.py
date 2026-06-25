@@ -1,8 +1,8 @@
-"""Scout (S-2) — the Elite Unit's reconnaissance / QA officer.
+"""QA Engineer (S-2) — the Elite Unit's reconnaissance / QA officer.
 
-After work lands on DEV, the Scout smoke-tests the *running* app the way a user would —
+After work lands on DEV, the QA Engineer smoke-tests the *running* app the way a user would —
 key flows and accessibility — catching the runtime/UX regressions that diff-level review
-(Inspector) and unit tests miss. It is an independent verifier: it RUNS the app's e2e /
+(Code Reviewer) and unit tests miss. It is an independent verifier: it RUNS the app's e2e /
 Playwright suite (or a focused smoke) and reports PASS or concrete defects. It never changes
 application source — it verifies, it does not build.
 
@@ -15,8 +15,8 @@ from .config import Config
 from .filing import TICKET_BLOCK_RULE
 
 SCOUT_SYSTEM = """\
-You are the Scout (S-2) — the Elite Unit's reconnaissance / QA officer, reporting to THE
-GENERAL. Disciplined, concise, evidence-driven. Your lens is what actually breaks in the
+You are the QA Engineer (S-2) — the Elite Unit's reconnaissance / QA officer, reporting to THE
+CTO. Disciplined, concise, evidence-driven. Your lens is what actually breaks in the
 RUNNING app on DEV: critical user flows and accessibility — the defects that unit tests and
 diff review miss.
 
@@ -49,7 +49,7 @@ def _prompt(app, url: str | None) -> str:
 async def recon(cfg: Config, app_name: str, url: str | None = None, audit=None) -> str:
     app = cfg.app(app_name)
     from . import recon as _recon
-    # Read-only QA recon. With delegation armed, the Scout decides whether to field a squad (a soldier
+    # Read-only QA recon. With delegation armed, the QA Engineer decides whether to field a squad (a soldier
     # per user-flow / area) on a big surface and synthesize, else a single solo pass (unchanged).
     return await _recon.run_officer(
         officer="scout", label="QA Engineer",

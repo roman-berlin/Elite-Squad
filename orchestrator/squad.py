@@ -1,6 +1,6 @@
-"""Squad delegation — the Field Engineer's chain of command executes.
+"""Squad delegation — the Dev Team Lead's chain of command executes.
 
-For a big ticket, the Field Engineer (squad lead) decomposes the work into a few non-overlapping
+For a big ticket, the Dev Team Lead (squad lead) decomposes the work into a few non-overlapping
 subtasks, each owned by the right SOLDIER (frontend / backend / DB / DevOps / generalist) and
 SIZED to its slice (task-adaptive effort, all the way down to the soldier). The soldiers run
 sequentially on the SAME isolated branch; the orchestrator's gate + review + keep-DEV-green merge
@@ -86,10 +86,10 @@ def parse_subtasks(text: str | None) -> list[Subtask]:
 
 
 _PLANNER_SYSTEM = """\
-You are the Field Engineer (squad lead) planning how to split ONE ticket across your squad so
+You are the Dev Team Lead (squad lead) planning how to split ONE ticket across your squad so
 specialists each own their slice. Read what you need (Grep/Glob/Read only — do NOT edit). Decide
 the SMALLEST set of subtasks (1-5) that fully covers the acceptance criteria, each owned by the
-right soldier. If the ticket is genuinely atomic (one concern, one area), return a SINGLE subtask.
+right engineer. If the ticket is genuinely atomic (one concern, one area), return a SINGLE subtask.
 
 Roles (use the exact key):
 - vanguard-fe   : frontend (React/Vite/TS/Tailwind)
@@ -101,16 +101,16 @@ Roles (use the exact key):
 Reply with ONLY a JSON array, no prose, each item exactly:
 {"role":"<key>","title":"<short>","detail":"<what to implement + which files/area>","size":"XS|S|M|L"}
 Order them so dependencies come first (e.g. a DB migration before the backend that uses it). Keep
-slices NON-OVERLAPPING — two soldiers must never edit the same lines."""
+slices NON-OVERLAPPING — two engineers must never edit the same lines."""
 
 _SOLDIER_SYSTEM = """\
-You are a SOLDIER of the Field Engineer's squad — {label}: {focus}
+You are an ENGINEER of the Dev Team Lead's squad — {label}: {focus}
 You implement ONE subtask of a larger ticket, on the current git branch, surgically.
 
 HOUSE RULES: before editing, read this repo's conventions and follow them strictly — CLAUDE.md at
 the repo root and the relevant .claude/rules/ files (Bun-only, never npm; tenant-isolation /
 zero-trust; TypeScript conventions). Stay strictly inside YOUR subtask — do NOT implement other
-soldiers' slices, and do NOT refactor unrelated code. Match existing conventions. Add or adjust
+engineers' slices, and do NOT refactor unrelated code. Match existing conventions. Add or adjust
 ONLY the tests for what you changed.
 
 Resource safety (limited RAM): never run the whole suite; run ONLY targeted tests with bounded
@@ -138,12 +138,12 @@ def _soldier_prompt(st: Subtask, req: BuildRequest, idx: int, total: int) -> str
     label = SQUAD[st.role][0]
     parts = [
         f"Parent ticket {req.ticket.id}: {req.ticket.summary}",
-        f"(You are soldier {idx} of {total}. Other soldiers handle the rest — stay in your slice.)",
+        f"(You are engineer {idx} of {total}. Other engineers handle the rest — stay in your slice.)",
         "", "FULL ACCEPTANCE CRITERIA (context — you own only your slice):", ac, "",
         f"YOUR SUBTASK [{label}] — {st.title}:", st.detail, "",
     ]
     if idx > 1:
-        parts.append("Earlier soldiers already changed this branch; build on their work, don't redo it.")
+        parts.append("Earlier engineers already changed this branch; build on their work, don't redo it.")
     parts.append("Implement your subtask now.")
     return "\n".join(parts)
 
@@ -208,7 +208,7 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
 
     cost, turns, tools, summaries, ok = p_cost, p_turns, list(p_tools), [], True
     for i, st in enumerate(subtasks, 1):
-        print(f"  soldier {i}/{len(subtasks)} · {SQUAD[st.role][0]} (effort {st.effort()}) — {st.title}",
+        print(f"  engineer {i}/{len(subtasks)} · {SQUAD[st.role][0]} (effort {st.effort()}) — {st.title}",
               flush=True)
         run = await _soldier(st, req, app, cfg, i, len(subtasks))
         cost += run.cost_usd

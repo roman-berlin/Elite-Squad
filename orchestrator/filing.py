@@ -1,6 +1,6 @@
 """Officers raise their own tickets.
 
-Scout / Provost / Quartermaster append a machine-readable block of ticket-worthy findings to
+QA Engineer / Security Engineer / Release Manager append a machine-readable block of ticket-worthy findings to
 their report. We parse it, de-dup against open tickets, and (only when the Commander passes
 `--file`) create them in the backlog — assigned to you, To Do, labeled by the officer. Without
 `--file`, we just show what *would* be filed (propose-first).
@@ -46,12 +46,12 @@ class FilingResult:
 TICKET_BLOCK_RULE = """
 
 FINALLY — ticket filing. If (and only if) you found issues that genuinely warrant their own
-ticket for a Field Engineer to fix, append a machine block as the VERY LAST thing in your reply,
+ticket for a Dev Team Lead to fix, append a machine block as the VERY LAST thing in your reply,
 with nothing after it:
 ===TICKETS===
 [{"title": "<imperative, specific summary>", "type": "Bug" or "Task", "severity": "CRITICAL"|"HIGH"|"MEDIUM"|"LOW", "body": "<what, where (file), why it matters, and acceptance criteria>"}]
 ===END===
-Include ONLY real, actionable findings (a bug, gap, or risk worth a Field Engineer's time) — omit
+Include ONLY real, actionable findings (a bug, gap, or risk worth a Dev Team Lead's time) — omit
 minor notes. If nothing warrants a ticket, emit an empty list:
 ===TICKETS===
 []

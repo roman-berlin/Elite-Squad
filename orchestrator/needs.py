@@ -2,7 +2,7 @@
 
 Three streams converge here so there's one place (and one count) to watch instead of three
 scattered badges:
-  • decisions — the General's open questions (pending_decisions.json)
+  • decisions — the CTO's open questions (pending_decisions.json)
   • approvals — officer recommendations awaiting Approve/Disapprove (drill / adjutant)
   • tasks     — runs that ended needing you (PR / escalated / errored), minus dismissed
 

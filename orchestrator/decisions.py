@@ -1,6 +1,6 @@
-"""Two-way decisions — the General asks, you answer in Telegram, it resumes.
+"""Two-way decisions — the CTO asks, you answer in Telegram, it resumes.
 
-When the Inspector flags a product/scope decision (`needs_human`), the loop records
+When the Code Reviewer flags a product/scope decision (`needs_human`), the loop records
 a *pending decision* here and pings you. While the control panel (`general serve`) is
 running, a background poller watches Telegram; when you reply, the matching ticket is
 re-run with your decision appended to its spec. Resume = re-run with the answer baked in
@@ -214,7 +214,7 @@ def route_message(cfg, audit, text: str) -> bool:
         return handle_command(cfg, audit, text)
     if load(cfg):
         return handle_reply(cfg, audit, text)
-    # Otherwise: a free-text message (e.g. a reply to a council question). The General
+    # Otherwise: a free-text message (e.g. a reply to a council question). The CTO
     # answers it in Telegram and logs the exchange as standing guidance for the unit.
     from . import council
     try:
@@ -227,7 +227,7 @@ def route_message(cfg, audit, text: str) -> bool:
             asyncio.run(council.respond_to_commander(cfg, text))
         except Exception as exc:  # noqa: BLE001
             council.add_commander_note(cfg, text)   # at least capture it
-            notify.send(f"⚠️ the General couldn't reply ({exc}); logged your note.")
+            notify.send(f"⚠️ the CTO couldn't reply ({exc}); logged your note.")
     threading.Thread(target=_answer, daemon=True).start()
     return True
 

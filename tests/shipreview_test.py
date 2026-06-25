@@ -57,7 +57,7 @@ def check(n, c, d=""):
 officer_tags = [t for t in calls if t != "the-general"]
 check("Quartermaster certified readiness", qm_called == ["automatixy"], str(qm_called))
 check("convened Quartermaster + Provost + Inspector",
-      set(officer_tags) == {"quartermaster", "provost-marshal", "inspector-general"}, str(officer_tags))
+      set(officer_tags) == {"quartermaster", "provost", "inspector"}, str(officer_tags))
 check("the General chaired the recommendation", "the-general" in calls)
 check("verdict + blockers present", "VERDICT" in decision and "BLOCKERS" in decision)
 check("promotion framed as the Commander's call", "Your call" in decision and "Promote DEV" in decision)

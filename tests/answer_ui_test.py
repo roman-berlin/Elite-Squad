@@ -82,7 +82,7 @@ body = client.get("/needs").get_data(as_text=True)
 chk("/needs decisions form ships to /api/answer", "action=/api/answer" in body)
 chk("/needs parked card has a Ship-answer box", "Ship answer" in body and "Answer the unit" in body)
 chk("/needs answer form carries the app", "value='automatixy'" in body)
-chk("/needs still offers Discuss + Dismiss", "Discuss with the General" in body and "Dismiss" in body)
+chk("/needs still offers Discuss + Dismiss", "Discuss with the CTO" in body and "Dismiss" in body)
 
 # --- Case 5: the confirmation banner renders on /needs (one-shot), so the answer visibly "took" ---
 server._state["last_msg"] = "✓ Answer sent to AUTO-77 — cleared from Needs-you; re-running."

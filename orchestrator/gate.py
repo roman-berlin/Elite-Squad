@@ -15,7 +15,7 @@ from .contracts import GateResult
 
 def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) -> GateResult:
     """Run a list of shell commands in the app's worktree; fail on the first non-zero exit.
-    Shared by the pre-review gate and the post-merge Sentinel."""
+    Shared by the pre-review gate and the post-merge SRE."""
     if not commands:
         return GateResult(passed=True, report="(no commands configured)")
     where = cwd or app.workdir or app.repo_path

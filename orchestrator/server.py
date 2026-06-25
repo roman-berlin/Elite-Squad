@@ -562,7 +562,7 @@ def create_app(cfg: Config):
                 "rejecting these</h3><p style='color:#8a929f;font-size:12.5px;margin:0 0 10px'>Folded "
                 "into the log on Consolidate. Each is a drill candidate.</p>"
                 f"<div class=lrej>{rows}</div>")
-        # One-shot confirmation banner ("✓ Scribe folded … into Unit Memory") — shown once the Scribe
+        # One-shot confirmation banner ("✓ Technical Writer folded … into Unit Memory") — shown once the Technical Writer
         # finishes (not mid-fold), so the action visibly "took" instead of silently returning here.
         _m = "" if _state.get("scribing") else (_state.pop("last_msg", "") or "")
         banner = (f"<div style='background:#10371f;border:1px solid #1c5238;color:#7fe3a6;border-radius:9px;"
@@ -598,7 +598,7 @@ def create_app(cfg: Config):
             "<p class=hint>Attending — leave all unchecked for the whole council:</p>"
             f"<div>{checks}</div>"
             "<p><button>Convene meeting</button></p></form>"
-            "<p class=hint>The officers debate, the General decides, and the outcome is written to "
+            "<p class=hint>The officers debate, the CTO decides, and the outcome is written to "
             "Unit Memory. Watch it appear under <a href='/council'>councils</a>.</p>")
         return _wrap("Call a meeting", body)
 
@@ -842,7 +842,7 @@ def create_app(cfg: Config):
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
         out = [style, banner]
         if s["decisions"]:
-            out.append(f"<div class=nsec><h3>&#128172; Questions from the General · {len(s['decisions'])}</h3>")
+            out.append(f"<div class=nsec><h3>&#128172; Questions from the CTO · {len(s['decisions'])}</h3>")
             for d in s["decisions"]:
                 tid = html.escape(str(d.get("id") or ""))
                 dapp = html.escape(str(d.get("app") or ""))
@@ -880,7 +880,7 @@ def create_app(cfg: Config):
                 oc = html.escape(str(t.get("outcome") or ""))
                 note = html.escape(_dash._short(t.get("note") or "", 120))
                 detail = _dash.needs_detail_html(t)            # the full 'what went wrong'
-                prefill = quote(_dash.needs_chat_summary(t))   # pre-loaded into the General chat
+                prefill = quote(_dash.needs_chat_summary(t))   # pre-loaded into the CTO chat
                 out.append(
                     "<div class=ncard><details><summary>"
                     f"<span class=meta>{tid}</span> &nbsp;{oc}"
@@ -892,7 +892,7 @@ def create_app(cfg: Config):
                     "<input type=text name=text placeholder='Answer the unit — your decision; it re-runs the ticket'>"
                     "<button class='nbtn send'>Ship answer</button></form>"
                     # Secondary: talk it through, or clear it.
-                    + f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the General</a>"
+                    + f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the CTO</a>"
                     "<form method=post action=/api/dismiss style='margin:0'>"
                     f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
                     "<button class='nbtn x'>Dismiss</button></form></div></div>")
@@ -954,7 +954,7 @@ def create_app(cfg: Config):
             mixbanner = (
                 f"<div class=budget><div class=bl>Model ladder today — <b>{mix['total']}</b> code calls: "
                 f"<b>{int(mix['cheap_pct'] * 100)}%</b> Sonnet/Haiku · {int(mix['opus_pct'] * 100)}% Opus</div>"
-                f"<div class=bnote>builder / reviewer / soldiers — opus {bt['opus']} · sonnet {bt['sonnet']} · "
+                f"<div class=bnote>builder / reviewer / engineers — opus {bt['opus']} · sonnet {bt['sonnet']} · "
                 f"haiku {bt['haiku']}. A higher Sonnet/Haiku share = the economical ladder working "
                 f"(complex work still escalates to Opus).</div></div>")
         else:
@@ -1404,20 +1404,20 @@ def create_app(cfg: Config):
             npend = len(decisions.load(cfg))
         except Exception:  # noqa: BLE001
             npend = 0
-        # 'Discuss with the General' on /needs hands us a ready-made brief of the problem to send.
+        # 'Discuss with the CTO' on /needs hands us a ready-made brief of the problem to send.
         prefill = html.escape((request.args.get("prefill") or "")[:800], quote=True)
         body = (_CHAT_STYLE + _chat_tabs("general", npend)
                 + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
                 '<div class=composer><form method=post action=/api/chat>'
                 f'<input type=text name=text autocomplete=off autofocus value="{prefill}" '
-                'placeholder="Message the General…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
+                'placeholder="Message the CTO…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
                 'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
                 'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
                 'document.getElementById("cinner").innerHTML=await r.text();'
                 'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},5000);'
                 '</script>')
-        return _wrap("Chat with the General", body)
+        return _wrap("Chat with the CTO", body)
 
     @app.get("/group")
     def group_page():
@@ -1546,7 +1546,7 @@ def create_app(cfg: Config):
             "cut off; expected it to scroll to the last card…'></textarea></p>"
             "<p>Screenshot (optional): <input type=file name=screenshot accept='image/*'></p>"
             "<p><label><input type=checkbox name=dryrun> dry run (build only — no merge)</label></p>"
-            "<p><button>Send to the General</button></p></form>")
+            "<p><button>Send to the CTO</button></p></form>")
         return _wrap("Report a problem", form)
 
     @app.post("/api/report")

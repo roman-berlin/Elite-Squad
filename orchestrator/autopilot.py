@@ -126,7 +126,7 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
     """After a productive cycle, fold any new recurring rejection-lessons into Unit Memory and prune it
     — FREE + deterministic (no model call), so memory compounds every cycle instead of only at the
-    06:30 council. The full model-Scribe stays on the council cadence. Best-effort: memory hygiene must
+    06:30 council. The full model-Technical Writer stays on the council cadence. Best-effort: memory hygiene must
     never break the loop. Returns the consolidate report ({} when there was nothing to learn from)."""
     if not reports:
         return {}

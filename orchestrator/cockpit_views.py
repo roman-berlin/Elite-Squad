@@ -152,7 +152,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     needs_badge = f'<span class=cbadge>{_nneeds}</span>' if _nneeds else ""
 
     # ── Two DIFFERENT repos, two DIFFERENT promotions — kept visually distinct so they can't be
-    # confused. (A) "Update unit": THE GENERAL'S OWN code (this tool) dev->main -> the 24/7 VPS
+    # confused. (A) "Update unit": THE CTO'S OWN code (this tool) dev->main -> the 24/7 VPS
     # self-updates. (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production.
     # Both only on a cockpit allowed to push (the Mac, via GENERAL_COCKPIT_PROMOTE).
     promote_html = ""
@@ -183,7 +183,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     ship_html = ""
     try:
         from . import sync as _sync
-        # An app whose repo IS the General's OWN repo (e.g. the 'Elite-Unit' app, added so the unit can
+        # An app whose repo IS the CTO's OWN repo (e.g. the 'Elite-Unit' app, added so the unit can
         # work its own EU tickets) is promoted via "Update unit" — NOT shipped as a product. Suppress its
         # Ship button so there's no duplicate/ambiguous "ship the unit" path next to Update-unit.
         _is_unit_repo = False

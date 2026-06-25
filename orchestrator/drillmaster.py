@@ -1,4 +1,4 @@
-"""The Drillmaster — the unit's training officer (compounding improvement).
+"""The Engineering Coach — the unit's training officer (compounding improvement).
 
 Reads the operation's track record (audit.jsonl) + the officers' current
 instructions, finds RECURRING weaknesses, and proposes specific upgrades to the
@@ -23,19 +23,20 @@ from . import memory
 from .agent import run_agent
 from .config import Config
 from .dashboard import audit_lines, load_tasks
+from .officers import display
 
 DRILLMASTER_SYSTEM = """\
-You are the Drillmaster — the R&D unit's training officer. Your job is continuous
+You are the Engineering Coach — the R&D unit's training officer. Your job is continuous
 improvement: study the unit's track record and the officers' current instructions, find
 RECURRING weaknesses (not one-offs), and propose precise upgrades to the officers'
 Identity / Knowledge / Skills so the same mistake does not happen twice.
 
-You also own the unit's TRAINING pipeline: (a) ONBOARDING — when a new officer or soldier is
+You also own the unit's TRAINING pipeline: (a) ONBOARDING — when a new officer or engineer is
 recruited, draft their onboarding drill (what to read first, the standards they must meet, the
 unit's conventions and hot spots) so they are productive from day one; (b) REFRESHERS — keep
 existing officers sharp with periodic refresher drills targeting the weak spots the record keeps
 surfacing. Onboarding and refreshers are drills like any other — propose them; the Commander
-approves and applies; the Adjutant executes the actual hire.
+approves and applies; the Engineering Manager executes the actual hire.
 
 You are read-only. You PROPOSE; the Commander approves and applies. Be specific and
 surgical — quote the exact instruction to change and give the replacement. Prefer a few
@@ -45,7 +46,7 @@ at most one sharpening.
 Output (concise, markdown):
 1. **Read of the unit** — 2-3 lines on how the team is doing, from the signals.
 2. **Recurring weaknesses** — each with the evidence (which signal) and the root cause.
-3. **Proposed upgrades** — per officer (Engineer / Inspector / a squad role): the exact
+3. **Proposed upgrades** — per officer (Dev Team Lead / Code Reviewer / a squad role): the exact
    instruction or SOP line to add/replace, and why. Keep each actionable.
 4. **Recruit? (only if needed)** — if a recurring weakness has NO current owner, recommend
    hiring ONE new officer and draft its file in Identity / Knowledge / Skills form (follow
@@ -103,7 +104,7 @@ def format_signals(sig: dict) -> str:
         f"Avg passes/ticket: {sig['avg_passes']} | retried: {sig['retried_tasks']} | "
         f"hit max effort: {sig['max_effort_hits']}\n"
         f"Gate failures: {sig['gate_fails']} | decisions needed: {sig['needs_human']}\n"
-        f"Recurring Inspector issue areas: {areas}"
+        f"Recurring {display('inspector')} issue areas: {areas}"
     )
 
 
@@ -113,7 +114,7 @@ def _prompt(sig: dict, cfg: Config) -> str:
         "",
         format_signals(sig),
         "",
-        "The officers' current instructions are in `officers/*.md` (Engineer, Inspector, "
+        f"The officers' current instructions are in `officers/*.md` ({display('field_engineer')}, {display('inspector')}, "
         "and any squad roles) and each app's CLAUDE.md. Read what you need.",
         "",
         "Produce the drill report.",
@@ -122,7 +123,7 @@ def _prompt(sig: dict, cfg: Config) -> str:
 
 async def drill(cfg: Config) -> str:
     sig = collect_signals(cfg)
-    cwd = str(Path(__file__).resolve().parent.parent)   # the General's repo root
+    cwd = str(Path(__file__).resolve().parent.parent)   # the CTO's repo root
     options = ClaudeAgentOptions(
         model=cfg.reviewer_model,
         system_prompt=memory.preamble() + DRILLMASTER_SYSTEM,
@@ -157,7 +158,7 @@ def snapshot_doctrine(cfg: Config) -> Path:
 
 
 DRILL_APPLY_SYSTEM = """\
-You are the Drillmaster, now EXECUTING an approved drill (not proposing). Apply the single
+You are the Engineering Coach, now EXECUTING an approved drill (not proposing). Apply the single
 highest-leverage upgrade from the approved drill report: the precise edit(s) to an officer file
 (officers/*.md) or a squad agent (~/.claude/agents/*.md). Make MINIMAL, surgical edits — change
 only what the drill specifies, nothing else; do not reword or refactor unrelated lines. After

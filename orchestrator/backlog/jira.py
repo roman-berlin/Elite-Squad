@@ -176,7 +176,7 @@ class JiraAdapter(BacklogAdapter):
                           json={"transition": {"id": match["id"]}}).raise_for_status()
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
-        # Prefix so the General's own comments can be told apart from the Commander's.
+        # Prefix so the CTO's own comments can be told apart from the Commander's.
         self.session.post(self._url(f"issue/{ticket.key}/comment"),
                           json={"body": _adf("[General] " + body)}).raise_for_status()
 
@@ -260,7 +260,7 @@ class JiraAdapter(BacklogAdapter):
             ac = _split_criteria(_adf_to_text(f[self.ac_field]))
         if not ac:
             ac = _criteria_from_description(description)
-        # Bring ALL of the Commander's comments into context (skip the General's own) — these carry
+        # Bring ALL of the Commander's comments into context (skip the CTO's own) — these carry
         # the QA feedback when a ticket bounces back from QA to To Do.
         feedback = []
         for c in (f.get("comment", {}) or {}).get("comments", []) or []:

@@ -25,6 +25,7 @@ from .config import AppConfig, Config
 from .contracts import BuildRequest, Outcome, Ticket, TicketReport
 from .gate import run_gate
 from .git_ops import Git, GitError
+from .officers import display
 
 
 def _notify(cfg: Config, text: str) -> None:
@@ -131,7 +132,7 @@ def _bar(done: int, active: int = -1, fail: int = -1) -> None:
 
 
 def _worktree_path(app: AppConfig, cfg: Config) -> str:
-    """Where the General keeps this app's private worktree (a sibling of the repo)."""
+    """Where the CTO keeps this app's private worktree (a sibling of the repo)."""
     if getattr(cfg, "worktree_dir", None):
         return str(Path(cfg.worktree_dir).expanduser() / app.name)
     repo = Path(app.repo_path).expanduser().resolve()
@@ -139,7 +140,7 @@ def _worktree_path(app: AppConfig, cfg: Config) -> str:
 
 
 def _make_git(cfg: Config, app: AppConfig) -> Git:
-    """Build the git custodian for an app. With use_worktree on, the General gets a
+    """Build the git custodian for an app. With use_worktree on, the CTO gets a
     dedicated linked worktree (based on origin/<base>) so it never fights the user's
     manual checkout. Falls back to in-tree if isolation can't engage (e.g. no origin)."""
     if getattr(cfg, "use_worktree", False):
@@ -494,7 +495,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
         _bar(1, active=1)
         if cfg.notify_verbose:
-            _notify(cfg, f"🔧 {ticket.id} — Engineer implemented (pass {iteration})")
+            _notify(cfg, f"🔧 {ticket.id} — {display('field_engineer')} implemented (pass {iteration})")
 
         # 2) VERIFICATION GATE on the feature branch (cheap filter, before review)
         # Gate only the monorepo apps/packages this ticket actually touched (EU-19) —
@@ -570,10 +571,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
               flush=True)
         blockers = [q for q in review.quality_issues if q.severity == "blocker"]
         if blockers:
-            _notify(cfg, f"🚨 {ticket.id} — Inspector found a critical issue ({blockers[0].area}): "
+            _notify(cfg, f"🚨 {ticket.id} — Code Reviewer found a critical issue ({blockers[0].area}): "
                          f"{blockers[0].detail}")
         if cfg.notify_verbose:
-            _notify(cfg, f"🔎 {ticket.id} — Inspector verdict: {review.verdict.value}")
+            _notify(cfg, f"🔎 {ticket.id} — Code Reviewer verdict: {review.verdict.value}")
 
         # A product/scope decision only the Commander can make -> stop and ask, don't loop.
         if review.needs_human:
@@ -723,7 +724,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
 
     # LIVE + validated -> fast-forward DEV to the trial and push: the ONLY moment DEV changes.
     if not reason:
-        merge_sha = git.current_sha()   # the validated merge commit — Sentinel reverts THIS if DEV breaks
+        merge_sha = git.current_sha()   # the validated merge commit — SRE reverts THIS if DEV breaks
         git.land_trial(temp)
         git.delete_local_branch(branch)   # merged into DEV (commits live there) -> retire the feature branch
         sync = git.sync_main_base() if getattr(cfg, "sync_base_after_merge", False) else ""
@@ -745,7 +746,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
 
-        # Sentinel: run the heavier post-merge suite on the landed DEV; if it's red, roll the merge
+        # SRE: run the heavier post-merge suite on the landed DEV; if it's red, roll the merge
         # back (forward-only) and hand the ticket back rather than leave DEV broken.
         from . import sentinel
         if sentinel.should_run(cfg, app):
@@ -783,7 +784,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
 
 
 async def _after_merge_scout(cfg, app, ticket, audit) -> None:
-    """Opt-in: right after a live merge, the Scout smoke-tests the running DEV app and (live) files
+    """Opt-in: right after a live merge, the QA Engineer smoke-tests the running DEV app and (live) files
     any runtime/UX/a11y regressions it finds. Never raises — recon must not break the run."""
     try:
         from . import filing, scout

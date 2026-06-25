@@ -402,13 +402,13 @@ def needs_detail_html(t: dict[str, Any]) -> str:
             rows.append(f'<div class="ndt sub">• {html.escape(_short(_finding_str(f), 240))}</div>')
     if not rows:
         rows.append('<div class="ndt muted">No further detail was captured for this run — '
-                    'open it with the General to investigate.</div>')
+                    'open it with the CTO to investigate.</div>')
     return "".join(rows)
 
 
 def needs_chat_summary(t: dict[str, Any]) -> str:
-    """A compact plain-text brief of the problem, pre-loaded into the General chat when the Commander
-    clicks 'Discuss with the General' — so he can send it as-is (or tweak) instead of retyping."""
+    """A compact plain-text brief of the problem, pre-loaded into the CTO chat when the Commander
+    clicks 'Discuss with the CTO' — so he can send it as-is (or tweak) instead of retyping."""
     tid = str(t.get("ticket_id") or "this run")
     oc = str(t.get("outcome") or "needs attention")
     parts = [f"{tid} ended '{oc}'."]
@@ -501,7 +501,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     if flt:
         banner = (f'<div class=fltbar>Showing <b>{html.escape(_FILTER_LABEL.get(flt, flt))}</b> only '
                   f'· <a href="/tasks">show all</a></div>')
-    empty = "No tasks match this filter." if flt else "No tasks yet — run the General."
+    empty = "No tasks match this filter." if flt else "No tasks yet — run the CTO."
     rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>{empty}</td></tr>'
     return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{PANEL}}", panel)
             .replace("{{FILTER}}", banner)
@@ -593,7 +593,7 @@ def standup(cfg) -> str:
 
 def render_status(tasks: list[dict[str, Any]], limit: int = 15, show_cost: bool = True) -> str:
     if not tasks:
-        return "No tasks yet — run the General."
+        return "No tasks yet — run the CTO."
     head = f"{'TICKET':<26}{'APP':<12}{'OUTCOME':<14}{'PASSES':<7}{'DUR':<8}" + ("COST" if show_cost else "")
     lines = [head]
     for t in tasks[:limit]:

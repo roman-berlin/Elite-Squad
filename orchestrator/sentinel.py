@@ -1,9 +1,9 @@
-"""Sentinel — S-3 · Integration & rollback.
+"""SRE — S-3 · Integration & rollback.
 
 The unit's last line of defence on DEV. The pre-review gate already validates the *exact* merge on a
-throwaway branch before anything touches DEV, so Sentinel is for the checks that only make sense AFTER
+throwaway branch before anything touches DEV, so SRE is for the checks that only make sense AFTER
 the code is actually on DEV — a heavier integration / e2e suite too slow to run on every build pass.
-If that suite goes red, Sentinel **reverts the merge** (forward-only `git revert`, no force-push, no
+If that suite goes red, SRE **reverts the merge** (forward-only `git revert`, no force-push, no
 history rewrite) and hands the ticket back, so DEV is never left broken.
 
 Opt-in: `sentinel_enabled: true` plus a per-app `postmerge_commands:` list. With no post-merge suite
@@ -22,7 +22,7 @@ def should_run(cfg: Config, app: AppConfig) -> bool:
 
 def guard(cfg: Config, app: AppConfig, ticket, git, merge_sha: str, audit=None) -> tuple[bool, str]:
     """Run the post-merge suite on the landed DEV. Green → (True, note). Red → revert the merge and
-    return (False, reason). Never raises into the loop — a Sentinel hiccup must not corrupt a run."""
+    return (False, reason). Never raises into the loop — a SRE hiccup must not corrupt a run."""
     tid = getattr(ticket, "id", "?")
     cmds = list(getattr(app, "postmerge_commands", []) or [])
     print(f"  🛡️ SRE · post-merge suite on {app.base_branch}…", flush=True)

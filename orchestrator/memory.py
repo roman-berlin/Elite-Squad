@@ -1,19 +1,19 @@
 """Unit Memory — the Elite Unit's living protocol (company memory).
 
 A single curated document, `memory/UNIT.md`, that every officer reads before acting
-and the **Scribe** keeps current after each council. Git-versioned, so it doubles as
+and the **Technical Writer** keeps current after each council. Git-versioned, so it doubles as
 an audit trail of how the unit's doctrine evolved.
 
 Design:
 - **Human-owned sections** (Mission, Standing Orders, Per-App Notes) are edited by the
-  Commander and NEVER touched by the Scribe.
-- **Scribe-owned section** lives between `<!-- SCRIBE:BEGIN -->` / `<!-- SCRIBE:END -->`
-  markers — the only region the Scribe rewrites. This protects your hand edits by
+  Commander and NEVER touched by the Technical Writer.
+- **Technical Writer-owned section** lives between `<!-- SCRIBE:BEGIN -->` / `<!-- SCRIBE:END -->`
+  markers — the only region the Technical Writer rewrites. This protects your hand edits by
   construction.
 - `preamble()` returns a compact block prepended to every officer's system prompt, so the
   whole unit shares one memory. Keep UNIT.md tight — it rides along on every call.
 
-The Scribe agent is READ-ONLY: it returns proposed log bullets from the council transcript
+The Technical Writer agent is READ-ONLY: it returns proposed log bullets from the council transcript
 + recent audit, and *Python* performs the marker-bounded write (deterministic, safe).
 """
 from __future__ import annotations
@@ -23,14 +23,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-_ROOT = Path(__file__).resolve().parent.parent      # the General repo root
+_ROOT = Path(__file__).resolve().parent.parent      # the CTO repo root
 UNIT_PATH = _ROOT / "memory" / "UNIT.md"             # versioned DOCTRINE (Commander-owned; ships via git)
 LIVE_PATH = _ROOT / "memory" / "UNIT.live.md"        # runtime LIVING LOG (officer-owned; gitignored)
 _BACKUPS = _ROOT / "memory" / "backups"
 
 _BEGIN = "<!-- SCRIBE:BEGIN -->"
 _END = "<!-- SCRIBE:END -->"
-_LOG_HEADING = "## Lessons & Decisions  _(Scribe-maintained — newest first)_"
+_LOG_HEADING = "## Lessons & Decisions  _(Technical Writer-maintained — newest first)_"
 
 # How many of the newest/most-recurring lessons to inline into EVERY officer prompt. The log is
 # newest-first and Consolidate folds the most-recurring rejection lessons to the top, so the cap keeps
@@ -41,7 +41,7 @@ PREAMBLE_LESSONS = 12
 _SEED = f"""# Elite Unit — Living Protocol (Unit Memory)
 
 The unit's shared memory. Every officer reads this before acting. The Commander owns the
-Mission, Standing Orders, and Per-App Notes; the Scribe maintains only the Lessons &
+Mission, Standing Orders, and Per-App Notes; the Technical Writer maintains only the Lessons &
 Decisions log (between the markers). Keep it tight and current.
 
 ## Mission
@@ -73,7 +73,7 @@ MAIN. Quality and tenant-safety over speed.
 
 # --------------------------------------------------------------------------- #
 def ensure() -> Path:
-    """Create a starter UNIT.md if none exists, and migrate any legacy inline Scribe log out to the
+    """Create a starter UNIT.md if none exists, and migrate any legacy inline Technical Writer log out to the
     runtime live-log file (one-time). Returns the doctrine path."""
     if not UNIT_PATH.exists():
         UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ def load() -> str:
 
 
 def _doctrine() -> str:
-    """The Commander-owned doctrine: UNIT.md with any LEGACY inline Scribe section stripped (the log
+    """The Commander-owned doctrine: UNIT.md with any LEGACY inline Technical Writer section stripped (the log
     now lives in its own runtime file, so it's never shown twice)."""
     text = load()
     if _BEGIN in text and _END in text:
@@ -107,7 +107,7 @@ def _doctrine() -> str:
 
 def _live_log(limit: int | None = None) -> str:
     """The officer-maintained living log (runtime file, gitignored). Falls back to a legacy inline
-    Scribe section in UNIT.md for an un-migrated repo. Includes the log heading. When `limit` is set,
+    Technical Writer section in UNIT.md for an un-migrated repo. Includes the log heading. When `limit` is set,
     only the newest `limit` lessons are returned (the rest collapse to a one-line pointer) — this is
     what `preamble()` inlines into every officer prompt, so it stays bounded as the log grows. With
     `limit=None` (the cockpit page) the FULL log is returned."""
@@ -186,7 +186,7 @@ def update_log(bullets: str) -> None:
 
 # --------------------------------------------------------------------------- #
 SCRIBE_SYSTEM = """\
-You are the Scribe of an elite autonomous software unit, keeper of its living protocol
+You are the Technical Writer of an elite autonomous software unit, keeper of its living protocol
 (Unit Memory). After a council, you update ONLY the "Lessons & Decisions" log: a concise,
 durable record of what the unit learned and decided — the things future officers must know.
 
@@ -202,7 +202,7 @@ Rules:
 
 
 async def scribe(cfg) -> str:
-    """Run the Scribe: read the latest council + recent audit, rewrite the log section.
+    """Run the Technical Writer: read the latest council + recent audit, rewrite the log section.
     Returns a short status line. Safe to call after every council (best-effort)."""
     from claude_agent_sdk import ClaudeAgentOptions
 

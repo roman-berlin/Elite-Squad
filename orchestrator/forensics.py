@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import dashboard as D
+from .officers import display
 
 # A run counts as a failure worth diagnosing when it escalated, errored, landed only as a PR, or parked
 # awaiting a decision. NOTE two vocabularies: dashboard.load_tasks emits these display strings, while a
@@ -35,7 +36,7 @@ _RULES: list[tuple[str, str, tuple[str, ...], str]] = [
      "Answer the product/IA question (or enable PM auto-decide / automode) so the build can resume."),
     ("security_block", "Security finding",
      ("security", "provost", "critical", "vuln", "secret"),
-     "Address the security finding the Provost flagged — it opened a PR instead of landing."),
+     f"Address the security finding the {display('provost')} flagged — it opened a PR instead of landing."),
     ("merge_conflict", "Merge conflict",
      ("conflict", "non-fast-forward", "couldn't merge", "could not merge", "cannot merge", "rebase"),
      "Bring DEV up to date and resolve the conflict; the unit couldn't land the branch cleanly."),
