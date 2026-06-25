@@ -46,6 +46,21 @@ s = needs.summary(cfg)
 chk("dismissing AUTO-32 hides ONLY it — AUTO-31 (the one to answer) survives, panel NOT wiped",
     [t["ticket_id"] for t in s["tasks"]] == ["AUTO-31"], str([t["ticket_id"] for t in s["tasks"]]))
 
+# --- one row per ticket: latest run only (the AUTO-14×5 duplicate / stale-success pile-up) ---
+many = [
+    task("AUTO-14", "2026-06-19T19:58:03", "errored"),
+    task("AUTO-14", "2026-06-21T01:03:06", "errored"),       # newest errored run of AUTO-14
+    task("AUTO-9", "2026-06-21T10:59:08", "escalated"),
+    task("AUTO-9", "2026-06-23T09:00:00", "merged→dev"),     # AUTO-9 SUCCEEDED on a later run → must drop off
+    task("AUTO-32", "2026-06-24T03:29:37", "awaiting decision"),
+]
+ny = D.latest_needs_you(many, {})
+ids = sorted(t["ticket_id"] for t in ny)
+chk("one row per ticket — historical duplicates collapsed", ids == ["AUTO-14", "AUTO-32"], str(ids))
+chk("a ticket whose LATEST run merged drops off needs-you (no stale failure)", "AUTO-9" not in ids)
+chk("the surviving row is the ticket's NEWEST run",
+    next(t for t in ny if t["ticket_id"] == "AUTO-14")["started"] == "2026-06-21T01:03:06")
+
 print("\n============ DISMISS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

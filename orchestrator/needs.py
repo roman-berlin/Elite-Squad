@@ -32,8 +32,7 @@ def summary(cfg: Config) -> dict:
         from . import dashboard as _D
         tasks = _D.load_tasks(cfg.audit_path)
         dismissed = _D.load_dismissed(cfg.audit_path)
-        task_items = [t for t in tasks
-                      if t.get("outcome") in _D._NEEDS_YOU and not _D._is_dismissed(t, dismissed)]
+        task_items = _D.latest_needs_you(tasks, dismissed)   # one row per ticket (latest run), not every old run
     except Exception:  # noqa: BLE001
         pass
     return {

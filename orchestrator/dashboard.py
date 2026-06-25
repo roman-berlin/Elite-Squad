@@ -252,12 +252,47 @@ def _is_dismissed(t: dict[str, Any], dismissed: dict | None) -> bool:
     da = dismissed.get(str(t.get("ticket_id")))
     if not da:
         return False
-    dt, st = _parse_ts(da), _parse_ts(t.get("started"))
+    dt, st = _started_dt({"started": da}), _started_dt(t)   # both naive — robust to datetime objs / formats
     if dt is None or st is None:
         return False                       # can't confirm it's old → never hide on uncertainty
-    if (dt.tzinfo is None) != (st.tzinfo is None):
-        dt, st = dt.replace(tzinfo=None), st.replace(tzinfo=None)   # normalise so the compare can't raise
     return st <= dt
+
+
+def _started_dt(t: dict[str, Any]) -> Optional[datetime]:
+    """A run's 'started' as a naive datetime — tolerates a datetime object OR an ISO string with a 'T'
+    or space separator and a +HH:MM / +HHMM offset (load_tasks emits the space+colon form). None if blank.
+    Used for BOTH the dismissal compare and latest-run dedupe, so neither mis-orders on format drift."""
+    s = t.get("started")
+    if isinstance(s, datetime):
+        return s.replace(tzinfo=None)
+    if not isinstance(s, str) or not s:
+        return None
+    dt = _parse_ts(s)
+    if dt is None:
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+    return dt.replace(tzinfo=None)
+
+
+def _started_key(t: dict[str, Any]) -> datetime:
+    return _started_dt(t) or datetime.min
+
+
+def latest_needs_you(tasks: list[dict[str, Any]], dismissed: dict | None = None) -> list[dict[str, Any]]:
+    """The Needs-you list: ONE row per ticket — its most recent run — kept only if that latest run still
+    needs you and isn't dismissed. Stops the panel showing every historical errored run of a ticket (the
+    AUTO-14×5 duplicates) or a stale failure for a ticket that has since succeeded on a later run."""
+    latest: dict[str, dict[str, Any]] = {}
+    for t in tasks:
+        tid = str(t.get("ticket_id") or "")
+        if not tid:
+            continue
+        if tid not in latest or _started_key(t) >= _started_key(latest[tid]):
+            latest[tid] = t
+    return [t for t in latest.values()
+            if t.get("outcome") in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +434,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     # Cards summarize the FULL run set, regardless of any active scope filter.
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
-    needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
+    needs = latest_needs_you(tasks, dismissed)   # one row per ticket (latest run), not every old run
     cards = [("Tasks", total, "all"), ("Merged → dev", merged, "merged"), ("Needs you", len(needs), "needs")]
     if show_cost:
         cards.append(("Est. cost", f"${sum(t['cost'] for t in tasks):.2f}", None))
