@@ -217,7 +217,8 @@ def create_app(cfg: Config):
                  ".trun button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 18px;font-weight:650;cursor:pointer}"
                  ".hint{color:#8a909c;font-size:13px}"
                  ".tapp{margin-left:auto;font-size:11px;color:#8a909c;background:#161b24;border:1px solid #232936;border-radius:999px;padding:1px 9px;white-space:nowrap}"
-                 ".tgrp{font-size:12px;color:#c4c9d2;font-weight:700;margin:16px 0 6px}</style>")
+                 ".tgrp{font-size:12px;color:#c4c9d2;font-weight:700;margin:16px 0 6px}"
+                 ".tall{background:#10141b;font-weight:650}</style>")
         try:
             items = intake.from_drain(cfg, name, 40)
         except Exception as exc:  # noqa: BLE001
@@ -239,12 +240,19 @@ def create_app(cfg: Config):
                 f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span></label>'
                 for t in its)
 
+        # "Select all" header: a nameless checkbox that toggles every ticket box in ITS OWN form (so in the
+        # all-projects view each project's select-all stays scoped to that project). No name=ticket -> it is
+        # never submitted; it only flips the real boxes.
+        _toggle = "this.closest('form').querySelectorAll('input[name=ticket]').forEach(c=>c.checked=this.checked)"
+        _select_all = ('<label class="trow tall"><input type=checkbox onclick="' + _toggle + '">'
+                       '<span class=tsum>Select all</span></label>')
+
         def _run_form(target_app: str, rows_html: str, btn_label: str) -> str:
             # One run form = one app/Jira. Multiple ticket checkboxes are fine — they're all this app.
             return ('<form method=post action=/api/run-selected '
                     'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
                     f'<input type=hidden name=app value="{html.escape(target_app)}">'
-                    f'<div class=tlist>{rows_html}</div>'
+                    f'<div class=tlist>{_select_all}{rows_html}</div>'
                     '<div class=trun>'
                     '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
                     f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'

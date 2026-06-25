@@ -49,6 +49,12 @@ s = client.get("/tickets?app=automatixy").get_data(as_text=True)
 chk("single-project view keeps checkboxes + one form", "type=checkbox name=ticket" in s and s.count("action=/api/run-selected") == 1)
 chk("single-project form targets that app", 'name=app value="automatixy"' in s)
 
+# --- "Select all" toggle: one per run form, scoped to its own form, never itself submittable ---
+chk("all-projects: a 'Select all' per project form (2)", b.count(">Select all<") == 2, str(b.count(">Select all<")))
+chk("select-all toggles ticket boxes in its own form via JS", "querySelectorAll('input[name=ticket]')" in b)
+chk("select-all is nameless -> not submitted as a ticket (still 4 ticket boxes)", b.count("type=checkbox name=ticket") == 4)
+chk("single-project: exactly one 'Select all'", s.count(">Select all<") == 1, str(s.count(">Select all<")))
+
 print("\n============ CHOOSE-TICKETS MULTI-SELECT QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
