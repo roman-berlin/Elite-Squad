@@ -87,14 +87,15 @@ intake.from_drain = lambda c, n, l: []
 chk("empty backlog -> friendly empty state", "Nothing of yours open" in warroom._backlog_html(cfg, "Elite-Unit"))
 intake.from_drain = fake_drain
 
-# --- /tickets route: '*' -> grouped read-only index (no crash); a project -> the run form ---
+# --- /tickets route: '*' -> grouped, multi-select PER project (one form per app); a project -> the run form ---
 sync.can_promote = lambda: False
 cfg.detected_auth = lambda: "test"
 client = server.create_app(cfg).test_client()
 warroom._BACKLOG_CACHE.clear()
 all_pg = client.get("/tickets?app=*").get_data(as_text=True)
 chk("/tickets?app=* does not crash (200 + all-projects index)", "all projects" in all_pg and "EU-20" in all_pg and "AUTO-9" in all_pg)
-chk("/tickets?app=* is read-only (no cross-app run checkboxes)", 'name=ticket' not in all_pg and "Develop selected" not in all_pg)
+chk("/tickets?app=* allows multi-select PER project (a checkbox form per app, each single-app scoped)",
+    'name=ticket' in all_pg and "Develop selected in" in all_pg and 'name=app value="Elite-Unit"' in all_pg)
 one_pg = client.get("/tickets?app=Elite-Unit").get_data(as_text=True)
 chk("/tickets?app=<proj> shows the run form (checkboxes + develop)", 'name=ticket' in one_pg and "Develop selected" in one_pg and "EU-20" in one_pg)
 

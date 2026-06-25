@@ -229,46 +229,48 @@ def create_app(cfg: Config):
             return _wrap("Choose tickets", style + "<p class=hint>Nothing assigned to you in "
                          f"{who} (In Progress / To Do). Clear queue.</p>")
 
-        # ALL-PROJECTS view: a read-only index grouped by app — each ticket links into its own project,
-        # where it can be ticked + developed (one run form can only target a single app/Jira).
+        effort = "".join(f"<option value='{e}'>{e}</option>"
+                         for e in ("low", "medium", "high", "xhigh", "max"))
+
+        def _checkbox_rows(its) -> str:
+            return "".join(
+                f'<label class=trow><input type=checkbox name=ticket value="{html.escape(t.id)}">'
+                f'<span class=tkey>{html.escape(t.id)}</span>'
+                f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span></label>'
+                for t in its)
+
+        def _run_form(target_app: str, rows_html: str, btn_label: str) -> str:
+            # One run form = one app/Jira. Multiple ticket checkboxes are fine — they're all this app.
+            return ('<form method=post action=/api/run-selected '
+                    'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
+                    f'<input type=hidden name=app value="{html.escape(target_app)}">'
+                    f'<div class=tlist>{rows_html}</div>'
+                    '<div class=trun>'
+                    '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
+                    f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
+                    f'<button>&#9654; {html.escape(btn_label)}</button>'
+                    '<span class=hint>default builds + merges to DEV — tick "dry run" to build only</span>'
+                    '</div></form>')
+
+        # ALL-PROJECTS view: grouped by app, but each group is its OWN selectable run form — so you can
+        # tick SEVERAL tickets within a project and develop them together (a single run still targets a
+        # single app/Jira, so cross-project multi-select would need separate runs — hence one form per app).
         if all_projects:
             by_app: dict[str, list] = {}
             for a, t in items:
                 by_app.setdefault(getattr(a, "name", "") or "?", []).append(t)
-            blocks = []
-            for an in sorted(by_app):
-                trows = "".join(
-                    f'<a class=trow href="/tickets?app={quote(an)}">'
-                    f'<span class=tkey>{html.escape(t.id)}</span>'
-                    f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span>'
-                    f'<span class=tapp>develop &rarr;</span></a>' for t in by_app[an])
-                blocks.append(f'<div class=tgrp>{html.escape(an)} &middot; {len(by_app[an])}</div>'
-                              f'<div class=tlist>{trows}</div>')
+            blocks = [f'<div class=tgrp>{html.escape(an)} &middot; {len(by_app[an])}</div>'
+                      + _run_form(an, _checkbox_rows(by_app[an]), f"Develop selected in {an}")
+                      for an in sorted(by_app)]
             body = (style + f'<p class=hint>{len(items)} ticket(s) assigned to you across '
-                    f'{len(by_app)} project(s). Pick a project to develop its tickets.</p>'
+                    f'{len(by_app)} project(s). Tick the ones to develop in a project, then Develop.</p>'
                     + "".join(blocks))
             return _wrap("Choose tickets — all projects", body)
 
-        rows = "".join(
-            f'<label class=trow><input type=checkbox name=ticket value="{html.escape(t.id)}">'
-            f'<span class=tkey>{html.escape(t.id)}</span>'
-            f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span></label>'
-            for _, t in items)
-        effort = "".join(f"<option value='{e}'>{e}</option>"
-                         for e in ("low", "medium", "high", "xhigh", "max"))
         body = (style
                 + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
                   "Tick the ones to develop, then Run.</p>"
-                  '<form method=post action=/api/run-selected '
-                  'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
-                  f'<input type=hidden name=app value="{html.escape(appq)}">'
-                  f'<div class=tlist>{rows}</div>'
-                  '<div class=trun>'
-                  '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
-                  f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
-                  '<button>&#9654; Develop selected</button>'
-                  '<span class=hint>default builds + merges to DEV — tick “dry run” to build only</span>'
-                  '</div></form>')
+                + _run_form(appq, _checkbox_rows([t for _, t in items]), "Develop selected"))
         return _wrap(f"Choose tickets — {html.escape(appq)}", body)
 
     @app.post("/api/run-selected")
