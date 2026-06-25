@@ -39,24 +39,47 @@ check("turns: custom base scales (high=160, max=240)",
 check("detect: 'maximum number of turns'", loop._is_turn_limit("Claude Code returned an error result: Reached maximum number of turns (60)"))
 check("detect: generic error is NOT a turn limit", not loop._is_turn_limit("Some other crash: KeyError 'x'"))
 
-# ---- _exception_report: turn limit -> needs you (ESCALATED + decision) ----
+# ---- _exception_report on a turn limit: FIRST try the Scrum Master split, escalate only if it can't ----
+import asyncio
+from orchestrator import scrum as _scrum_mod, decisions
 class FakeAudit:
     def __init__(s): s.events = []
     def record(s, e, **kw): s.events.append((e, kw))
-tk = Ticket(id="AUTO-13", key="AUTO-13", summary="big migration", description="d", app="automatixy")
-a1 = FakeAudit()
-rep = loop._exception_report(cfg, tk, app, RuntimeError("Reached maximum number of turns (60)"), a1)
-check("turn-limit -> ESCALATED (needs you), not ERRORED", rep.outcome == Outcome.ESCALATED, str(rep.outcome))
-check("turn-limit -> records needs_human(reason=turn-limit)",
-      any(e == "needs_human" and kw.get("reason") == "turn-limit" for e, kw in a1.events), str(a1.events))
-check("turn-limit -> no 'ticket_exception' recorded", not any(e == "ticket_exception" for e, _ in a1.events))
-from orchestrator import decisions
-pend = decisions.load(cfg)
-check("turn-limit -> a decision card is filed for you", any(p.get("id") == "AUTO-13" for p in pend), str(pend))
+TURN_ERR = RuntimeError("Reached maximum number of turns (60)")
 
-# ---- _exception_report: a real error stays ERRORED ----
+# (a) the Scrum Master CAN split it -> the unit splits + re-queues, the Commander is NOT bothered
+async def _split_ok(*a, **k): return {"ok": True, "keys": ["AUTO-13a", "AUTO-13b"]}
+_scrum_mod.split = _split_ok
+tkA = Ticket(id="AUTO-13", key="AUTO-13", summary="big migration", description="d", app="automatixy")
+aA = FakeAudit()
+repA = asyncio.run(loop._exception_report(cfg, tkA, app, TURN_ERR, aA))
+check("too-big ticket -> Scrum Master splits it (REQUEUED, not ESCALATED)", repA.outcome == Outcome.REQUEUED, str(repA.outcome))
+check("split is audited (scrum_split, reason=turn-limit, into=[...])",
+      any(e == "scrum_split" and kw.get("reason") == "turn-limit" and kw.get("into") for e, kw in aA.events), str(aA.events))
+check("a successful split does NOT escalate to you", not any(e == "needs_human" for e, _ in aA.events))
+
+# (b) the splitter DECLINES (can't split further) -> fall back to escalating to the Commander
+async def _split_no(*a, **k): return {"ok": False, "keys": []}
+_scrum_mod.split = _split_no
+tkB = Ticket(id="AUTO-14", key="AUTO-14", summary="atomic but heavy", description="d", app="automatixy")
+aB = FakeAudit()
+repB = asyncio.run(loop._exception_report(cfg, tkB, app, TURN_ERR, aB))
+check("unsplittable too-big ticket -> ESCALATED (needs you), not ERRORED", repB.outcome == Outcome.ESCALATED, str(repB.outcome))
+check("escalation records needs_human(reason=turn-limit)",
+      any(e == "needs_human" and kw.get("reason") == "turn-limit" for e, kw in aB.events), str(aB.events))
+check("turn-limit is never a plain 'ticket_exception'", not any(e == "ticket_exception" for e, _ in aB.events))
+check("escalation files a decision card for you", any(p.get("id") == "AUTO-14" for p in decisions.load(cfg)), "no card")
+
+# (c) an EPHEMERAL ticket has no backlog to file sub-tickets into -> skip the split, escalate directly
+async def _split_boom(*a, **k): raise AssertionError("must not try to split an ephemeral ticket")
+_scrum_mod.split = _split_boom
+tkE = Ticket(id="ADHOC-1", key="ADHOC-1", summary="x", description="d", app="automatixy", ephemeral=True)
+repE = asyncio.run(loop._exception_report(cfg, tkE, app, TURN_ERR, FakeAudit()))
+check("ephemeral too-big ticket -> escalates without attempting a split", repE.outcome == Outcome.ESCALATED, str(repE.outcome))
+
+# ---- _exception_report: a real (non-turn-limit) error stays ERRORED ----
 a2 = FakeAudit()
-rep2 = loop._exception_report(cfg, tk, app, RuntimeError("KeyError: boom"), a2)
+rep2 = asyncio.run(loop._exception_report(cfg, tkB, app, RuntimeError("KeyError: boom"), a2))
 check("generic error -> ERRORED", rep2.outcome == Outcome.ERRORED)
 check("generic error -> records ticket_exception", any(e == "ticket_exception" for e, _ in a2.events))
 

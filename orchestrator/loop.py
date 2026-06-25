@@ -72,13 +72,34 @@ def _is_turn_limit(text: str | None) -> bool:
     return any(m in t for m in _TURN_LIMIT_MARKERS)
 
 
-def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exception,
-                      audit: AuditLog) -> TicketReport:
-    """Turn a ticket-level exception into a report. A turn-limit blow-out is NOT a real failure —
-    the ticket was simply too big to finish in one pass — so surface it as an actionable 'needs
-    you' (split it / raise the budget), not a confusing 'errored'."""
+async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exception,
+                            audit: AuditLog) -> TicketReport:
+    """Turn a ticket-level exception into a report. A turn-limit blow-out is NOT a real failure — the
+    ticket was simply too big to finish in one pass. "Too big" is the Scrum Master's job, so first hand
+    it to him to split into right-sized sub-tickets, and only escalate to the Commander if a split isn't
+    possible (delegation off, or no backlog to file sub-tickets into, or the splitter declines)."""
     msg = str(exc)
     if _is_turn_limit(msg):
+        # Auto-split first — don't ask the Commander to do by hand what the Scrum Master is for.
+        # Needs a real backlog to file sub-tickets into, so only for non-ephemeral tickets.
+        if not ticket.ephemeral:
+            try:
+                from . import scrum as _scrum
+                sp = await _scrum.split(
+                    cfg, app.name, ticket,
+                    recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
+                    reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.")
+            except Exception as sexc:  # noqa: BLE001 - a split failure must fall through to escalate
+                sp = {"ok": False, "keys": [], "error": str(sexc)}
+            if sp.get("ok") and sp.get("keys"):
+                kk = ", ".join(sp["keys"])
+                audit.record("scrum_split", ticket_id=ticket.id, reason="turn-limit", into=sp["keys"])
+                _notify(cfg, f"🧩 {ticket.id} was too big for one pass — the Scrum Master split it into "
+                             f"{kk} and closed the parent. The unit takes the fragments next.")
+                print(f"  🧩 {ticket.id}: too big → Scrum Master split into {kk}; parent closed.", flush=True)
+                return TicketReport(ticket.id, Outcome.REQUEUED, 0, 0.0, app.name,
+                                    notes=f"too big — Scrum Master split into {kk}")
+        # No split possible → escalate to the Commander as before.
         note = (f"{ticket.id} ran out of turns before finishing — this ticket is likely too big for "
                 "a single pass. Split it into smaller tickets, or raise the turn budget "
                 "(builder_max_turns). Nothing was merged.")
@@ -87,9 +108,9 @@ def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exceptio
         except Exception:  # noqa: BLE001 - never let the escalation path itself crash the run
             pass
         audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=note)
-        _notify(cfg, f"🛑 {ticket.id} — ran out of turns (too big to finish in one pass). "
+        _notify(cfg, f"🛑 {ticket.id} — ran out of turns (too big for one pass) and couldn't be split. "
                      "Split it, or raise builder_max_turns.\n\n" + decisions.reply_hint(ticket.id))
-        print(f"  🛑 {ticket.id}: ran out of turns — ticket too big; escalated to you.", flush=True)
+        print(f"  🛑 {ticket.id}: ran out of turns — too big and unsplittable; escalated to you.", flush=True)
         return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name,
                             notes="ran out of turns — ticket too big for one pass")
     audit.record("ticket_exception", ticket_id=ticket.id, app=app.name, error=msg)
@@ -279,7 +300,7 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                     ensured.add(app.name)
                 report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
             except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
-                report = _exception_report(cfg, ticket, app, exc, audit)
+                report = await _exception_report(cfg, ticket, app, exc, audit)
             reports.append(report)
             # Failure forensics: if this ticket has now failed enough times, auto-write its post-mortem.
             try:
@@ -461,7 +482,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                              question=proposal[:1500], reason="product blocker — escalated to Commander")
                 _notify(cfg, f"🛑 {ticket.id} — needs your product call"
                              + (" (the PM recommends):" if pm_outcome is not None else ":")
-                             + f"\n\n{notify.clip(proposal, 600)}"
+                             + f"\n\n{await _decision_brief(cfg, ticket.id, proposal)}"
                              + f"\n\n{decisions.reply_hint(ticket.id)}")
                 print(f"  🛑 {ticket.id}: parked — escalated to you; the unit moves to the next ticket.",
                       flush=True)
@@ -557,7 +578,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # A product/scope decision only the Commander can make -> stop and ask, don't loop.
         if review.needs_human:
             decisions.add(cfg, ticket, app.name, review.question or review.summary)
-            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{notify.clip(review.question or review.summary, 600)}"
+            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{await _decision_brief(cfg, ticket.id, review.question or review.summary)}"
                          f"\n\n{decisions.reply_hint(ticket.id)}")
             if not cfg.dry_run and not ticket.ephemeral:
                 backlog.set_status(ticket, "Needs Human")
@@ -662,7 +683,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         backlog.set_status(ticket, "Needs Human")
         backlog.add_comment(ticket, ("🎖️ [PM] " + esc[:1400]) if triage else esc)
     print("  ✗ escalated — needs you (max passes reached without a clean review)", flush=True)
-    _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{_D.brief(esc)}\n\n{decisions.reply_hint(ticket.id)}")
+    _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")
     audit.record("needs_human", ticket_id=ticket.id, iterations=cfg.max_iterations,
                  reason="max passes — PM escalated", question=esc[:1500])
     return TicketReport(ticket.id, Outcome.ESCALATED, cfg.max_iterations, cost, app.name, branch,
@@ -810,3 +831,32 @@ def _escalation_comment(last_changes: list[str]) -> str:
     items = "\n".join(f"- {c}" for c in last_changes) or "- (no specific feedback captured)"
     return ("Automated pipeline could not complete this ticket within the iteration "
             f"limit. Outstanding items:\n{items}")
+
+
+async def _decision_brief(cfg: Config, ticket_id: str, raw: str) -> str:
+    """Distil a verbose escalation (reviewer/PM notes) into a phone-sized DECISION: the one question,
+    the concrete options, and a recommendation — so the Commander reads what to DECIDE, not the whole
+    review essay. Cheapest model, one shot, no file access; fails safe to the rule-based
+    dashboard.brief() if the model errors so an escalation is never lost."""
+    from . import dashboard as _D
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions
+        from .agent import run_agent
+        system = ("Compress a stuck ticket's reviewer/PM notes into a DECISION BRIEF for a busy engineer "
+                  "reading it on his phone. Output ONLY, no preamble:\n"
+                  "first line: the single decision he must make (≤18 words)\n"
+                  "then up to 3 short bullets — the concrete options\n"
+                  "last line: 'Rec: <one-line recommendation>'\n"
+                  "≤55 words total; never restate the whole review.")
+        run = await run_agent(
+            f"Ticket {ticket_id}. Reviewer/PM notes:\n{raw[:2200]}\n\nWrite the decision brief.",
+            ClaudeAgentOptions(model=getattr(cfg, "smalltalk_model", None) or cfg.discussion_model,
+                               system_prompt=system, permission_mode="bypassPermissions",
+                               allowed_tools=[], setting_sources=[], max_turns=1, effort="low"),
+            tag="decision-brief")
+        return (run.final or run.text or "").strip() or _D.brief(raw)
+    except Exception:  # noqa: BLE001 - summarisation must never break the escalation path
+        return _D.brief(raw)

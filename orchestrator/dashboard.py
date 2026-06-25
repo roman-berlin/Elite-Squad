@@ -241,14 +241,23 @@ def dismiss(audit_path: str | Path, ticket_id: str) -> None:
 
 
 def _is_dismissed(t: dict[str, Any], dismissed: dict | None) -> bool:
-    """A needs-you task is hidden if it (or an older run) was dismissed — but a newer run shows."""
+    """Hide a needs-you run ONLY if its ticket was dismissed AND we can confirm THIS run started at/before
+    that dismissal — a newer run for the same ticket shows again. Fail-safe by design: any uncertainty
+    (missing/unparseable timestamps) SHOWS the item, and the comparison never raises. The old version
+    compared a tz-aware dismissal time against a naive run time, which raised TypeError — and because
+    needs.summary() swallows exceptions, a SINGLE dismissal then wiped the entire panel (every run, even
+    the one you still needed to answer)."""
     if not dismissed:
         return False
     da = dismissed.get(str(t.get("ticket_id")))
     if not da:
         return False
-    dt, st = _parse_ts(da), t.get("started")
-    return (st <= dt) if (dt and st) else True
+    dt, st = _parse_ts(da), _parse_ts(t.get("started"))
+    if dt is None or st is None:
+        return False                       # can't confirm it's old → never hide on uncertainty
+    if (dt.tzinfo is None) != (st.tzinfo is None):
+        dt, st = dt.replace(tzinfo=None), st.replace(tzinfo=None)   # normalise so the compare can't raise
+    return st <= dt
 
 
 # --------------------------------------------------------------------------- #
