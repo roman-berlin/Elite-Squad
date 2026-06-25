@@ -128,6 +128,13 @@ class Config:
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
     postmortem_after: int = 3               # auto-write a post-mortem once a ticket has failed this many times (0 = off); see forensics.py
 
+    # --- EU-38 builder context budget: INPUT tokens (not the model tier) drive cost. The prior_issues
+    #     fed back on retry grows every pass and is the biggest contributor, so it's bounded here; the
+    #     unit-memory preamble concatenated into the system prompt is bounded too. See builder._cap_feedback. ---
+    builder_feedback_max_items: int = 12    # keep at most this many prior-issue lines on retry (NEWEST kept)
+    builder_feedback_max_chars: int = 6000  # ...and at most this many total chars of feedback
+    builder_preamble_max_chars: int = 4000  # bound the unit-memory preamble fed into the builder system prompt
+
     # --- squad delegation: ONE switch arms both the Field Engineer's build squad AND the recon
     #     officers' read-only squads (Scout / Provost / Quartermaster each decide per-task whether
     #     to recruit soldiers or run solo). See squad.py (build) and recon.py (recon). ---
