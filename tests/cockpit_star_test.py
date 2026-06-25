@@ -6,7 +6,8 @@ literal "*" flowed into cfg.app("*") -> KeyError. This crashed Patrol (swallowed
 "+ New task" -> Run path ("could not start: '*'") from the DEFAULT all-projects view.
 
 Asserts the complete fix:
-  - _control_bar(cfg, "*") bakes a CONCRETE app into every button — no ?app=* / value="*".
+  - _control_bar(cfg, "*") bakes a CONCRETE app into every single-app ACTION button (no value="*"),
+    while NAV links ("Choose a ticket") keep ?app=* so All-projects actually lists all projects.
   - cfg.app() is NEVER called with "*" while rendering the bar.
   - /api/patrol with app="*" sweeps EVERY app (the "All projects" intent), no KeyError.
   - /api/run with app="*" starts a real run instead of reporting "could not start: '*'".
@@ -53,10 +54,11 @@ cfg.app = _guard_app
 
 # --- 1) _control_bar normalizes "*" -> a concrete app; no "*" leaks into any button ---
 bar = srv._control_bar(cfg, "*", True)
-chk("control bar emits no ?app=* link", "?app=*" not in bar, bar[:200])
-chk("control bar emits no app value=\"*\" hidden field", 'value="*"' not in bar)
-chk("control bar falls back to the first concrete app", "automatixy" in bar)
-chk("cfg.app() was never called with '*' while rendering", not star_calls, str(star_calls))
+chk("Choose-a-ticket NAV link preserves All-projects (/tickets?app=* — safe, that route handles *)",
+    "/tickets?app=*" in bar, bar[:200])
+chk("single-app ACTION buttons emit no app value=\"*\" hidden field", 'value="*"' not in bar)
+chk("action buttons fall back to the first concrete app", "automatixy" in bar)
+chk("cfg.app() was never called with '*' while rendering (the crash invariant)", not star_calls, str(star_calls))
 
 # --- 2) /api/patrol with app="*" sweeps EVERY app, no KeyError ---
 swept = []

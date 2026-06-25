@@ -125,6 +125,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
     # cfg.app("*") -> KeyError). Normalize once here to a concrete app (or "").
     app0 = current_app if (current_app and current_app != "*") else (cfg.apps[0].name if cfg.apps else "")
+    # NAV links (e.g. "Choose a ticket") must PRESERVE "All projects" → "*", not collapse to apps[0] the way
+    # the single-target action buttons (deploy/ship/run) do; otherwise All-projects shows only the first app.
+    nav_app = current_app if (current_app and current_app != "*") else "*"
     apps = "".join(
         f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
         f"{html.escape(a.name)}</option>" for a in cfg.apps)
@@ -310,7 +313,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 }}
 </style>
 <div class=tbar>
-  <a class="btn primary" href="/tickets?app={html.escape(app0)}">&#127915; Choose a ticket</a>
+  <a class="btn primary" href="/tickets?app={html.escape(nav_app)}">&#127915; Choose a ticket</a>
 
   <details class=menu>
     <summary class=btn>&#43; New task</summary>
