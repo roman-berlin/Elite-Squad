@@ -17,6 +17,17 @@ from .cockpit_state import _state
 from .config import Config
 
 
+def _back_home() -> str:
+    """The cockpit URL to return to — carries the active ?app= so 'back to cockpit' lands on the project
+    you were in, not 'All projects'. Reads it from the request when there is one; falls back to '/'."""
+    try:
+        from flask import request
+        appq = (request.args.get("app") or "").strip()
+    except Exception:  # noqa: BLE001 - rendered outside a request context (tests / previews)
+        appq = ""
+    return f"/?app={html.escape(appq)}" if appq else "/"
+
+
 def _wrap(title: str, inner: str) -> str:
     return ("<!doctype html><meta charset=utf-8><title>" + html.escape(title) + "</title>"
             "<style>body{background:#0d0f14;color:#e8eaed;font:14px/1.6 -apple-system,"
@@ -27,7 +38,7 @@ def _wrap(title: str, inner: str) -> str:
             "border-radius:8px;padding:8px;font:inherit}"
             "button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 16px;"
             "font-weight:650;cursor:pointer}</style>"
-            f"<p><a href='/'>&larr; cockpit</a></p><h2>{html.escape(title)}</h2>{inner}")
+            f"<p><a href='{_back_home()}'>&larr; cockpit</a></p><h2>{html.escape(title)}</h2>{inner}")
 
 
 def _working(msg: str, secs: int = 5) -> str:

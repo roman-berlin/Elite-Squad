@@ -46,6 +46,13 @@ chk("/tasks board has a back link", BACK in t)
 r = client.get("/report").get_data(as_text=True)
 chk("/report (a _wrap page) has a back link", BACK in r)
 
+# --- the back link CARRIES the active project, so 'back' returns to it, not 'All projects' (the bug) ---
+rp = client.get("/report?app=automatixy").get_data(as_text=True)
+chk("a _wrap sub-page back link preserves the active project", "href='/?app=automatixy'" in rp)
+tp = client.get("/tasks?app=automatixy").get_data(as_text=True)
+chk("/tasks back link preserves the active project", "/?app=automatixy" in tp)
+chk("no active project → plain '/' (no dangling ?app=)", "href='/'" in client.get("/report").get_data(as_text=True))
+
 # --- the home page is the root: it should NOT carry a '← cockpit' link to itself ---
 home = client.get("/").get_data(as_text=True)
 chk("home '/' has no self-referential back link", BACK not in home)

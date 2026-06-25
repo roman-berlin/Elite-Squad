@@ -189,7 +189,11 @@ def create_app(cfg: Config):
                              active_filter=flt, blocked=blocked)
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
-        back = "<p style='margin:14px 30px 4px'><a href='/' style='color:#6aa9ff'>&larr; cockpit</a></p>"
+        # Carry the active project so 'back' returns to it, not 'All projects'.
+        _appq = (request.args.get("app") or "").strip()
+        _home = f"/?app={html.escape(_appq)}" if _appq else "/"
+        back = (f"<p style='margin:14px 30px 4px'><a href='{_home}' style='color:#6aa9ff'>"
+                "&larr; cockpit</a></p>")
         return page.replace("</header>", "</header>" + back + _control_bar(cfg), 1)
 
     @app.post("/api/dismiss")
