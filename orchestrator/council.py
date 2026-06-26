@@ -369,7 +369,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
 
     # Report up to the Commander.
     header = "🎖️ *Daily Council*" if not topic else f"🎖️ *Muster — {topic}*"
-    notify.send(f"{header}\n\n{notify.clip(briefing)}")
+    notify.send(f"{header}\n\n{await notify.report_brief(cfg, briefing)}")
     if questions:
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
                     + "\n\nReply here and I'll log it as standing guidance.")
@@ -483,7 +483,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
 
     saved = _save_transcript(cfg, f"meeting: {topic}", digest, said, decision)
     questions = _commander_questions(decision)
-    notify.send(f"🎖️ *Meeting — {topic}*\n\n{notify.clip(decision)}")
+    notify.send(f"🎖️ *Meeting — {topic}*\n\n{await notify.report_brief(cfg, decision)}")
     if questions:
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
                     + "\n\nReply here and I'll log it as standing guidance.")
@@ -536,7 +536,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     decision = (chair.final or chair.text or "(no recommendation)").strip()
 
     saved = _save_transcript(cfg, f"ship-review: {name}", context, said, decision)
-    notify.send(f"🚀 *Ship-review — {name}*\n\n{notify.clip(decision)}\n\n_Promotion to MAIN is yours, Commander._")
+    notify.send(f"🚀 *Ship-review — {name}*\n\n{await notify.report_brief(cfg, decision)}\n\n_Promotion to MAIN is yours, Commander._")
     if audit is not None:
         audit.record("ship_review", app=name, transcript=saved.name)
     try:
@@ -742,7 +742,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         # Commander's message invited a quick look ("investigate…"), so the CTO couldn't answer.
         max_turns=14, effort="low"), tag="the-general")
     answer = (run.final or run.text or "(the CTO had no answer)").strip()
-    notify.send(f"🎖️ {notify.clip(answer)}")
+    notify.send(f"🎖️ {await notify.report_brief(cfg, answer)}")
     # Log compactly — a colleague chat, not a briefing to be replayed verbatim into future prompts.
     add_commander_note(cfg, f"Q: {message[:120]} → A: {answer[:200]}")
     append_chat(cfg, "A", answer)    # full reply to the cockpit chat (not only Telegram)
@@ -931,8 +931,10 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
     Commander). The full per-officer round-table is NOT pushed to Telegram — it stays in the cockpit
     (last-standup.md + the saved transcript), so the daily ping is skimmable instead of a wall of chat."""
     hb = "\n".join(f"- {h}" for h in handoffs) or "- none"
+    # Hand-offs/blockers are already concise bullets and this helper is sync, so bulletize() (the
+    # deterministic brief) keeps every one as a tight '•' line — no model call, no truncate-and-punt.
     return (f"🫡 *Daily stand-up* — {len(rows)} officer(s) reported.\n\n"
-            f"*Hand-offs & blockers:*\n{notify.clip(hb, 600)}\n\n_Full round-table in the cockpit._")
+            f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
 
 
 async def hold_standup(cfg: Config, audit=None) -> str:
