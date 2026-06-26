@@ -199,6 +199,18 @@ chk("is_installed() True when SDK supports hooks", guard.is_installed() is True)
 chk("builder calls warn_if_absent", "guard.warn_if_absent(" in b)
 chk("soldier calls warn_if_absent", "guard.warn_if_absent(" in s)
 
+# --- EU-47: the READ-ONLY recon officers must attach the guard too (drift-guard the wiring) ---
+# provost/scout/quartermaster recon all funnel through recon._opts; the provost security GATE builds its
+# own inline options. Both run bypassPermissions with Bash allowed (for npm/bun audit), so the hard
+# denylist — deny-by-content (cat .env / exfil), NOT removing Bash — must be wired on these paths, and
+# warn_if_absent must fire loud if it's ever absent. Pin it so the wiring can't silently regress.
+rc = Path("./orchestrator/recon.py").read_text()
+pv = Path("./orchestrator/provost.py").read_text()
+chk("recon._opts attaches the guard (provost/scout/quartermaster recon)", "hooks=guard.hooks_config()" in rc)
+chk("recon calls warn_if_absent", "guard.warn_if_absent(" in rc)
+chk("provost gate attaches the guard", "hooks=guard.hooks_config()" in pv)
+chk("provost gate calls warn_if_absent", "guard.warn_if_absent(" in pv)
+
 # simulate the guard vanishing (SDK too old / import failure -> hooks_config() returns None)
 import io, contextlib
 _orig = guard.hooks_config

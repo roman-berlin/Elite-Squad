@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import guard, memory
 from .agent import run_agent
 from .config import Config
 
@@ -94,6 +94,10 @@ def _opts(system: str, cwd: str, model: str, tools: list[str], turns: int, effor
         permission_mode="bypassPermissions",
         allowed_tools=(["Read", "Grep", "Glob"] if planning else tools),
         disallowed_tools=["Write", "Edit", "NotebookEdit"],   # recon is read-only — flag, never edit
+        # EU-47: these read-only recon officers (provost/scout/quartermaster) run under bypassPermissions
+        # with Bash allowed (for npm/bun audit), so the hard denylist must guard them too — Bash stays,
+        # deny-by-content blocks `cat .env`/exfil. Same guard the write-capable officers attach.
+        hooks=guard.hooks_config(),
         setting_sources=["project"],
         max_turns=turns,
         effort=effort,
@@ -110,6 +114,7 @@ async def run_officer(*, officer: str, label: str, system: str, task: str, cfg: 
                       empty: str = "(no report)", audit=None) -> str:
     """Run a recon officer. Solo by default; when delegation is armed the officer may field a squad.
     Always returns the report string (same contract as a solo run)."""
+    guard.warn_if_absent(officer)   # EU-47: loud one-liner if this read-only officer runs under bypass with no guard
     if not getattr(cfg, "delegation_enabled", False):
         return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer)
 
