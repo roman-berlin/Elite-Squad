@@ -14,9 +14,6 @@ import time
 from pathlib import Path
 
 from .config import Config
-from .contracts import Outcome
-
-_PARKED = (Outcome.ESCALATED, Outcome.PR_OPENED, Outcome.ERRORED)
 
 
 def _state_path(cfg: Config) -> Path:

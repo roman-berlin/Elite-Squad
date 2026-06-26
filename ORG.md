@@ -67,7 +67,7 @@ flowchart LR
 
 ## Daily council (the unit studies every day)
 
-At **10:00** the officers muster: each gives a short SITREP from its lens on the unit's recent
+At **06:30** the officers muster: each gives a short SITREP from its lens on the unit's recent
 record, the Engineering Coach names the one drill worth running, the Engineering Manager covers personnel, and
 the CTO chairs — producing a briefing, the day's orders, and the questions only you can
 answer. The unit can also call an **ad-hoc muster** to work a specific improvement
@@ -80,7 +80,7 @@ direction, business strategy, irreversible decisions). Most mornings, that's *No
 
 ```mermaid
 flowchart LR
-    REC["Record<br/>(audit log)"] --> M["10:00 Muster<br/>officers' round-table"]
+    REC["Record<br/>(audit log)"] --> M["06:30 Muster<br/>officers' round-table"]
     NOTES["Your standing<br/>guidance"] --> M
     M --> BRF["CTO's<br/>briefing"]
     BRF --> TG["Telegram summary"]
@@ -89,7 +89,7 @@ flowchart LR
     Q -. "you reply in Telegram" .-> NOTES
 ```
 
-Run it: `general council` (now) · scheduled 10:00 via `scripts/com.roman.general.council.plist`
+Run it: `general council` (now) · scheduled daily 06:30 via the server crontab (`scripts/install-server-cron.sh`)
 · from your phone with `/council` · transcripts + history in the cockpit at `/council`.
 
 ## Roster

@@ -167,6 +167,15 @@ AUDIT_EVENT_OUTCOME: dict[str, Outcome] = {
 }
 
 
+# Outcomes that PARK a ticket IMMEDIATELY — a human decision (ESCALATED) or an open PR (PR_OPENED) is
+# waiting on the Commander, so there is no point auto-retrying. The SINGLE source of truth for the
+# "should this outcome park now?" check (EU-56): autopilot imports this instead of re-declaring its own
+# copy, which had drifted out of sync with a now-deleted dead duplicate in events.py. ERRORED is
+# deliberately NOT here — a transient blip is retried a few times before parking (see
+# autopilot._MAX_TICKET_ERRORS); do not add it, or errored tickets would never get their retry budget.
+PARKED: tuple[Outcome, ...] = (Outcome.ESCALATED, Outcome.PR_OPENED)
+
+
 @dataclass
 class TicketReport:
     ticket_id: str

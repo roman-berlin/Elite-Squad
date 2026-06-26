@@ -237,10 +237,11 @@ The-General repo:
   - **VPS:** the `*/15` cron above (`GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1`). Pull-only is all
     the server needs to see the Mac; it skips the push so there's no 403 noise. Give the box git write
     credentials and drop the flag if you want its councils pushed back for the Mac to see too.
-  - **Mac:** `export GENERAL_HOST_ID=mac`, then load the launchd pair (every 15 min):
+  - **Mac:** `export GENERAL_HOST_ID=mac`, then add a cron line (every 15 min) — the same `general sync`
+    mechanism the server installs via `scripts/install-server-cron.sh`, but with push left **on** so the
+    Mac publishes its audit for the server to read:
     ```bash
-    cp scripts/com.roman.general.sync.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/com.roman.general.sync.plist
+    */15 * * * * cd "$HOME/General" && GENERAL_HOST_ID=mac ./general sync >> council/cron.log 2>&1
     ```
   - First run from the machine that has push auth (your Mac) — it bootstraps the `unit-state` branch.
 

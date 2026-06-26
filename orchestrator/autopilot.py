@@ -23,13 +23,13 @@ from pathlib import Path
 from . import events, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
-from .contracts import Outcome
+from .contracts import PARKED, Outcome
 from .loop import run as run_loop
 
-# Outcomes that park a ticket IMMEDIATELY (a human decision / a PR is waiting — no point retrying).
-# ERRORED is handled separately: a transient blip shouldn't sideline a ticket, so we retry it a few
-# times (with a short backoff) before parking. See _MAX_TICKET_ERRORS.
-_PARKED = (Outcome.ESCALATED, Outcome.PR_OPENED)
+# `PARKED` (the outcomes that park a ticket IMMEDIATELY — a human decision / a PR is waiting, no point
+# retrying) is the canonical tuple in contracts.py (EU-56), imported above. ERRORED is handled
+# separately: a transient blip shouldn't sideline a ticket, so we retry it a few times (with a short
+# backoff) before parking. See _MAX_TICKET_ERRORS.
 
 # Consecutive ERRORs tolerated before an errored ticket is parked. The first errors are retried
 # next cycle; the Nth consecutive error parks it. Counter resets the moment the ticket stops
@@ -269,7 +269,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
 
             # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
             # parking so a transient blip doesn't sideline a ticket for hours.
-            park_now = [r.ticket_id for r in reports if r.outcome in _PARKED]
+            park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
             retrying: list[str] = []
             counts_changed = False
             for r in reports:

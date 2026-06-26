@@ -312,9 +312,9 @@ Last updated: 2026-06-20.
   assigned to you, To Do), so with Autopilot armed the unit continuously finds → files → fixes.
   One officer failing never aborts the patrol; `--no-file` makes it propose-only, `--officers`
   picks a subset. Trigger on demand from the War Room (**Unit → Run patrol**, with a confirm since
-  it files tickets), or on a cadence via the included launchd plist (weekly Mon 09:00 —
-  `scripts/com.roman.general.patrol.plist` + `run-patrol.sh`, not auto-loaded; you `launchctl load`
-  it when ready). Verified by a dedicated harness (13/13); dashboard suite 66/66.
+  it files tickets), or on a cadence via the server crontab that `scripts/install-server-cron.sh`
+  installs (its weekly `0 9 * * 1 … ./general patrol` entry — Mon 09:00). Verified by a dedicated
+  harness (13/13); dashboard suite 66/66.
 
 - **Squad delegation (the chain of command executes)** — for a sized-big ticket (L/XL or many
   acceptance criteria), the **Field Engineer now splits the work** into a few non-overlapping

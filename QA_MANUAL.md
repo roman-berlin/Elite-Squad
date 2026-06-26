@@ -170,7 +170,7 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 
 **12.3 Resilience** — (sanity) if one officer errors, the others still run and report.
 
-**12.4 Schedule** — `launchctl list | grep general` → `com.roman.general.patrol` present (`-  0`). Fires weekly Mon 09:00.
+**12.4 Schedule** — `crontab -l | grep patrol` → the weekly `0 9 * * 1 … ./general patrol` line is present (installed by `scripts/install-server-cron.sh`). Fires weekly Mon 09:00.
 
 ---
 

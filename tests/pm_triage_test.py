@@ -48,8 +48,8 @@ chk("PM-triage system prompt carries the out-of-scope channel (producer side)",
 
 # --- REQUEUED outcome exists + is NOT parked ---
 chk("REQUEUED outcome value", Outcome.REQUEUED.value == "requeued")
-chk("REQUEUED is NOT parked (autopilot re-runs it)", Outcome.REQUEUED not in autopilot._PARKED)
-chk("ESCALATED is still parked (sanity)", Outcome.ESCALATED in autopilot._PARKED)
+chk("REQUEUED is NOT parked (autopilot re-runs it)", Outcome.REQUEUED not in autopilot.PARKED)
+chk("ESCALATED is still parked (sanity)", Outcome.ESCALATED in autopilot.PARKED)
 
 # --- dashboard: pm_triage -> 're-queued', kept OUT of Needs-you ---
 chk("dashboard maps pm_triage -> re-queued", D._OUTCOME.get("pm_triage") == "re-queued")
