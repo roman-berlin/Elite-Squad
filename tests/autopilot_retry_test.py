@@ -27,9 +27,9 @@ def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 # --- constants / immediate-park set sanity ---
-chk("ERRORED is NOT in the immediate-park set", Outcome.ERRORED not in autopilot._PARKED)
-chk("ESCALATED parks immediately", Outcome.ESCALATED in autopilot._PARKED)
-chk("PR_OPENED parks immediately", Outcome.PR_OPENED in autopilot._PARKED)
+chk("ERRORED is NOT in the immediate-park set", Outcome.ERRORED not in autopilot.PARKED)
+chk("ESCALATED parks immediately", Outcome.ESCALATED in autopilot.PARKED)
+chk("PR_OPENED parks immediately", Outcome.PR_OPENED in autopilot.PARKED)
 chk("retry threshold is a couple of passes", autopilot._MAX_TICKET_ERRORS >= 2)
 
 # --- harness: one autopilot cycle with a scripted outcome for one ticket ---

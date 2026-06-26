@@ -211,8 +211,8 @@ flowchart TD
 4. **Scheduled — VPS cron** (`scripts/install-server-cron.sh`, `CRON_TZ=Asia/Jerusalem`):
    self-update every 15 min, state sync every 15 min + 06:30, **daily council/muster 06:30**, corridor
    small-talk 11:00/14:30-ish/16:00-ish, weekly patrol Mon 09:00. The Mac launchd council is **retired**
-   — the VPS cron is the single source (`install-server-cron.sh:8`). (Mac `*.plist` launch agents still
-   exist under `scripts/` but are superseded — **inferred** from that comment.)
+   — the VPS cron is the single source (`install-server-cron.sh:8`). (The retired Mac `*.plist` launch
+   agents and their `run-*.sh` wrappers have been removed from `scripts/`; nothing loaded them.)
 
 ---
 

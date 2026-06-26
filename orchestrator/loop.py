@@ -10,6 +10,7 @@ import fcntl
 import os
 import re
 import subprocess
+from collections import deque
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -465,7 +466,10 @@ def _changes_sig(changes: list[str]) -> str:
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
     cost = 0.0
     last_changes: list[str] = []
-    prev_reject_sig: str | None = None     # retry guard: detect the same rejection coming back unaddressed
+    # Retry guard (EU-56): remember the last few reject signatures, not just the immediately
+    # previous one, so an A/B/A/B rejection oscillation — where the build alternates between two
+    # unaddressed failures — trips escalation instead of burning every remaining Opus pass.
+    recent_reject_sigs: deque[str] = deque(maxlen=3)
     coverage_artifact = ""        # Test Engineer's PR coverage line for this ticket (latest pass)
     covered_diff_hash: str | None = None   # EU-53: hash of the tree the Test Engineer last covered —
                                            # lets a later pass skip the (Opus) coverage agent + re-gate
@@ -711,15 +715,18 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         last_changes = review.required_changes or review.spec_gaps or [
             q.detail for q in review.blocking_issues]
         audit.record("retry", ticket_id=ticket.id, iteration=iteration, required_changes=last_changes)
-        # Retry guard: if the SAME blocking feedback returns a second time, the build isn't making
-        # progress on it — stop burning identical passes and hand it to the PM / Commander instead.
+        # Retry guard: if a blocking feedback signature we've already seen in the last few passes
+        # returns, the build isn't making progress on it — whether it repeats back-to-back (A/A) or
+        # oscillates between two unaddressed failures (A/B/A/B). Either way, stop burning passes and
+        # hand it to the PM / Commander instead of looping more identical/alternating passes.
         sig = _changes_sig(last_changes)
-        if sig and sig == prev_reject_sig:
-            audit.record("retry_stuck", ticket_id=ticket.id, iteration=iteration, repeats=2)
-            print("  ⚠ same review feedback twice — escalating instead of looping another identical pass",
-                  flush=True)
+        if sig and sig in recent_reject_sigs:
+            audit.record("retry_stuck", ticket_id=ticket.id, iteration=iteration,
+                         repeats=recent_reject_sigs.count(sig) + 1)
+            print("  ⚠ review feedback is repeating/oscillating — escalating instead of looping "
+                  "another unproductive pass", flush=True)
             break
-        prev_reject_sig = sig
+        recent_reject_sigs.append(sig)
         _bar(REVIEW, fail=REVIEW)
         print("  ↻ changes requested → rebuilding", flush=True)
 
