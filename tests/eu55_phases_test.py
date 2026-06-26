@@ -1,0 +1,123 @@
+"""EU-55 / F12: the terminal phase bar (loop._bar) and the War Room web phase bar
+(warroom.active_run) must derive from ONE shared PHASES constant, so they can never
+drift apart again — and that constant must include the real pipeline's Test Engineer
+("Tests") and Security steps, which both old hardcoded bars omitted.
+
+Guards three things:
+  1. single source of truth — loop and warroom both bind the same phases.PHASES object;
+  2. the Tests (Test Engineer) and Security phases are present, in pipeline order;
+  3. the reached / failed_phase index logic matches the new phase count/order (no drift).
+"""
+import io
+import json
+import sys
+import tempfile
+import types
+from contextlib import redirect_stdout
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, ".")
+_sdk = types.ModuleType("claude_agent_sdk")
+class _D:
+    def __init__(s, *a, **k): pass
+    def __call__(s, *a, **k): return s
+_sdk.__getattr__ = lambda n: _D
+sys.modules["claude_agent_sdk"] = _sdk
+
+from orchestrator import loop, phases, warroom
+
+ns = types.SimpleNamespace
+now = datetime.now().astimezone()
+ts = now.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _cfg(rows):
+    d = Path(tempfile.mkdtemp())
+    a = d / "audit.jsonl"
+    a.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    return ns(audit_path=str(a), apps=[ns(name="automatixy")])
+
+
+def _run(rows, *, live):
+    cfg = _cfg(rows)
+    return warroom.active_run(cfg, warroom.D.load_tasks(cfg.audit_path), None, live)
+
+
+checks = []
+def chk(name, cond):
+    checks.append(bool(cond))
+    print(("  ok " if cond else "  XX ") + name)
+
+
+# --- 1) Single source of truth -----------------------------------------------------------------
+PH = phases.PHASES
+chk("PHASES is the exact pipeline order", PH == ("Build", "Gate", "Tests", "Review", "Security", "Land"))
+chk("loop._bar derives from the shared PHASES (identity)", loop.PHASES is phases.PHASES)
+chk("warroom bar derives from the shared PHASES (identity)", warroom.PHASES is phases.PHASES)
+
+# --- 2) Test Engineer + Security phases present, and between the right neighbours ----------------
+chk("Test Engineer 'Tests' phase present", "Tests" in PH)
+chk("Security phase present", "Security" in PH)
+chk("Tests runs between Gate and Review", PH.index("Gate") < PH.index("Tests") < PH.index("Review"))
+chk("Security runs between Review and Land", PH.index("Review") < PH.index("Security") < PH.index("Land"))
+
+# --- 3) Both bars render the SAME ordered phases from that one constant --------------------------
+# Web bar: active_run hands the template list(PHASES).
+web = _run([dict(event="ticket_start", ticket_id="AUTO-1", app="automatixy", branch="b", ts=ts),
+            dict(event="build", ticket_id="AUTO-1", app="automatixy", iteration=1, tools=["Edit"],
+                 summary="built", ts=ts)], live=True)
+chk("web bar phases == list(PHASES)", web["phases"] == list(PH))
+
+# Terminal bar: loop._bar prints every phase name from PHASES, in order.
+buf = io.StringIO()
+with redirect_stdout(buf):
+    loop._bar(loop.BUILD, active=loop.BUILD)
+term = buf.getvalue()
+chk("terminal bar prints every phase name", all(p in term for p in PH))
+chk("terminal bar prints Tests and Security", "Tests" in term and "Security" in term)
+chk("terminal bar phase order matches PHASES",
+    [term.index(p) for p in PH] == sorted(term.index(p) for p in PH))
+
+# --- 4) reached / failed_phase indices match the new 6-phase order (drift guard) ----------------
+# build done + live -> we've reached the Gate (next phase = index 1).
+chk("has_build (live) -> reached == Gate index", web["reached"] == PH.index("Gate"))
+
+# reviewed + live -> Build, Gate, Tests, Review behind us; Security is next (index 4).
+reviewed = _run([dict(event="ticket_start", ticket_id="AUTO-2", app="automatixy", branch="b", ts=ts),
+                 dict(event="build", ticket_id="AUTO-2", app="automatixy", iteration=1, tools=["Edit"],
+                      summary="built", ts=ts),
+                 dict(event="review", ticket_id="AUTO-2", iteration=1, verdict="PASS", summary="ok", ts=ts)],
+                live=True)
+chk("has_review (live) -> reached == Security index", reviewed["reached"] == PH.index("Security"))
+
+# merged -> every phase complete (reached == len), nothing failed.
+merged = _run([dict(event="ticket_start", ticket_id="AUTO-3", app="automatixy", branch="b", ts=ts),
+               dict(event="build", ticket_id="AUTO-3", app="automatixy", iteration=1, tools=["Edit"],
+                    summary="built", ts=ts),
+               dict(event="review", ticket_id="AUTO-3", iteration=1, verdict="PASS", summary="ok", ts=ts),
+               dict(event="merged", ticket_id="AUTO-3", app="automatixy", ts=ts)], live=False)
+chk("merged -> reached == len(PHASES)", merged["reached"] == len(PH))
+chk("merged -> no failed_phase", merged["failed_phase"] is None)
+
+# review-FAIL errored -> Review lights red at its NEW index (3, not the old 2).
+rev_fail = _run([dict(event="ticket_start", ticket_id="AUTO-4", app="automatixy", branch="b", ts=ts),
+                 dict(event="build", ticket_id="AUTO-4", app="automatixy", iteration=1, tools=["Edit"],
+                      summary="built", ts=ts),
+                 dict(event="review", ticket_id="AUTO-4", iteration=1, verdict="FAIL", summary="no", ts=ts),
+                 dict(event="ticket_exception", ticket_id="AUTO-4", app="automatixy", error="x", ts=ts)],
+                live=False)
+chk("review-FAIL -> failed_phase == Review index (3)", rev_fail["failed_phase"] == PH.index("Review") == 3)
+
+# built-but-not-reviewed errored -> Gate lights red (index 1, unchanged).
+gate_fail = _run([dict(event="ticket_start", ticket_id="AUTO-5", app="automatixy", branch="b", ts=ts),
+                  dict(event="build", ticket_id="AUTO-5", app="automatixy", iteration=1, tools=["Read"],
+                       summary="built", ts=ts),
+                  dict(event="ticket_exception", ticket_id="AUTO-5", app="automatixy", error="x", ts=ts)],
+                 live=False)
+chk("built-not-reviewed -> failed_phase == Gate index (1)", gate_fail["failed_phase"] == PH.index("Gate") == 1)
+
+ok = sum(1 for c in checks if c)
+print(f"{ok}/{len(checks)} passed")
+assert ok == len(checks), "EU-55 shared-phase-bar regression failed"
+print("OK")

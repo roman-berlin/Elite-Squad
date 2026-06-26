@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 from . import dashboard as D
 from .officers import display as _display
+from .phases import BUILD, GATE, PHASES, REVIEW, SECURITY
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
@@ -297,14 +298,16 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     has_build = any(d.get("build_summary") or d.get("tools") for d in t.get("passes_list", []))
     has_review = t.get("verdict") is not None
     merged = t.get("outcome") == "merged→dev"
-    phases = ["Build", "Gate", "Review", "Security", "Land"]
+    # One source of truth, shared with the terminal bar (loop._bar) so the two can't drift (EU-55).
+    # `reached` doubles as the count of completed phases AND the index of the current/next phase.
+    phases = list(PHASES)
     reached = 0
-    if has_build:          # build done; the gate runs next
-        reached = 1
-    if has_review:         # reviewed → build + gate behind it
-        reached = 3
-    if merged:             # security passed and landed
-        reached = 5
+    if has_build:          # build done → the Gate runs next
+        reached = GATE
+    if has_review:         # reviewed → Build, Gate and Tests are all behind it; Security runs next
+        reached = SECURITY
+    if merged:             # security passed and landed → every phase complete
+        reached = len(PHASES)
     # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
     # the phases behind it as cleanly-done. Derive the phase the run died at so the bar shows where
     # it actually broke instead of implying it sailed through review and just didn't deploy.
@@ -312,13 +315,13 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     if not live and t.get("outcome") in _FAILED_OUTCOMES:
         verdict = (t.get("verdict") or "").upper()
         if not has_build:
-            failed_phase = 0                                   # Build never finished
+            failed_phase = BUILD                               # Build never finished
         elif not has_review:
-            failed_phase = 1                                   # built, then died at the Gate
+            failed_phase = GATE                                # built, then died before review (the Gate)
         elif "FAIL" in verdict or "REJECT" in verdict:
-            failed_phase = 2                                   # review verdict was a rejection
+            failed_phase = REVIEW                              # review verdict was a rejection
         else:
-            failed_phase = 3                                   # passed review, broke at Security/Land
+            failed_phase = SECURITY                            # passed review, broke at Security/Land
     return {
         "live": live,
         "ticket": str(t.get("ticket_id") or "—"),

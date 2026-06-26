@@ -1400,7 +1400,7 @@ def create_app(cfg: Config):
         tickets = [t for t in groups if t != "—"]
         jira_base = ""
         try:
-            jira_base = str((app_cfg.backlog or {}).get("site", "")).rstrip("/")
+            jira_base = str((getattr(app_cfg, "backlog", {}) or {}).get("base_url", "")).rstrip("/")
         except Exception:  # noqa: BLE001
             jira_base = ""
         cards = []
