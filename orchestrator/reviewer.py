@@ -11,7 +11,7 @@ import re
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import filing, memory
 from .agent import run_agent
 from .config import AppConfig, Config, normalize_effort
 from .contracts import QualityIssue, ReviewResult, Ticket, Verdict
@@ -59,6 +59,13 @@ Rules for the verdict:
   missing acceptance criterion) — not for ordinary code fixes. When needs_human is true,
   set verdict to FAIL.
 """
+
+# EU-42: give the Reviewer the out-of-scope findings channel. A real-but-off-spec issue it notices
+# while judging the diff (a bug/risk outside THIS ticket's scope) is emitted as the shared
+# ===TICKETS=== block, which loop._route_out_of_scope parses off review.raw and routes into the
+# backlog (de-duped, labeled out-of-scope) instead of letting it evaporate. Reuses filing.py — the
+# same machine block the QA/Security/Release officers already use.
+REVIEWER_SYSTEM += filing.TICKET_BLOCK_RULE
 
 
 def _prompt(diff: str, ticket: Ticket) -> str:

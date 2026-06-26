@@ -13,6 +13,7 @@ answers; the product-direction ones it routes to Roman with a recommendation.
 """
 from __future__ import annotations
 
+from . import filing
 from .config import Config
 
 PM_SYSTEM = """\
@@ -119,9 +120,19 @@ the ticket is genuinely oversized for one build. Reserve ESCALATE for what only 
 
 End with EXACTLY one line, nothing after it:  TRIAGE: RESOLVE   or   TRIAGE: ESCALATE   or   TRIAGE: SPLIT"""
 
+# EU-42: PM triage can ALSO spot real-but-off-spec issues while judging an exhausted ticket. Give it the
+# same out-of-scope findings channel (shared ===TICKETS=== block) so those land in the backlog via
+# loop._route_out_of_scope — which reads the PM's full raw reply (parse_triage(...)['raw']) so the block
+# survives regardless of where the model places it relative to the TRIAGE verdict line.
+PM_TRIAGE_SYSTEM += filing.TICKET_BLOCK_RULE
+
 
 def parse_triage(text: str | None) -> dict[str, str]:
-    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE|SPLIT, text}. Unclear -> ESCALATE."""
+    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE|SPLIT, text, raw}. Unclear -> ESCALATE.
+
+    `text` is the human-facing instruction with the TRIAGE verdict line AND any EU-42 out-of-scope
+    ===TICKETS=== block stripped (so a RESOLVE comment never carries the machine block); `raw` keeps the
+    full reply so the loop can route that findings block to the backlog separately."""
     raw = (text or "").strip()
     up = raw.upper()
     if "TRIAGE: SPLIT" in up:
@@ -132,8 +143,11 @@ def parse_triage(text: str | None) -> dict[str, str]:
         action = "ESCALATE"
     else:
         action = "ESCALATE"
-    body = raw.rsplit("TRIAGE:", 1)[0].strip() if "TRIAGE:" in up else raw
-    return {"action": action, "text": body or "(the PM gave no detail)"}
+    # Drop the out-of-scope findings block (routed separately from `raw`) before isolating the
+    # instruction, then trim the trailing TRIAGE verdict line.
+    _proposals, clean = filing.parse_tickets(raw)
+    body = clean.rsplit("TRIAGE:", 1)[0].strip() if "TRIAGE:" in clean.upper() else clean
+    return {"action": action, "text": body or "(the PM gave no detail)", "raw": raw}
 
 
 async def triage(cfg: Config, app_name: str, ticket_id: str, last_build: str = "",

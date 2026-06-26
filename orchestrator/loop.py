@@ -614,6 +614,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         if cfg.notify_verbose:
             _notify(cfg, f"🔎 {ticket.id} — Code Reviewer verdict: {review.verdict.value}")
 
+        # EU-42: real-but-off-spec findings the Reviewer flagged (===TICKETS=== block on review.raw)
+        # go to the backlog — auto-filed or proposed for you — instead of being lost.
+        _route_out_of_scope(cfg, ticket, app, audit, review.raw, source="reviewer")
+
         # A product/scope decision only the Commander can make -> stop and ask, don't loop.
         if review.needs_human:
             decisions.add(cfg, ticket, app.name, review.question or review.summary)
@@ -680,6 +684,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                       last_build=(build.summary or build.raw or ""), rejections=last_changes)
         except Exception:  # noqa: BLE001 - triage must never crash the run
             triage = None
+
+    # EU-42: the PM may surface its own off-spec findings while triaging — route them to the backlog
+    # (===TICKETS=== block carried in the PM's full raw reply) before we act on the triage verdict.
+    if triage and triage.get("raw"):
+        _route_out_of_scope(cfg, ticket, app, audit, triage["raw"], source="pm-triage")
 
     if triage and triage["action"] == "RESOLVE":
         audit.record("pm_triage", ticket_id=ticket.id, action="RESOLVE", instruction=triage["text"][:600])
@@ -839,6 +848,56 @@ async def _after_merge_scout(cfg, app, ticket, audit) -> None:
                 + (("\n\n" + block) if block else ""))
     except Exception as exc:  # noqa: BLE001 - after-merge recon must never break the run
         print(f"  scout smoke skipped: {exc}", flush=True)
+
+
+def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
+    """EU-42: route real-but-off-spec findings the Reviewer/PM flagged (their ===TICKETS=== block on
+    `report`) into the backlog instead of losing them.
+
+    When ``cfg.out_of_scope_autofile`` is on we AUTO-FILE each finding as its own ticket — labeled
+    'out-of-scope', assigned to the Commander (filing.create_task assigns to you by default), and
+    de-duped against open tickets by filing's existing find_open_by_summary. When it is off we
+    PROPOSE-FIRST: record a pending decision so the proposals surface in the cockpit's 'Needs you'
+    for the Commander to wave through — never silently dropped. Never raises: routing findings out of
+    the build must not break the run."""
+    try:
+        from . import filing
+        proposals, _clean = filing.parse_tickets(report or "")
+        if not proposals:
+            return
+        if getattr(cfg, "out_of_scope_autofile", False):
+            if cfg.dry_run:
+                titles = ", ".join(str(p.get("title", "?")) for p in proposals)
+                print(f"  filing · {len(proposals)} out-of-scope finding(s) ({source}, dry-run — not filed): "
+                      f"{titles}", flush=True)
+                return
+            result = filing.file_findings(app, "out-of-scope", report)
+            if audit is not None:
+                audit.record("out_of_scope_filed", ticket_id=ticket.id, source=source,
+                             filed=result.filed, deduped=result.deduped,
+                             failed=[t for t, _ in result.failed])
+            if result.lines:
+                print(f"  filing · out-of-scope findings ({source}):", flush=True)
+                for ln in result.lines:
+                    print(f"    {ln}", flush=True)
+            if result.failed:
+                _notify(cfg, f"⚠️ {ticket.id} — {len(result.failed)} out-of-scope finding(s) could not be "
+                             "filed:\n" + "\n".join(f"• {t}: {e}" for t, e in result.failed))
+        else:
+            titles = "\n".join(f"• [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
+            question = ("Out-of-scope findings surfaced while working this ticket — file them as their own "
+                        f"backlog tickets?\n{titles}\n\n(set out_of_scope_autofile to file these "
+                        "automatically next time.)")
+            # Distinct decision id so the proposal doesn't clobber (or get clobbered by) a needs_human
+            # decision recorded for the SAME ticket — both must survive in the cockpit 'Needs you'.
+            decisions.add(cfg, ticket, app.name, question, entry_id=f"{ticket.id}#out-of-scope")
+            if audit is not None:
+                audit.record("out_of_scope_proposed", ticket_id=ticket.id, source=source,
+                             titles=[p.get("title") for p in proposals])
+            print(f"  filing · {len(proposals)} out-of-scope finding(s) proposed → cockpit 'Needs you' "
+                  f"({source})", flush=True)
+    except Exception as exc:  # noqa: BLE001 - routing findings must never break the run
+        print(f"  filing · out-of-scope routing skipped ({source}): {exc}", flush=True)
 
 
 def _cleanup(cfg, git, audit, report) -> None:

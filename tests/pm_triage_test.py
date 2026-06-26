@@ -14,7 +14,7 @@ req.Session = lambda: types.SimpleNamespace(auth=None, headers=types.SimpleNames
 sys.modules["requests"] = req
 sys.path.insert(0, ".")
 
-from orchestrator import pm, dashboard as D, loop, autopilot
+from orchestrator import pm, dashboard as D, loop, autopilot, filing
 from orchestrator.contracts import Outcome
 from orchestrator.config import Config
 
@@ -29,6 +29,22 @@ chk("parse: keeps the instruction, drops the verdict line", "supabase" in r["tex
 chk("parse: ESCALATE", pm.parse_triage("BLOCKER: need the coordinator phone.\nTRIAGE: ESCALATE")["action"] == "ESCALATE")
 chk("parse: unclear -> ESCALATE (ask)", pm.parse_triage("hmm, not sure")["action"] == "ESCALATE")
 chk("parse: empty -> ESCALATE + placeholder", pm.parse_triage("")["action"] == "ESCALATE" and pm.parse_triage("")["text"])
+
+# EU-42: an out-of-scope ===TICKETS=== block in the triage reply is kept OUT of the human-facing
+# instruction `text`, but preserved in `raw` so loop._route_out_of_scope can route it to the backlog
+# regardless of where the model places the block relative to the TRIAGE verdict line.
+_blk = ("Land the in-scope fix; back out the stray edit.\nTRIAGE: RESOLVE\n"
+        '===TICKETS===\n[{"title": "Fix unrelated crash", "type": "Bug", "severity": "HIGH", "body": "x.py"}]\n===END===')
+_rt = pm.parse_triage(_blk)
+chk("triage+block: action still parsed past a trailing TICKETS block", _rt["action"] == "RESOLVE")
+chk("triage+block: instruction text drops the machine block",
+    "===TICKETS===" not in _rt["text"] and "Fix unrelated crash" not in _rt["text"])
+chk("triage+block: instruction text keeps the real instruction", "back out the stray edit" in _rt["text"])
+chk("triage+block: raw preserves the block for backlog routing",
+    "===TICKETS===" in _rt["raw"] and "Fix unrelated crash" in _rt["raw"])
+chk("triage+block: filing.parse_tickets recovers the finding from raw", len(filing.parse_tickets(_rt["raw"])[0]) == 1)
+chk("PM-triage system prompt carries the out-of-scope channel (producer side)",
+    filing.TICKET_BLOCK_RULE in pm.PM_TRIAGE_SYSTEM)
 
 # --- REQUEUED outcome exists + is NOT parked ---
 chk("REQUEUED outcome value", Outcome.REQUEUED.value == "requeued")
