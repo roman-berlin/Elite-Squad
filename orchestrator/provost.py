@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import guard, memory
 from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
@@ -103,6 +103,7 @@ async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
     ANY exception at the gate also blocks (the caller opens a PR rather than landing on DEV).
     """
     try:
+        guard.warn_if_absent("provost-gate")   # EU-47: loud one-liner if the gate runs under bypass with no guard
         options = ClaudeAgentOptions(
             model=cfg.reviewer_model,
             system_prompt=memory.preamble() + PROVOST_GATE_SYSTEM,
@@ -110,6 +111,9 @@ async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
             permission_mode="bypassPermissions",
             allowed_tools=["Read", "Grep", "Glob", "Bash"],
             disallowed_tools=["Write", "Edit", "NotebookEdit"],
+            # EU-47: the gate reads an attacker-influenceable diff with Bash allowed, so the hard denylist
+            # must guard it too — deny-by-content (cat .env / exfil) is the boundary, not removing Bash.
+            hooks=guard.hooks_config(),
             setting_sources=["project"],
             max_turns=18,
             effort="high",
