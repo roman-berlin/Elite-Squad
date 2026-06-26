@@ -152,7 +152,7 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
         print(f"  🛑 {ticket.id}: ran out of turns — too big and unsplittable; escalated to you.", flush=True)
         return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name,
                             notes="ran out of turns — ticket too big for one pass")
-    audit.record("ticket_exception", ticket_id=ticket.id, app=app.name, error=msg)
+    audit.record(Outcome.ERRORED.audit_event, ticket_id=ticket.id, app=app.name, error=msg)
     _notify(cfg, f"❌ {ticket.id} — error: {msg[:200]}")
     return TicketReport(ticket.id, Outcome.ERRORED, 0, 0.0, app.name, notes=msg)
 
@@ -691,7 +691,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         _route_out_of_scope(cfg, ticket, app, audit, triage["raw"], source="pm-triage")
 
     if triage and triage["action"] == "RESOLVE":
-        audit.record("pm_triage", ticket_id=ticket.id, action="RESOLVE", instruction=triage["text"][:600])
+        audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="RESOLVE",
+                     instruction=triage["text"][:600])
         if not cfg.dry_run and not ticket.ephemeral:
             try:
                 backlog.add_comment(ticket, "🎖️ [PM] One focused pass to finish — stay strictly in "
@@ -715,7 +716,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             sp = {"ok": False, "keys": [], "error": str(exc)}
         if sp.get("ok") and sp.get("keys"):
             kk = ", ".join(sp["keys"])
-            audit.record("pm_triage", ticket_id=ticket.id, action="SPLIT", into=sp["keys"])
+            audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="SPLIT", into=sp["keys"])
             _notify(cfg, f"🧩 {ticket.id} was too heavy — the Scrum Master split it into {kk} (on you) and "
                          "closed the parent. The unit takes the fragments next.")
             print(f"  🧩 {ticket.id}: too heavy → Scrum Master split into {kk}; parent closed.", flush=True)
@@ -766,7 +767,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         print(f"  land · (dry-run) {note}", flush=True)
         _bar(4) if not reason else _bar(3, fail=3)
         _notify(cfg, f"🧪 {ticket.id} — {note}\n{ticket.summary}")
-        audit.record("dryrun_land", ticket_id=ticket.id, note=note)
+        audit.record(Outcome.SKIPPED.audit_event, ticket_id=ticket.id, note=note)
         return TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch, notes=note)
 
     # LIVE + validated -> fast-forward DEV to the trial and push: the ONLY moment DEV changes.
@@ -791,7 +792,8 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 ticket, f"✅ Merged to {app.base_branch} — {head}.\nWhat was done: {whatdone}{test_line}")
         done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
-        audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
+        audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,
+                     done=cfg.mark_done_on_merge)
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).
         _record_changelog(cfg, ticket, app, review.summary or build.summary, turl)
 
@@ -827,7 +829,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             backlog.attach_pr(ticket, pr_url)
     _notify(cfg, f"⚠️ {ticket.id} needs you — not auto-merged ({reason})\n"
             + (pr_url or "open a PR manually"))
-    audit.record("pr_opened", ticket_id=ticket.id, reason=reason, pr_url=pr_url)
+    audit.record(Outcome.PR_OPENED.audit_event, ticket_id=ticket.id, reason=reason, pr_url=pr_url)
     return TicketReport(ticket.id, Outcome.PR_OPENED, iteration, cost, app.name, branch,
                         pr_url=pr_url, notes=reason)
 

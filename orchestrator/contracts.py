@@ -135,6 +135,37 @@ class Outcome(str, Enum):
     SKIPPED = "skipped"           # dry-run (no side effects)
     REQUEUED = "requeued"         # PM triage sent it back for ONE corrective pass (not parked)
 
+    @property
+    def audit_event(self) -> str:
+        """The canonical ``audit.jsonl`` ``event`` string this outcome is recorded under.
+
+        The Outcome enum is the SINGLE source of truth for run outcomes (EU-51). The land path
+        records terminal events via ``Outcome.<X>.audit_event`` instead of hand-typed literals, and
+        the dashboard/forensics reconstruct the outcome via ``AUDIT_EVENT_OUTCOME`` — so the two
+        vocabularies can never silently drift apart and mis-classify a run."""
+        return _OUTCOME_AUDIT_EVENT[self]
+
+
+# Canonical Outcome -> audit-event name. One event per outcome; this is the name the loop records.
+_OUTCOME_AUDIT_EVENT: dict[Outcome, str] = {
+    Outcome.MERGED: "merged",
+    Outcome.PR_OPENED: "pr_opened",
+    Outcome.ESCALATED: "needs_human",
+    Outcome.ERRORED: "ticket_exception",
+    Outcome.SKIPPED: "dryrun_land",
+    Outcome.REQUEUED: "pm_triage",
+}
+
+# Reverse map: audit-event string -> Outcome, used to reconstruct a run's outcome from the log. It
+# includes the canonical events above PLUS sub-cause ALIASES — finer-grained events the loop records
+# for a specific reason that still reconstruct to the same coarse Outcome (e.g. a no-diff build and an
+# infra exception are both ERRORED). Keep new audit events that represent a run outcome registered here.
+AUDIT_EVENT_OUTCOME: dict[str, Outcome] = {
+    **{event: outcome for outcome, event in _OUTCOME_AUDIT_EVENT.items()},
+    "no_changes": Outcome.ERRORED,    # builder produced no diff (distinct sub-cause of ERRORED)
+    "escalated": Outcome.ESCALATED,   # explicit/legacy escalation event
+}
+
 
 @dataclass
 class TicketReport:

@@ -62,6 +62,18 @@ chk("names the failing board + the actionable fix", "Elite-Unit" in out and "Rot
 chk("announced ONCE per idle stretch (no spam)", out.count("UNREACHABLE") == 1, f"count={out.count('UNREACHABLE')}")
 chk("pinged Telegram about the unreachable backlog", any("unreachable" in s.lower() for s in sent), str(sent)[:200])
 
+# EU-51: the dark backlog must also leave a DURABLE trail in audit.jsonl (not just a print + notify),
+# naming the unreachable board(s) — else a queue that went dark at 3am has zero forensic record.
+import json
+audit_rows = [json.loads(ln) for ln in Path(cfg.audit_path).read_text().splitlines() if ln.strip()]
+bu = [r for r in audit_rows if r.get("event") == "backlog_unreachable"]
+chk("recorded a 'backlog_unreachable' audit event", len(bu) == 1, f"rows={len(bu)}")
+chk("the audit event names the dead board + the actionable fix",
+    bool(bu) and "Elite-Unit" in bu[0].get("boards", {}) and "Rotate" in str(bu[0].get("boards", {})),
+    str(bu[:1])[:200])
+chk("did NOT record a 'queue_clear' while a board was unreachable",
+    not any(r.get("event") == "queue_clear" for r in audit_rows))
+
 # control: with NO drain errors the old honest 'queue clear' must still appear
 autopilot.intake.LAST_DRAIN_ERRORS.clear()
 ev2 = threading.Event(); sleeps["n"] = 0
@@ -75,6 +87,12 @@ with contextlib.redirect_stdout(buf2):
     asyncio.run(autopilot.autopilot(cfg, once=False, interval=1, stop_event=ev2))
 out2 = buf2.getvalue()
 chk("a genuinely empty queue still says 'queue clear'", "queue clear" in out2 and "UNREACHABLE" not in out2)
+
+# EU-51: the benign empty queue records 'queue_clear' (so the log distinguishes "genuinely clear" from
+# "hidden behind a dead board"), distinct from the unreachable case.
+rows2 = [json.loads(ln) for ln in Path(cfg.audit_path).read_text().splitlines() if ln.strip()]
+chk("a genuinely empty queue records a 'queue_clear' audit event",
+    any(r.get("event") == "queue_clear" for r in rows2))
 
 print("\n============ AUTOPILOT UNREACHABLE-BACKLOG QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
