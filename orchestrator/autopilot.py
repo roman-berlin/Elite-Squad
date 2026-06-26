@@ -169,7 +169,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     audit.record("autopilot_start", mode=mode, app=app_name, once=once)
     budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
     budget_alerted = False
-    idle_announced = False   # print "queue clear" once per idle stretch, not every interval
+    # Last-announced idle REASON, as (bool(unreachable), frozenset(unreachable boards)) — or None when
+    # not idling. Keying on the reason (not a bare "already announced" flag) is the EU-50 fix: a board
+    # going dark AFTER the queue idled clear is a state change that must push once.
+    idle_state: tuple[bool, frozenset[str]] | None = None
     git_held = False         # hold (once-announced) while the Commander is mid-rebase/merge locally
     try:
         while True:
@@ -230,7 +233,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 # what hid EU's whole To Do column behind a dead JIRA_API_TOKEN. (Jira answers an
                 # unauthenticated search with HTTP 200 + no issues — see backlog/jira._raise_if_unauthenticated.)
                 unreachable = dict(intake.LAST_DRAIN_ERRORS)
-                if not idle_announced:   # say it once, then stay quiet until the state changes
+                # Re-announce on ANY transition: clear↔unreachable, or a changed set of dark boards. The
+                # old single `idle_announced` flag was set True by whichever branch fired and only reset
+                # when work appeared — so a queue that idled clear and THEN went dark (Jira token expired
+                # → empty worklist again) stayed True and silently skipped the UNREACHABLE alert (EU-50).
+                state = (bool(unreachable), frozenset(unreachable))
+                if state != idle_state:   # say each distinct idle reason once, then stay quiet
                     if unreachable:
                         boards = "; ".join(f"{name} — {msg}" for name, msg in unreachable.items())
                         print(f"  ⚠ NOT a clear queue: {len(unreachable)} board(s) UNREACHABLE this cycle, "
@@ -241,13 +249,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                         print("  · queue clear — nothing of yours in In Progress / To Do"
                               + (f" (parked: {', '.join(sorted(blocked))})" if blocked else "")
                               + " — idling; I'll pick up new or unblocked tickets automatically.", flush=True)
-                    idle_announced = True
+                    idle_state = state
                 if once:
                     break
                 await events.after_cycle(cfg, [], audit, blocked)   # quiet cycle — room for life
                 _sleep(max(5, interval), stop_event)
                 continue
-            idle_announced = False   # work again → re-announce next time the queue empties
+            idle_state = None   # work again → re-announce next time the queue empties
 
             ids = ", ".join(t.id for _, t in worklist)
             print(f"  · taking {ids}", flush=True)
