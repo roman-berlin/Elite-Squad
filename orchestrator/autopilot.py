@@ -211,8 +211,20 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     # going dark AFTER the queue idled clear is a state change that must push once.
     idle_state: tuple[bool, frozenset[str]] | None = None
     git_held = False         # hold (once-announced) while the Commander is mid-rebase/merge locally
+
+    # EU-64: reflect this autopilot on its OWN project's cockpit run-state (keyed per app), so a
+    # per-project board shows autopilot working THIS project without reading/writing another's state.
+    # ``app_name=None`` (all backlog apps) maps to the unit-wide default key. We claim the slot for the
+    # project; if it's already held — e.g. server.py holds the unit-wide guard for autopilot's whole
+    # lifetime, or a manual run owns this app — we run anyway but DON'T own the release, so we never
+    # clear or clobber someone else's run-state.
+    from . import cockpit_state
+    run_key = app_name or None
+    owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
+    run_state = cockpit_state.get_state(run_key)
     try:
         while True:
+            run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
                 break
@@ -361,4 +373,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             _sleep(_ERROR_BACKOFF_SEC if retrying else 3, stop_event)
     except KeyboardInterrupt:
         print("\n🛸 Autopilot stood down. Nothing left mid-flight.", flush=True)
+    finally:
+        # Release THIS project's run-state if we own it (clears active / run_started / stop_event) and
+        # drop the dry/live tag, so the per-project board shows no stale run once autopilot stands down.
+        if owns_run_state:
+            cockpit_state.release_run(run_key)
+            run_state["dry_run"] = None
     audit.record("autopilot_stop")

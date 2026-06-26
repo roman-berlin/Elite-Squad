@@ -34,9 +34,13 @@ srv.run_loop = fake_run_loop
 app = srv.create_app(cfg)
 c = app.test_client()
 
+# EU-64: the run is now per-project — its active/dry_run/run_started live on the app's OWN state
+# (``get_state("automatixy")``), not the unit-wide ``_state``. Wait on (and assert) that key.
+ST = srv.get_state("automatixy")
+
 def wait_idle():
     for _ in range(40):
-        if not srv._state["active"]:
+        if not ST["active"]:
             return
         time.sleep(0.05)
 
@@ -53,8 +57,8 @@ chk("default run is LIVE (dry_run is False)", captured.get("dry_run") is False, 
 
 # 3) after the run finishes, the dry/live flag is cleared (no stale tag)
 wait_idle(); time.sleep(0.1)
-chk("dry_run reset to None after the run ends", srv._state["dry_run"] is None, str(srv._state.get("dry_run")))
-chk("run_started reset to None after the run ends", srv._state["run_started"] is None, str(srv._state.get("run_started")))
+chk("dry_run reset to None after the run ends", ST["dry_run"] is None, str(ST.get("dry_run")))
+chk("run_started reset to None after the run ends", ST["run_started"] is None, str(ST.get("run_started")))
 
 # 4) opt-in dry run -> DRY
 done.clear(); captured.clear()

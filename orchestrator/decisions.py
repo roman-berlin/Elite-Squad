@@ -234,32 +234,43 @@ def handle_reply(cfg, audit, text: str) -> bool:
     return True
 
 
+def _worklist_app_key(worklist) -> str | None:
+    """EU-64: the per-project run-state key for a worklist — its single app's name, or ``None`` (the
+    unit-wide default key) when the worklist is empty, untyped, or spans more than one project (a bare
+    ``/drain``). Keying the resume/run on the app means a thread for project A never blocks (or clears)
+    project B's run, and two resumes of the SAME project still share one per-app TOCTOU guard (F7)."""
+    names: set[str | None] = set()
+    for item in (worklist or []):
+        app = item[0] if isinstance(item, tuple) else None
+        names.add(getattr(app, "name", None))
+    names.discard(None)
+    return next(iter(names)) if len(names) == 1 else None
+
+
 def _run_bg(cfg, audit, worklist, *, refuse_if_busy: bool = False) -> bool:
-    """Run a worklist in a background thread, claiming the cockpit run-guard (``_state["active"]``).
+    """Run a worklist in a background thread, claiming THIS project's cockpit run-guard (EU-64).
 
-    Mirrors the run POSTs in ``server.py``: the guard is set under ``_run_lock`` so the War Room badge
-    reflects this run and a concurrent cockpit run refuses. Returns True when the run was started.
+    Mirrors the run POSTs in ``server.py``, but keyed PER PROJECT via ``cockpit_state.claim_run`` so a
+    resume/run for one project runs truly in parallel with another's, while a second run on the SAME
+    project still can't double-start (F7, the per-app TOCTOU guard). Returns True when the run started.
 
-    ``refuse_if_busy=True`` (Telegram ``/run`` / ``/drain``): if a run/loop is already active, REFUSE
-    rather than start an overlapping run on the same app — notify and return False.
+    ``refuse_if_busy=True`` (Telegram ``/run`` / ``/drain``): if a run/loop is already active for this
+    project (or the parallel-run cap is reached), REFUSE rather than start an overlapping run — notify
+    and return False.
 
-    ``refuse_if_busy=False`` (decision resume): a resumed escalation is flock-safe (``loop.py``) and must
-    proceed even while autopilot is live — that is the always-on case, and the pending decision has
-    already been popped, so dropping it would lose the Commander's answer. It still claims the badge flag
-    when it's free, but never refuses.
+    ``refuse_if_busy=False`` (decision resume): a resumed escalation is flock-safe (``loop.py``) and
+    must proceed even while a run for its project is live — that is the always-on case, and the pending
+    decision has already been popped, so dropping it would lose the Commander's answer. It still claims
+    this project's badge when free, but never refuses.
     """
-    from .cockpit_state import _run_lock, _state
+    from . import cockpit_state
     from .loop import run as run_loop
 
-    owns_guard = False
-    with _run_lock:
-        if _state.get("active"):
-            if refuse_if_busy:
-                notify.send("⏳ A run is already in progress — try again once it finishes.")
-                return False
-        else:
-            _state["active"] = True
-            owns_guard = True
+    run_key = _worklist_app_key(worklist)
+    owns_guard = cockpit_state.claim_run(run_key)
+    if not owns_guard and refuse_if_busy:
+        notify.send("⏳ A run is already in progress for this project — try again once it finishes.")
+        return False
 
     def _bg():
         try:
@@ -268,7 +279,7 @@ def _run_bg(cfg, audit, worklist, *, refuse_if_busy: bool = False) -> bool:
             notify.send(f"⚠️ run failed: {exc}")
         finally:
             if owns_guard:
-                _state["active"] = False
+                cockpit_state.release_run(run_key)
     threading.Thread(target=_bg, daemon=True).start()
     return True
 

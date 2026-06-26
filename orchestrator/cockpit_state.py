@@ -9,20 +9,196 @@ stay valid for callers and tests, and every importer shares the SAME mutable obj
 from __future__ import annotations
 
 import collections as _collections
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 
-_state = {"active": False, "last_msg": "", "last_result": "", "drilling": False, "dry_run": None,
-          "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
-          "approving": None}
+# --------------------------------------------------------------------------------------------------
+# EU-64 — PER-PROJECT run state (retire the single global run-lock).
+#
+# The cockpit used to carry ONE global ``_state`` dict and ONE global ``_run_lock``, which serialised
+# every run across the whole unit: project B couldn't start while project A was running. That single
+# global is replaced here by per-app keyed state + a per-app lock so distinct projects run truly in
+# parallel, while two near-simultaneous POSTs for the SAME project still can't double-start (the
+# per-app TOCTOU guard).
+#
+# Back-compat: the legacy single-context names stay valid. ``_state`` and ``_run_lock`` ARE the
+# state/lock for the default key (``None``) — so existing callers that do ``_state["active"]`` or
+# ``with _run_lock:`` keep operating on the default run, while new per-app callers go through
+# ``get_state(app)`` / ``run_lock_for(app)`` / ``claim_run(app)``.
+# --------------------------------------------------------------------------------------------------
+
+_STATE_KEYS = ("active", "last_msg", "last_result", "drilling", "dry_run",
+               "last_activity", "run_started", "stop_event", "log_seq", "approving")
+
+
+def _new_state() -> dict:
+    """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
+    return {"active": False, "last_msg": "", "last_result": "", "drilling": False, "dry_run": None,
+            "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
+            "approving": None}
+
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions
 #                  (ship / promote / patrol) — set by their _bg, shown once on /, then cleared.
 
-# Guards the active check-then-set so two near-simultaneous run POSTs can't both pass the
-# `_state["active"]` guard and start two runs (TOCTOU race). Acquire it whenever you claim a run.
+# The default (single-context) run-state, kept under the ``None`` key. ``_state`` is an ALIAS of
+# ``_states[None]`` so legacy ``_state[...]`` access stays valid.
+_state = _new_state()
 _run_lock = threading.Lock()
+# Per-app registries. The ``None`` key is the legacy/default run; concrete app names are added lazily
+# by ``get_state`` / ``run_lock_for``. ``_registry_lock`` guards the lazy-create of both dicts.
+_states: "dict[object, dict]" = {None: _state}
+_run_locks: "dict[object, threading.Lock]" = {None: _run_lock}
+_registry_lock = threading.Lock()
+# Serialises the cross-app cap check + per-app claim so the max-parallel-runs cap is honoured even
+# when two DIFFERENT projects race to start at the same instant.
+_claim_lock = threading.Lock()
+
+# Shared, monotonic log sequence — bumped on every captured stdout line so SSE streamers (per-tab or
+# global) can long-poll for "is there anything new". Each app's own ``log_seq`` is bumped too.
+_shared_log_seq = 0
+_log_seq_lock = threading.Lock()
+
+# Optional cap on how many projects may run CONCURRENTLY (0 / None = unlimited). Set from config via
+# ``set_max_parallel_runs``; an ``EU_MAX_PARALLEL_RUNS`` env var overrides it.
+_max_parallel_runs = 0
+
+
+# --------------------------------------------------------------------------------------------------
+# Per-app run-state accessors / helpers (the foundation the other EU-64 slices import).
+# --------------------------------------------------------------------------------------------------
+
+def get_state(app: str | None = None) -> dict:
+    """The run-state dict for ``app`` (lazily created). ``app=None`` returns the default ``_state``.
+
+    Same object on every call for a given app, so callers mutate the live state in place."""
+    if app is None:
+        return _state
+    with _registry_lock:
+        st = _states.get(app)
+        if st is None:
+            st = _new_state()
+            _states[app] = st
+        return st
+
+
+def run_lock_for(app: str | None = None) -> threading.Lock:
+    """The per-app run lock (lazily created). ``app=None`` returns the default ``_run_lock``.
+
+    Acquire it around any check-then-set on ``get_state(app)["active"]`` to close the same-project
+    TOCTOU race that the single global ``_run_lock`` used to close unit-wide."""
+    if app is None:
+        return _run_lock
+    with _registry_lock:
+        lk = _run_locks.get(app)
+        if lk is None:
+            lk = threading.Lock()
+            _run_locks[app] = lk
+        return lk
+
+
+def is_active(app: str | None = None) -> bool:
+    """Whether ``app`` currently has a run in flight."""
+    return bool(get_state(app).get("active"))
+
+
+def active_runs() -> list[object]:
+    """The keys (app names; ``None`` for the default) of every currently-active run."""
+    with _registry_lock:
+        return [key for key, st in _states.items() if st.get("active")]
+
+
+def active_run_count() -> int:
+    """How many projects are running right now."""
+    return len(active_runs())
+
+
+def max_parallel_runs() -> int:
+    """The concurrent-run cap (0 = unlimited). ``EU_MAX_PARALLEL_RUNS`` env var overrides config."""
+    env = os.environ.get("EU_MAX_PARALLEL_RUNS")
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    return max(0, int(_max_parallel_runs or 0))
+
+
+def set_max_parallel_runs(n: int | None) -> None:
+    """Set the concurrent-run cap from config (0 / None = unlimited)."""
+    global _max_parallel_runs
+    _max_parallel_runs = max(0, int(n or 0))
+
+
+def claim_run(app: str | None = None, *, dry_run: bool | None = None,
+              stop_event: object | None = None) -> bool:
+    """Atomically claim a run slot for ``app``: the check-then-set that starts exactly one run.
+
+    Returns True if the caller now owns the run (it must ``release_run`` when done), or False if a
+    run for ``app`` is already in flight OR the max-parallel-runs cap is reached. Holds the global
+    claim lock (so the cross-app cap is honoured under a race) and the per-app lock (so two POSTs for
+    the SAME project can't both win)."""
+    with _claim_lock:
+        cap = max_parallel_runs()
+        st = get_state(app)
+        if cap and not st.get("active") and active_run_count() >= cap:
+            return False
+        with run_lock_for(app):
+            if st.get("active"):
+                return False
+            st["active"] = True
+            st["run_started"] = time.time()
+            st["last_activity"] = time.time()
+            if dry_run is not None:
+                st["dry_run"] = dry_run
+            if stop_event is not None:
+                st["stop_event"] = stop_event
+            return True
+
+
+def release_run(app: str | None = None) -> None:
+    """Release ``app``'s run slot (clears ``active`` + run bookkeeping). Mirror of ``claim_run``."""
+    with run_lock_for(app):
+        st = get_state(app)
+        st["active"] = False
+        st["run_started"] = None
+        st["stop_event"] = None
+
+
+def bump_log_seq(app: str | None = None) -> int:
+    """Bump the shared log sequence AND ``app``'s own ``log_seq`` + heartbeat; return the shared seq.
+
+    Called on every captured stdout line. The shared counter wakes global SSE streamers; the per-app
+    ``log_seq`` wakes that project's tab streamer."""
+    global _shared_log_seq
+    with _log_seq_lock:
+        _shared_log_seq += 1
+        seq = _shared_log_seq
+    st = get_state(app)
+    st["last_activity"] = time.time()   # heartbeat — proves the run is alive
+    st["log_seq"] = st.get("log_seq", 0) + 1
+    return seq
+
+
+def shared_log_seq() -> int:
+    """The current shared log sequence (for global, not-per-app, SSE long-polling)."""
+    return _shared_log_seq
+
+
+def reset_run_state() -> None:
+    """Drop every per-app run-state + lock back to the default-only registry — test seam."""
+    global _shared_log_seq
+    with _registry_lock:
+        _states.clear()
+        _states[None] = _state
+        _run_locks.clear()
+        _run_locks[None] = _run_lock
+        for key in list(_state.keys()):
+            _state[key] = _new_state()[key]
+    with _log_seq_lock:
+        _shared_log_seq = 0
 
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
@@ -50,8 +226,9 @@ class _Tee:
             t = line.rstrip()
             if t and "/api/board" not in t and "GET /api/" not in t:
                 _LOG.append(t)
-                _state["last_activity"] = time.time()   # heartbeat — proves the unit is alive
-                _state["log_seq"] = _state.get("log_seq", 0) + 1   # wake SSE streamers (real-time push)
+                # Heartbeat + wake SSE streamers. stdout isn't per-app attributable, so bump the
+                # shared seq (global streamers) and the default state (legacy + heartbeat).
+                bump_log_seq()
 
     def flush(self):
         self._real.flush()
