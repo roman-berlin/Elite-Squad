@@ -58,7 +58,7 @@ loop.builder_mod = FakeBuilder
 
 SAME = ["Add an explicit tenant_id filter to the query"]
 review_calls = []
-async def fake_review(diff, ticket, app, cfg):
+async def fake_review(diff, ticket, app, cfg, iteration=1):   # EU-52: review() now takes the build iteration
     review_calls.append(1)
     return ReviewResult(verdict=Verdict.FAIL, spec_met=False, required_changes=list(SAME), cost_usd=0.0)
 reviewer_mod.review = fake_review

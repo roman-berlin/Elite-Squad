@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import guard, memory
+from . import guard, memory, models
 from .agent import run_agent
 from .config import Config
 from .filing import TICKET_BLOCK_RULE
@@ -52,13 +52,18 @@ def _prompt(app) -> str:
 
 async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     app = cfg.app(app_name)
-    from . import recon
+    from . import recon, models
     # Read-only security recon. With delegation armed, the Security Engineer decides for itself whether to field
     # a squad on a big surface (a soldier per area) and synthesize, else a single solo pass (unchanged).
+    # EU-52: route through the ladder — high-effort security recon holds the reviewer ceiling normally
+    # and only steps down when the day's budget is tight; auto_model off keeps the configured model.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · provost model: {mreason}", flush=True)
     return await recon.run_officer(
         officer="provost", label="Security Engineer",
         system=PROVOST_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
-        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
         empty="(Security Engineer produced no report.)", audit=audit)
 
@@ -104,8 +109,13 @@ async def gate(cfg: Config, app, diff: str) -> tuple[bool, str]:
     """
     try:
         guard.warn_if_absent("provost-gate")   # EU-47: loud one-liner if the gate runs under bypass with no guard
+        # EU-52: the merge-blocking security gate runs through the ladder at high effort — it normally
+        # holds the reviewer ceiling (Opus) for a strong gate, conserving only when the budget is tight.
+        gate_model, gmreason = models.for_officer(cfg, effort="high")
+        if getattr(cfg, "auto_model", False):
+            print(f"  · provost-gate model: {gmreason}", flush=True)
         options = ClaudeAgentOptions(
-            model=cfg.reviewer_model,
+            model=gate_model,
             system_prompt=memory.preamble() + PROVOST_GATE_SYSTEM,
             cwd=app.workdir or app.repo_path,
             permission_mode="bypassPermissions",

@@ -346,20 +346,44 @@ cheap Haiku status line (`roster.py:165-198`).
 
 ## 9. Cost & models
 
-**Tiers** (`config.py:92-99`):
-- **Opus** (`claude-opus-4-8`) — Builder + Reviewer (all implementation), and the dedicated recon of
-  QA Engineer/Security Engineer/Release Manager + PM + Engineering Manager + Engineering Coach.
+**Tiers / ceilings** (`config.py:104-123`):
+- **Opus** (`claude-opus-4-8`) — the configured *ceiling* for `builder_model` (Builder + engineers +
+  council round-table) and `reviewer_model` (Reviewer + the PM/QA/Security/Release/Engineering-Manager/
+  Engineering-Coach recon). With the ladder **on**, Opus is the cap these roles may climb to, not their
+  starting tier — see below.
 - **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, group chat, the CTO's
-  chair/1:1, the Technical Writer.
+  chair/1:1, the Technical Writer. Also the **floor for all code** (Builder/Reviewer/engineers/
+  Test Engineer never drop below Sonnet — a too-weak coder just fails review and burns more on retries).
 - **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — corridor small-talk and the roster
-  status line.
+  status line. **Pinned** — small-talk never routes through the ladder.
 
-**Auto model/effort selection** (`orchestrator/models.py`) — `auto_model` is **off** by default and in
-live config. When on, it picks the cheapest model **≤ the configured ceiling** and **never below
-Sonnet for code** (`models.py:87-104`); code stays at Opus and only drops a tier under daily-budget
-pressure. **Effort** is sized from the ticket (`builder.size_ticket`, `builder.py:76-137`) and
+**The economical model ladder** (`orchestrator/models.py`) — `auto_model` is **on by default**
+(`config.py:123`). When on, no role is hard-pinned to Opus; each picks the cheapest model that fits its
+task **≤ its configured ceiling** and **≥ the Sonnet floor for code**:
+- **Builder + engineers** (`models.for_builder`, `models.py:117-128`) start **Sonnet-first** for ordinary
+  tickets — including auto-sized **`high`** effort — and escalate **one tier per rejected retry**
+  (`_escalating`, `models.py:95-114`), so a wrong cheap pass is *corrected* on Opus, not merely repeated.
+  Only an **explicit** top-end pin (`max`/`maximum`/`ultra` effort) starts on Opus from pass one
+  (`_HEAVY_EFFORT`, `models.py:92`).
+- **Reviewer** (`models.for_reviewer`, `models.py:149-158`) is **sized by the diff** — a small diff is
+  reviewed on Sonnet, a large/complex one (`≥12k` chars or `≥300` lines) on Opus — and likewise escalates
+  one tier per re-review.
+- **Other officers honor the ladder but do NOT escalate per retry** (`models.for_officer`,
+  `models.py:131-146`): scout/recon, PM, Quartermaster, Drillmaster, Adjutant, Scrum Master, squad
+  planner, Security gate (`provost.py`), Test Engineer — each picks the cheapest model that fits **once**,
+  under its own configured ceiling (most run under `reviewer_model`; the squad planner under
+  `builder_model`, the Scrum Master under `discussion_model`).
+- **Pinned / never laddered**: the Haiku small-talk + roster line, and the Sonnet `discussion_model`
+  chair/council/Technical-Writer seats run at their fixed tier regardless of `auto_model`.
+
+When `auto_model` is **off**, every role falls back to its configured ceiling unchanged (`"fixed"`,
+`models.py:124-125,144-145,154-155`). A **tight daily budget lowers the ceiling** a tier (≥80% of budget)
+or two (≥100%) so the unit keeps shipping on a cheaper model instead of hard-pausing (`_escalating`,
+`models.py:105-106`). **Effort** is sized from the ticket (`builder.size_ticket`, `builder.py:76-137`) and
 escalates one tier per rejected retry (`builder.effort_plan`, `builder.py:140-156`); turn budget scales
-with effort (`builder.turns_for`, `builder.py:169-172`).
+with effort (`builder.turns_for`, `builder.py:169-172`). The cockpit `/usage` "model ladder today"
+readout (`server.py:985-988`) shows the Opus/Sonnet/Haiku code-call mix — a higher Sonnet/Haiku share
+means the ladder is shifting work off Opus as intended.
 
 **Token ledger + daily budget** (`orchestrator/usage.py`): every `run_agent` call records one line to
 `usage_ledger.jsonl` (`agent.py:86-89`, `usage.record`); the cockpit shows today / 7d / 30d
@@ -468,15 +492,15 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 
 | Knob | Default | What it does |
 |---|---|---|
-| `builder_model` | `claude-opus-4-8` | Builder + engineers + build-squad planner |
-| `reviewer_model` | `claude-opus-4-8` | Reviewer + PM + Security Engineer/QA Engineer/Release Manager recon + Engineering Manager/Engineering Coach |
+| `builder_model` | `claude-opus-4-8` | **Ceiling** for Builder + engineers + build-squad planner (Sonnet-first, climbs here on retry when `auto_model` is on) |
+| `reviewer_model` | `claude-opus-4-8` | **Ceiling** for Reviewer + PM + Security Engineer/QA Engineer/Release Manager recon + Engineering Manager/Engineering Coach (diff-/effort-sized under the ladder) |
 | `discussion_model` | `claude-sonnet-4-6` | Council / stand-up / meetings / chair / Technical Writer |
 | `smalltalk_model` | `claude-haiku-4-5-…` | Corridor small-talk + roster status line |
 | `builder_effort` / `reviewer_effort` | `high` | Base effort when sizing is off |
 | `builder_max_turns` | `60` | Base build turn budget (scaled by effort) |
 | `adaptive_effort` | `true` | Size the Builder's effort from the ticket |
 | `escalate_effort_on_retry` | `true` | Bump effort one tier per rejected pass |
-| `auto_model` | `false` | Pick the cheapest model ≤ ceiling when budget is tight |
+| `auto_model` | `true` | Economical ladder ON: cheapest model that fits each task ≤ its ceiling, Sonnet floor for code, escalating one tier per rejected Builder/Reviewer retry; off = configured ceiling, fixed |
 | `sentinel_enabled` | `false` | Run `postmerge_commands` + auto-revert on red |
 | `auto_mode` | `false` | PM decides without waiting for approval |
 | `readiness_gate` | `false` | Hand back under-specified tickets before building |

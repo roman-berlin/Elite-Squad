@@ -55,8 +55,8 @@ class FakeBuilder:
 loop.builder_mod = FakeBuilder
 
 review_calls = []
-async def fake_review(diff, ticket, app, cfg):
-    review_calls.append(1)
+async def fake_review(diff, ticket, app, cfg, iteration=1):
+    review_calls.append(iteration)   # EU-52: capture the build iteration the loop now threads in
     if len(review_calls) == 1:
         # first pass: unparseable -> fail-safe FAIL with parse_failed set
         return ReviewResult(verdict=Verdict.FAIL, spec_met=False,
@@ -81,6 +81,8 @@ chk("re-reviewed exactly once (2 review calls total)", len(review_calls) == 2, f
 chk("did NOT rebuild — builder ran once", len(built) == 1, f"builds={built}")
 chk("review_parse_retry audited", any(e["event"] == "review_parse_retry" for e in au.ev))
 chk("re-review parsed -> shipped (MERGED)", rep.outcome == Outcome.MERGED, str(rep.outcome))
+chk("EU-52: loop threads the build iteration in, and the parse-retry escalates a tier (iteration+1)",
+    review_calls == [1, 2], f"iterations={review_calls}")
 
 print("\n========== REVIEW PARSE-RETRY QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)

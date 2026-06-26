@@ -20,7 +20,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import memory, models
 from .agent import run_agent
 from .config import AppConfig, Config, normalize_effort
 from .contracts import TestEngineerResult, Ticket
@@ -131,8 +131,13 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config) -> TestEn
     from . import guard
     workdir = app.workdir or app.repo_path
     eff = normalize_effort(getattr(cfg, "test_engineer_effort", "medium"))
+    # EU-52: the Test Engineer writes test code under the Builder's ceiling — route it through the ladder
+    # sized off its effort (floor stays Sonnet for code), conserving under budget; ceiling when auto off.
+    model, mreason = models.for_officer(cfg, effort=eff, ceiling_model=cfg.builder_model)
+    if getattr(cfg, "auto_model", False):
+        print(f"  · test-engineer model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.builder_model,            # same ceiling as the Builder — it writes test code
+        model=model,                        # ladder-chosen under the Builder ceiling — it writes test code
         system_prompt=system_prompt(),
         cwd=workdir,                        # the isolated worktree, where the Builder's change lives
         permission_mode="bypassPermissions",

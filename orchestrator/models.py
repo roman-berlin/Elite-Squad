@@ -84,8 +84,12 @@ def _budget_pct(cfg) -> float:
         return 0.0
 
 
-# effort levels that warrant Opus from the first pass (heavy / architecture work)
-_HEAVY_EFFORT = {"high", "xhigh", "ultra", "max", "maximum"}
+# effort levels that warrant Opus from the *first* pass. Deliberately narrow: only an explicit
+# top-end pin ('max'/'maximum'/'ultra') starts the Builder on Opus. Auto-sizing routinely emits
+# 'high' for ordinary tickets, so 'high'/'xhigh' must NOT live here — that was the bug that pinned
+# almost everything to Opus and made the ladder inert. Those efforts now start Sonnet-first and
+# escalate to Opus only if a cheap pass is rejected.
+_HEAVY_EFFORT = {"ultra", "max", "maximum"}
 
 
 def _escalating(ceiling_model: str, *, base_tier: int, iteration: int, budget_pct: float,
@@ -111,16 +115,35 @@ def _escalating(ceiling_model: str, *, base_tier: int, iteration: int, budget_pc
 
 
 def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]:
-    """The Builder's model. Off: the configured ceiling, unchanged. On (economical): a small/normal
-    ticket attempts Sonnet first and escalates to Opus only if that pass is rejected; a heavy ticket
-    (high+ effort / architecture) starts on Opus. Floor = Sonnet (never Haiku for code). A tight
-    budget pins it to Sonnet to keep shipping rather than hard-pausing."""
+    """The Builder's model. Off: the configured ceiling, unchanged. On (economical): a routine
+    ticket — including auto-sized 'high' effort — attempts Sonnet first and escalates to Opus only
+    if that pass is rejected. Only an *explicit* top-end pin ('max'/'maximum'/'ultra' effort) starts
+    on Opus from pass one. Floor = Sonnet (never Haiku for code). A tight budget pins it to Sonnet to
+    keep shipping rather than hard-pausing."""
     ceiling = getattr(cfg, "builder_model", OPUS)
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
-    base = 2 if (effort or "").lower() in _HEAVY_EFFORT else 1   # heavy→Opus, else Sonnet-first
+    base = 2 if (effort or "").lower() in _HEAVY_EFFORT else 1   # explicit max pin→Opus, else Sonnet-first
     return _escalating(ceiling, base_tier=base, iteration=iteration,
                        budget_pct=_budget_pct(cfg), floor_tier=1, why=f"{effort or '?'} effort")
+
+
+def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | None = None,
+                ) -> tuple[str, str]:
+    """A non-Builder officer's model (scout, council chair, drillmaster, PM, QM, security review…).
+
+    Off: the configured ceiling, unchanged. On (economical): size the task down a tier when it's
+    light and conserve harder when the day's budget is tight — but never drop below Sonnet (floor),
+    and never exceed the configured ceiling. Unlike the Builder/Reviewer this does NOT escalate per
+    retry (officer turns aren't a code review→retry loop), so there's no `iteration` knob — it just
+    picks the cheapest model that fits, once.
+
+    `ceiling_model` lets the caller pass that officer's own configured ceiling; it defaults to
+    `reviewer_model`, the ceiling most non-Builder officers run under."""
+    ceiling = ceiling_model or getattr(cfg, "reviewer_model", OPUS)
+    if not getattr(cfg, "auto_model", False):
+        return ceiling, "fixed"
+    return optimize(ceiling, size=size, effort=effort, budget_pct=_budget_pct(cfg), floor_tier=1)
 
 
 def for_reviewer(cfg, diff: str = "", iteration: int = 1) -> tuple[str, str]:

@@ -48,12 +48,17 @@ def _prompt(app, url: str | None) -> str:
 
 async def recon(cfg: Config, app_name: str, url: str | None = None, audit=None) -> str:
     app = cfg.app(app_name)
-    from . import recon as _recon
+    from . import recon as _recon, models
     # Read-only QA recon. With delegation armed, the QA Engineer decides whether to field a squad (a soldier
     # per user-flow / area) on a big surface and synthesize, else a single solo pass (unchanged).
+    # EU-52: honor auto_model — a high-effort recon stays at the reviewer ceiling, but conserves under
+    # a tight budget and obeys the off-switch instead of hardcoding Opus.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · scout model: {mreason}", flush=True)
     return await _recon.run_officer(
         officer="scout", label="QA Engineer",
         system=SCOUT_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app, url),
-        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
         empty="(QA Engineer produced no report.)", audit=audit)
