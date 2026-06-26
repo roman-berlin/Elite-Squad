@@ -133,6 +133,18 @@ def today_tokens(cfg: Config | None = None) -> int:
     return rollup(cfg, _day_start())["total"]
 
 
+def tokens_today_for_tag(cfg: Config | None, prefix: str) -> int:
+    """Today's total (input+output) tokens for ledger lines whose tag starts with `prefix`.
+
+    Lets a sub-channel (e.g. the EU-65 liaison) meter its OWN burn against a dedicated cap
+    without touching the unit's global daily budget."""
+    if not prefix:
+        return 0
+    return sum(int(r.get("i", 0)) + int(r.get("o", 0))
+               for r in _rows(cfg, _day_start())
+               if str(r.get("g", "")).startswith(prefix))
+
+
 _CODE_TAGS = ("builder", "reviewer", "soldier")
 
 
