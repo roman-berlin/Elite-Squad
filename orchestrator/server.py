@@ -30,6 +30,17 @@ from .loop import run as run_loop
 # so every module shares the SAME mutable ``_state``/``_LOG`` objects.
 from . import cockpit_state
 from .cockpit_state import _LOG, _Tee, _run_lock, _sse, _state, recent_log  # noqa: F401
+# EU-64: per-project run state. The run/stop routes + the SSE stream key off the request's project
+# via these helpers so distinct projects run (and stream) truly in parallel, while a second run on
+# the SAME project is still refused (the per-app TOCTOU guard inside ``claim_run``).
+from .cockpit_state import (  # noqa: F401
+    active_runs,
+    claim_run,
+    get_state,
+    is_active,
+    release_run,
+    shared_log_seq,
+)
 from .cockpit_views import (  # noqa: F401
     _CHAT_STYLE,
     _actbar,
@@ -148,6 +159,47 @@ def create_app(cfg: Config):
             return name
         return ws.active or (cfg.apps[0].name if cfg.apps else "")
 
+    def _view_state(app: str | None) -> dict:
+        """The run-state to RENDER for one tab's board/header (EU-64: per-project).
+
+        Returns ``app``'s own per-app run-state (so each tab's board/live-feed reflect ONLY that
+        project's run), with the still-unit-wide ``autopilot`` field overlaid so the header autopilot
+        switch + the autopilot 'live' chip keep working until autopilot itself goes per-project. The
+        overlay is a shallow copy — render is read-only, so the live state is never mutated."""
+        st = get_state(app or None)
+        ap = _state.get("autopilot")
+        if st is _state or not ap:
+            return st
+        view = dict(st)
+        view["autopilot"] = ap
+        return view
+
+    def _claim_cockpit_run(app_name: str):
+        """Claim ``app_name``'s run slot for a manual cockpit run (EU-64: per-project).
+
+        Honours BOTH guards: the per-project one (a second run on the SAME project is refused, other
+        projects unaffected) AND the still-unit-wide one that autopilot / Telegram-resume hold on the
+        legacy ``_state`` (until those migrate, a manual project run must not overlap them). Returns
+        the per-app run-state dict on success — the caller owns the run and MUST ``release_run`` it —
+        or None when refused, with ``last_msg`` already set on the right state for the banner."""
+        key = app_name or None
+        st = get_state(key)
+        busy = "a run is already in progress for this project — wait for it to finish, then start the new one"
+        if is_active(key):
+            st["last_msg"] = busy
+            return None
+        if key is not None and is_active(None):
+            # A unit-wide run (autopilot / Telegram resume) holds the legacy global guard.
+            _state["last_msg"] = ("a run is already in progress — stop it and wait for it to finish, "
+                                  "then start the new one")
+            return None
+        if not claim_run(key):
+            # Lost the start race (TOCTOU) or hit the max-parallel-runs cap.
+            st["last_msg"] = busy if is_active(key) else (
+                "too many projects are running at once — wait for one to finish, then start this one")
+            return None
+        return st
+
     @app.get("/")
     def index():
         appq = _scope(request.args.get("app"))   # one concrete project — the session's active tab
@@ -160,7 +212,10 @@ def create_app(cfg: Config):
         # One-shot result banner for ship/promote/patrol — shown once, then cleared (read-and-clear),
         # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
         bar = _result_banner(_state) + _control_bar(cfg, appq, h["healthy"])
-        return warroom.render_page(cfg, appq, _state, bar, h, log_lines=recent_log())
+        # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
+        # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
+        # unit-level actions, not per-project runs.)
+        return warroom.render_page(cfg, appq, _view_state(appq), bar, h, log_lines=recent_log())
 
     @app.get("/api/health")
     def health_api():
@@ -231,7 +286,8 @@ def create_app(cfg: Config):
     def board_api():
         from flask import Response
         appq = _board_project(request.args.get("app"))   # board is per-tab — one concrete project
-        return Response(warroom.render_board(cfg, appq, _state, recent_log()), mimetype="text/html")
+        return Response(warroom.render_board(cfg, appq, _view_state(appq), recent_log()),
+                        mimetype="text/html")
 
     @app.get("/api/stream")
     def stream_api():
@@ -248,12 +304,17 @@ def create_app(cfg: Config):
             last_seq = None
             last_emit = 0.0
             while True:
-                seq = _state.get("log_seq", 0)
+                # EU-64: wake on EITHER the shared stdout sequence (the unit's live feed isn't
+                # per-app attributable — the stdout Tee bumps the shared counter) OR this project's
+                # own ``log_seq`` (its run heartbeat). The RENDERED board is per-project, so each
+                # tab's feed/board update independently even though the wake signal is shared.
+                seq = (shared_log_seq(), get_state(appq or None).get("log_seq", 0))
                 now = time.time()
                 if seq != last_seq or now - last_emit >= 2.0:
                     last_seq, last_emit = seq, now
                     try:
-                        yield _sse("board", warroom.render_board(cfg, appq, _state, recent_log()))
+                        yield _sse("board",
+                                   warroom.render_board(cfg, appq, _view_state(appq), recent_log()))
                     except Exception:  # noqa: BLE001 - never let a render error kill the stream
                         yield ": render-error\n\n"
                 time.sleep(0.5)
@@ -350,26 +411,23 @@ def create_app(cfg: Config):
 
     @app.post("/api/run-selected")
     def run_selected_api():
-        # Atomically claim the run: check-then-set under the lock so two near-simultaneous
-        # POSTs can't both pass this guard and start two runs.
-        with _run_lock:
-            if _state["active"]:
-                _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
-                return redirect("/")
-            _state["active"] = True
         app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project
         keys = request.form.getlist("ticket")
         if not keys:
-            _state["active"] = False
             return redirect(f"/tickets?app={app_name}")
+        # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
+        # cap). A second run on the SAME project is refused; other projects are unaffected.
+        st = _claim_cockpit_run(app_name)
+        if st is None:
+            return redirect("/")
         if not health.summary(cfg)["healthy"]:
-            _state["active"] = False
-            _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            release_run(app_name or None)
+            st["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
-        _state["dry_run"] = rcfg.dry_run
+        st["dry_run"] = rcfg.dry_run
         effort = request.form.get("effort") or None
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
@@ -377,44 +435,40 @@ def create_app(cfg: Config):
         try:
             worklist = intake.from_tickets(rcfg, app_name, keys)
         except Exception as exc:  # noqa: BLE001
-            _state["active"] = False
-            _state["last_msg"] = f"could not start: {exc}"
+            release_run(app_name or None)
+            st["dry_run"] = None
+            st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
         def _bg():
-            _state["active"], _state["last_msg"] = True, ""
-            _state["run_started"] = _state["last_activity"] = time.time()
+            st["last_msg"] = ""
             ev = threading.Event()
-            _state["stop_event"] = ev
+            st["stop_event"] = ev
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = str(exc)
+                st["last_msg"] = str(exc)
             finally:
-                _state["active"] = False
-                _state["stop_event"] = None
-                _state["dry_run"] = None        # clear the dry/live flag so the cockpit shows no stale tag
-                _state["run_started"] = None
+                release_run(app_name or None)   # clears active / run_started / stop_event for this app
+                st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
     @app.post("/api/run")
     def run_api():
-        # Atomically claim the run: check-then-set under the lock so two near-simultaneous
-        # POSTs can't both pass this guard and start two runs.
-        with _run_lock:
-            if _state["active"]:
-                _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
-                return redirect("/")
-            _state["active"] = True
-        if not health.summary(cfg)["healthy"]:
-            _state["active"] = False
-            _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
-            return redirect("/")
         # EU-63: context is always ONE concrete project (the active tab) — no "All projects"/`*`. The
         # drain therefore drains just this project's backlog, not every app.
         app_name = _scope(request.form.get("app"))
         drain_app = app_name
+        # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
+        # cap). A second run on the SAME project is refused; other projects are unaffected.
+        st = _claim_cockpit_run(app_name)
+        if st is None:
+            return redirect("/")
+        if not health.summary(cfg)["healthy"]:
+            release_run(app_name or None)
+            st["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            return redirect("/")
         kind = request.form.get("kind", "task")
         text = (request.form.get("text") or "").strip()
         ttype = (request.form.get("type") or "feature").strip()
@@ -422,7 +476,7 @@ def create_app(cfg: Config):
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
-        _state["dry_run"] = rcfg.dry_run
+        st["dry_run"] = rcfg.dry_run
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
@@ -437,33 +491,42 @@ def create_app(cfg: Config):
             else:
                 worklist = intake.from_drain(rcfg, drain_app, rcfg.max_tickets_per_run)
         except Exception as exc:  # noqa: BLE001
-            _state["active"] = False
-            _state["last_msg"] = f"could not start: {exc}"
+            release_run(app_name or None)
+            st["dry_run"] = None
+            st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
         def _bg():
-            _state["active"], _state["last_msg"] = True, ""
-            _state["run_started"] = _state["last_activity"] = time.time()
+            st["last_msg"] = ""
             ev = threading.Event()
-            _state["stop_event"] = ev
+            st["stop_event"] = ev
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = str(exc)
+                st["last_msg"] = str(exc)
             finally:
-                _state["active"] = False
-                _state["stop_event"] = None
-                _state["dry_run"] = None        # clear the dry/live flag so the cockpit shows no stale tag
-                _state["run_started"] = None
+                release_run(app_name or None)   # clears active / run_started / stop_event for this app
+                st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
     @app.post("/api/stop-run")
     def stop_run_api():
-        ev = _state.get("stop_event")
+        # EU-64: stop THIS project's run (the Stop button lives on a per-tab board). Resolve the tab's
+        # project read-only (don't steal the active tab), then signal that app's stop Event.
+        appq = _board_project(request.form.get("app"))
+        st = get_state(appq or None)
+        ev = st.get("stop_event")
+        if ev is None and not (request.form.get("app") or "").strip():
+            # The Stop form may not carry an ?app yet — fall back to the sole stoppable run, if there
+            # is exactly one (keeps Stop working in the single-run case during the per-project rollout).
+            stoppable = [k for k in active_runs() if get_state(k).get("stop_event") is not None]
+            if len(stoppable) == 1:
+                st = get_state(stoppable[0])
+                ev = st.get("stop_event")
         if ev is not None:
             ev.set()
-            _state["last_msg"] = "stopping after the current step — DEV untouched, no merge"
+            st["last_msg"] = "stopping after the current step — DEV untouched, no merge"
         return redirect("/")
 
     @app.get("/standup")
@@ -1692,46 +1755,42 @@ def create_app(cfg: Config):
 
     @app.post("/api/report")
     def report_api():
-        # Atomically claim the run: check-then-set under the lock so two near-simultaneous
-        # POSTs can't both pass this guard and start two runs.
-        with _run_lock:
-            if _state["active"]:
-                _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
-                return redirect("/")
-            _state["active"] = True
-        if not health.summary(cfg)["healthy"]:
-            _state["active"] = False
-            _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
-            return redirect("/")
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
+        # cap). A second run on the SAME project is refused; other projects are unaffected.
+        st = _claim_cockpit_run(app_name)
+        if st is None:
+            return redirect("/")
+        if not health.summary(cfg)["healthy"]:
+            release_run(app_name or None)
+            st["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            return redirect("/")
         text = (request.form.get("text") or "").strip()
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
-        _state["dry_run"] = rcfg.dry_run
+        st["dry_run"] = rcfg.dry_run
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
         try:
             worklist = intake.from_text(rcfg, app_name, title, [], description=desc)
         except Exception as exc:  # noqa: BLE001
-            _state["active"] = False
-            _state["last_msg"] = f"could not start: {exc}"
+            release_run(app_name or None)
+            st["dry_run"] = None
+            st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
         def _bg():
-            _state["active"], _state["last_msg"] = True, ""
-            _state["run_started"] = _state["last_activity"] = time.time()
+            st["last_msg"] = ""
             ev = threading.Event()
-            _state["stop_event"] = ev
+            st["stop_event"] = ev
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = str(exc)
+                st["last_msg"] = str(exc)
             finally:
-                _state["active"] = False
-                _state["stop_event"] = None
-                _state["dry_run"] = None        # clear the dry/live flag so the cockpit shows no stale tag
-                _state["run_started"] = None
+                release_run(app_name or None)   # clears active / run_started / stop_event for this app
+                st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 

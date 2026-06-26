@@ -60,18 +60,23 @@ threads = [threading.Thread(target=fire, args=(i,)) for i in range(N)]
 for t in threads: t.start()
 for t in threads: t.join(5)
 
+# EU-64: with no ?app the run targets the first project ("automatixy"), so its active flag lives on
+# THAT project's per-app state, not the unit-wide ``_state``. Wait on / assert the per-app key.
+ST = srv.get_state("automatixy")
+
 # Give the single accepted run a moment to enter run_loop, then let it finish.
 time.sleep(0.2)
 release.set()
 for _ in range(60):
-    if not srv._state["active"]:
+    if not ST["active"]:
         break
     time.sleep(0.05)
 
 chk("two+ rapid run POSTs start EXACTLY one run", len(starts) == 1, f"starts={len(starts)}")
-chk("active flag cleared after the run ends", srv._state["active"] is False, str(srv._state.get("active")))
+chk("active flag cleared after the run ends", ST["active"] is False, str(ST.get("active")))
 
-# A request that arrives while a run is active is rejected WITH feedback (deterministic).
+# A request that arrives while a unit-wide run holds the legacy guard is rejected WITH feedback. The
+# manual run routes still honour that global guard (autopilot / Telegram resume hold it) on ``_state``.
 srv._state["active"] = True
 try:
     app.test_client().post("/api/run", data={"kind": "task", "text": "busy"})
