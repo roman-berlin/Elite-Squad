@@ -53,7 +53,7 @@ MAIN. Quality and tenant-safety over speed.
   Automatixy monorepo. EU tickets = fixes/features in `orchestrator/` + `tests/`. Tests: `python3 tests/run_all.py`.
 
 <!-- SCRIBE:BEGIN -->
-## Lessons & Decisions  _(Scribe-maintained — newest first)_
+## Lessons & Decisions  _(Technical Writer-maintained — newest first)_
 
 - 2026-06-19: a11y ×9 and tests ×7 across 17 tickets confirm the Engineer gate has not yet proven it blocks these defects at build — today's proof case (Scout + Inspector cross-check on the `running` ticket) is the first real gate validation cycle.
 - 2026-06-19: Zero browser/e2e coverage until Scout's smoke test today — all prior coverage was build-side only; assembled-app defects were entirely blind. Scout's DEV run is the unit's first live-app lens.

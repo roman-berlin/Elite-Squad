@@ -54,6 +54,8 @@ Everything under `Documentation/` (these are the only files there — keep this 
   live land, newest first, written automatically by the Technical Writer (EU-41). Created on the
   first land if absent.
 - `Documentation/UNIT_REVIEW_2026-06-25.md` — a point-in-time unit review.
+- `Documentation/OFFICER_NAMING.md` — canonical old→new officer-name map and the policy for what
+  stays army-themed by design (EU-57).
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them
