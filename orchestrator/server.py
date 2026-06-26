@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import html
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ from .loop import run as run_loop
 # live in dedicated modules. They are re-imported here so callers and tests that reach for
 # ``server._state`` / ``server._control_bar`` / ``server._Tee`` etc. keep working unchanged, and
 # so every module shares the SAME mutable ``_state``/``_LOG`` objects.
+from . import cockpit_state
 from .cockpit_state import _LOG, _Tee, _run_lock, _sse, _state, recent_log  # noqa: F401
 from .cockpit_views import (  # noqa: F401
     _CHAT_STYLE,
@@ -91,9 +93,64 @@ def create_app(cfg: Config):
     from . import usage
     usage.configure(cfg.audit_path)   # the cockpit process meters token burn too
 
+    # ----------------------------------------------------------------------------------------------
+    # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`
+    # context: EVERY request is scoped to exactly ONE concrete project — the active tab of this
+    # browser's server-side workspace (``cockpit_state``). ``_session_id`` mints a per-browser cookie
+    # so the open tabs survive reloads; ``_scope`` resolves a request's ``app`` param to a concrete
+    # project, opening/focusing its tab, and falls back to the active tab (else the first app) when the
+    # param is missing or the retired ``*`` sentinel. This replaces the old global switcher + the
+    # `"*" -> all projects` special-casing that used to live in run/ship/patrol/tickets.
+    # ----------------------------------------------------------------------------------------------
+    _SID_COOKIE = "eu_cockpit_sid"
+    _app_names = {a.name for a in (getattr(cfg, "apps", None) or [])}
+
+    def _session_id() -> str:
+        """The opaque per-browser session id (cookie). Minted on first sight; the new value is stashed
+        on the request env so ``_ensure_session_cookie`` can set it on the response."""
+        sid = request.cookies.get(_SID_COOKIE)
+        if not sid:
+            sid = request.environ.get("eu_new_sid") or secrets.token_hex(16)
+            request.environ["eu_new_sid"] = sid
+        return sid
+
+    @app.after_request
+    def _ensure_session_cookie(resp):
+        sid = request.environ.get("eu_new_sid")
+        if sid:
+            resp.set_cookie(_SID_COOKIE, sid, max_age=60 * 60 * 24 * 365,
+                            httponly=True, samesite="Lax")
+        return resp
+
+    def _scope(raw) -> str:
+        """Resolve a request's project param to ONE concrete project for this session's active tab.
+
+        A concrete, configured project opens/focuses its tab and becomes active. The retired
+        ``*``/empty selector is NOT honoured as "all projects" any more — it falls back to whatever
+        tab is already active, else the first configured app. Returns "" only when no apps exist.
+        """
+        ws = cockpit_state.workspace_for(_session_id())
+        name = (raw or "").strip()
+        if name and name != cockpit_state.ALL_PROJECTS_SENTINEL and name in _app_names:
+            ws.add_tab(name)        # open or focus that project's tab, and make it active
+        if ws.active is None and _app_names:
+            ws.add_tab(cfg.apps[0].name)   # seed a first tab so the cockpit is never project-less
+        return ws.active or (cfg.apps[0].name if cfg.apps else "")
+
+    def _board_project(raw) -> str:
+        """Read-only project resolver for the per-tab board/SSE stream: render the concrete project
+        the requesting tab asked for (so each tab streams ONLY its own board) WITHOUT mutating which
+        tab is active — otherwise every tab's background poll would fight over the active tab. Falls
+        back to the active tab, then the first app, and never honours the retired ``*`` sentinel."""
+        ws = cockpit_state.workspace_for(_session_id())
+        name = (raw or "").strip()
+        if name and name != cockpit_state.ALL_PROJECTS_SENTINEL and name in _app_names:
+            return name
+        return ws.active or (cfg.apps[0].name if cfg.apps else "")
+
     @app.get("/")
     def index():
-        appq = request.args.get("app")
+        appq = _scope(request.args.get("app"))   # one concrete project — the session's active tab
         try:
             from . import projects
             projects.record_recent(cfg, appq)   # VS-Code-style "recent projects"
@@ -121,7 +178,7 @@ def create_app(cfg: Config):
             if not health.summary(cfg)["healthy"]:
                 _state["last_msg"] = "autopilot blocked — fix the health problems first"
                 return redirect("/")
-            app_name = (request.form.get("app") or "").strip() or None
+            app_name = _scope(request.form.get("app")) or None   # autopilot works ONE concrete project
             ev = threading.Event()
             ap_cfg = copy.copy(cfg)
             ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
@@ -142,7 +199,7 @@ def create_app(cfg: Config):
                                           "finish, then start autopilot")
                     return redirect("/")
                 _state["active"] = True
-                _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "all projects",
+                _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "(no project)",
                                        "stopping": False}
 
             def _bg():
@@ -173,7 +230,7 @@ def create_app(cfg: Config):
     @app.get("/api/board")
     def board_api():
         from flask import Response
-        appq = request.args.get("app")
+        appq = _board_project(request.args.get("app"))   # board is per-tab — one concrete project
         return Response(warroom.render_board(cfg, appq, _state, recent_log()), mimetype="text/html")
 
     @app.get("/api/stream")
@@ -182,7 +239,10 @@ def create_app(cfg: Config):
         (sub-second), and at least every 2s (keeps the elapsed timer + heartbeat alive). The
         browser swaps #board on each frame; it falls back to the 5s poll if the stream drops."""
         from flask import Response
-        appq = request.args.get("app")
+        # Resolve the tab's concrete project ONCE, up front: the generator outlives the request, so we
+        # can't touch ``request`` inside it. Each tab opens its own EventSource(?app=<its project>), so
+        # this makes every tab stream ONLY its own project's board.
+        appq = _board_project(request.args.get("app"))
 
         def gen():
             last_seq = None
@@ -211,12 +271,12 @@ def create_app(cfg: Config):
                              active_filter=flt, blocked=blocked)
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
-        # Carry the active project so 'back' returns to it, not 'All projects'.
-        _appq = (request.args.get("app") or "").strip()
+        # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
+        _appq = _board_project(request.args.get("app"))
         _home = f"/?app={html.escape(_appq)}" if _appq else "/"
         back = (f"<p style='margin:14px 30px 4px'><a href='{_home}' style='color:#6aa9ff'>"
                 "&larr; cockpit</a></p>")
-        return page.replace("</header>", "</header>" + back + _control_bar(cfg), 1)
+        return page.replace("</header>", "</header>" + back + _control_bar(cfg, _board_project(request.args.get("app"))), 1)
 
     @app.post("/api/dismiss")
     def dismiss_api():
@@ -228,9 +288,10 @@ def create_app(cfg: Config):
 
     @app.get("/tickets")
     def tickets_page():
-        appq = (request.args.get("app") or "").strip()
-        all_projects = appq in ("", "*")    # "" (no param) + "*" (selector "All projects") -> every backlogged Jira
-        name = None if all_projects else appq
+        # EU-63: one concrete project per tab — the retired "All projects"/`*` grouped view is gone, so
+        # this page always lists exactly one app's backlog. ``_scope`` resolves (and focuses) that tab.
+        appq = _scope(request.args.get("app"))
+        name = appq or None
         style = ("<style>.tlist{margin:10px 0;border:1px solid #232936;border-radius:10px;overflow:hidden}"
                  ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid #1a1f29;cursor:pointer}"
                  ".trow:first-child{border-top:0}.trow:hover{background:#151a23}"
@@ -244,11 +305,11 @@ def create_app(cfg: Config):
         try:
             items = intake.from_drain(cfg, name, 40)
         except Exception as exc:  # noqa: BLE001
-            who = "any project" if all_projects else f"<b>{html.escape(appq)}</b>"
+            who = f"<b>{html.escape(appq)}</b>" if appq else "this project"
             return _wrap("Choose tickets", style + f"<p class=hint>Couldn't load tickets for "
                          f"{who}: {html.escape(str(exc))}</p>")
         if not items:
-            who = "any project" if all_projects else f"<b>{html.escape(appq)}</b>"
+            who = f"<b>{html.escape(appq)}</b>" if appq else "this project"
             return _wrap("Choose tickets", style + "<p class=hint>Nothing assigned to you in "
                          f"{who} (In Progress / To Do). Clear queue.</p>")
 
@@ -262,9 +323,8 @@ def create_app(cfg: Config):
                 f'<span class=tsum>{html.escape(t.summary or "(no summary)")}</span></label>'
                 for t in its)
 
-        # "Select all" header: a nameless checkbox that toggles every ticket box in ITS OWN form (so in the
-        # all-projects view each project's select-all stays scoped to that project). No name=ticket -> it is
-        # never submitted; it only flips the real boxes.
+        # "Select all" header: a nameless checkbox that toggles every ticket box in ITS OWN form. No
+        # name=ticket -> it is never submitted; it only flips the real boxes for this project's run.
         _toggle = "this.closest('form').querySelectorAll('input[name=ticket]').forEach(c=>c.checked=this.checked)"
         _select_all = ('<label class="trow tall"><input type=checkbox onclick="' + _toggle + '">'
                        '<span class=tsum>Select all</span></label>')
@@ -282,21 +342,6 @@ def create_app(cfg: Config):
                     '<span class=hint>default builds + merges to DEV — tick "dry run" to build only</span>'
                     '</div></form>')
 
-        # ALL-PROJECTS view: grouped by app, but each group is its OWN selectable run form — so you can
-        # tick SEVERAL tickets within a project and develop them together (a single run still targets a
-        # single app/Jira, so cross-project multi-select would need separate runs — hence one form per app).
-        if all_projects:
-            by_app: dict[str, list] = {}
-            for a, t in items:
-                by_app.setdefault(getattr(a, "name", "") or "?", []).append(t)
-            blocks = [f'<div class=tgrp>{html.escape(an)} &middot; {len(by_app[an])}</div>'
-                      + _run_form(an, _checkbox_rows(by_app[an]), f"Develop selected in {an}")
-                      for an in sorted(by_app)]
-            body = (style + f'<p class=hint>{len(items)} ticket(s) assigned to you across '
-                    f'{len(by_app)} project(s). Tick the ones to develop in a project, then Develop.</p>'
-                    + "".join(blocks))
-            return _wrap("Choose tickets — all projects", body)
-
         body = (style
                 + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
                   "Tick the ones to develop, then Run.</p>"
@@ -312,7 +357,7 @@ def create_app(cfg: Config):
                 _state["last_msg"] = "a run is already in progress — stop it and wait for it to finish, then start the new one"
                 return redirect("/")
             _state["active"] = True
-        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project
         keys = request.form.getlist("ticket")
         if not keys:
             _state["active"] = False
@@ -366,12 +411,10 @@ def create_app(cfg: Config):
             _state["active"] = False
             _state["last_msg"] = "blocked — fix the health problems first (see the banner)"
             return redirect("/")
-        appq = (request.form.get("app") or "").strip()
-        # "*" (the "All projects" selector) is truthy, so a bare `or` fallback never fires and "*"
-        # would flow into intake -> cfg.app("*") -> KeyError ("could not start: '*'"). Map "*"/empty
-        # to a concrete app for a single-app run; for a drain, "*"/empty means "every app" (None).
-        app_name = appq if (appq and appq != "*") else (cfg.apps[0].name if cfg.apps else "")
-        drain_app = appq if (appq and appq != "*") else None
+        # EU-63: context is always ONE concrete project (the active tab) — no "All projects"/`*`. The
+        # drain therefore drains just this project's backlog, not every app.
+        app_name = _scope(request.form.get("app"))
+        drain_app = app_name
         kind = request.form.get("kind", "task")
         text = (request.form.get("text") or "").strip()
         ttype = (request.form.get("type") or "feature").strip()
@@ -654,9 +697,10 @@ def create_app(cfg: Config):
 
     @app.post("/api/ship-review")
     def ship_review_api():
-        appq = (request.form.get("app") or "").strip()
-        # Ship-review is per-PRODUCT; "*"/all/empty -> the first shippable product (never cfg.app("*")).
-        app_name = appq if (appq and appq != "*") else _first_shippable(cfg)
+        # Ship-review is per-PRODUCT and per-tab now (EU-63): the active tab's project, falling back to
+        # the first shippable product when no tab resolves (never the retired "*"/all-projects).
+        appq = _scope(request.form.get("app"))
+        app_name = appq or _first_shippable(cfg)
         if not app_name:
             # No product repo distinct from the unit's own — don't launch ship-review or flash an
             # empty "running for  …" banner; explain why and bail out.
@@ -723,7 +767,7 @@ def create_app(cfg: Config):
         from . import sync
         if not sync.can_promote():
             return Response("Shipping is disabled on this cockpit (read-only box).", status=403)
-        app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
+        app_name = _scope(request.form.get("app"))   # ship the active tab's one concrete project
         if _state.get("active"):
             _state["last_result"] = "finish the active run before shipping to production"
             return redirect("/")
@@ -750,12 +794,9 @@ def create_app(cfg: Config):
 
     @app.post("/api/patrol")
     def patrol_api():
-        appq = (request.form.get("app") or "").strip()
-        # "*"/empty is the "All projects" selector — it is truthy, so a bare `or` fallback never fires
-        # and "*" would reach patrol -> cfg.app("*") -> KeyError. Honour the "All projects" intent by
-        # sweeping EVERY app; a single selected project patrols just that one.
-        sweep_all = appq in ("", "*")
-        targets = [a.name for a in cfg.apps] if sweep_all else [appq]
+        # EU-63: patrol the ONE concrete project of the active tab — the "All projects"/`*` sweep is gone.
+        app_name = _scope(request.form.get("app"))
+        targets = [app_name] if app_name else []
         if not _state.get("patrolling"):
             def _bg():
                 _state["patrolling"] = True
@@ -763,7 +804,7 @@ def create_app(cfg: Config):
                     from . import patrol as patrol_mod
                     for name in targets:
                         asyncio.run(patrol_mod.patrol(cfg, name, do_file=True, audit=audit))
-                    scope = "all projects" if sweep_all else targets[0]
+                    scope = targets[0] if targets else "(no project)"
                     _state["last_result"] = (f"✓ Patrol finished for {scope} — any findings were filed as "
                                              "Jira tickets assigned to you (see Needs you / your backlog).")
                 except Exception as exc:  # noqa: BLE001
