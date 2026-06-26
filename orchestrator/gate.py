@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 
 from .config import AppConfig
 from .contracts import GateResult
@@ -36,6 +37,47 @@ def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) ->
     if failures:
         return GateResult(passed=False, report="\n\n".join(failures))
     return GateResult(passed=True, report="all commands passed")
+
+
+def gate_interpreter(commands: list[str] | None) -> str | None:
+    """The python interpreter a gate will use: the leading token of the first command that
+    points at a python executable (e.g. an absolute `.venv/bin/python`). None when the gate
+    isn't python-invoked (e.g. a Bun `tsc` typecheck). (EU-54)"""
+    for cmd in commands or []:
+        toks = (cmd or "").strip().split()
+        if toks and os.path.basename(toks[0]).startswith("python"):
+            return toks[0]
+    return None
+
+
+def preflight_imports(app: AppConfig, commands: list[str] | None = None) -> GateResult | None:
+    """EU-54 health check. Before running the suite, confirm the gate's python interpreter can
+    import every module in ``app.gate_preflight``. Returns a FAILED GateResult (with an actionable
+    venv hint) when one is missing; None when there's nothing to check or all imports resolve.
+
+    Guards the unit's most fragile path — an EU self-build whose bare ``python3`` gate inherits a
+    PATH without the project virtualenv and dies on ``import requests``, turning the gate red for a
+    reason unrelated to the ticket and burning retries until it parks."""
+    mods = list(getattr(app, "gate_preflight", None) or [])
+    if not mods:
+        return None
+    interp = gate_interpreter(commands if commands is not None else app.gate_commands) or sys.executable
+    try:
+        proc = subprocess.run(
+            [interp, "-c", "import " + ", ".join(mods)],
+            capture_output=True, text=True, timeout=min(app.gate_timeout_sec, 120),
+            env={**os.environ, **app.gate_env},
+        )
+    except Exception as exc:  # noqa: BLE001 - a broken/missing interpreter IS the finding
+        return GateResult(passed=False, report=f"gate health check: cannot run interpreter '{interp}': {exc}")
+    if proc.returncode != 0:
+        miss = (proc.stderr.strip().splitlines() or ["import failed"])[-1]
+        return GateResult(passed=False, report=(
+            f"gate health check FAILED — interpreter '{interp}' cannot import required modules "
+            f"({', '.join(mods)}).\n{miss}\n"
+            "The gate is not running under the project virtualenv. Pin gate_commands to the venv "
+            "interpreter (an absolute .venv/bin/python path) or launch autopilot with the venv on PATH."))
+    return None
 
 
 def touched_components(changed_paths: list[str]) -> list[str]:
@@ -85,6 +127,11 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
     changed paths map to one or more configured components, run ONLY those components' gates
     (naming each in the failure report). Otherwise fall back to the repo-wide `gate_commands`
     (the original single-command behaviour). (EU-19)"""
+    # EU-54: fail fast and clearly if the gate interpreter can't even import its deps, before we
+    # spend the whole suite producing a confusing mid-run ModuleNotFoundError.
+    pf = preflight_imports(app)
+    if pf is not None:
+        return pf
     groups = select_gate_groups(app, changed_paths or [])
     if not groups:
         if not app.gate_commands:

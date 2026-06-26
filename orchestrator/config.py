@@ -78,6 +78,14 @@ class AppConfig:
     gate_shared_packages: dict[str, list[str]] = field(default_factory=dict)
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
+    # EU-54 health check: modules the gate's python interpreter MUST be able to import. Checked once
+    # before the suite runs (and by the doctor); a missing one fails the gate fast with a clear venv
+    # hint instead of a cryptic mid-suite `ModuleNotFoundError`. Empty = no check (e.g. a Bun app).
+    gate_preflight: list[str] = field(default_factory=list)
+    # EU-54: per-app override of the unit-wide Config.worktree_setup_cmd. Runs ONCE on worktree
+    # creation. None = inherit the unit-wide default; "" = explicitly run nothing for this app. Lets the
+    # Bun product install deps while the Python EU repo (no package.json) installs nothing.
+    worktree_setup_cmd: Optional[str] = None
     postmerge_commands: list[str] = field(default_factory=list)  # SRE's heavier post-merge suite (e2e/integration); empty = skip
     backlog_backend: str = "jira"       # "jira" | "notion" | "none"
     backlog: dict[str, Any] = field(default_factory=dict)

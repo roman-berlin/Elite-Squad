@@ -146,6 +146,15 @@ def checks(cfg) -> list[dict[str, str]]:
             app.base_branch if _git_ref(app.repo_path, app.base_branch) else f"'{app.base_branch}' missing")
         add(f"{tag} · gate", "ok" if app.gate_commands else "warn",
             "tests configured" if app.gate_commands else "no gate_commands — no tests will run")
+        # EU-54: confirm the gate's interpreter can import its declared deps (the EU self-build's most
+        # fragile point — a bare python3 gate without the project venv dies on `import requests`).
+        if getattr(app, "gate_preflight", None):
+            from . import gate
+            pf = gate.preflight_imports(app)
+            if pf is None:
+                add(f"{tag} · gate deps", "ok", "interpreter resolves " + ", ".join(app.gate_preflight))
+            else:
+                add(f"{tag} · gate deps", "bad", pf.report.splitlines()[0])
         if getattr(cfg, "use_worktree", False):
             ref_ok = _git_ref(app.repo_path, f"origin/{app.base_branch}")
             add(f"{tag} · worktree", "ok" if ref_ok else "warn",
