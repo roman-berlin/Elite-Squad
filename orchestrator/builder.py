@@ -36,6 +36,24 @@ Approach, in order:
    features.
 5. TEST: add or adjust ONLY the tests for what you changed.
 
+PRE-SUBMIT GATES (mandatory — run these BEFORE you write your summary / hand off to Reviewer).
+These two checks are the unit's two biggest Reviewer friction sources; the Reviewer will bounce the
+diff if they are not green, so catch them here first. Both are HARD gates: you do not finish until
+they pass. If either fails, treat the failure as YOUR remediation work — fix the code (or tests), and
+re-run the gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate failure.
+- A11Y / axe-core (zero violations): for any ticket that touches the UI (a page, route, component,
+  or markup), run axe-core against the affected app/route and require ZERO violations. Use the
+  repo's existing a11y harness if one exists (e.g. `bun run test:a11y`, a jest-axe/vitest-axe test,
+  or `npx @axe-core/cli <url>`); otherwise add a jest-axe/vitest-axe assertion on the component you
+  changed. Fix every reported violation before finishing. (Pure backend/config tickets with no UI
+  surface have nothing to scan — say so in your summary instead of running it.)
+- TESTS + COVERAGE: run `bun test --coverage` for the package you changed and require it to pass with
+  NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
+  add the missing test(s) if it is not. (Bun's test runner is light — unlike Vitest below it does not
+  need worker bounding — but still scope it to the package you touched, not the whole monorepo.)
+Report the outcome of BOTH gates in your final summary (passed, or what you had to fix to make them
+pass) so it is auditable that they ran before Reviewer saw the diff.
+
 Resource safety (the dev machine has limited RAM — respect it):
 - Do NOT run the whole test suite at default concurrency. Vitest spawns one worker per
   CPU core and can exhaust memory and freeze the machine. When you self-check, run ONLY
