@@ -346,14 +346,23 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         *([f"Hand-offs needing coordination: {'; '.join(handoffs)}\n"] if handoffs else []),
         "Now write the briefing.",
     ])
+    from .filing import TICKET_BLOCK_RULE
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.discussion_model, system_prompt=memory.preamble() + _CHAIR_SYSTEM, cwd=cwd,
+        model=cfg.discussion_model,
+        system_prompt=memory.preamble() + _CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
-    briefing = (chair.final or chair.text or "(no briefing)").strip()
+    briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
     from . import governor
     governor.note_call(cfg, len(said) + 1)
+
+    # Route any ticket-worthy items the briefing proposed into the Commander's approval queue
+    # (or, with meeting_autospawn, file them) — the block is stripped from the briefing shown.
+    briefing, spawn_note = _autospawn_tickets(cfg, briefing_raw, audit,
+                                              source=("muster: " + topic) if topic else "council/daily",
+                                              officer_label="council")
+    briefing = (briefing + spawn_note).strip()
 
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
@@ -406,22 +415,33 @@ def pending_meeting_requests(cfg: Config) -> tuple[str, list[str]]:
     return f, extract_meeting_requests(transcript_text(cfg, f))
 
 
-def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None) -> tuple[str, str]:
-    """Strip any ticket block from a meeting decision; if `meeting_autospawn` is on, FILE those
-    tickets (de-duped, to the primary app) and return a note. Drills/hires stay proposal-only —
-    only the Commander approves those. Returns (clean_decision, note)."""
+def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None, *,
+                       source: str = "meeting", officer_label: str = "meeting") -> tuple[str, str]:
+    """Strip any ticket block from a council/meeting decision and route the proposed tickets.
+
+    Default (EU-61): the proposals land in the Commander's approval queue (Needs you → Approve to
+    file a chosen subset / Deny), never straight to the board. `meeting_autospawn` is the explicit
+    opt-in bypass that files them immediately, de-duped, to the primary app (the old all-or-nothing
+    behaviour). Drills/hires stay proposal-only elsewhere. Returns (clean_decision, note)."""
     from . import filing
     proposals, clean = filing.parse_tickets(decision_raw)
-    if not proposals:
+    if not proposals or not getattr(cfg, "apps", None):
         return clean, ""
-    if not getattr(cfg, "meeting_autospawn", False) or not getattr(cfg, "apps", None):
-        listed = "\n".join(f"  • [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
-        return clean, "\n\n📋 Proposed tickets (set meeting_autospawn to file these):\n" + listed
-    result = filing.file_findings(cfg.apps[0], "meeting", decision_raw)
+    if getattr(cfg, "meeting_autospawn", False):                       # explicit opt-in bypass
+        result = filing.file_findings(cfg.apps[0], officer_label, decision_raw)
+        if audit is not None:
+            audit.record("meeting_autospawn", filed=result.filed_n,
+                         deduped=result.deduped_n, failed=result.failed_n)
+        return clean, "\n\n🗂️ Auto-filed by the unit:\n" + "\n".join(result.lines)
+    # Default: queue for the Commander to approve/deny per ticket.
+    from . import approvals
+    bid = approvals.enqueue_proposals(cfg, app_name=cfg.apps[0].name, officer_label=officer_label,
+                                      source=source, report=decision_raw)
     if audit is not None:
-        audit.record("meeting_autospawn", filed=result.filed_n,
-                     deduped=result.deduped_n, failed=result.failed_n)
-    return clean, "\n\n🗂️ Auto-filed by the unit:\n" + "\n".join(result.lines)
+        audit.record("proposals_queued", source=source, batch=bid or "", count=len(proposals))
+    listed = "\n".join(f"  • [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
+    return clean, ("\n\n📋 Proposed tickets — queued for your approval "
+                   "(cockpit → Needs you):\n" + listed)
 
 
 async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,
@@ -446,16 +466,19 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
         *[f"### {who}\n{what}\n" for who, what in said],
         "Now write the decision record.",
     ])
+    # Mirror hold_council: the chair is ALWAYS told to propose a ticket block, so ad-hoc meetings
+    # feed the approval queue in the default (queue-for-approval) mode. The meeting_autospawn flag
+    # only decides file-vs-queue downstream in _autospawn_tickets — never whether tickets are proposed.
     from .filing import TICKET_BLOCK_RULE
-    autospawn = getattr(cfg, "meeting_autospawn", False)
-    chair_system = _MEETING_CHAIR_SYSTEM + (TICKET_BLOCK_RULE if autospawn else "")
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
-        model=cfg.discussion_model, system_prompt=memory.preamble() + chair_system, cwd=cwd,
+        model=cfg.discussion_model,
+        system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision_raw = (chair.final or chair.text or "(no decision)").strip()
-    decision_clean, spawn_note = _autospawn_tickets(cfg, decision_raw, audit)
+    decision_clean, spawn_note = _autospawn_tickets(cfg, decision_raw, audit,
+                                                    source=f"meeting: {topic}", officer_label="meeting")
     decision = decision_clean + spawn_note
 
     saved = _save_transcript(cfg, f"meeting: {topic}", digest, said, decision)

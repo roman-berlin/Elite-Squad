@@ -41,6 +41,17 @@ class BacklogAdapter(ABC):
         """Optional: find an open ticket with this summary, for de-dup. Default: None."""
         return None
 
+    def comments(self, key: str) -> list:
+        """Optional: all human-visible comments on a ticket, oldest -> newest. The read half of a
+        decision round-trip (the loop posts a question, the Commander answers in a comment).
+        Default: not supported."""
+        return []
+
+    def latest_answer(self, ticket: Ticket) -> Optional[str]:
+        """Optional: the most recent HUMAN comment on the ticket (the Commander's answer), skipping
+        the unit's own comments, as plain text. Default: not supported."""
+        return None
+
 
 class NoneBacklog(BacklogAdapter):
     """For apps with no tracker (ad-hoc / free-text only)."""

@@ -16,6 +16,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .backlog.jira import ROMAN_ACCOUNT_ID
+
 
 def _file(cfg=None) -> Path:
     """The store location — ALWAYS the repo root, so the cockpit (which has a cfg) and the Jira adapter
@@ -58,14 +60,16 @@ def list_connections(cfg=None) -> list[dict]:
     return [public(c) for c in _load(cfg).get("connections", [])]
 
 
-def add(cfg, *, name: str, base_url: str, email: str, token: str, project_key: str = "") -> str:
-    """Save a new Jira connection. Returns its id."""
+def add(cfg, *, name: str, base_url: str, email: str, token: str, project_key: str = "",
+        assignee: str = ROMAN_ACCOUNT_ID) -> str:
+    """Save a new Jira connection. Returns its id. ``assignee`` is pinned to Roman by default so every
+    board onboarded via quick-connect inherits him — the adapter then assigns him on new tickets."""
     data = _load(cfg)
     cid = uuid.uuid4().hex[:8]
     data["connections"].append({
         "id": cid, "name": name.strip() or base_url, "base_url": base_url.strip().rstrip("/"),
         "email": email.strip(), "token": token.strip(), "project_key": project_key.strip(),
-        "added": time.strftime("%Y-%m-%d"),
+        "assignee": (assignee or "").strip(), "added": time.strftime("%Y-%m-%d"),
     })
     _save(cfg, data)
     return cid

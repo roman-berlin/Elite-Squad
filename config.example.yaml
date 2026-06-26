@@ -122,6 +122,11 @@ apps:
       acceptance_criteria_field: ""  # e.g. "customfield_10034"; blank = parse from description
       status_map:                    # logical -> your board's columns
         In Progress: "In Progress"
+        Blocked: "Blocked"            # EU-61: a parked product decision round-trips through this column —
+                                      # the unit moves the ticket here and posts the open question; you
+                                      # answer in a comment (or Telegram) and it auto-resumes. Add a
+                                      # "Blocked" column to the board first (with a transition back to
+                                      # In Progress), or point this at an existing column you use for it.
         QA: "QA"                      # merged tickets land here for your review (pass->Done, fail->To Do)
         Done: "Done"
         Needs Human: "In Progress"
