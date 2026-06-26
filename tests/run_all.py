@@ -6,6 +6,14 @@ harness fails. CI runs this on every push to ``dev`` (see ``.github/workflows/ci
 self-update should refuse a red ``main``. Each harness stubs the Agent SDK and asserts a slice of the
 orchestrator's behaviour — no network, no real models, fast.
 
+A harness counts as GREEN only when it exits 0 **and**, if it printed its own ``k/n passed`` tally,
+``k == n``. This is the EU-44 fix: ~28 legacy harnesses use a soft ``check()`` helper that prints
+``k/n passed`` + ``RESULT: … FAIL`` but never ``sys.exit(1)``, so a genuine failure used to sail
+through on the subprocess's 0 exit code and the suite reported ALL GREEN while a quarter of itself was
+failure-blind. We now read that self-reported tally and fail the harness when ``k < n`` regardless of
+its exit code. Harnesses that print no count line (the assert-based ones — they raise on failure) are
+judged purely on their exit code, exactly as before. See ``_verdict``.
+
   python tests/run_all.py            # run the whole suite
   python tests/run_all.py --verbose  # also print the tail of any failing harness
 """
@@ -20,26 +28,50 @@ ROOT = Path(__file__).resolve().parent.parent          # the General repo root
 TESTS = sorted(p for p in (ROOT / "tests").glob("*_test.py"))
 
 
+def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
+    """Decide one harness's honest pass/fail from its stdout and exit code (the EU-44 gate).
+
+    Scans for the harness's self-reported ``k/n passed`` tally (the last such line wins, so a stray
+    later mention of "passed" can't shadow the real count). The verdict:
+
+    * a tally line present and ``k < n`` → FAIL, even if the harness exited 0 (the soft-tally bug:
+      ~28 harnesses print ``RESULT: … FAIL`` but never ``sys.exit(1)``);
+    * a tally line present and ``k == n`` → pass iff the exit code is also 0;
+    * no tally line at all → trust the exit code unchanged (the assert-based harnesses raise on
+      failure, so a 0 exit is an honest pass — failing them on "no count" would be a false positive).
+
+    Returns ``(ok, checks, line, reason)``: ``checks`` is k for the running TOTAL CHECKS total,
+    ``line`` is the tally line to display, and ``reason`` explains a tally-driven failure.
+    """
+    line, count = "", None
+    for ln in stdout.splitlines():
+        m = re.search(r"(\d+)/(\d+) passed", ln)
+        if m:
+            line, count = ln.strip(), (int(m.group(1)), int(m.group(2)))
+    if count is None:
+        return returncode == 0, 0, line, ""          # no self-tally → judge on the exit code alone
+    k, n = count
+    if k < n:
+        reason = f"soft-tally FAIL: only {k}/{n} of its own checks passed (harness exited {returncode})"
+        return False, k, line, reason
+    return returncode == 0, k, line, ""
+
+
 def main() -> int:
     passed = failed = total_checks = 0
     red: list[str] = []
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     for t in TESTS:
         r = subprocess.run([sys.executable, str(t)], cwd=str(ROOT), capture_output=True, text=True)
-        line = ""
-        for ln in r.stdout.splitlines():
-            if "passed" in ln and "/" in ln:
-                line = ln.strip()
-        m = re.search(r"(\d+)/(\d+) passed", line)
-        if m:
-            total_checks += int(m.group(1))
-        if r.returncode == 0:
+        ok, checks, line, reason = _verdict(r.stdout, r.returncode)
+        total_checks += checks
+        if ok:
             passed += 1
             print(f"  ✓ {t.name:<32} {line}")
         else:
             failed += 1
             red.append(t.name)
-            print(f"  ✗ {t.name:<32} {line or '(crashed before a result line)'}")
+            print(f"  ✗ {t.name:<32} {reason or line or '(crashed before a result line)'}")
             if verbose:
                 print("\n".join(("      " + x) for x in (r.stdout + r.stderr).strip().splitlines()[-25:]))
     print("=" * 64)
