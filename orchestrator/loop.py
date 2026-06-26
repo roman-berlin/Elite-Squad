@@ -52,6 +52,44 @@ def _test_url(app: AppConfig, build_summary: str | None) -> str:
     return route
 
 
+def _changelog_path() -> Path:
+    """Documentation/Development_Status.md in the orchestrator's OWN repo (not the app's)."""
+    return Path(__file__).resolve().parent.parent / "Documentation" / "Development_Status.md"
+
+
+def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str | None,
+                      test_url: str, *, today: str | None = None,
+                      path: str | Path | None = None) -> bool:
+    """Technical Writer release-hygiene: after a SUCCESSFUL LIVE land, append a one-line entry to
+    Documentation/Development_Status.md — date · ticket · app · what-was-done · DEV test URL — so the
+    unit keeps a human-readable feature changelog. Deterministic, no LLM (the data already exists at the
+    land site). Skipped for dry-run and ephemeral tickets. Best-effort: a write failure is swallowed and
+    never raises, so it can't break the run. Appends, never loses history; newest entry first. Returns
+    True iff an entry was written."""
+    if cfg.dry_run or ticket.ephemeral:
+        return False
+    try:
+        import datetime
+
+        from . import dashboard as _D
+        date = today or datetime.date.today().isoformat()
+        what = _D.brief(summary, n=220) or (ticket.summary or "").strip()
+        link = f" · 🔗 {test_url}" if test_url else ""
+        entry = f"- {date} · {ticket.id} · {app.name} · {what}{link}"
+        header = ("# Development Status\n\n"
+                  "Feature changelog — one line per successful live land to the dev branch, newest "
+                  "first. Maintained automatically by the Technical Writer (orchestrator/loop.py).\n")
+        path = Path(path) if path else _changelog_path()
+        old = ([ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.startswith("- ")]
+               if path.exists() else [])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(header + "\n" + "\n".join([entry, *old]) + "\n", encoding="utf-8")
+        return True
+    except Exception as exc:  # noqa: BLE001 - release-hygiene logging must never break the run
+        print(f"  changelog skipped: {exc}", flush=True)
+        return False
+
+
 _HALT_MARKERS = ("halt", "stop", "do not proceed", "precondition", "made no writes",
                  "no files were written", "no files written", "will not edit", "will not proceed",
                  "cannot proceed", "refuse", "abort", "needs your", "for the commander", "holding for")
@@ -745,6 +783,8 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record("merged", ticket_id=ticket.id, base=app.base_branch, done=cfg.mark_done_on_merge)
+        # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).
+        _record_changelog(cfg, ticket, app, review.summary or build.summary, turl)
 
         # SRE: run the heavier post-merge suite on the landed DEV; if it's red, roll the merge
         # back (forward-only) and hand the ticket back rather than leave DEV broken.
