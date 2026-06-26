@@ -126,24 +126,46 @@ def create_app(cfg: Config):
             ap_cfg = copy.copy(cfg)
             ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
 
+            # Claim the run-guard atomically (mirror the run POSTs). Flask is threaded=True, so two
+            # near-simultaneous "Start" clicks would otherwise both pass the check above and the SECOND
+            # would overwrite _state["autopilot"] — stranding the first loop's stop Event so "Stop" in
+            # the War Room can never stop it (you'd have to kill the process). Idempotent Start: refuse
+            # if an autopilot Event already exists; also refuse if a manual run is live, so the two can't
+            # run_loop the same app concurrently. Holding _state["active"] for autopilot's lifetime makes
+            # the cockpit run POSTs (which check it) refuse while autopilot is on.
+            with _run_lock:
+                if (_state.get("autopilot") or {}).get("on"):
+                    _state["last_msg"] = "autopilot is already running"
+                    return redirect("/")
+                if _state["active"]:
+                    _state["last_msg"] = ("a run is already in progress — stop it and wait for it to "
+                                          "finish, then start autopilot")
+                    return redirect("/")
+                _state["active"] = True
+                _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "all projects",
+                                       "stopping": False}
+
             def _bg():
                 try:
                     asyncio.run(ap.autopilot(ap_cfg, app_name, once=False, stop_event=ev))
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"autopilot error: {exc}"
                 finally:
+                    _state["active"] = False   # release the run-guard so manual runs / a fresh Start work
                     st = _state.get("autopilot")
                     if st:
                         st["on"] = False
                         st["stopping"] = False
-            _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "all projects", "stopping": False}
             threading.Thread(target=_bg, daemon=True).start()
         elif action == "drain" and cur.get("on") and cur.get("stop"):
             # Graceful stop: let the in-flight ticket finish landing on DEV, then stand down (take no new
             # tickets). Stays "stopping" in the UI until the worker thread exits (its finally clears it).
             cur["stop"].set()
             cur["stopping"] = True
-        elif cur.get("on") and cur.get("stop"):
+        elif action != "start" and cur.get("on") and cur.get("stop"):
+            # Immediate stop (toggle-off / explicit stop). A redundant "start" must NOT reach here:
+            # otherwise a second Start while one is live would STOP the running loop instead of being
+            # the idempotent no-op the guard above already made it.
             cur["stop"].set()
             cur["on"] = False
         return redirect("/")

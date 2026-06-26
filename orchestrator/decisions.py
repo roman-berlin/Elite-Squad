@@ -144,15 +144,43 @@ def handle_reply(cfg, audit, text: str) -> bool:
     return True
 
 
-def _run_bg(cfg, audit, worklist) -> None:
+def _run_bg(cfg, audit, worklist, *, refuse_if_busy: bool = False) -> bool:
+    """Run a worklist in a background thread, claiming the cockpit run-guard (``_state["active"]``).
+
+    Mirrors the run POSTs in ``server.py``: the guard is set under ``_run_lock`` so the War Room badge
+    reflects this run and a concurrent cockpit run refuses. Returns True when the run was started.
+
+    ``refuse_if_busy=True`` (Telegram ``/run`` / ``/drain``): if a run/loop is already active, REFUSE
+    rather than start an overlapping run on the same app — notify and return False.
+
+    ``refuse_if_busy=False`` (decision resume): a resumed escalation is flock-safe (``loop.py``) and must
+    proceed even while autopilot is live — that is the always-on case, and the pending decision has
+    already been popped, so dropping it would lose the Commander's answer. It still claims the badge flag
+    when it's free, but never refuses.
+    """
+    from .cockpit_state import _run_lock, _state
     from .loop import run as run_loop
+
+    owns_guard = False
+    with _run_lock:
+        if _state.get("active"):
+            if refuse_if_busy:
+                notify.send("⏳ A run is already in progress — try again once it finishes.")
+                return False
+        else:
+            _state["active"] = True
+            owns_guard = True
 
     def _bg():
         try:
             asyncio.run(run_loop(cfg, worklist, audit))
         except Exception as exc:  # noqa: BLE001
             notify.send(f"⚠️ run failed: {exc}")
+        finally:
+            if owns_guard:
+                _state["active"] = False
     threading.Thread(target=_bg, daemon=True).start()
+    return True
 
 
 def handle_command(cfg, audit, text: str) -> bool:
@@ -218,8 +246,11 @@ def handle_command(cfg, audit, text: str) -> bool:
             if not wl:
                 notify.send("Nothing to do.")
                 return True
+            # A manual /run or /drain must not start a second run_loop on top of a live run or
+            # autopilot — refuse (the resume path stays exempt). _run_bg notifies on refusal.
+            if not _run_bg(rcfg, audit, wl, refuse_if_busy=True):
+                return True
             notify.send(f"▶️ Starting {len(wl)} ticket(s) {'(LIVE)' if live else '(dry-run)'}…")
-            _run_bg(rcfg, audit, wl)
         except Exception as exc:  # noqa: BLE001
             notify.send(f"⚠️ couldn't start: {exc}")
     else:

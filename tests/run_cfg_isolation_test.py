@@ -41,7 +41,7 @@ cfg.dry_run = False
 seen = {}
 intake.from_text = lambda c, *a, **k: (seen.__setitem__("intake_cfg", c), ["WL"])[1]
 intake.from_drain = lambda c, *a, **k: (seen.__setitem__("intake_cfg", c), ["WL"])[1]
-decisions._run_bg = lambda c, audit, wl: seen.__setitem__("run_cfg", c)
+decisions._run_bg = lambda c, audit, wl, **k: (seen.__setitem__("run_cfg", c), True)[1]
 
 class FakeAudit:
     def record(s, *a, **k): pass
