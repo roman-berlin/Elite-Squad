@@ -832,6 +832,40 @@ def create_app(cfg: Config):
             approvals.disapprove(cfg, kind, reason)
         return redirect("/approvals")
 
+    @app.post("/api/approve-proposals")
+    def approve_proposals_api():
+        """Approve a queued batch of unit-proposed tickets — file the checked subset to the board
+        (de-duped). EU-61."""
+        batch = (request.form.get("batch") or "").strip()
+        titles = [t for t in request.form.getlist("titles") if t.strip()]
+        if batch:
+            from . import approvals
+            try:
+                res = approvals.approve_proposals(cfg, batch, titles)
+                if res is None:
+                    _state["last_msg"] = "That proposal batch was already actioned."
+                else:
+                    parts = [f"Filed {res.filed_n} ticket(s)"]
+                    if res.deduped_n:
+                        parts.append(f"{res.deduped_n} already open")
+                    if res.failed_n:
+                        parts.append(f"{res.failed_n} failed")
+                    _state["last_msg"] = ", ".join(parts) + "."
+            except Exception as exc:  # noqa: BLE001
+                _state["last_msg"] = f"approve failed: {exc}"
+        return redirect("/needs")
+
+    @app.post("/api/deny-proposals")
+    def deny_proposals_api():
+        """Deny a queued batch of unit-proposed tickets — discard, nothing filed. EU-61."""
+        batch = (request.form.get("batch") or "").strip()
+        reason = (request.form.get("reason") or "").strip()
+        if batch:
+            from . import approvals
+            if approvals.deny_proposals(cfg, batch, reason):
+                _state["last_msg"] = "Proposal batch denied — nothing filed."
+        return redirect("/needs")
+
     @app.get("/needs")
     def needs_page():
         from . import needs as _needs
@@ -863,6 +897,10 @@ def create_app(cfg: Config):
             ".ncard .ndt b{color:#e9ecf1;font-weight:650}"
             ".nbanner{background:#0f2740;border:1px solid #1c4a78;color:#9cc9ff;border-radius:9px;"
             "padding:11px 14px;margin:0 0 16px;font-size:13.5px;font-weight:600}"
+            ".ncard label.pcheck{display:flex;gap:8px;align-items:flex-start;margin:7px 0;"
+            "color:#c3cad6;font-size:13.5px;cursor:pointer}"
+            ".ncard label.pcheck input{margin-top:3px}"
+            ".ncard .psev{color:#fbbf24;font-weight:650}.ncard .ptype{color:#6b7480;font-size:12px}"
             ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
         # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
         _m = _state.pop("last_msg", "") or ""
@@ -899,6 +937,32 @@ def create_app(cfg: Config):
                     f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
                     "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)'>"
                     "<button class='nbtn no'>Disapprove</button></form></div></div>")
+            out.append("</div>")
+        if s.get("proposals"):
+            out.append(f"<div class=nsec><h3>&#128203; Tickets to file &middot; {len(s['proposals'])}</h3>")
+            for b in s["proposals"]:
+                bid = html.escape(str(b.get("id") or ""))
+                src = html.escape(str(b.get("source") or "proposed"))
+                bapp = html.escape(str(b.get("app") or ""))
+                props = b.get("proposals") or []
+                rows = ""
+                for p in props:
+                    t = html.escape(str(p.get("title") or ""))
+                    sev = html.escape(str(p.get("severity") or "?"))
+                    typ = html.escape(str(p.get("type") or "Task"))
+                    rows += (f"<label class=pcheck><input type=checkbox name=titles value=\"{t}\" checked> "
+                             f"<span><span class=psev>[{sev}]</span> {t} <span class=ptype>{typ}</span></span></label>")
+                out.append(
+                    "<div class=ncard>"
+                    f"<div class=q>Proposed tickets &mdash; {src}</div>"
+                    f"<div class=meta>{bapp} &middot; {len(props)} ticket(s) &mdash; pick which to file</div>"
+                    "<form method=post action=/api/approve-proposals>"
+                    f"<input type=hidden name=batch value=\"{bid}\">"
+                    + rows +
+                    "<div class=nrow><button class='nbtn ok'>&#9989; Approve &amp; file selected</button></div></form>"
+                    "<form method=post action=/api/deny-proposals class=nrow style='margin:6px 0 0'>"
+                    f"<input type=hidden name=batch value=\"{bid}\">"
+                    "<button class='nbtn no'>Deny &mdash; discard</button></form></div>")
             out.append("</div>")
         if s["tasks"]:
             from urllib.parse import quote

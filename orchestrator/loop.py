@@ -396,7 +396,9 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
                     backlog.add_comment(ticket, "🚧 " + note + "\n\nAdd these and move it back to To Do.")
                 except Exception:  # noqa: BLE001 - a comment failure must not break the run
                     pass
-            decisions.add(cfg, ticket, app.name, note)
+            # Not a decision round-trip — the readiness gate owns its own 'Needs Human' status above —
+            # so record the pending decision WITHOUT re-parking the ticket to 'Blocked' (EU-61).
+            decisions.add(cfg, ticket, app.name, note, block=False)
             _notify(cfg, f"🚧 {ticket.id} — handed back, not ready to build:\n\n{notify.clip(note, 600)}"
                          f"\n\n{decisions.reply_hint(ticket.id)}")
             audit.record("not_ready", ticket_id=ticket.id, missing=missing)
@@ -404,7 +406,13 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
             return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name, branch,
                                 notes="not ready — handed back before build")
 
+    # EU-61: a parked decision the Commander answered DIRECTLY on its Jira ticket resumes here — fold the
+    # question + answer into the builder's context and clear the park. (A Telegram answer is already baked
+    # into the description by decisions.to_worklist, so this only fires for the Jira-native path.)
+    ticket = _resume_from_jira_answer(cfg, ticket, backlog, audit)
+
     if not cfg.dry_run and not ticket.ephemeral:
+        # For a resuming ticket this transitions it out of 'Blocked' and back to 'In Progress' (EU-61).
         backlog.set_status(ticket, "In Progress")
     git.checkout_feature(branch)
     # EU-18: re-pin the (possibly reused) worktree's deps to DEV's bun.lock before any
@@ -419,6 +427,36 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
         return report
     finally:
         _cleanup(cfg, git, audit, report)
+
+
+def _resume_from_jira_answer(cfg, ticket, backlog, audit):
+    """EU-61 Jira-native decision resume. If this ticket has an OPEN parked decision and the Commander
+    answered it directly on the ticket (a fresh human comment, newer than the baseline snapshotted at
+    park time), fold the question + answer into the builder's context and clear the park, so the build
+    continues with the decision baked in. Returns the (possibly augmented) ticket. Best-effort — never
+    raises; a no-op for ephemeral tickets or when nothing is parked/answered."""
+    if getattr(ticket, "ephemeral", False):
+        return ticket
+    try:
+        pending = next((d for d in decisions.load(cfg) if d.get("id") == ticket.id), None)
+        if not pending:
+            return ticket
+        answer = backlog.latest_answer(ticket)
+        if not answer or answer == pending.get("answer_baseline"):
+            return ticket   # no answer yet, or only the pre-park comment — leave it parked
+        from dataclasses import replace
+        question = pending.get("question", "")
+        desc = (ticket.description or "") + (
+            "\n\n---\nResolved decision (the Commander answered on the ticket — act on it, do not "
+            f"re-raise it):\nQ: {question}\nA: {answer}")
+        # Pop the park locally; the answer is already a comment on the ticket, so don't echo it back.
+        decisions.resolve(cfg, answer, ticket.id, comment=False)
+        audit.record("decision_resumed", ticket_id=ticket.id, via="jira-comment")
+        print(f"  ▶ {ticket.id}: resuming with the Commander's answer from Jira", flush=True)
+        return replace(ticket, description=desc)
+    except Exception as exc:  # noqa: BLE001 - resume injection must never break the run
+        print(f"  · decision resume skipped for {ticket.id}: {exc}", flush=True)
+        return ticket
 
 
 async def _consult_pm(cfg, ticket, app, audit, halt_report: str):
@@ -679,7 +717,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{await _decision_brief(cfg, ticket.id, review.question or review.summary)}"
                          f"\n\n{decisions.reply_hint(ticket.id)}")
             if not cfg.dry_run and not ticket.ephemeral:
-                backlog.set_status(ticket, "Needs Human")
+                # decisions.add already parked it to 'Blocked' (EU-61) — just record the open question.
                 backlog.add_comment(ticket, f"Needs a product decision: {review.question}")
             audit.record("needs_human", ticket_id=ticket.id, question=review.question)
             return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
@@ -789,7 +827,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     esc = (triage.get("text") if triage else None) or _escalation_comment(last_changes)
     decisions.add(cfg, ticket, app.name, esc[:1500])
     if not cfg.dry_run and not ticket.ephemeral:
-        backlog.set_status(ticket, "Needs Human")
+        # decisions.add already parked it to 'Blocked' (EU-61) — just leave the escalation note.
         backlog.add_comment(ticket, ("🎖️ [PM] " + esc[:1400]) if triage else esc)
     print("  ✗ escalated — needs you (max passes reached without a clean review)", flush=True)
     _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")

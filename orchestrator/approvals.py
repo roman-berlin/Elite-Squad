@@ -129,3 +129,157 @@ def disapprove(cfg: Config, kind: str, reason: str = "") -> None:
         council.add_commander_note(cfg, f"Disapproved {KINDS[kind][0]}: {reason or '(no reason given)'}")
     except Exception:  # noqa: BLE001
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Unit-proposed tickets awaiting the Commander (EU-61 Part B).
+#
+# A second, distinct approval kind: batches of fileable findings (from
+# filing.parse_tickets) raised by a council/daily, an ad-hoc meeting, or an
+# out-of-scope in-dev finding. Instead of going straight to the board, each
+# batch lands in this queue so the Commander can Approve (file to the board,
+# de-duped, with slice-1's Roman-default create) — optionally only a chosen
+# subset of the tickets — or Deny (discard). This is separate state from the
+# drill/adjutant KINDS above (those are single-report-hash approvals); a batch
+# is many tickets the Commander can pick through.
+# --------------------------------------------------------------------------- #
+
+_PROPOSAL_HISTORY_CAP = 100   # keep recent actioned batches for audit, bound the file
+
+
+def _proposals_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("proposals.json")
+
+
+def _load_proposals(cfg: Config) -> list[dict]:
+    try:
+        d = json.loads(_proposals_file(cfg).read_text(encoding="utf-8"))
+        return d if isinstance(d, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_proposals(cfg: Config, items: list[dict]) -> None:
+    try:
+        _proposals_file(cfg).write_text(json.dumps(items), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _app_by_name(cfg: Config, name: str):
+    apps = getattr(cfg, "apps", None) or []
+    for a in apps:
+        if getattr(a, "name", None) == name:
+            return a
+    return apps[0] if apps else None   # fall back to the primary app
+
+
+def _normalize_proposals(raw: list[dict]) -> list[dict]:
+    """Keep only real proposals, de-duped by title within the batch."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        title = str(p.get("title", "")).strip()
+        if not title or title.lower() in seen:
+            continue
+        seen.add(title.lower())
+        out.append({
+            "title": title,
+            "type": str(p.get("type", "Task")) or "Task",
+            "severity": str(p.get("severity", "?")),
+            "body": str(p.get("body", "")),
+        })
+    return out
+
+
+def enqueue_proposals(cfg: Config, *, app_name: str, officer_label: str, source: str,
+                      report) -> str | None:
+    """Queue a batch of unit-proposed tickets for the Commander's Approve/Deny instead of filing
+    them straight to the board. `report` may be a raw report string (parsed with
+    filing.parse_tickets) or an already-parsed list of proposal dicts. Returns the batch id, or
+    None when there's nothing fileable. Identical pending batches collapse (idempotent) so a
+    re-run of the same council/meeting doesn't stack duplicate cards."""
+    if isinstance(report, str):
+        from . import filing
+        proposals, _ = filing.parse_tickets(report)
+    else:
+        proposals = list(report or [])
+    clean = _normalize_proposals(proposals)
+    if not clean:
+        return None
+    bid = _hash(f"{source}::" + "||".join(p["title"].lower() for p in clean))
+    items = _load_proposals(cfg)
+    for b in items:                                  # idempotent: same pending batch -> reuse
+        if b.get("id") == bid and b.get("status") == "pending":
+            return bid
+    items.append({
+        "id": bid, "kind": "proposal", "source": source, "app": app_name,
+        "label": officer_label, "proposals": clean, "ts": time.time(), "status": "pending",
+    })
+    # Bound the file: keep all pending + the most recent actioned batches.
+    pending_b = [b for b in items if b.get("status") == "pending"]
+    actioned = [b for b in items if b.get("status") != "pending"][-_PROPOSAL_HISTORY_CAP:]
+    _save_proposals(cfg, actioned + pending_b)
+    return bid
+
+
+def pending_proposals(cfg: Config) -> list[dict]:
+    """Proposal batches still awaiting the Commander's decision (newest first)."""
+    return [b for b in reversed(_load_proposals(cfg)) if b.get("status") == "pending"]
+
+
+def _find_batch(items: list[dict], batch_id: str) -> dict | None:
+    for b in items:
+        if b.get("id") == batch_id:
+            return b
+    return None
+
+
+def approve_proposals(cfg: Config, batch_id: str, titles=None):
+    """Approve a queued batch — file the chosen tickets to the board (de-duped, Roman-default
+    create via filing.file_findings). `titles` selects a subset (None/empty = file the whole
+    batch). Returns the FilingResult, or None if the batch is unknown/already actioned."""
+    from . import filing
+    items = _load_proposals(cfg)
+    batch = _find_batch(items, batch_id)
+    if batch is None or batch.get("status") != "pending":
+        return None
+    wanted = {str(t).strip().lower() for t in (titles or []) if str(t).strip()}
+    selected = [p for p in batch.get("proposals", [])
+                if not wanted or p["title"].strip().lower() in wanted]
+    app = _app_by_name(cfg, batch.get("app"))
+    result = filing.FilingResult()
+    if selected and app is not None:
+        # Reuse filing.file_findings (de-dup + slice-1 Roman-default create) by handing it a
+        # ===TICKETS=== block of exactly the approved subset.
+        block = "===TICKETS===\n" + json.dumps(selected) + "\n===END==="
+        result = filing.file_findings(app, batch.get("label", "proposal"), block)
+    batch["status"] = "approved"
+    batch["filed"] = result.filed
+    batch["deduped"] = result.deduped
+    batch["selected_titles"] = [p["title"] for p in selected]
+    batch["actioned_ts"] = time.time()
+    _save_proposals(cfg, items)
+    try:
+        from . import notify
+        notify.send(f"✅ Approved & filed — {batch.get('source')}: "
+                    f"{result.filed_n} new, {result.deduped_n} already open.")
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
+def deny_proposals(cfg: Config, batch_id: str, reason: str = "") -> bool:
+    """Deny a queued batch — discard it, nothing is filed. Returns True if a pending batch was
+    found and cleared."""
+    items = _load_proposals(cfg)
+    batch = _find_batch(items, batch_id)
+    if batch is None or batch.get("status") != "pending":
+        return False
+    batch["status"] = "denied"
+    batch["reason"] = reason
+    batch["actioned_ts"] = time.time()
+    _save_proposals(cfg, items)
+    return True

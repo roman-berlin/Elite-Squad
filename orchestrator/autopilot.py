@@ -126,6 +126,43 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     return f"unblocked all ({len(blocked)})"
 
 
+def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) -> dict:
+    """EU-61: parked tickets the Commander has answered DIRECTLY on their Jira ticket → auto-resume.
+
+    For each parked ticket that still has an OPEN pending decision, fetch it by key and compare the
+    latest human comment against the baseline snapshotted at park time (decisions.add). A genuinely-new
+    answer means the Commander resolved it on Jira (not Telegram), so it should re-enter the develop
+    queue without a manual /unblock. Returns ``{ticket_id: (app, ticket)}``. Fetched by key, so it's
+    independent of the board's queue_statuses; best-effort per ticket (a wrong-project/network miss just
+    skips that ticket this cycle)."""
+    from . import decisions
+    from .backlog.base import make_backlog
+    out: dict = {}
+    if not blocked:
+        return out
+    pending = {d.get("id"): d for d in decisions.load(cfg)}
+    targets = [tid for tid in blocked if tid in pending]
+    if not targets:
+        return out
+    apps = [cfg.app(app_name)] if app_name else [a for a in cfg.apps if a.backlog_backend != "none"]
+    for app in apps:
+        try:
+            backlog = make_backlog(app)
+        except Exception:  # noqa: BLE001 - a misconfigured/unreachable board must not abort the others
+            continue
+        for tid in targets:
+            if tid in out:
+                continue
+            try:
+                ticket = backlog.get_task(tid)
+                answer = backlog.latest_answer(ticket)
+            except Exception:  # noqa: BLE001 - wrong project for this board, network, etc.
+                continue
+            if answer and answer != pending[tid].get("answer_baseline"):
+                out[tid] = (app, ticket)
+    return out
+
+
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
     """After a productive cycle, fold any new recurring rejection-lessons into Unit Memory and prune it
     — FREE + deterministic (no model call), so memory compounds every cycle instead of only at the
@@ -223,8 +260,19 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             git_held = False
 
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
+            # EU-61: a parked ticket the Commander answered directly on Jira auto-resumes — lift it out
+            # of the skip-set and put it at the FRONT of the queue (resume before taking new work).
+            resumed = _resumable_answered(cfg, app_name, blocked)
+            if resumed:
+                blocked -= set(resumed)
+                save_blocked(cfg, blocked)
+                notify.send("▶️ Resuming (answered on Jira): " + ", ".join(sorted(resumed)))
+                audit.record("decision_resumed", tickets=sorted(resumed), via="jira-comment")
             worklist = intake.from_drain(cfg, app_name, cap + len(blocked) + 5)
             worklist = [(a, t) for (a, t) in worklist if t.id not in blocked][:cap]
+            # Prepend the Jira-answered resumes, de-duped against what the drain already returned.
+            in_wl = {t.id for _, t in worklist}
+            worklist = [v for k, v in resumed.items() if k not in in_wl] + worklist
 
             if not worklist:
                 # An empty worklist is NOT necessarily a clear queue: a board that failed to drain

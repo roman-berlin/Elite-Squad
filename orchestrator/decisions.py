@@ -46,10 +46,18 @@ def _save(cfg, items: list[dict]) -> None:
     locking.locked_rmw(_store(cfg), lambda _current: items, default=[])
 
 
-def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None) -> None:
+def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None,
+        *, block: bool = True) -> None:
     """Record a pending decision for the cockpit 'Needs you'. `entry_id` overrides the storage/de-dup
     key (defaults to the ticket id); pass a distinct key — e.g. f'{ticket.id}#out-of-scope' (EU-42) —
-    when one ticket carries more than one kind of pending decision, so they don't overwrite each other."""
+    when one ticket carries more than one kind of pending decision, so they don't overwrite each other.
+
+    EU-61 (decision round-trip): parking a ticket's MAIN decision also transitions it to 'Blocked' on
+    the tracker, so the open question is visible in Jira and the Commander can answer it right there, and
+    snapshots the latest human comment as a resume *baseline* (the autopilot uses it to tell a NEW Jira
+    answer from a pre-existing comment). A SUB-decision carrying a distinct ``entry_id`` (the out-of-scope
+    proposal) rides alongside without changing the ticket's status; pass ``block=False`` for a hand-back
+    that owns its own status (e.g. the readiness gate → 'Needs Human')."""
     eid = entry_id or ticket.id
     entry = {
         "id": eid, "app": app_name, "question": question,
@@ -57,6 +65,12 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
         "acceptance": ticket.acceptance_criteria, "ephemeral": ticket.ephemeral,
         "ts": time.time(),
     }
+    # Only the ticket's own (main) decision parks it to 'Blocked'; a distinct-entry_id sub-decision
+    # must not move the ticket's status out from under an in-flight build.
+    if block and (entry_id is None or entry_id == ticket.id):
+        baseline = _park_on_tracker(cfg, ticket, app_name)
+        if baseline is not None:
+            entry["answer_baseline"] = baseline
 
     def _mutate(items):
         items = [i for i in (items or []) if i.get("id") != eid]   # de-dupe by entry id
@@ -65,6 +79,50 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
 
     # One atomic read-modify-write so a concurrent add/resolve can't drop this decision.
     locking.locked_rmw(_store(cfg), _mutate, default=[])
+
+
+def _park_on_tracker(cfg, ticket: Ticket, app_name: str) -> str | None:
+    """Transition a parked ticket to 'Blocked' (the visible state of a decision round-trip, EU-61) and
+    return the latest human comment currently on it — the baseline the autopilot compares against to
+    detect a NEW Commander answer. Best-effort: a no-op (returns None) for dry-run, ephemeral
+    (trackerless) tickets, and apps with no backlog; never raises, so a tracker hiccup can't break the
+    escalation path."""
+    if getattr(cfg, "dry_run", False) or getattr(ticket, "ephemeral", False):
+        return None
+    try:
+        app = cfg.app(app_name)
+        if getattr(app, "backlog_backend", "none") == "none":
+            return None
+        from .backlog.base import make_backlog
+        backlog = make_backlog(app)
+        backlog.set_status(ticket, "Blocked")
+        try:
+            return backlog.latest_answer(ticket) or ""
+        except Exception:  # noqa: BLE001 - the resume baseline is optional
+            return ""
+    except Exception:  # noqa: BLE001 - parking on the tracker must never break escalation
+        return None
+
+
+def _comment_answer(cfg, resolved: dict, answer: str) -> None:
+    """Post the Commander's decision back onto the ticket as a comment (the write half of the EU-61
+    round-trip), so the question and its resolution both live in Jira. Best-effort: skipped for dry-run /
+    ephemeral / trackerless tickets; never raises."""
+    if getattr(cfg, "dry_run", False) or resolved.get("ephemeral"):
+        return
+    try:
+        app = cfg.app(resolved.get("app"))
+        if getattr(app, "backlog_backend", "none") == "none":
+            return
+        key = str(resolved.get("id", "")).split("#", 1)[0]   # strip any sub-decision suffix
+        if not key:
+            return
+        from .backlog.base import make_backlog
+        ticket = Ticket(id=key, key=key, summary=resolved.get("summary", ""), description="",
+                        app=app.name)
+        make_backlog(app).add_comment(ticket, f"Commander's decision: {answer}")
+    except Exception:  # noqa: BLE001 - commenting the answer must never break the resume path
+        pass
 
 
 def reply_hint(ticket_id: str | None = None) -> str:
@@ -77,8 +135,12 @@ def reply_hint(ticket_id: str | None = None) -> str:
     return "↩️ Reply  TICKET-ID: <your decision>  to target one — or reply plainly for the oldest pending."
 
 
-def resolve(cfg, answer: str, ticket_id: str | None = None) -> dict | None:
-    """Pop and return the matching pending decision (by id, else oldest)."""
+def resolve(cfg, answer: str, ticket_id: str | None = None, *, comment: bool = True) -> dict | None:
+    """Pop and return the matching pending decision (by id, else oldest).
+
+    EU-61: by default also posts the answer back to the tracker as a comment (the Commander answered in
+    Telegram → echo the decision onto the Jira ticket). Pass ``comment=False`` when the answer ALREADY
+    came from a Jira comment (the autopilot's Jira-native resume), so it isn't echoed back."""
     popped: list[dict] = []
 
     def _mutate(items):
@@ -101,6 +163,8 @@ def resolve(cfg, answer: str, ticket_id: str | None = None) -> dict | None:
         return None
     it = popped[0]
     it["answer"] = answer
+    if comment:
+        _comment_answer(cfg, it, answer)
     return it
 
 

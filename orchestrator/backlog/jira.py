@@ -28,6 +28,12 @@ import requests
 from ..contracts import Ticket
 from .base import BacklogAdapter
 
+# Roman Berlin's Atlassian accountId. The unit only ever works and files Roman's tickets (Standing
+# Order), so every ticket the unit creates is pinned to him — even when the board/connection configures
+# no explicit assignee. Without this, Jira leaves a created issue assigned to the API-token owner (the
+# implicit currentUser()), so it never lands in Roman's queue.
+ROMAN_ACCOUNT_ID = "70121:051c9744-3c4d-4dfb-b2e5-d7a0e87c2443"
+
 
 class JiraAdapter(BacklogAdapter):
     def __init__(self, app):
@@ -62,6 +68,9 @@ class JiraAdapter(BacklogAdapter):
             self.base_url = (conn.get("base_url") or self.base_url).rstrip("/")
             self.project = conn.get("project_key") or self.project
             self.session.auth = (conn.get("email", ""), conn.get("token", ""))
+            # A connection can pin an assignee so future boards inherit it (quick-connect stores
+            # Roman by default); app config still wins if it set one explicitly.
+            self.assignee = self.assignee or conn.get("assignee")
         else:
             email_env = b.get("email_env", "JIRA_EMAIL")
             token_env = b.get("token_env", "JIRA_API_TOKEN")
@@ -150,6 +159,24 @@ class JiraAdapter(BacklogAdapter):
         resp.raise_for_status()
         return self._to_ticket(resp.json())
 
+    def comments(self, key: str) -> list[dict[str, Any]]:
+        """All comments on an issue, oldest -> newest (GET issue/{key}/comment). The read half of a
+        decision round-trip: the loop posts a question as a comment, the Commander answers in one."""
+        resp = self.session.get(self._url(f"issue/{key}/comment"))
+        resp.raise_for_status()
+        return list((resp.json() or {}).get("comments", []) or [])
+
+    def latest_answer(self, ticket) -> str | None:
+        """The most recent HUMAN comment on the ticket — the Commander's answer in a decision
+        round-trip — as plain text, or None. Skips the unit's own '[General]'-prefixed comments so a
+        question the loop just posted is never mistaken for the reply."""
+        key = getattr(ticket, "key", ticket)
+        for c in reversed(self.comments(key)):
+            txt = _adf_to_text(c.get("body"))
+            if txt and not txt.strip().startswith("[General]"):
+                return txt.strip()
+        return None
+
     def _current_status(self, key: str) -> str | None:
         try:
             r = self.session.get(self._url(f"issue/{key}"), params={"fields": "status"})
@@ -197,8 +224,10 @@ class JiraAdapter(BacklogAdapter):
             "issuetype": {"name": issue_type},
             "description": _adf(description or summary),
         }
-        if self.assignee:
-            fields["assignee"] = {"accountId": self.assignee}
+        # Always pin an assignee: the configured one, else Roman by default. Leaving it unset makes
+        # Jira fall back to the token owner (implicit currentUser()), so tickets the unit files would
+        # never reach Roman's queue.
+        fields["assignee"] = {"accountId": self.assignee or ROMAN_ACCOUNT_ID}
         if labels:
             fields["labels"] = [str(l).replace(" ", "-") for l in labels]
         r = self.session.post(self._url("issue"), json={"fields": fields})
