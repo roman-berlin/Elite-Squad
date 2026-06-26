@@ -442,6 +442,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     last_changes: list[str] = []
     prev_reject_sig: str | None = None     # retry guard: detect the same rejection coming back unaddressed
     coverage_artifact = ""        # Test Engineer's PR coverage line for this ticket (latest pass)
+    covered_diff_hash: str | None = None   # EU-53: hash of the tree the Test Engineer last covered —
+                                           # lets a later pass skip the (Opus) coverage agent + re-gate
+                                           # when nothing changed since.
     pm_used = False
 
     for iteration in range(1, cfg.max_iterations + 1):
@@ -553,33 +556,54 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 2.5) TEST ENGINEER — coverage gate: after the build, before review, ensure the change is
         # proven (happy-path + regression test) and own the coverage artifact for the PR description.
         if getattr(cfg, "test_gate", True):
-            print("  tests · Test Engineer covering the change…", flush=True)
-            te = await test_engineer_mod.ensure_coverage(ticket, app, cfg)
-            cost += te.cost_usd
-            budget.add(te.cost_usd)
-            audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
-                         coverage=te.coverage, cost_usd=te.cost_usd, turns=te.num_turns,
-                         tools=te.tools, summary=(te.summary or "")[:1000])
-            if te.coverage:
-                coverage_artifact = te.coverage
-                print(f"  tests · coverage {te.coverage}", flush=True)
-            elif te.ok:
-                print("  tests · Test Engineer added tests (no coverage delta reported)", flush=True)
+            # EU-53: the coverage pass runs a full-tools (Opus) agent and the re-gate below re-runs
+            # the repo's whole test command — both are pure waste on a retry whose tree is byte-for-byte
+            # what the Test Engineer already covered (e.g. a review rejection the builder didn't act on,
+            # or any unchanged-scope pass). Hash the current diff and skip the whole stage when it
+            # matches the tree we last covered.
+            pre_te_hash = AuditLog.diff_hash(git.diff_against_base())
+            if pre_te_hash == covered_diff_hash:
+                print("  tests · change unchanged since last coverage pass — skipping Test Engineer (EU-53)",
+                      flush=True)
+                audit.record("test_engineer_skipped", ticket_id=ticket.id, iteration=iteration,
+                             reason="diff unchanged since last coverage pass")
             else:
-                print("  tests · Test Engineer errored — proceeding to review", flush=True)
-            # The Test Engineer may have added test files. Re-run the SAME verification gate the
-            # build passed — run_gate over the app's configured gate_commands. That re-gate catches a
-            # newly-broken test ONLY when those commands actually run the repo's tests (e.g.
-            # automatixy's vitest, the EU repo's `python3 tests/run_all.py`); when the gate is
-            # lint/typecheck-only it instead catches type/lint breakage the new test files introduced,
-            # and a failing test would surface later (the Test Engineer's own run, or CI). Either way a
-            # red here goes back to the builder now rather than as a confusing review failure.
-            te_gate = run_gate(app, git.changed_paths())
-            if not te_gate.passed:
-                print("  gate · FAILED after tests → sending fixes back to builder", flush=True)
-                _bar(1, fail=1)
-                last_changes = [f"Verification failed after the coverage pass; fix these:\n{te_gate.report}"]
-                continue
+                print("  tests · Test Engineer covering the change…", flush=True)
+                te = await test_engineer_mod.ensure_coverage(ticket, app, cfg)
+                cost += te.cost_usd
+                budget.add(te.cost_usd)
+                audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
+                             coverage=te.coverage, cost_usd=te.cost_usd, turns=te.num_turns,
+                             tools=te.tools, summary=(te.summary or "")[:1000])
+                if te.coverage:
+                    coverage_artifact = te.coverage
+                    print(f"  tests · coverage {te.coverage}", flush=True)
+                elif te.ok:
+                    print("  tests · Test Engineer added tests (no coverage delta reported)", flush=True)
+                else:
+                    print("  tests · Test Engineer errored — proceeding to review", flush=True)
+                # Record the tree the Test Engineer just covered so a later unchanged pass can skip above.
+                covered_diff_hash = AuditLog.diff_hash(git.diff_against_base())
+                # EU-53: only re-gate when the Test Engineer ACTUALLY changed the tree (added/edited test
+                # files). When it added nothing, the build already passed this exact gate above, so the
+                # re-gate — for the EU repo the whole `python3 tests/run_all.py` — is pure redundant burn.
+                if covered_diff_hash == pre_te_hash:
+                    print("  tests · Test Engineer added no files — skipping re-gate (EU-53)", flush=True)
+                else:
+                    # The Test Engineer added test files. Re-run the SAME verification gate the build
+                    # passed — run_gate over the app's configured gate_commands. That re-gate catches a
+                    # newly-broken test ONLY when those commands actually run the repo's tests (e.g.
+                    # automatixy's vitest, the EU repo's `python3 tests/run_all.py`); when the gate is
+                    # lint/typecheck-only it instead catches type/lint breakage the new test files
+                    # introduced, and a failing test would surface later (the Test Engineer's own run, or
+                    # CI). Either way a red here goes back to the builder now rather than as a confusing
+                    # review failure.
+                    te_gate = run_gate(app, git.changed_paths())
+                    if not te_gate.passed:
+                        print("  gate · FAILED after tests → sending fixes back to builder", flush=True)
+                        _bar(1, fail=1)
+                        last_changes = [f"Verification failed after the coverage pass; fix these:\n{te_gate.report}"]
+                        continue
 
         # 3) REVIEW (spec + quality) on the diff
         print("  review · reviewer reading the diff…", flush=True)
