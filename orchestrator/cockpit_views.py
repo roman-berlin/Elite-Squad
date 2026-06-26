@@ -16,6 +16,43 @@ from . import dashboard as D
 from .cockpit_state import _state
 from .config import Config
 
+# ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
+# Slice 1 made the War Room's ``:root{…}`` block the single source of truth for the
+# cockpit's palette / radius / elevation / focus-ring. The standalone pages built
+# here (``_wrap`` chrome → forensics, chat, ship-preview, …) live in their OWN HTML
+# documents and never see that block, so they must inject it too. ``_token_css``
+# pulls it LIVE out of ``warroom._PAGE`` — re-skin there and every page follows — and
+# falls back to a bundled copy when that block can't be read (tests / offline preview).
+_TOKENS_FALLBACK = (
+    ":root{color-scheme:dark;"
+    "--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;"
+    "--ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;"
+    "--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;"
+    "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
+    "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
+    "--info:#6aa9ff;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;"
+    "--mono:ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;"
+    "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
+    "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
+    "--shadow-3:0 16px 40px rgba(0,0,0,.55);"
+    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease}")
+
+
+def _token_css() -> str:
+    """The slice-1 design tokens as a ``<style>:root{…}</style>`` block, so every standalone
+    cockpit page shares ONE palette source with the War Room (EU-39). Read live from
+    ``warroom._PAGE``; falls back to ``_TOKENS_FALLBACK`` when unavailable."""
+    try:
+        import re
+
+        from . import warroom
+        m = re.search(r":root\{[^}]*\}", warroom._PAGE)
+        if m:
+            return "<style>" + m.group(0) + "</style>"
+    except Exception:  # noqa: BLE001 - tests / preview render without the War Room module loaded
+        pass
+    return "<style>" + _TOKENS_FALLBACK + "</style>"
+
 
 def _back_home() -> str:
     """The cockpit URL to return to — carries the active ?app= so 'back to cockpit' lands on the project
@@ -30,14 +67,19 @@ def _back_home() -> str:
 
 def _wrap(title: str, inner: str) -> str:
     return ("<!doctype html><meta charset=utf-8><title>" + html.escape(title) + "</title>"
-            "<style>body{background:#0d0f14;color:#e8eaed;font:14px/1.6 -apple-system,"
-            "BlinkMacSystemFont,sans-serif;margin:0;padding:22px 30px}a{color:#6aa9ff}"
-            ".rep{white-space:pre-wrap;background:#151a23;border:1px solid #232936;"
-            "border-radius:10px;padding:16px}"
-            "textarea,select,input{background:#151a23;border:1px solid #232936;color:#e8eaed;"
-            "border-radius:8px;padding:8px;font:inherit}"
-            "button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 16px;"
-            "font-weight:650;cursor:pointer}</style>"
+            + _token_css() +
+            "<style>*{box-sizing:border-box}"
+            "body{background:radial-gradient(1100px 440px at 80% -10%,rgba(77,124,255,.08),transparent 60%),"
+            "var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"
+            "\"Segoe UI\",Inter,sans-serif;margin:0;padding:22px 30px}a{color:var(--info)}"
+            ".rep{white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);"
+            "border-radius:var(--r-lg);padding:16px}"
+            "textarea,select,input{background:var(--panel);border:1px solid var(--line2);color:var(--ink);"
+            "border-radius:var(--r-md);padding:8px;font:inherit}"
+            "button{background:var(--accent);border:0;color:#fff;border-radius:var(--r-md);padding:9px 16px;"
+            "font-weight:650;cursor:pointer}"
+            "a:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible,"
+            "input:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
             f"<p><a href='{_back_home()}'>&larr; cockpit</a></p><h2>{html.escape(title)}</h2>{inner}")
 
 
@@ -77,9 +119,11 @@ def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
 def _actbar(*items: str) -> str:
     """A row of on-page officer-action controls."""
     return ("<style>.actbar{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}"
-            ".actbtn{background:#161b25;border:1px solid #2a3343;color:#e9ecf1;border-radius:9px;"
-            "padding:9px 14px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;"
-            "text-decoration:none;display:inline-block}.actbtn:hover{background:#1b2230}</style>"
+            ".actbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);"
+            "border-radius:var(--r-md);padding:9px 14px;font:inherit;font-size:14px;font-weight:600;"
+            "cursor:pointer;text-decoration:none;display:inline-block;transition:background var(--t-fast)}"
+            ".actbtn:hover{background:var(--line)}"
+            ".actbtn:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
             "<div class=actbar>" + "".join(items) + "</div>")
 
 
@@ -264,45 +308,48 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 
     return f"""
 <style>
-.tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid #1f2531;background:#0e1219}}
-.tbar .btn{{display:inline-flex;align-items:center;gap:7px;background:#161b25;border:1px solid #2a3343;color:#e9ecf1;border-radius:9px;padding:9px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap}}
-.tbar .btn:hover{{background:#1b2230}}
-.tbar .btn.primary{{background:#3b6cff;border-color:#3b6cff;color:#fff}}
+/* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
+   the War Room's :root{{}}, so a re-skin there flows through here too. */
+.tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
+.tbar .btn{{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:9px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background var(--t-fast),border-color var(--t-fast)}}
+.tbar .btn:hover{{background:var(--line)}}
+.tbar .btn.primary{{background:var(--accent);border-color:var(--accent);color:#fff}}
 .tbar .btn.primary:hover{{background:#2f5ce0}}
+.tbar .btn:focus-visible,.tbar summary:focus-visible,.tbar .panel a:focus-visible,.tbar .panel button:focus-visible{{outline:none;box-shadow:var(--ring)}}
 .tbar details.menu{{position:relative}}
 .tbar details.menu>summary{{list-style:none}}
 .tbar details.menu>summary::-webkit-details-marker{{display:none}}
-.tbar details.menu>summary::after{{content:" \\25BE";color:#8a929f;font-size:10px}}
-.tbar details[open]>summary{{background:#1b2230;border-color:#3b6cff}}
-.tbar .panel{{position:absolute;top:calc(100% + 7px);left:0;z-index:30;min-width:212px;background:#12161f;border:1px solid #2a3343;border-radius:12px;padding:6px;display:flex;flex-direction:column;gap:2px;box-shadow:0 16px 40px rgba(0,0,0,.5)}}
+.tbar details.menu>summary::after{{content:" \\25BE";color:var(--dim);font-size:10px}}
+.tbar details[open]>summary{{background:var(--line);border-color:var(--accent)}}
+.tbar .panel{{position:absolute;top:calc(100% + 7px);left:0;z-index:30;min-width:212px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r-lg);padding:6px;display:flex;flex-direction:column;gap:2px;box-shadow:var(--shadow-3)}}
 .tbar .panel.right{{left:auto;right:0}}
-.tbar .panel a,.tbar .panel form>button{{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:none;border:0;color:#e9ecf1;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;white-space:nowrap}}
-.tbar .panel a:hover,.tbar .panel form>button:hover{{background:#1b2230}}
+.tbar .panel a,.tbar .panel form>button{{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:none;border:0;color:var(--ink);border-radius:var(--r-md);padding:9px 11px;font:inherit;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;white-space:nowrap}}
+.tbar .panel a:hover,.tbar .panel form>button:hover{{background:var(--line)}}
 .tbar .panel form{{margin:0}}
 .tbar .panel.form{{min-width:312px;gap:9px;padding:13px}}
-.tbar .panel.form select,.tbar .panel.form input[type=text]{{background:#0d1119;border:1px solid #2a3343;color:#e9ecf1;border-radius:8px;padding:8px 10px;font:inherit;width:100%}}
+.tbar .panel.form select,.tbar .panel.form input[type=text]{{background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:8px 10px;font:inherit;width:100%}}
 .tbar .panel.form .row{{display:flex;gap:8px;align-items:center}}
-.tbar .panel.form button{{display:block;width:100%;background:#3b6cff;color:#fff;border:0;border-radius:8px;padding:9px;font-weight:650;cursor:pointer}}
-.tbar .panel.form button:disabled{{background:#222a37;color:#5c6573;cursor:not-allowed}}
-.tbar .panel .sep{{height:1px;background:#1f2531;margin:5px 4px}}
-.tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#5c6573;padding:6px 11px 3px}}
-.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:#f7b955}}.tbar .tbnote.bad{{color:#f0676b}}.tbar .tbnote.ok{{color:#52b788;font-weight:600}}
+.tbar .panel.form button{{display:block;width:100%;background:var(--accent);color:#fff;border:0;border-radius:var(--r-md);padding:9px;font-weight:650;cursor:pointer}}
+.tbar .panel.form button:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}
+.tbar .panel .sep{{height:1px;background:var(--line);margin:5px 4px}}
+.tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);padding:6px 11px 3px}}
+.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:var(--warn)}}.tbar .tbnote.bad{{color:var(--bad)}}.tbar .tbnote.ok{{color:var(--ok);font-weight:600}}
 .tbar .btn.deploy{{background:#1f7a45;border-color:#2c9a5f;color:#fff}}.tbar .btn.deploy:hover{{background:#1a6b3c}}.tbar .btn.deploy .cbadge{{background:#0c3a22}}
 .tbar .btn.ship{{background:#7c3aed;border-color:#8b5cf6;color:#fff}}.tbar .btn.ship:hover{{background:#6d28d9}}.tbar .btn.ship .cbadge{{background:#3b1d7a}}
-.tbar .tbdiv{{width:1px;height:22px;background:#2a3343;margin:0 7px;align-self:center;display:inline-block}}
+.tbar .tbdiv{{width:1px;height:22px;background:var(--line2);margin:0 7px;align-self:center;display:inline-block}}
 .tbar .grow{{flex:1}}
 .tbar .chatbtn{{display:inline-flex;align-items:center;gap:6px}}
-.tbar .cbadge{{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px}}
+.tbar .cbadge{{background:var(--bad);color:#fff;font-size:10px;font-weight:800;border-radius:var(--r-pill);padding:1px 6px}}
 .tbar form.tbf{{margin:0;display:inline-flex}}
 .tbar .btn:disabled{{opacity:.5;cursor:not-allowed}}
 .tbar .panel a{{display:flex;align-items:center}}
-.tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:#5c6573;font-size:11px;font-weight:400}}
-.deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:#0f1626;border-bottom:1px solid #20304d}}
-.deploybar .dspin{{width:18px;height:18px;border:3px solid #21314f;border-top-color:#3b6cff;border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
+.tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:var(--faint);font-size:11px;font-weight:400}}
+.deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
+.deploybar .dspin{{width:18px;height:18px;border:3px solid var(--accentline);border-top-color:var(--accent);border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
 .deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
-.deploybar .dsub{{color:#7f8ba3;font-weight:400;font-size:12px}}
-.deploybar .dprog{{flex:1;max-width:300px;height:6px;background:#0c1119;border-radius:99px;overflow:hidden;border:1px solid #21314f}}
-.deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,#2b5cff,#6aa9ff);border-radius:99px;animation:dsl 1.4s ease-in-out infinite}}
+.deploybar .dsub{{color:var(--dim);font-weight:400;font-size:12px}}
+.deploybar .dprog{{flex:1;max-width:300px;height:6px;background:var(--bg);border-radius:var(--r-pill);overflow:hidden;border:1px solid var(--accentline)}}
+.deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,var(--accent),var(--info));border-radius:var(--r-pill);animation:dsl 1.4s ease-in-out infinite}}
 @keyframes dsp{{to{{transform:rotate(360deg)}}}}
 @keyframes dsl{{0%{{margin-left:-38%}}100%{{margin-left:100%}}}}
 @media(max-width:820px){{
@@ -415,24 +462,25 @@ def _chat_inner(cfg: Config) -> str:
 
 _CHAT_STYLE = ("<style>"
                ".chat{max-width:780px;margin:0 auto}"
-               ".ctabs{max-width:780px;margin:0 auto 14px;display:flex;gap:6px;border-bottom:1px solid #1e222b}"
-               ".ctab{padding:9px 14px;color:#8a929f;font-size:13px;font-weight:600;border-bottom:2px solid transparent;text-decoration:none}"
-               ".ctab.on{color:#e9ecf1;border-bottom-color:#3b6cff}.ctab:hover{color:#e9ecf1}"
-               ".cbadge{background:#f0676b;color:#fff;font-size:10px;font-weight:800;border-radius:99px;padding:1px 6px;margin-left:5px}"
-               ".aim{max-width:780px;margin:0 auto 10px;color:#9be7bd;font-size:13px}.aim a{color:#6aa9ff}"
-               ".pcard{background:#1a160f;border:1px solid #3a2f12;border-radius:14px;padding:14px 16px;margin-bottom:12px}"
-               ".pcard .ph2{color:#f7b955;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
-               ".pcard .pq{color:#e9ecf1;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:ui-monospace,Menlo,monospace;line-height:1.5}"
+               ".ctabs{max-width:780px;margin:0 auto 14px;display:flex;gap:6px;border-bottom:1px solid var(--line)}"
+               ".ctab{padding:9px 14px;color:var(--dim);font-size:13px;font-weight:600;border-bottom:2px solid transparent;text-decoration:none}"
+               ".ctab.on{color:var(--ink);border-bottom-color:var(--accent)}.ctab:hover{color:var(--ink)}"
+               ".ctab:focus-visible{outline:none;box-shadow:var(--ring);border-radius:var(--r-sm)}"
+               ".cbadge{background:var(--bad);color:#fff;font-size:10px;font-weight:800;border-radius:var(--r-pill);padding:1px 6px;margin-left:5px}"
+               ".aim{max-width:780px;margin:0 auto 10px;color:#9be7bd;font-size:13px}.aim a{color:var(--info)}"
+               ".pcard{background:var(--warnbg);border:1px solid var(--warnline);border-radius:var(--r-xl);padding:14px 16px;margin-bottom:12px}"
+               ".pcard .ph2{color:var(--warn);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
+               ".pcard .pq{color:var(--ink);font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:var(--mono);line-height:1.5}"
                ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
                ".thread{display:flex;flex-direction:column;gap:9px;margin:16px 0 96px}"
                ".msg{display:flex;flex-direction:column;max-width:80%}"
                ".msg.you{align-self:flex-end;align-items:flex-end}.msg.unit{align-self:flex-start}"
-               ".who{font-size:10px;color:#5c6573;margin:0 6px 2px}"
-               ".bub{padding:9px 13px;border-radius:14px;font-size:13px;line-height:1.5;white-space:pre-wrap}"
-               ".msg.unit .bub{background:#161b25;border:1px solid #232b38;border-bottom-left-radius:4px}"
+               ".who{font-size:10px;color:var(--faint);margin:0 6px 2px}"
+               ".bub{padding:9px 13px;border-radius:var(--r-xl);font-size:13px;line-height:1.5;white-space:pre-wrap}"
+               ".msg.unit .bub{background:var(--panel2);border:1px solid var(--line2);border-bottom-left-radius:4px}"
                ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
-               ".cempty{color:#8a929f;padding:30px 8px;text-align:center;font-size:13px}"
-               ".composer{position:fixed;bottom:0;left:0;right:0;background:#0d0f14;border-top:1px solid #1e222b;padding:12px 30px}"
+               ".cempty{color:var(--dim);padding:30px 8px;text-align:center;font-size:13px}"
+               ".composer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--line);padding:12px 30px}"
                ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
                "</style>")
 

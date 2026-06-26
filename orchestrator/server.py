@@ -1426,22 +1426,25 @@ def create_app(cfg: Config):
     def ship_preview_page():
         from . import sync as _sync
         appq = (request.args.get("app") or "").strip() or (cfg.apps[0].name if cfg.apps else "")
+        # Skinned with the EU-39 design tokens injected by _wrap; the purple "ship" accent
+        # stays a distinct brand colour (matches the control-bar Ship button) on purpose.
         style = (
             "<style>"
-            ".shp{max-width:940px}.shhead{background:#171226;border:1px solid #2c2148;border-radius:12px;"
-            "padding:16px 18px;margin:4px 0 18px}.shhead h2{margin:0 0 6px;color:#e9ecf1;font-size:20px}"
-            ".shhead .meta{color:#b9a6e6;font-size:13px;font-family:ui-monospace,Menlo,monospace}"
-            ".shtix{margin:14px 0 6px;color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
-            ".shcard{background:#12161f;border:1px solid #232936;border-radius:11px;padding:12px 15px;margin:9px 0}"
-            ".shcard .tk{color:#e9ecf1;font-weight:700;font-size:14px}.shcard .tk a{color:#7aa2ff;text-decoration:none}"
-            ".shcard .n{color:#6b7480;font-size:12px;margin-left:6px}"
+            ".shp{max-width:940px}.shhead{background:#171226;border:1px solid #2c2148;border-radius:var(--r-lg);"
+            "padding:16px 18px;margin:4px 0 18px}.shhead h2{margin:0 0 6px;color:var(--ink);font-size:20px}"
+            ".shhead .meta{color:#b9a6e6;font-size:13px;font-family:var(--mono)}"
+            ".shtix{margin:14px 0 6px;color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
+            ".shcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:12px 15px;margin:9px 0}"
+            ".shcard .tk{color:var(--ink);font-weight:700;font-size:14px}.shcard .tk a{color:#7aa2ff;text-decoration:none}"
+            ".shcard .n{color:var(--dim);font-size:12px;margin-left:6px}"
             ".shcard ul{margin:8px 0 0;padding-left:0;list-style:none}"
             ".shcard li{color:#c3cad6;font-size:13px;padding:3px 0;display:flex;gap:9px}"
-            ".shcard li .sha{color:#7aa2ff;font-family:ui-monospace,Menlo,monospace;white-space:nowrap}"
+            ".shcard li .sha{color:#7aa2ff;font-family:var(--mono);white-space:nowrap}"
             ".shbar{display:flex;gap:10px;align-items:center;margin:20px 0 8px}"
-            ".shgo{background:#7c3aed;border:0;color:#fff;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer;font:inherit}"
-            ".shgo:hover{background:#6d28d9}.shcancel{color:#8a929f;text-decoration:none;padding:11px 6px}"
-            ".shempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
+            ".shgo{background:#7c3aed;border:0;color:#fff;border-radius:var(--r-md);padding:11px 18px;font-weight:700;cursor:pointer;font:inherit}"
+            ".shgo:hover{background:#6d28d9}.shgo:focus-visible,.shcancel:focus-visible{outline:none;box-shadow:var(--ring)}"
+            ".shcancel{color:var(--dim);text-decoration:none;padding:11px 6px}"
+            ".shempty{color:var(--ok);padding:30px;text-align:center;font-size:15px}</style>")
         if not appq:
             return _wrap("Ship to production", style + "<div class=shempty>No app selected.</div>")
         try:
@@ -1470,8 +1473,11 @@ def create_app(cfg: Config):
         cards = []
         for tk in tickets + (["—"] if "—" in groups else []):
             cs = groups[tk]
-            label = (f'<a href="{jira_base}/browse/{tk}" target=_blank>{tk}</a>' if (tk != "—" and jira_base)
-                     else (tk if tk != "—" else "No ticket"))
+            # EU-55/F12(a): emit a real Jira deep-link only when the app's backlog base_url is known,
+            # and url-quote the key so the target can't break; otherwise degrade to escaped plain text.
+            label = (f'<a href="{html.escape(jira_base)}/browse/{quote(tk)}" target=_blank '
+                     f'rel=noopener>{html.escape(tk)}</a>' if (tk != "—" and jira_base)
+                     else (html.escape(tk) if tk != "—" else "No ticket"))
             lis = "".join(f'<li><span class=sha>{html.escape(c["sha"])}</span>'
                           f'<span>{html.escape(c["subject"])}</span></li>' for c in cs)
             cards.append(f'<div class=shcard><div class=tk>{label}<span class=n>· {len(cs)} commit'
