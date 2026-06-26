@@ -245,10 +245,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                               f"so your backlog is HIDDEN, not empty → {boards}", flush=True)
                         notify.send(f"⚠️ Autopilot can't read your backlog — {len(unreachable)} Jira "
                                     f"board(s) unreachable:\n{boards}")
+                        # Leave a durable trail in audit.jsonl — without this a backlog that went dark at
+                        # 3am (expired token, network) had ZERO record of WHY the queue looked empty.
+                        audit.record("backlog_unreachable", boards=dict(unreachable))
                     else:
                         print("  · queue clear — nothing of yours in In Progress / To Do"
                               + (f" (parked: {', '.join(sorted(blocked))})" if blocked else "")
                               + " — idling; I'll pick up new or unblocked tickets automatically.", flush=True)
+                        # Record the benign empty-queue too, so the log distinguishes "genuinely clear"
+                        # from "hidden behind a dead board" instead of being silent on both.
+                        audit.record("queue_clear", parked=sorted(blocked))
                     idle_state = state
                 if once:
                     break
