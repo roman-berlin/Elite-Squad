@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import notify
+from . import locking, notify
 from .contracts import Ticket
 
 
@@ -40,24 +40,31 @@ def load(cfg) -> list[dict]:
 
 
 def _save(cfg, items: list[dict]) -> None:
-    _store(cfg).write_text(json.dumps(items, indent=2))
+    # Write under the shared cross-thread + cross-process lock (the Telegram poller's add/resolve race
+    # the autopilot/cockpit on this same file). add()/resolve() below do the full read-modify-write
+    # inside a single locked_rmw so two concurrent edits can't clobber each other.
+    locking.locked_rmw(_store(cfg), lambda _current: items, default=[])
 
 
 def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None) -> None:
     """Record a pending decision for the cockpit 'Needs you'. `entry_id` overrides the storage/de-dup
     key (defaults to the ticket id); pass a distinct key — e.g. f'{ticket.id}#out-of-scope' (EU-42) —
     when one ticket carries more than one kind of pending decision, so they don't overwrite each other."""
-    items = load(cfg)
     eid = entry_id or ticket.id
-    # de-dupe by entry id
-    items = [i for i in items if i.get("id") != eid]
-    items.append({
+    entry = {
         "id": eid, "app": app_name, "question": question,
         "summary": ticket.summary, "description": ticket.description,
         "acceptance": ticket.acceptance_criteria, "ephemeral": ticket.ephemeral,
         "ts": time.time(),
-    })
-    _save(cfg, items)
+    }
+
+    def _mutate(items):
+        items = [i for i in (items or []) if i.get("id") != eid]   # de-dupe by entry id
+        items.append(entry)
+        return items
+
+    # One atomic read-modify-write so a concurrent add/resolve can't drop this decision.
+    locking.locked_rmw(_store(cfg), _mutate, default=[])
 
 
 def reply_hint(ticket_id: str | None = None) -> str:
@@ -72,17 +79,27 @@ def reply_hint(ticket_id: str | None = None) -> str:
 
 def resolve(cfg, answer: str, ticket_id: str | None = None) -> dict | None:
     """Pop and return the matching pending decision (by id, else oldest)."""
-    items = load(cfg)
-    if not items:
+    popped: list[dict] = []
+
+    def _mutate(items):
+        items = list(items or [])
+        if not items:
+            return items
+        idx = 0
+        if ticket_id:
+            idx = next((i for i, it in enumerate(items)
+                        if it["id"].lower() == ticket_id.lower()), None)
+            if idx is None:
+                return items   # no match — leave the store untouched
+        popped.append(items.pop(idx))
+        return items
+
+    # Find-and-remove in one locked read-modify-write so a concurrent add/resolve can't lose a
+    # decision or hand the same one to two replies.
+    locking.locked_rmw(_store(cfg), _mutate, default=[])
+    if not popped:
         return None
-    idx = 0
-    if ticket_id:
-        idx = next((i for i, it in enumerate(items)
-                    if it["id"].lower() == ticket_id.lower()), None)
-        if idx is None:
-            return None
-    it = items.pop(idx)
-    _save(cfg, items)
+    it = popped[0]
     it["answer"] = answer
     return it
 
