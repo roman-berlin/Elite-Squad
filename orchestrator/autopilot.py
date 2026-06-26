@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import events, intake, notify, usage
+from . import events, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import Outcome
@@ -82,9 +82,12 @@ def load_blocked(cfg: Config) -> set[str]:
 
 
 def save_blocked(cfg: Config, blocked: set[str]) -> None:
+    # Authoritative overwrite, but taken under the shared cross-thread + cross-process lock so it can't
+    # interleave with a concurrent write (the Telegram poller's /unblock) and lose one side's update.
+    snapshot = sorted(blocked)
     try:
-        _blocked_file(cfg).write_text(json.dumps(sorted(blocked), indent=2))
-    except OSError:
+        locking.locked_rmw(_blocked_file(cfg), lambda _current: snapshot, default=[])
+    except (OSError, ValueError):
         pass
 
 
@@ -275,6 +278,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                       + ", ".join(f"{t} [{error_counts[t]}/{_MAX_TICKET_ERRORS}]" for t in retrying),
                       flush=True)
 
+            # Re-read straight from disk right before the write-back instead of trusting the snapshot
+            # taken at the top of the loop (~:219). The Telegram poller may have run /unblock mid-cycle;
+            # merging our new parks into the *stale* snapshot would silently resurrect a ticket the
+            # Commander just unblocked. (error_counts was already persisted just above, so this reload
+            # is a no-op for it — but keeps both in lock-step with the on-disk truth.)
+            blocked = load_blocked(cfg)
+            error_counts = load_error_counts(cfg)
             newly = [t for t in park_now if t not in blocked]
             if newly:
                 blocked.update(newly)

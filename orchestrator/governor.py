@@ -11,6 +11,7 @@ import json
 import time
 from pathlib import Path
 
+from . import locking
 from .config import Config
 
 _WINDOW = 3600.0   # one rolling hour
@@ -24,9 +25,10 @@ def note_call(cfg: Config, n: int = 1) -> None:
     """Record n model calls happening now."""
     try:
         now = time.time()
-        with _file(cfg).open("a", encoding="utf-8") as f:
-            for _ in range(max(1, int(n))):
-                f.write(json.dumps({"t": now}) + "\n")
+        # One locked append for all n lines: concurrent corridor/meeting bursts share this file, so an
+        # unlocked write can interleave and corrupt a row (the F8 pattern, now via the shared helper).
+        block = "".join(json.dumps({"t": now}) + "\n" for _ in range(max(1, int(n))))
+        locking.locked_append(_file(cfg), block)
     except OSError:
         pass
 

@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from . import locking
 from .config import Config
 
 _PATH: Optional[Path] = None
@@ -65,8 +66,9 @@ def record(model: str, input_tokens: int, output_tokens: int,
                 row["p"] = int(pass_number)
             except (TypeError, ValueError):
                 pass
-        with p.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        # Locked append: every agent call records here from many threads/processes at once; an
+        # unlocked write can interleave and split a row mid-line (the F8 lost-write bug, generalised).
+        locking.locked_append(p, json.dumps(row))
     except OSError:
         pass
 
