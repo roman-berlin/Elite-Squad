@@ -26,6 +26,7 @@ from .contracts import BuildRequest, Outcome, Ticket, TicketReport
 from .gate import run_gate
 from .git_ops import Git, GitError
 from .officers import display
+from .phases import BUILD, GATE, LAND, PHASES, REVIEW, SECURITY, TESTS
 
 
 def _notify(cfg: Config, text: str) -> None:
@@ -157,13 +158,16 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
     return TicketReport(ticket.id, Outcome.ERRORED, 0, 0.0, app.name, notes=msg)
 
 
-_PHASES = ("Build", "Gate", "Review", "Land")
-
-
 def _bar(done: int, active: int = -1, fail: int = -1) -> None:
-    """A phase progress checklist:  ✓ Build   ✓ Gate   ⏳ Review   ○ Land"""
+    """A phase progress checklist:  ✓ Build  ✓ Gate  ✓ Tests  ⏳ Review  ○ Security  ○ Land.
+
+    Phases come from the shared ``PHASES`` constant (EU-55) so this terminal bar and the
+    War Room web bar derive from one source and can never drift apart again. ``done`` is the
+    count of completed phases; ``active``/``fail`` are PHASES indices — pass them by name
+    (BUILD/GATE/TESTS/REVIEW/SECURITY/LAND) so the call sites can't drift if the order changes.
+    """
     cells = []
-    for i, name in enumerate(_PHASES):
+    for i, name in enumerate(PHASES):
         glyph = "✗" if i == fail else "✓" if i < done else "⏳" if i == active else "○"
         cells.append(f"{glyph} {name}")
     print("    " + "   ".join(cells), flush=True)
@@ -483,7 +487,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         eff, eff_reason = builder_mod.effort_plan(cfg, iteration, ticket)
         print(f"  build · pass {iteration}/{cfg.max_iterations} (effort {eff} — {eff_reason}) "
               f"— builder working (can take a few minutes)…", flush=True)
-        _bar(0, active=0)
+        _bar(BUILD, active=BUILD)
         req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration)
         build = await builder_mod.build(req, app, cfg, audit=audit)
         cost += build.cost_usd
@@ -555,7 +559,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                 notes="builder produced no changes")
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
-        _bar(1, active=1)
+        _bar(GATE, active=GATE)
         if cfg.notify_verbose:
             _notify(cfg, f"🔧 {ticket.id} — {display('field_engineer')} implemented (pass {iteration})")
 
@@ -567,12 +571,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                      report=("" if gate.passed else (gate.report or "")[:2500]))
         if not gate.passed:
             print("  gate · FAILED → sending fixes back to builder", flush=True)
-            _bar(1, fail=1)
+            _bar(GATE, fail=GATE)
             last_changes = [f"Verification failed; fix these:\n{gate.report}"]
             continue
         if app.gate_commands:
             print("  gate · passed", flush=True)
-        _bar(2, active=2)
+        _bar(TESTS, active=TESTS)
 
         # 2.5) TEST ENGINEER — coverage gate: after the build, before review, ensure the change is
         # proven (happy-path + regression test) and own the coverage artifact for the PR description.
@@ -622,11 +626,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     te_gate = run_gate(app, git.changed_paths())
                     if not te_gate.passed:
                         print("  gate · FAILED after tests → sending fixes back to builder", flush=True)
-                        _bar(1, fail=1)
+                        _bar(TESTS, fail=TESTS)
                         last_changes = [f"Verification failed after the coverage pass; fix these:\n{te_gate.report}"]
                         continue
 
         # 3) REVIEW (spec + quality) on the diff
+        _bar(REVIEW, active=REVIEW)
         print("  review · reviewer reading the diff…", flush=True)
         diff = git.diff_against_base()
         review = await reviewer_mod.review(diff, ticket, app, cfg, iteration)   # EU-52: escalate the reviewer on re-review
@@ -685,9 +690,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                     notes="stopped by Commander before merge")
             security_block = None
             if getattr(cfg, "security_gate", False):
+                _bar(SECURITY, active=SECURITY)
                 print("  security · Security Engineer gating the diff…", flush=True)
                 sec_ok, sec_report = await provost_mod.gate(cfg, app, diff)
                 if not sec_ok:
+                    _bar(SECURITY, fail=SECURITY)
                     print("  security · Security Engineer BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
                     _notify(cfg, f"🛡️ {ticket.id} — Security Engineer blocked the merge (security).\n\n{sec_report[:1200]}")
                     audit.record("security_block", ticket_id=ticket.id, iteration=iteration,
@@ -713,7 +720,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                   flush=True)
             break
         prev_reject_sig = sig
-        _bar(2, fail=2)
+        _bar(REVIEW, fail=REVIEW)
         print("  ↻ changes requested → rebuilding", flush=True)
 
     # Exhausted the passes. Before bothering the Commander, let the PM TRIAGE: if the core deliverable
@@ -793,7 +800,8 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     temp = f"{app.branch_prefix}/_trial"
     merge_msg = f"Merge {branch} into {app.base_branch} ({ticket.id})"
     print(f"  land · trial-merging into {app.base_branch} (throwaway branch — DEV untouched)…", flush=True)
-    _bar(3, active=3)
+    if not security_block:           # a security block already lit Security red — don't claim Land active
+        _bar(LAND, active=LAND)
 
     clean = bool(cfg.merge_to_dev) and git.trial_merge(branch, temp, merge_msg)
     green = clean and run_gate(app, git.changed_paths()).passed   # gate runs on the trial branch, not on DEV (EU-19: per-app)
@@ -805,13 +813,15 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         reason = "Security Engineer blocked — CRITICAL/HIGH security finding"
     else:
         reason = ""
+    # The phase a failure lights red: a security block stops at Security, anything else at Land.
+    fail_idx = SECURITY if security_block else LAND
 
     # DRY-RUN: previewed only — DEV is never touched.
     if cfg.dry_run:
         git.abandon_trial(temp)
         note = "would merge to dev (dev stays green)" if not reason else f"would open PR into dev ({reason})"
         print(f"  land · (dry-run) {note}", flush=True)
-        _bar(4) if not reason else _bar(3, fail=3)
+        _bar(len(PHASES)) if not reason else _bar(fail_idx, fail=fail_idx)
         _notify(cfg, f"🧪 {ticket.id} — {note}\n{ticket.summary}")
         audit.record(Outcome.SKIPPED.audit_event, ticket_id=ticket.id, note=note)
         return TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch, notes=note)
@@ -825,7 +835,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         print(f"  land · merged into {app.base_branch} ✓ (pushed) · feature branch retired", flush=True)
         if sync:
             print(f"  land · {sync}", flush=True)
-        _bar(4)
+        _bar(len(PHASES))
         turl = _test_url(app, build.summary)
         test_line = f"\n🔗 Test on {app.base_branch}: {turl}" if turl else ""
         # QA hand-off: a brief 'what was done' + the DEV test link — NOT the reviewer's full essay.
@@ -867,7 +877,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         if cfg.open_pr_on_block else None
     print(f"  land · not auto-merged ({reason}) → "
           + (f"PR {pr_url}" if pr_url else "open a PR manually"), flush=True)
-    _bar(3, fail=3)
+    _bar(fail_idx, fail=fail_idx)
     if not ticket.ephemeral:
         backlog.add_comment(ticket, f"Passed review but not auto-merged ({reason})."
                             + (f" PR: {pr_url}" if pr_url else " Open a PR manually."))

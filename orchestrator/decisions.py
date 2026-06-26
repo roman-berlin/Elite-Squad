@@ -128,6 +128,32 @@ def parse_reply(text: str) -> tuple[str | None, str]:
     return None, text.strip()
 
 
+# Leading markers that signal an explicit reply to a pending decision even without a
+# ticket id (e.g. forwarding the cockpit's "↩️ Reply …" hint, or a plain "re:" prefix).
+_REPLY_MARKERS = ("↩️", "↩", "re:", "reply:")
+
+
+def _strip_reply_marker(text: str) -> str:
+    """Drop a leading reply marker so the remainder parses as a normal reply."""
+    lowered = text.lstrip()
+    for m in _REPLY_MARKERS:
+        if lowered[: len(m)].lower() == m:
+            return lowered[len(m):].strip()
+    return text
+
+
+def is_explicit_reply(text: str) -> bool:
+    """True only when the message *explicitly* targets a parked decision: the
+    `TICKET-ID: <decision>` form, or a leading reply marker. Bare free text is NOT a
+    reply — it must reach the CTO chat instead of being swallowed by the oldest pending
+    decision (F12 fix: free-text notes/questions were being eaten while decisions parked)."""
+    stripped = text.lstrip()
+    if any(stripped[: len(m)].lower() == m for m in _REPLY_MARKERS):
+        return True
+    ticket_id, _ = parse_reply(text)
+    return ticket_id is not None
+
+
 def handle_reply(cfg, audit, text: str) -> bool:
     """Resolve a pending decision from a reply and re-run the ticket. Returns True
     if a ticket was resumed."""
@@ -264,8 +290,11 @@ def route_message(cfg, audit, text: str) -> bool:
         return False
     if text.startswith("/"):
         return handle_command(cfg, audit, text)
-    if load(cfg):
-        return handle_reply(cfg, audit, text)
+    # Only an EXPLICIT reply (id:/marker form) resolves a parked decision; a bare
+    # free-text message must NOT pop the oldest pending one — it goes to the CTO chat.
+    if load(cfg) and is_explicit_reply(text):
+        if handle_reply(cfg, audit, _strip_reply_marker(text)):
+            return True
     # Otherwise: a free-text message (e.g. a reply to a council question). The CTO
     # answers it in Telegram and logs the exchange as standing guidance for the unit.
     from . import council
