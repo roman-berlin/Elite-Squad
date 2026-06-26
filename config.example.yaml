@@ -62,7 +62,10 @@ sentinel_enabled: true      # ARMED: after a feature lands on <base>, Sentinel r
                             # never left runtime-broken. NO-OP for any app without a `postmerge_commands:` suite.
                             # Keep the suite NARROW + STABLE: a flaky test here triggers an auto-revert.
 # worktree_dir: "..."       # optional parent for worktrees (default: <repo_parent>/.general-worktrees/<app>)
-# worktree_setup_cmd: "npm install"   # optional: run ONCE when a fresh worktree is created (deps for the gate)
+# worktree_setup_cmd: "npm install"   # optional unit-wide default: run ONCE when a fresh worktree is created
+                                      # (deps for the gate). A bun/npm/pnpm/yarn install auto-skips for an app
+                                      # whose worktree has no package.json (e.g. a Python repo), and any app can
+                                      # override this with its own per-app `worktree_setup_cmd:` (EU-54).
 
 audit_path: "./audit.jsonl" # append-only log of every step; keep outside your repos
 
@@ -124,8 +127,13 @@ apps:
         Needs Human: "In Progress"
 
   # A second app with no tracker — drive it only with free-text `task` commands.
+  # Also shows the Python-repo recipe (EU-54): pin the gate to the project venv interpreter so it
+  # doesn't depend on the autopilot process's PATH, declare its import deps as a fast health check,
+  # and run nothing on worktree creation (no package.json to install).
   - name: signaldesk
     repo_path: "/Users/romanberlin/code/signaldesk"
     base_branch: "dev"
-    gate_commands: ["pytest -q"]
+    gate_commands: ["./.venv/bin/python -m pytest -q"]   # venv interpreter, not a bare `pytest`/`python3`
+    gate_preflight: ["pytest"]        # modules the gate interpreter must import; a miss fails fast with a venv hint
+    worktree_setup_cmd: ""            # explicitly install nothing for this app (no Node manifest)
     backlog_backend: "none"

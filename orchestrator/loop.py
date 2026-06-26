@@ -177,6 +177,25 @@ def _worktree_path(app: AppConfig, cfg: Config) -> str:
     return str(repo.parent / ".general-worktrees" / app.name)
 
 
+def _worktree_setup_command(app: AppConfig, cfg: Config, workdir: str) -> str | None:
+    """Resolve the command to run ONCE when a worktree is first created, or None to skip. (EU-54)
+
+    A per-app `worktree_setup_cmd` overrides the unit-wide `Config.worktree_setup_cmd`. A node-manifest
+    install (bun/npm/pnpm/yarn) is skipped when the worktree has no package.json — so the Bun product's
+    `bun install --frozen-lockfile` no longer errors on every fresh Elite-Unit (Python) worktree, which
+    has no manifest and gates with python3. Mirrors the no-manifest guard in _repin_worktree_deps."""
+    cmd = app.worktree_setup_cmd if getattr(app, "worktree_setup_cmd", None) is not None \
+        else getattr(cfg, "worktree_setup_cmd", None)
+    if not cmd:
+        return None
+    needs_manifest = any(tok in cmd for tok in
+                         ("bun install", "npm install", "npm ci", "pnpm install", "pnpm i", "yarn"))
+    if needs_manifest and not (Path(workdir) / "package.json").is_file():
+        print(f"  · worktree setup skipped (no package.json for '{cmd}')", flush=True)
+        return None
+    return cmd
+
+
 def _make_git(cfg: Config, app: AppConfig) -> Git:
     """Build the git custodian for an app. With use_worktree on, the CTO gets a
     dedicated linked worktree (based on origin/<base>) so it never fights the user's
@@ -187,9 +206,11 @@ def _make_git(cfg: Config, app: AppConfig) -> Git:
             git = Git(app.repo_path, app.base_branch, app.protected_branch, worktree_path=wt)
             created = git.setup()
             app.workdir = git.workdir
-            if created and getattr(cfg, "worktree_setup_cmd", None):
-                print(f"  · worktree created — setup: {cfg.worktree_setup_cmd}", flush=True)
-                subprocess.run(cfg.worktree_setup_cmd, shell=True, cwd=git.workdir, check=False)
+            if created:
+                setup_cmd = _worktree_setup_command(app, cfg, git.workdir)
+                if setup_cmd:
+                    print(f"  · worktree created — setup: {setup_cmd}", flush=True)
+                    subprocess.run(setup_cmd, shell=True, cwd=git.workdir, check=False)
             print(f"  · isolated worktree → {git.workdir}", flush=True)
             return git
         except GitError as exc:
