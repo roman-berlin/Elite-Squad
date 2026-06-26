@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import memory, models
 from .agent import run_agent
 from .config import AppConfig, Config
 from .contracts import BuildRequest, BuildResult
@@ -151,8 +151,13 @@ def _soldier_prompt(st: Subtask, req: BuildRequest, idx: int, total: int) -> str
 async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
     """Read-only planning pass. Returns (subtasks, cost, turns, tools)."""
     cwd = app.workdir or app.repo_path
+    # EU-52: the read-only squad-planning pass runs through the ladder under the Builder's ceiling — a
+    # medium-effort plan sizes down a tier and conserves under a tight budget; auto_model off = ceiling.
+    model, mreason = models.for_officer(cfg, effort="medium", ceiling_model=cfg.builder_model)
+    if getattr(cfg, "auto_model", False):
+        print(f"  · squad-plan model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.builder_model,
+        model=model,
         system_prompt=memory.preamble() + _PLANNER_SYSTEM,
         cwd=cwd, permission_mode="bypassPermissions",   # read-only plan; unattended — never dead-stop
         allowed_tools=["Read", "Grep", "Glob"],
@@ -168,8 +173,14 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
     guard.warn_if_absent(f"soldier·{st.role}")   # EU-2 F7: loud one-liner if guard is absent under bypass
     cwd = app.workdir or app.repo_path
     label, focus = SQUAD[st.role]
+    # EU-52: a squad engineer writes production code under the Builder's ceiling — route it through the
+    # ladder sized off the slice's own effort (floor stays Sonnet, never Haiku, for code). Squads only
+    # run on the first pass; a rejection retries as a single Builder via for_builder, which escalates.
+    model, mreason = models.for_officer(cfg, effort=st.effort(), ceiling_model=cfg.builder_model)
+    if getattr(cfg, "auto_model", False):
+        print(f"  · soldier·{st.role} model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.builder_model,
+        model=model,
         system_prompt=memory.preamble() + _SOLDIER_SYSTEM.format(label=label, focus=focus),
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],

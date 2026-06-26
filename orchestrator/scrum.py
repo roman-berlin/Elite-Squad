@@ -62,7 +62,7 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
     """Break ``parent`` into sub-tickets, FILE them, and close the parent. Returns
     {ok, keys, subs, error}. ``parent`` is a Ticket (needs .id/.summary/.description/.ephemeral)."""
     app = cfg.app(app_name)
-    from . import recon
+    from . import recon, models
     from .backlog.base import make_backlog
     result: dict = {"ok": False, "keys": [], "subs": [], "error": None}
 
@@ -73,9 +73,15 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
         f"\nWhat the unit already tried (so fragments don't repeat dead ends):\n{recap[:1500]}" if recap else "",
         "\nBreak it into 2–5 small, independently-shippable sub-tickets in the required block format.",
     ]))
+    # EU-52: route through the ladder under the Scrum Master's own ceiling (discussion_model), so a
+    # high-effort split conserves under a tight budget yet keeps the configured model when auto_model is off.
+    model, mreason = models.for_officer(
+        cfg, effort="high", ceiling_model=getattr(cfg, "discussion_model", cfg.reviewer_model))
+    if getattr(cfg, "auto_model", False):
+        print(f"  · scrum model: {mreason}", flush=True)
     report = await recon.run_officer(
         officer="scrum", label="Scrum Master", system=SCRUM_SYSTEM,
-        task=task, cfg=cfg, cwd=app.repo_path, model=getattr(cfg, "discussion_model", cfg.reviewer_model),
+        task=task, cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob"], max_turns=16, effort="high", empty="")
     subs = parse_subtickets(report)
     result["subs"] = subs

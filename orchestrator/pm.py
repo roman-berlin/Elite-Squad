@@ -156,16 +156,21 @@ async def triage(cfg: Config, app_name: str, ticket_id: str, last_build: str = "
     the loop re-queues the ticket with `text` as a corrective instruction; ESCALATE -> park with `text`
     as the Commander brief."""
     app = cfg.app(app_name)
-    from . import recon
+    from . import recon, models
     task = "\n".join([
         f"Ticket {ticket_id} exhausted its build passes ({cfg.max_iterations}). Decide RESOLVE vs ESCALATE.",
         "", "Latest Builder summary:", (last_build or "(none)")[:1500],
         "", "Reviewer's outstanding required changes:",
         ("\n".join(f"- {c}" for c in (rejections or [])[:12]) or "(none recorded)"),
     ])
+    # EU-52: route the PM through the ladder instead of pinning Opus — high effort holds the ceiling,
+    # conserves under a tight budget, and falls back to the configured model when auto_model is off.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · pm model: {mreason}", flush=True)
     report = await recon.run_officer(
         officer="pm", label="Product Manager", system=PM_TRIAGE_SYSTEM,
-        task=task, cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        task=task, cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob"], max_turns=14, effort="high",
         empty="TRIAGE: ESCALATE")
     return parse_triage(report)
@@ -177,15 +182,19 @@ async def review(cfg: Config, app_name: str, ticket_id: str, question: str, cont
     Commander decision). In automode the PM is told to decide and the verdict is coerced to DECIDE."""
     app = cfg.app(app_name)
     auto = bool(getattr(cfg, "auto_mode", False))
-    from . import recon
+    from . import recon, models
     # Read-only product review. With delegation armed, the PM decides for itself whether to recruit
     # soldiers (a slice of the console each) and synthesize the call, else a single solo pass. Either
     # way the reply ends with the PM VERDICT line that parse_verdict reads.
+    # EU-52: honor auto_model — sized off effort, conserved under budget, ceiling when the ladder is off.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · pm model: {mreason}", flush=True)
     report = await recon.run_officer(
         officer="pm", label="Product Manager",
         system=PM_SYSTEM + (PM_AUTOMODE if auto else ""),
         task=_prompt(app_name, ticket_id, question, context),
-        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob"], max_turns=18, effort="high",
         empty="(the PM gave no answer)")
     return parse_verdict(report, auto_mode=auto)

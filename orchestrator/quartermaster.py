@@ -51,12 +51,16 @@ def _prompt(app) -> str:
 
 async def inspect(cfg: Config, app_name: str, audit=None) -> str:
     app = cfg.app(app_name)
-    from . import recon
+    from . import recon, models
     # Read-only deploy-readiness certification. With delegation armed, the Release Manager decides whether
     # to field a squad (a soldier per readiness area) on a big surface and synthesize, else solo (unchanged).
+    # EU-52: honor auto_model — sized off effort, conserved under a tight budget, ceiling when off.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · quartermaster model: {mreason}", flush=True)
     return await recon.run_officer(
         officer="quartermaster", label="Release Manager",
         system=QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
-        cfg=cfg, cwd=app.repo_path, model=cfg.reviewer_model,
+        cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
         empty="(Release Manager produced no report.)", audit=audit)

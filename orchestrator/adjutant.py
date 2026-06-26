@@ -15,7 +15,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import memory, models
 from .agent import run_agent
 from .config import Config
 from .drillmaster import collect_signals, format_signals
@@ -80,8 +80,13 @@ def retire(cfg: Config, name: str) -> Path:
 async def propose(cfg: Config) -> str:
     sig = collect_signals(cfg)
     cwd = str(Path(__file__).resolve().parent.parent)   # the CTO's repo root
+    # EU-52: honor auto_model — the personnel-review pass sizes off effort and conserves under a tight
+    # budget rather than always pinning Opus; with auto_model off the configured model is unchanged.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · adjutant model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
+        model=model,
         system_prompt=memory.preamble() + ADJUTANT_SYSTEM,
         cwd=cwd,
         permission_mode="bypassPermissions",   # read-only propose pass; runs unattended — must never
@@ -124,8 +129,13 @@ async def apply(cfg: Config) -> str:
     report = Path(cfg.audit_path).with_name("adjutant-report.md")
     plan = report.read_text(encoding="utf-8") if report.exists() else ""
     backup = snapshot_doctrine(cfg)
+    # EU-52: route the apply pass through the ladder too (high effort: holds the ceiling normally,
+    # conserves under budget pressure, configured model when auto_model is off).
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · adjutant model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
+        model=model,
         system_prompt=memory.preamble() + ADJUTANT_APPLY_SYSTEM,
         cwd=root,
         permission_mode="bypassPermissions",   # unattended write; originals are snapshotted first

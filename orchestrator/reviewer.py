@@ -88,9 +88,15 @@ def _prompt(diff: str, ticket: Ticket) -> str:
     ])
 
 
-async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config) -> ReviewResult:
+async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1) -> ReviewResult:
     from . import models
-    rmodel, _rreason = models.for_reviewer(cfg, diff)   # ceiling unless auto_model is on
+    # EU-52: thread the build iteration so the Reviewer escalates one tier per re-review — a small diff
+    # is judged on Sonnet on pass 1 and on Opus when a rebuilt diff comes back (for_reviewer climbs a
+    # tier per retry). Without this the iteration>1 escalation branch was dead and every review pinned
+    # the ceiling. Defaults to 1 so direct/CLI callers are unaffected.
+    rmodel, rreason = models.for_reviewer(cfg, diff, iteration)   # ceiling unless auto_model is on
+    if getattr(cfg, "auto_model", False):
+        print(f"  · reviewer model: {rreason}", flush=True)
     options = ClaudeAgentOptions(
         model=rmodel,
         system_prompt=memory.preamble() + REVIEWER_SYSTEM,

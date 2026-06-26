@@ -584,16 +584,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 3) REVIEW (spec + quality) on the diff
         print("  review · reviewer reading the diff…", flush=True)
         diff = git.diff_against_base()
-        review = await reviewer_mod.review(diff, ticket, app, cfg)
+        review = await reviewer_mod.review(diff, ticket, app, cfg, iteration)   # EU-52: escalate the reviewer on re-review
         cost += review.cost_usd
         budget.add(review.cost_usd)
-        # Unparseable reviewer output fails closed. Before paying for a full rebuild+review pass
-        # (up to 4 Opus passes), retry JUST the review once — a parse miss is near-zero with Opus
-        # and re-running the read-only review is far cheaper than rebuilding (EU-11).
+        # Unparseable reviewer output fails closed. Before paying for a full rebuild+review pass,
+        # retry JUST the review once — re-running the read-only review is far cheaper than rebuilding
+        # (EU-11). EU-52: the retry escalates one tier (iteration+1) so even when the ladder judged
+        # pass 1 on Sonnet, the re-review lands on a stronger model where a parse miss is near-zero.
         if review.parse_failed:
             print("  review · unparseable verdict → re-reviewing once (no rebuild)", flush=True)
             audit.record("review_parse_retry", ticket_id=ticket.id, iteration=iteration)
-            review = await reviewer_mod.review(diff, ticket, app, cfg)
+            review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1)
             cost += review.cost_usd
             budget.add(review.cost_usd)
         audit.record("review", ticket_id=ticket.id, iteration=iteration,

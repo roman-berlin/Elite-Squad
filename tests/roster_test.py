@@ -47,14 +47,19 @@ chk("model auto -> marked (auto)", roster._model_for(auto, "builder_model") == "
 chk("deterministic officer (Sentinel) shows no model", roster._model_for(cfg, None) == "—")
 
 # --- F15 regression: the roster's model label must match the model each officer actually runs on ---
-# The recon officers (QA Engineer/Security Engineer/Release Manager) run their recon on cfg.reviewer_model (Opus), not
-# discussion_model — verified against the officer source so doc-vs-code can't drift again.
+# The recon officers (QA Engineer/Security Engineer/Release Manager) run under cfg.reviewer_model (Opus),
+# not discussion_model. EU-52 routed them through the economical ladder (models.for_officer), whose
+# ceiling DEFAULTS to reviewer_model — so the roster's "reviewer_model" label still matches reality.
+# We verify against the officer source (routes through the ladder, and its ceiling is not pointed off
+# reviewer_model) so doc-vs-code can't drift again.
 _attr = {name: mattr for name, _role, _duty, mattr in roster._OFFICERS}
 _recon_src = {"QA Engineer": "scout", "Security Engineer": "provost", "Release Manager": "quartermaster"}
 for _name, _mod in _recon_src.items():
     chk(f"{_name} roster label says reviewer_model", _attr[_name] == "reviewer_model", _attr[_name])
     _src = (Path("orchestrator") / f"{_mod}.py").read_text(encoding="utf-8")
-    chk(f"{_name} source actually runs on cfg.reviewer_model", "model=cfg.reviewer_model" in _src)
+    chk(f"{_name} source runs under the reviewer ceiling via the ladder (models.for_officer)",
+        "models.for_officer(" in _src
+        and ("ceiling_model=" not in _src or "ceiling_model=cfg.reviewer_model" in _src), _name)
 # and the labelled model resolves to Opus, not Sonnet, when the two configs differ
 _drift = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, discussion_model="claude-sonnet-4-5",
                 reviewer_model="claude-opus-4-8")

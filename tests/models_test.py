@@ -59,14 +59,20 @@ chk("auto OFF -> builder uses the exact configured model (no behaviour change)",
 
 on = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, builder_model=M.OPUS)
 mb_small, why_small = M.for_builder(on, SMALL, "low")          # pass 1, low effort
-mb_big, _ = M.for_builder(on, BIG, "high")                     # heavy → Opus from the start
+mb_big, _ = M.for_builder(on, BIG, "high")                     # auto-sized 'high' → Sonnet-first now
 chk("auto ON: a small/normal ticket ATTEMPTS Sonnet first (economical)", mb_small == M.SONNET, mb_small)
-chk("auto ON: a heavy (high-effort) ticket starts on Opus", mb_big == M.OPUS, mb_big)
+chk("auto ON: an auto-sized 'high'-effort ticket ATTEMPTS Sonnet first (the ladder fix)",
+    mb_big == M.SONNET, mb_big)
 chk("a rejected cheap pass ESCALATES to Opus on retry (effective)",
     M.for_builder(on, SMALL, "low", iteration=2)[0] == M.OPUS)
+chk("an auto-sized 'high' ticket escalates to Opus on retry too",
+    M.for_builder(on, BIG, "high", iteration=2)[0] == M.OPUS)
 chk("medium effort also attempts Sonnet first", M.for_builder(on, SMALL, "medium")[0] == M.SONNET)
-chk("xhigh / max effort (architecture) starts on Opus",
-    M.for_builder(on, BIG, "max")[0] == M.OPUS and M.for_builder(on, BIG, "xhigh")[0] == M.OPUS)
+chk("'xhigh' is still auto-sized → Sonnet-first (not an explicit top pin)",
+    M.for_builder(on, BIG, "xhigh")[0] == M.SONNET)
+chk("only an explicit top pin (max/maximum/ultra) starts on Opus from pass one",
+    M.for_builder(on, BIG, "max")[0] == M.OPUS and M.for_builder(on, BIG, "maximum")[0] == M.OPUS
+    and M.for_builder(on, BIG, "ultra")[0] == M.OPUS)
 chk("builder floor is Sonnet, never Haiku for code", mb_small != M.HAIKU)
 chk("escalation never exceeds the ceiling (a Sonnet-ceiling shop never jumps to Opus)",
     M.for_builder(Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, builder_model=M.SONNET),
@@ -84,6 +90,21 @@ chk("auto OFF reviewer fixed", M.for_reviewer(off, "x" * 50000)[0] == M.OPUS)
 chk("auto ON: a small diff is reviewed on Sonnet (economical)", M.for_reviewer(on, "tiny diff")[0] == M.SONNET)
 chk("auto ON: a large diff is reviewed on Opus (effective)", M.for_reviewer(on, "x" * 20000)[0] == M.OPUS)
 chk("reviewer re-review escalates a small diff on retry", M.for_reviewer(on, "tiny diff", iteration=2)[0] == M.OPUS)
+
+# --- for_officer: non-Builder officers — cheapest-that-fits, Sonnet floor, no per-retry escalation ---
+chk("auto OFF officer fixed (uses configured ceiling unchanged)",
+    M.for_officer(off, size="XS")[0] == M.OPUS)
+chk("auto ON: a light officer task sizes down to Sonnet (economical)",
+    M.for_officer(on, size="XS")[0] == M.SONNET)
+chk("auto ON: a heavy officer task runs on Opus (under the ceiling)",
+    M.for_officer(on, size="XL")[0] == M.OPUS)
+chk("officer floor is Sonnet, never Haiku, even on a light task",
+    M.for_officer(on, size="XS")[0] != M.HAIKU)
+chk("officer never exceeds an explicit ceiling_model",
+    M.for_officer(on, size="XL", ceiling_model=M.SONNET)[0] == M.SONNET)
+chk("officer defaults its ceiling to reviewer_model",
+    M.for_officer(Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, reviewer_model=M.SONNET),
+                  size="XL")[0] == M.SONNET)
 
 # --- budget signal flows from the real ledger ---
 tmp = Path(tempfile.mkdtemp()); led = tmp / "audit.jsonl"

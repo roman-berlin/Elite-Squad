@@ -19,7 +19,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import memory, models
 from .agent import run_agent
 from .config import Config
 from .dashboard import audit_lines, load_tasks
@@ -124,8 +124,13 @@ def _prompt(sig: dict, cfg: Config) -> str:
 async def drill(cfg: Config) -> str:
     sig = collect_signals(cfg)
     cwd = str(Path(__file__).resolve().parent.parent)   # the CTO's repo root
+    # EU-52: honor auto_model — the drill pass sizes off effort and conserves under a tight budget
+    # instead of pinning Opus; auto_model off keeps the configured model.
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · drillmaster model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
+        model=model,
         system_prompt=memory.preamble() + DRILLMASTER_SYSTEM,
         cwd=cwd,
         permission_mode="bypassPermissions",   # read-only drill pass; runs unattended — must never
@@ -173,8 +178,13 @@ async def apply(cfg: Config) -> str:
     report = Path(cfg.audit_path).with_name("drill-report.md")
     plan = report.read_text(encoding="utf-8") if report.exists() else ""
     backup = snapshot_doctrine(cfg)
+    # EU-52: route the apply pass through the ladder too (high effort: ceiling normally, conserve under
+    # budget pressure, configured model when auto_model is off).
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · drillmaster model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
-        model=cfg.reviewer_model,
+        model=model,
         system_prompt=memory.preamble() + DRILL_APPLY_SYSTEM,
         cwd=root,
         permission_mode="bypassPermissions",   # unattended write; originals are snapshotted first
