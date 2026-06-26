@@ -36,7 +36,8 @@ council.format_signals = lambda s: ""
 council.recent_commander_notes = lambda cfg, lines=12: ""
 async def fake_ticket_context(cfg, msg): return ""
 council._ticket_context = fake_ticket_context
-council.notify = ns(send=lambda *a, **k: None, clip=lambda t, *a, **k: t)
+async def _fake_report_brief(cfg, text, *a, **k): return text
+council.notify = ns(send=lambda *a, **k: None, report_brief=_fake_report_brief)
 council.add_commander_note = lambda *a, **k: None
 council.memory = ns(preamble=lambda: "")
 

@@ -399,7 +399,7 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
             # Not a decision round-trip — the readiness gate owns its own 'Needs Human' status above —
             # so record the pending decision WITHOUT re-parking the ticket to 'Blocked' (EU-61).
             decisions.add(cfg, ticket, app.name, note, block=False)
-            _notify(cfg, f"🚧 {ticket.id} — handed back, not ready to build:\n\n{notify.clip(note, 600)}"
+            _notify(cfg, f"🚧 {ticket.id} — handed back, not ready to build:\n\n{await notify.report_brief(cfg, note)}"
                          f"\n\n{decisions.reply_hint(ticket.id)}")
             audit.record("not_ready", ticket_id=ticket.id, missing=missing)
             print(f"  🚧 {ticket.id}: not ready — handed back (no build spent).", flush=True)
@@ -1040,26 +1040,19 @@ async def _decision_brief(cfg: Config, ticket_id: str, raw: str) -> str:
     """Distil a verbose escalation (reviewer/PM notes) into a phone-sized DECISION: the one question,
     the concrete options, and a recommendation — so the Commander reads what to DECIDE, not the whole
     review essay. Cheapest model, one shot, no file access; fails safe to the rule-based
-    dashboard.brief() if the model errors so an escalation is never lost."""
+    dashboard.brief() if the model errors so an escalation is never lost. Shares the cheap-model engine
+    (notify.distill) with the report briefs (EU-62)."""
     from . import dashboard as _D
     raw = (raw or "").strip()
     if not raw:
         return ""
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions
-        from .agent import run_agent
-        system = ("Compress a stuck ticket's reviewer/PM notes into a DECISION BRIEF for a busy engineer "
-                  "reading it on his phone. Output ONLY, no preamble:\n"
-                  "first line: the single decision he must make (≤18 words)\n"
-                  "then up to 3 short bullets — the concrete options\n"
-                  "last line: 'Rec: <one-line recommendation>'\n"
-                  "≤55 words total; never restate the whole review.")
-        run = await run_agent(
-            f"Ticket {ticket_id}. Reviewer/PM notes:\n{raw[:2200]}\n\nWrite the decision brief.",
-            ClaudeAgentOptions(model=getattr(cfg, "smalltalk_model", None) or cfg.discussion_model,
-                               system_prompt=system, permission_mode="bypassPermissions",
-                               allowed_tools=[], setting_sources=[], max_turns=1, effort="low"),
-            tag="decision-brief")
-        return (run.final or run.text or "").strip() or _D.brief(raw)
-    except Exception:  # noqa: BLE001 - summarisation must never break the escalation path
-        return _D.brief(raw)
+    system = ("Compress a stuck ticket's reviewer/PM notes into a DECISION BRIEF for a busy engineer "
+              "reading it on his phone. Output ONLY, no preamble:\n"
+              "first line: the single decision he must make (≤18 words)\n"
+              "then up to 3 short bullets — the concrete options\n"
+              "last line: 'Rec: <one-line recommendation>'\n"
+              "≤55 words total; never restate the whole review.")
+    return await notify.distill(
+        cfg, system=system,
+        user=f"Ticket {ticket_id}. Reviewer/PM notes:\n{raw[:2200]}\n\nWrite the decision brief.",
+        tag="decision-brief", fallback=lambda: _D.brief(raw))
