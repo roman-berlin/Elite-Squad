@@ -43,12 +43,16 @@ def _save(cfg, items: list[dict]) -> None:
     _store(cfg).write_text(json.dumps(items, indent=2))
 
 
-def add(cfg, ticket: Ticket, app_name: str, question: str) -> None:
+def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None) -> None:
+    """Record a pending decision for the cockpit 'Needs you'. `entry_id` overrides the storage/de-dup
+    key (defaults to the ticket id); pass a distinct key — e.g. f'{ticket.id}#out-of-scope' (EU-42) —
+    when one ticket carries more than one kind of pending decision, so they don't overwrite each other."""
     items = load(cfg)
-    # de-dupe by ticket id
-    items = [i for i in items if i.get("id") != ticket.id]
+    eid = entry_id or ticket.id
+    # de-dupe by entry id
+    items = [i for i in items if i.get("id") != eid]
     items.append({
-        "id": ticket.id, "app": app_name, "question": question,
+        "id": eid, "app": app_name, "question": question,
         "summary": ticket.summary, "description": ticket.description,
         "acceptance": ticket.acceptance_criteria, "ephemeral": ticket.ephemeral,
         "ts": time.time(),

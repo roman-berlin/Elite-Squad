@@ -30,6 +30,16 @@ merge_to_dev: true          # auto-merge feature -> dev when review passes AND d
 open_pr_on_block: true      # if it can't merge cleanly (or dev would break), open a PR instead
 mark_done_on_merge: false   # false = leave ticket In Progress for your manual QA; true = mark Done on dev-merge
 
+# --- out-of-scope build findings (EU-42) ---
+out_of_scope_autofile: false  # false = PROPOSE-FIRST: a finding outside the ticket's scope is proposed
+                              # (de-duped) but NOT auto-filed into the backlog. Flip true to let filing.py
+                              # open backlog tickets for out-of-scope findings automatically.
+
+# --- autonomy defaults (decided + documented, EU-42) ---
+# Both kept OFF: they incur extra cost/noise and are opt-in only.
+# scout_after_merge: false    # OFF: don't smoke-test DEV after each merge (extra QA-Engineer cost)
+# meeting_autospawn: false    # OFF: meetings may PROPOSE tickets but never auto-file them (review-first)
+
 # --- safety ---
 dry_run: true               # full loop incl. a trial merge, but NO push / merge / Jira writes
                             # flip per-run with --live
