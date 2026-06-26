@@ -875,8 +875,24 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     if not reason:
         merge_sha = git.current_sha()   # the validated merge commit — SRE reverts THIS if DEV breaks
         git.land_trial(temp)
-        git.delete_local_branch(branch)   # merged into DEV (commits live there) -> retire the feature branch
-        sync = git.sync_main_base() if getattr(cfg, "sync_base_after_merge", False) else ""
+        # EU-81: the commit is now on remote <base> — the ticket's definition of done is met.
+        # Everything below is best-effort post-land housekeeping (retire the merged feature
+        # branch, then fast-forward the Mac checkout so the running cockpit never serves stale
+        # code). A failure here must NEVER unwind or fail an already-successful land, so each
+        # step is individually guarded.
+        try:
+            git.delete_local_branch(branch)    # merged into DEV (commits live there) -> retire the feature branch
+            git.delete_remote_branch(branch)   # clean up remote autodev/* ref so the remote stays tidy
+        except Exception as exc:  # noqa: BLE001 - branch cleanup must not fail a landed ticket
+            print(f"  land · feature-branch cleanup skipped ({exc})", flush=True)
+        # Bring the Mac checkout's <base> up to date so QA/the cockpit run the just-merged code.
+        # Honours cfg.sync_base_after_merge (the opt-out knob) and never raises (convenience, not custody).
+        sync = ""
+        if cfg.sync_base_after_merge:
+            try:
+                sync = git.sync_main_base()
+            except Exception as exc:  # noqa: BLE001 - the sync is a convenience, never custody
+                print(f"  land · base sync skipped ({exc})", flush=True)
         print(f"  land · merged into {app.base_branch} ✓ (pushed) · feature branch retired", flush=True)
         if sync:
             print(f"  land · {sync}", flush=True)
