@@ -61,7 +61,11 @@ class Git:
         """Ensure the dedicated linked worktree exists and is clean, parked on a
         detached origin/<base>. Returns True if it was freshly created (so the caller
         can run a one-time setup command like `bun install`). No-op returning False in
-        in-tree mode. Raises GitError if origin/<base> can't be resolved."""
+        in-tree mode. Raises GitError if origin/<base> can't be resolved.
+
+        Fetch is intentionally performed BEFORE resolving or creating the worktree so
+        that the worktree always starts from the latest remote state — never a stale
+        local ref — regardless of how long the previous run took."""
         if not self.isolated:
             return False
         self._git(self.main, "fetch", "origin", self.base, check=False)
@@ -98,10 +102,19 @@ class Git:
 
     # -- branch / diff ---------------------------------------------------- #
     def checkout_feature(self, branch: str) -> None:
+        """Create (or reset) the feature branch from the freshest available base.
+
+        Isolated mode: the branch point is always ``origin/<base>`` (fetched just
+        before checkout), NOT the local base ref.  This guarantees every feature
+        starts from the true remote HEAD even if the local checkout is behind, so
+        concurrent tickets don't silently build on stale code."""
         self._guard(branch)
         if self.isolated:
-            # fresh feature branch off the latest origin/<base>; nothing local is touched
+            # Fetch origin/<base> first so the branch point is the latest remote
+            # state, not whatever the local ref happened to be last time setup ran.
             self._git(self.main, "fetch", "origin", self.base, check=False)
+            # Branch off origin/<base> — the user's local <base> checkout is
+            # intentionally never touched (they pull it for QA after land).
             self._run("checkout", "-B", branch, self.base_ref)
             return
         self._run("checkout", self.base)
@@ -237,11 +250,40 @@ class Git:
     def land_trial(self, temp: str) -> None:
         """The ONLY moment base changes. Isolated: fast-forward-push the validated
         trial straight to origin/<base> — the user's local base and working tree are
-        never touched (they pull it for QA). In-tree: ff base locally, then push."""
+        never touched (they pull it for QA). In-tree: ff base locally, then push.
+
+        Non-fast-forward recovery (isolated mode only): if the push is rejected because
+        another ticket landed concurrently and advanced origin/<base>, we fetch the new
+        tip, rebase ``temp`` onto it, and retry once.  On a second failure the temp
+        branch is deleted (so the next ticket starts clean) and a descriptive error is
+        raised — the caller should treat this as a failed land and leave the ticket for
+        the next run rather than leaving a dirty tree."""
         if self.base == self.protected:
             raise GitError("refusing to land on the protected branch")
         if self.isolated:
-            self._run("push", "origin", f"{temp}:{self.base}")   # ff origin/<base> forward
+            code, _, err = self._run_code("push", "origin", f"{temp}:{self.base}")
+            if code != 0:
+                # Likely a non-fast-forward rejection: fetch the latest base and
+                # rebase the trial merge commit onto it, then retry the push once.
+                self._git(self.main, "fetch", "origin", self.base, check=False)
+                rb_code, _, rb_err = self._run_code("rebase", self.base_ref)
+                if rb_code != 0:
+                    self._run_code("rebase", "--abort")
+                    self._run_code("branch", "-D", temp)
+                    self._run("checkout", "--detach", self.base_ref)
+                    raise GitError(
+                        f"land_trial: push rejected and rebase of '{temp}' onto "
+                        f"'{self.base_ref}' failed — left on clean {self.base_ref}.\n"
+                        f"push stderr: {err}\nrebase stderr: {rb_err}"
+                    )
+                code2, _, err2 = self._run_code("push", "origin", f"{temp}:{self.base}")
+                if code2 != 0:
+                    self._run_code("branch", "-D", temp)
+                    self._run("checkout", "--detach", self.base_ref)
+                    raise GitError(
+                        f"land_trial: push to origin/{self.base} failed after rebase "
+                        f"— left on clean {self.base_ref}; retry the ticket.\n{err2}"
+                    )
             self._run("checkout", "--detach", self.base_ref)     # off temp; origin/<base> now advanced
             self._run_code("branch", "-D", temp)
             return
@@ -293,6 +335,18 @@ class Git:
     def delete_local_branch(self, branch: str) -> None:
         if branch and branch != self.base and branch != self.protected:
             self._run_code("branch", "-D", branch)
+
+    def delete_remote_branch(self, branch: str) -> None:
+        """Delete the remote tracking ref for a fully-merged feature branch.
+
+        Called after a successful land so that the remote (e.g. GitHub) does not
+        accumulate stale autodev/* refs.  Silently skips base and protected branches
+        to prevent an accidental ``git push origin --delete dev`` or ``--delete main``;
+        also skips empty/None names and swallows non-fatal push errors (the branch may
+        already be gone or the remote may not support deletion — neither is fatal)."""
+        if not branch or branch == self.base or branch == self.protected:
+            return
+        self._run_code("push", "origin", "--delete", branch)
 
     # -- PR --------------------------------------------------------------- #
     def open_pr(self, branch: str, title: str, body: str) -> Optional[str]:
