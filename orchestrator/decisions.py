@@ -410,10 +410,25 @@ def poll_once(cfg, audit) -> int:
         return 0
     last = _read_offset(cfg)
     updates = notify.get_updates(offset=(last + 1) if last is not None else None, timeout=0)
+    # Map each update to its originating chat so an external reply can target the exact chat it came
+    # from. We re-read it here (rather than widening notify.incoming_texts' tested 3-tuple) so the
+    # ops path stays byte-identical and the chat id only ever matters on the isolated liaison path.
+    chat_by_uid = {
+        u.get("update_id"): ((u.get("message") or u.get("edited_message") or {}).get("chat") or {}).get("id")
+        for u in updates
+    }
     handled = 0
-    for uid, text in notify.incoming_texts(updates):
+    for uid, text, origin in notify.incoming_texts(updates, cfg):
         if uid is not None:
             _write_offset(cfg, uid)
+        if origin != "ops":
+            # EU-65 HARD channel split: an external/liaison chat NEVER reaches the Commander's
+            # command router, the parked-decision store, or a build. It is handed to the liaison
+            # chat agent, which treats it as untrusted data and replies (cheap model, mention-gated,
+            # token-capped) only to that same external chat. See orchestrator/liaison.py.
+            from . import liaison
+            liaison.handle_external_message(cfg, audit, text, chat_by_uid.get(uid))
+            continue
         if route_message(cfg, audit, text):
             handled += 1
     return handled

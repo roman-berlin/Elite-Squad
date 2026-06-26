@@ -99,17 +99,24 @@ async def report_brief(cfg, raw: str) -> str:
                          tag="report-brief", fallback=lambda: bulletize(raw))
 
 
-def send(text: str) -> bool:
+def send(text: str, chat_id: str | int | None = None) -> bool:
     """Send a Telegram message. Returns True if sent, False if not configured or
-    failed. Never raises — notifications must not break the pipeline."""
+    failed. Never raises — notifications must not break the pipeline.
+
+    By default the message goes to the Commander's ops chat (TELEGRAM_CHAT_ID), so every
+    existing caller — ops reports, escalations, council summaries — stays pinned to the ops
+    chat and is NEVER auto-broadcast to an external chat. EU-65: pass ``chat_id`` explicitly to
+    target a specific chat (e.g. an outward liaison reply to an allied unit); the liaison slice
+    is the ONLY path that supplies one, keeping the two channels isolated. An explicit
+    ``chat_id`` needs only the bot token — it does not require TELEGRAM_CHAT_ID to be set."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat = os.environ.get("TELEGRAM_CHAT_ID")
-    if not (token and chat):
+    target = str(chat_id) if chat_id is not None else os.environ.get("TELEGRAM_CHAT_ID")
+    if not (token and target):
         return False
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat, "text": text, "disable_web_page_preview": True},
+            json={"chat_id": target, "text": text, "disable_web_page_preview": True},
             timeout=10,
         )
         return r.status_code == 200
@@ -134,17 +141,28 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list:
         return []
 
 
-def incoming_texts(updates: list) -> list[tuple[int, str]]:
-    """Extract (update_id, text) for text messages from the configured chat."""
+def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:
+    """Extract ``(update_id, text, origin)`` for text messages we accept.
+
+    ``origin`` is ``"ops"`` for the Commander's operations chat (TELEGRAM_CHAT_ID) or
+    ``"external"`` for a configured EU-65 liaison chat (an allied unit). The ops chat is always
+    accepted exactly as before. External chats are accepted ONLY when ``cfg`` is supplied and the
+    liaison channel is active (master flag on AND at least one external id configured); with no
+    ``cfg`` — or while the liaison channel is inert — behaviour is byte-identical to today (ops
+    only). The origin tag lets downstream routing branch so an outward liaison chat is never fed
+    to the Commander's command handler."""
     chat = os.environ.get("TELEGRAM_CHAT_ID")
-    out = []
+    liaison_on = bool(cfg is not None and cfg.liaison_active())
+    out: list[tuple[int, str, str]] = []
     for u in updates:
         msg = u.get("message") or u.get("edited_message") or {}
         text = msg.get("text")
-        cid = str((msg.get("chat") or {}).get("id", ""))
         if not text:
             continue
-        if chat and cid and cid != str(chat):
-            continue
-        out.append((u.get("update_id"), text))
+        cid = str((msg.get("chat") or {}).get("id", ""))
+        if not chat or not cid or cid == str(chat):   # ops chat (unchanged acceptance)
+            out.append((u.get("update_id"), text, "ops"))
+        elif liaison_on and cfg.is_liaison_chat(cid):  # EU-65 allied/external liaison chat
+            out.append((u.get("update_id"), text, "external"))
+        # else: a foreign chat we don't talk to -> ignored
     return out

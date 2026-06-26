@@ -47,6 +47,47 @@ def normalize_effort(value: Any, default: str = "high") -> str:
     return _EFFORT_ALIASES.get(v, default)
 
 
+def parse_external_chat_ids(raw: Any) -> list[str]:
+    """Parse the EU-65 liaison external chat ids from an env value (or any string).
+
+    Accepts a comma / whitespace / newline-separated list (e.g.
+    ``TELEGRAM_EXTERNAL_CHAT_IDS="-100123, -100456"``) and returns a de-duped,
+    order-preserving list of non-empty chat-id strings. None / blank -> ``[]`` so
+    that with nothing configured the liaison channel stays empty and inert. These
+    are deliberately kept SEPARATE from the ops ``TELEGRAM_CHAT_ID`` (notify.py):
+    the liaison channel is an isolated OUTWARD chat to an allied unit and must
+    never reuse the ops chat id.
+    """
+    if not raw:
+        return []
+    seen: dict[str, None] = {}
+    for tok in str(raw).replace(",", " ").split():
+        tok = tok.strip()
+        if tok and tok not in seen:
+            seen[tok] = None
+    return list(seen)
+
+
+def _env_external_chat_ids() -> list[str]:
+    """Default factory: the liaison external chat ids parsed from the environment."""
+    return parse_external_chat_ids(os.environ.get("TELEGRAM_EXTERNAL_CHAT_IDS"))
+
+
+def parse_mention_handles(raw: Any) -> list[str]:
+    """Parse the bot @handles that count as an @mention on the liaison channel.
+
+    Same comma/whitespace/newline tokenising as the chat ids, but each token is
+    normalised to a bare, lower-case handle (leading ``@`` stripped) so ``@AlliedBot``
+    in a message matches the configured ``AlliedBot``. Empty -> ``[]`` which means the
+    liaison NEVER auto-replies (it only ever speaks when explicitly addressed)."""
+    return [tok.lstrip("@").lower() for tok in parse_external_chat_ids(raw)]
+
+
+def _env_bot_handles() -> list[str]:
+    """Default factory: the liaison mention handles parsed from TELEGRAM_BOT_USERNAME."""
+    return parse_mention_handles(os.environ.get("TELEGRAM_BOT_USERNAME"))
+
+
 def effort_step_index(effort: str) -> int:
     """Index of an effort on the escalation ladder. xhigh sits with 'high' (it falls
     back to high off-Opus), so a retry from xhigh climbs toward max."""
@@ -222,6 +263,37 @@ class Config:
 
     # --- notifications ---
     notify_verbose: bool = False        # also Telegram on implemented / verdict / pushed (not just key events)
+
+    # --- EU-65 inter-unit liaison channel (additive foundation; OFF + empty by default) ---
+    # An isolated OUTWARD Telegram chat to an ALLIED unit, kept strictly separate from the ops
+    # TELEGRAM_CHAT_ID (notify.py). With nothing configured every value below is empty / disabled,
+    # so behaviour is byte-identical to today — the channel stays inert until the Commander opts in.
+    # Liaison replies run on the CHEAP model under a per-day TOKEN cap so an outward chat can never
+    # compete with the unit's own coding spend. Other EU-65 slices import these.
+    liaison_enabled: bool = False                  # master flag; even when on, a no-op unless chat ids are set
+    # External / social chat ids the liaison may talk to. Parsed from TELEGRAM_EXTERNAL_CHAT_IDS by
+    # default (comma/space/newline separated); may also be set explicitly in config.yaml. Empty => inert.
+    liaison_external_chat_ids: list[str] = field(default_factory=_env_external_chat_ids)
+    liaison_model: str = "claude-haiku-4-5-20251001"   # cheap model for liaison replies (never Opus/Sonnet)
+    liaison_effort: str = "low"                    # minimal reasoning depth for an outward small-talk reply
+    liaison_daily_token_budget: int = 200_000      # per-day token ceiling for liaison replies; 0 = off (no cap)
+    liaison_max_reply_chars: int = 800             # bound a single outward reply (cost + don't over-share)
+    # Bot @handles that count as being addressed. The liaison replies ONLY when @mentioned, so with
+    # no handle configured it never speaks (safe default). Parsed from TELEGRAM_BOT_USERNAME by default.
+    liaison_mention_handles: list[str] = field(default_factory=_env_bot_handles)
+
+    def liaison_active(self) -> bool:
+        """True only when the liaison channel is BOTH flagged on AND has at least one external chat
+        id configured. Every other slice gates on this so an unconfigured unit behaves exactly as today."""
+        return bool(self.liaison_enabled and self.liaison_external_chat_ids)
+
+    def is_liaison_chat(self, chat_id: Any) -> bool:
+        """True if ``chat_id`` is one of the configured external liaison chats. Compared as strings so
+        an int env/update id and a YAML string id match. Always False for the ops TELEGRAM_CHAT_ID
+        unless it was (mistakenly) also listed — callers keep the two channels isolated."""
+        if chat_id is None:
+            return False
+        return str(chat_id) in set(self.liaison_external_chat_ids)
 
     # --- audit ---
     audit_path: str = "./audit.jsonl"   # keep OUTSIDE every target repo
