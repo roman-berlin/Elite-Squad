@@ -911,9 +911,23 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                     notes=f"sentinel reverted: {snote[:160]}")
 
+        # Post-merge SMOKE (EU-60): a fast, flag-only canary on the landed DEV. Unlike the SRE it never
+        # reverts — it surfaces a red smoke loudly (smoke.run sends Telegram + records the audit event;
+        # we add the ticket comment) so the Commander catches a broken DEV at QA. No-op unless the app
+        # opts in a `smoke_command`. The merge stands either way.
+        smoke_note = ""
+        from . import smoke
+        if smoke.should_run(cfg, app):
+            sok, smnote = smoke.run(cfg, app, ticket, audit)
+            if not sok:
+                smoke_note = " · ⚠️ post-merge smoke FAILED"
+                if not ticket.ephemeral:
+                    backlog.add_comment(ticket, f"🚨 Post-merge smoke FAILED on {app.base_branch} — "
+                                        f"DEV is live with a failing smoke. {smnote[:900]}")
+
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
-                            + (", Done" if cfg.mark_done_on_merge else ", awaiting QA"))
+                            + (", Done" if cfg.mark_done_on_merge else ", awaiting QA") + smoke_note)
 
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)

@@ -61,6 +61,10 @@ sentinel_enabled: true      # ARMED: after a feature lands on <base>, Sentinel r
                             # (git revert — no force-push, no history rewrite) and hands the ticket back, so DEV is
                             # never left runtime-broken. NO-OP for any app without a `postmerge_commands:` suite.
                             # Keep the suite NARROW + STABLE: a flaky test here triggers an auto-revert.
+smoke_enabled: true         # ARMED (EU-60): after a land, run that app's single `smoke_command` (a fast post-merge
+                            # canary, e.g. a Playwright auth-redirect smoke). Unlike Sentinel it NEVER reverts — on red
+                            # it FLAGS the merge (Telegram + audit + ticket comment) so you catch a broken DEV at QA.
+                            # NO-OP for any app without a `smoke_command:` (below), so arming it costs nothing.
 # worktree_dir: "..."       # optional parent for worktrees (default: <repo_parent>/.general-worktrees/<app>)
 # worktree_setup_cmd: "npm install"   # optional unit-wide default: run ONCE when a fresh worktree is created
                                       # (deps for the gate). A bun/npm/pnpm/yarn install auto-skips for an app
@@ -106,6 +110,11 @@ apps:
                                      # gate_env + bounded by gate_timeout_sec, same as the gate. Keep it NARROW
                                      # + STABLE — a red here auto-reverts the merge and hands the ticket back:
       - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
+    # smoke_command: "npx playwright test e2e/auth-redirect.smoke.ts"   # EU-60: a single FAST post-merge
+                                     # canary on the landed <base>. On red it FLAGS (Telegram + audit + ticket
+                                     # comment) but never reverts — the auth-redirect smoke lives in the AUTO repo
+                                     # under e2e/. Omit to skip (the smoke runner stays inert). Bounded by
+                                     # gate_timeout_sec + gate_env, same as the gate.
     backlog_backend: "jira"          # "jira" | "notion" | "none"
     backlog:
       base_url: "https://YOURTEAM.atlassian.net"

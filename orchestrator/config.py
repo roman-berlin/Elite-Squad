@@ -87,6 +87,11 @@ class AppConfig:
     # Bun product install deps while the Python EU repo (no package.json) installs nothing.
     worktree_setup_cmd: Optional[str] = None
     postmerge_commands: list[str] = field(default_factory=list)  # SRE's heavier post-merge suite (e2e/integration); empty = skip
+    # EU-60: a single fast post-merge SMOKE command run on the landed <base> (e.g. a Playwright
+    # auth-redirect smoke). Unlike postmerge_commands it never reverts — on red it FLAGS the merge
+    # (Telegram + audit + ticket comment) so the Commander catches a broken DEV at QA. None = skip
+    # (the framework stays inert until an app opts a command in). See smoke.py.
+    smoke_command: Optional[str] = None
     backlog_backend: str = "jira"       # "jira" | "notion" | "none"
     backlog: dict[str, Any] = field(default_factory=dict)
     # runtime-resolved working dir for officers + gate (the worktree in isolated mode).
@@ -135,6 +140,11 @@ class Config:
                                             # land and auto-reverts (forward-only) if red. Still a NO-OP for any app
                                             # without a `postmerge_commands:` suite (see sentinel.should_run), so
                                             # arming the framework here costs nothing until an app opts in a suite.
+    smoke_enabled: bool = True              # EU-60 ARMED by default: after a land, run an app's single `smoke_command`
+                                            # (a fast post-merge canary, e.g. a Playwright auth-redirect smoke) and
+                                            # FLAG it (Telegram + audit + ticket comment) if red — never reverts, that's
+                                            # the SRE's job. NO-OP for any app without a `smoke_command` (smoke.should_run),
+                                            # so arming it costs nothing until an app opts a command in.
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
