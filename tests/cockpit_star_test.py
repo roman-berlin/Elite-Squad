@@ -9,7 +9,8 @@ Asserts the complete fix:
   - _control_bar(cfg, "*") bakes a CONCRETE app into every single-app ACTION button (no value="*"),
     while NAV links ("Choose a ticket") keep ?app=* so All-projects actually lists all projects.
   - cfg.app() is NEVER called with "*" while rendering the bar.
-  - /api/patrol with app="*" sweeps EVERY app (the "All projects" intent), no KeyError.
+  - /api/patrol with app="*" no longer KeyErrors; EU-63 retired the all-projects sweep, so "*" resolves
+    to ONE concrete project (the active tab; default = first app) rather than every app.
   - /api/run with app="*" starts a real run instead of reporting "could not start: '*'".
 """
 import sys, types, tempfile, threading, time
@@ -52,15 +53,17 @@ def _guard_app(name):
     return _real_app(name)
 cfg.app = _guard_app
 
-# --- 1) _control_bar normalizes "*" -> a concrete app; no "*" leaks into any button ---
+# --- 1) _control_bar normalizes "*" -> a concrete app; no "*" leaks into any URL ---
 bar = srv._control_bar(cfg, "*", True)
-chk("Choose-a-ticket NAV link preserves All-projects (/tickets?app=* — safe, that route handles *)",
-    "/tickets?app=*" in bar, bar[:200])
+# EU-63: "All projects" retired — the NAV link now uses a concrete app, never the "*" sentinel.
+chk("Choose-a-ticket NAV link uses a concrete app, not the retired '*' sentinel (EU-63)",
+    "/tickets?app=automatixy" in bar and "/tickets?app=*" not in bar, bar[:200])
 chk("single-app ACTION buttons emit no app value=\"*\" hidden field", 'value="*"' not in bar)
 chk("action buttons fall back to the first concrete app", "automatixy" in bar)
 chk("cfg.app() was never called with '*' while rendering (the crash invariant)", not star_calls, str(star_calls))
 
-# --- 2) /api/patrol with app="*" sweeps EVERY app, no KeyError ---
+# --- 2) /api/patrol with app="*": EU-63 retired the all-projects sweep — `*` now resolves to ONE
+#        concrete project (the session's active tab; default = first app), never a KeyError on cfg.app("*") ---
 swept = []
 async def fake_patrol(c, app_name, do_file=True, audit=None):
     swept.append(app_name)
@@ -74,7 +77,8 @@ for _ in range(40):
     if not srv._state.get("patrolling") and swept:
         break
     time.sleep(0.05)
-chk("Patrol on 'All projects' sweeps every app", swept == ["automatixy", "Elite-Unit"], str(swept))
+chk("Patrol on '*' scopes to one concrete project (EU-63: no all-projects sweep)",
+    swept == ["automatixy"], str(swept))
 chk("Patrol left no error in last_msg", "failed" not in (srv._state.get("last_msg") or ""), srv._state.get("last_msg"))
 
 # --- 3) /api/run with app="*" starts (never 'could not start: *') ---

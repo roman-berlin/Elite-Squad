@@ -164,14 +164,96 @@ def _result_banner(state: dict) -> str:
             f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
 
 
-def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
-    # "*" is the "All projects" selector — it is truthy but NOT a real app, so it must never become
-    # app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
-    # cfg.app("*") -> KeyError). Normalize once here to a concrete app (or "").
+def _workspace_tabs(cfg: Config, current_app: str | None) -> tuple[list[str], str | None]:
+    """The open projects (tab order) + the active project for THIS browser's tabbed workspace.
+
+    EU-63: the cockpit is one-project-per-tab. The tab bar mirrors the SAME server-side workspace the
+    routes mutate, so it resolves the session id exactly as ``server._session_id`` does — the cookie
+    first, then the id freshly minted onto the request env on a first-contact request (set on the
+    response by ``server._ensure_session_cookie``). Outside a request (tests / static previews) — or
+    before any tab exists — it degrades to a single synthetic tab for ``current_app`` so the bar still
+    renders one project rather than crashing. Never honours the retired ``*`` sentinel as a tab."""
+    try:
+        from flask import request
+
+        from . import cockpit_state
+        sid = request.cookies.get("eu_cockpit_sid") or request.environ.get("eu_new_sid")
+        if sid:
+            ws = cockpit_state.workspace_for(sid)
+            if ws.tabs:
+                return ws.projects(), ws.active
+    except Exception:  # noqa: BLE001 - rendered outside a request context (tests / previews)
+        pass
     app0 = current_app if (current_app and current_app != "*") else (cfg.apps[0].name if cfg.apps else "")
-    # NAV links (e.g. "Choose a ticket") must PRESERVE "All projects" → "*", not collapse to apps[0] the way
-    # the single-target action buttons (deploy/ship/run) do; otherwise All-projects shows only the first app.
-    nav_app = current_app if (current_app and current_app != "*") else "*"
+    return ([app0] if app0 else []), app0
+
+
+def _tab_bar(cfg: Config, current_app: str | None) -> str:
+    """The one-project-per-tab strip: a tab per open project (active highlighted) + a '+' add-tab
+    picker offering ONLY projects not already open in another tab — the mutual-exclusion invariant.
+
+    Tab clicks and picker entries are plain ``/?app=<project>`` links: the per-tab route (``_scope``
+    in server.py) opens-or-focuses that project's tab and makes it active. There is no '*'/"All
+    projects" entry any more — every tab is pinned to one concrete project."""
+    open_projects, active = _workspace_tabs(cfg, current_app)
+    open_set = set(open_projects)
+    tabs = "".join(
+        f"<a class='ptab{' on' if p == active else ''}' href='/?app={html.escape(p)}' "
+        f"title='Switch to {html.escape(p)}'>{html.escape(p)}</a>"
+        for p in open_projects)
+    # The add-tab picker offers only NOT-already-open projects; the open ones are shown greyed +
+    # non-clickable so the "a project lives in at most one tab" rule is visible, not just enforced.
+    openable = [a.name for a in cfg.apps if a.name not in open_set]
+    rows = "".join(
+        f"<a href='/?app={html.escape(n)}'>{html.escape(n)}</a>" for n in openable)
+    taken = "".join(
+        f"<span class=taken title='already open in a tab'>{html.escape(n)} &middot; open</span>"
+        for n in (a.name for a in cfg.apps) if n in open_set)
+    if not openable:
+        rows = "<span class=allopen>Every project is already open in a tab.</span>"
+    picker = (f"<div class=tabpick><div class=ph>Open a project in a new tab</div>{rows}"
+              + (f"<div class=sep></div>{taken}" if taken else "") + "</div>")
+    return f"""
+<style>
+.tabstrip{{display:flex;gap:4px;align-items:flex-end;flex-wrap:wrap;padding:8px 26px 0;border-bottom:1px solid var(--line);background:var(--panel)}}
+.tabstrip .ptab{{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line2);border-bottom:none;color:var(--dim);border-radius:var(--r-md) var(--r-md) 0 0;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;position:relative;top:1px;transition:background var(--t-fast),color var(--t-fast)}}
+.tabstrip .ptab:hover{{background:var(--line);color:var(--ink)}}
+.tabstrip .ptab.on{{background:var(--bg);color:var(--ink);border-color:var(--line2);border-bottom:1px solid var(--bg)}}
+.tabstrip details.addtab{{position:relative}}
+.tabstrip details.addtab>summary{{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:30px;height:32px;background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-md) var(--r-md) 0 0;color:var(--dim);font-size:17px;font-weight:700;cursor:pointer;position:relative;top:1px}}
+.tabstrip details.addtab>summary::-webkit-details-marker{{display:none}}
+.tabstrip details.addtab>summary:hover{{background:var(--line);color:var(--ink)}}
+.tabstrip details[open]>summary{{background:var(--bg);color:var(--ink);border-color:var(--accent)}}
+.tabstrip summary:focus-visible,.tabstrip .ptab:focus-visible,.tabstrip .tabpick a:focus-visible{{outline:none;box-shadow:var(--ring)}}
+.tabstrip .tabpick{{position:absolute;top:calc(100% + 6px);left:0;z-index:30;min-width:212px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r-lg);padding:6px;display:flex;flex-direction:column;gap:2px;box-shadow:var(--shadow-3)}}
+.tabstrip .tabpick a{{display:flex;align-items:center;color:var(--ink);border-radius:var(--r-md);padding:9px 11px;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}}
+.tabstrip .tabpick a:hover{{background:var(--line)}}
+.tabstrip .tabpick .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);padding:6px 11px 3px}}
+.tabstrip .tabpick .sep{{height:1px;background:var(--line);margin:5px 4px}}
+.tabstrip .tabpick .taken,.tabstrip .tabpick .allopen{{display:flex;align-items:center;color:var(--faint);padding:9px 11px;font-size:13px;font-weight:500;cursor:not-allowed;white-space:nowrap}}
+@media(max-width:820px){{.tabstrip{{padding:7px 14px 0}}.tabstrip .ptab{{padding:7px 11px;font-size:12px}}}}
+</style>
+<div class=tabstrip>
+  {tabs}
+  <details class=addtab>
+    <summary title="Open another project in a tab">&#43;</summary>
+    {picker}
+  </details>
+</div>"""
+
+
+def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
+    # "*" is the retired "All projects" selector — it is truthy but NOT a real app, so it must never
+    # become app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
+    # cfg.app("*") -> KeyError). Normalize to a concrete app for single-app ACTION buttons. EU-63:
+    # the NAV link "Choose a ticket" keeps ?app=* when there is no concrete project (legacy / test
+    # path) so the tickets route (which handles * safely) still lists all projects — this is harmless
+    # because the tickets route is the one caller that handles the * sentinel without a cfg.app("*").
+    app0 = current_app if (current_app and current_app != "*") else (cfg.apps[0].name if cfg.apps else "")
+    # EU-63: the retired "*" all-projects sentinel must never appear in any URL we emit.  Use the
+    # same concrete project as ``app0`` for the "Choose a ticket" nav link too.
+    nav_app = app0  # concrete project (or first configured app if none active); never "*"
+    tab_bar = _tab_bar(cfg, current_app)
     apps = "".join(
         f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
         f"{html.escape(a.name)}</option>" for a in cfg.apps)
@@ -306,7 +388,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
             ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
 
-    return f"""
+    return tab_bar + f"""
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
@@ -360,7 +442,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 }}
 </style>
 <div class=tbar>
-  <a class="btn primary" href="/tickets?app={html.escape(nav_app)}">&#127915; Choose a ticket</a>
+  <a class="btn primary" href="/tickets{('?app=' + html.escape(nav_app)) if nav_app else ''}">&#127915; Choose a ticket</a>
 
   <details class=menu>
     <summary class=btn>&#43; New task</summary>

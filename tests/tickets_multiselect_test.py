@@ -1,6 +1,7 @@
-"""Choose-tickets QA: the All-projects view must let you MULTI-SELECT tickets (checkboxes), not just
-read-only 'develop →' links. A single run targets one app/Jira, so each project is its OWN checkbox form
-with its own 'Develop selected in <app>' button — multi-select within a project, separate runs across."""
+"""Choose-tickets QA (EU-63): /tickets is per-tab — every request renders exactly ONE concrete
+project's run form, with MULTI-SELECT checkboxes (not read-only 'develop →' links). The retired
+"All projects" grouped index (one form per app) is gone: '*'/empty falls back to the active tab /
+first app, so there is always a single run form scoped to one app/Jira."""
 import sys, types, tempfile
 from pathlib import Path
 
@@ -35,25 +36,25 @@ srv.intake.from_drain = lambda c, name, lim: [
     (A("automatixy"), T("AUTO-37", "skip")), (A("automatixy"), T("AUTO-38", "alt"))]
 client = srv.create_app(cfg).test_client()
 
-# --- All-projects: checkbox forms per project (multi-select), NOT read-only links ---
+# --- '*'/empty falls back to ONE concrete project (first app) — a single run form, not a grouped index ---
 b = client.get("/tickets?app=*").get_data(as_text=True)
-chk("all-projects view has a checkbox per ticket (multi-select restored)", b.count("type=checkbox name=ticket") == 4, str(b.count("type=checkbox name=ticket")))
-chk("one run form per project (2)", b.count("action=/api/run-selected") == 2)
-chk("each form targets its own app — Elite-Unit", 'name=app value="Elite-Unit"' in b)
-chk("each form targets its own app — automatixy", 'name=app value="automatixy"' in b)
-chk("a per-project 'Develop selected in <app>' button", b.count("Develop selected in") == 2)
+chk("'*' renders a checkbox per ticket (multi-select)", b.count("type=checkbox name=ticket") == 4, str(b.count("type=checkbox name=ticket")))
+chk("exactly ONE run form (no per-project grouping)", b.count("action=/api/run-selected") == 1)
+chk("'*' falls back to the first app's tab — Elite-Unit", 'name=app value="Elite-Unit"' in b)
+chk("no retired grouped 'Develop selected in <app>' label", "Develop selected in" not in b)
+chk("single 'Develop selected' button", b.count("Develop selected") == 1)
 chk("no read-only 'develop →' links remain", "develop &rarr;" not in b)
 
-# --- single-project view still works (one form, checkboxes) ---
+# --- focusing a concrete tab scopes the form to THAT app ---
 s = client.get("/tickets?app=automatixy").get_data(as_text=True)
-chk("single-project view keeps checkboxes + one form", "type=checkbox name=ticket" in s and s.count("action=/api/run-selected") == 1)
-chk("single-project form targets that app", 'name=app value="automatixy"' in s)
+chk("per-tab view keeps checkboxes + one form", "type=checkbox name=ticket" in s and s.count("action=/api/run-selected") == 1)
+chk("per-tab form targets that app", 'name=app value="automatixy"' in s)
 
 # --- "Select all" toggle: one per run form, scoped to its own form, never itself submittable ---
-chk("all-projects: a 'Select all' per project form (2)", b.count(">Select all<") == 2, str(b.count(">Select all<")))
+chk("exactly one 'Select all' (single form)", b.count(">Select all<") == 1, str(b.count(">Select all<")))
 chk("select-all toggles ticket boxes in its own form via JS", "querySelectorAll('input[name=ticket]')" in b)
 chk("select-all is nameless -> not submitted as a ticket (still 4 ticket boxes)", b.count("type=checkbox name=ticket") == 4)
-chk("single-project: exactly one 'Select all'", s.count(">Select all<") == 1, str(s.count(">Select all<")))
+chk("per-tab: exactly one 'Select all'", s.count(">Select all<") == 1, str(s.count(">Select all<")))
 
 print("\n============ CHOOSE-TICKETS MULTI-SELECT QA ============")
 passed = sum(1 for _, ok, _ in results if ok)

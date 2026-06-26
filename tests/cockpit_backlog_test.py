@@ -1,7 +1,8 @@
 """Cockpit backlog QA: the War Room shows a project-scoped 'Tickets to work' panel (the open Jira
 backlog), the project selector's 'All projects' (*) aggregates every backlogged app instead of crashing
 on cfg.app('*'), the fetch is TTL-cached so the SSE poll doesn't hammer Jira, and a Jira error degrades
-gracefully. /tickets renders an all-projects index (grouped, read-only) vs a single-project run form."""
+gracefully. /tickets is per-tab (EU-63): every request scopes to ONE concrete project's run form —
+the retired '*'/all-projects grouped index is gone, so '*'/empty falls back to the active tab/first app."""
 import sys, types, tempfile
 from pathlib import Path
 
@@ -87,17 +88,20 @@ intake.from_drain = lambda c, n, l: []
 chk("empty backlog -> friendly empty state", "Nothing of yours open" in warroom._backlog_html(cfg, "Elite-Unit"))
 intake.from_drain = fake_drain
 
-# --- /tickets route: '*' -> grouped, multi-select PER project (one form per app); a project -> the run form ---
+# --- /tickets route: EU-63 retired the grouped all-projects index — every /tickets request is scoped to
+#     ONE concrete project (the session's active tab; '*'/empty falls back to the first app's tab) ---
 sync.can_promote = lambda: False
 cfg.detected_auth = lambda: "test"
 client = server.create_app(cfg).test_client()
 warroom._BACKLOG_CACHE.clear()
-all_pg = client.get("/tickets?app=*").get_data(as_text=True)
-chk("/tickets?app=* does not crash (200 + all-projects index)", "all projects" in all_pg and "EU-20" in all_pg and "AUTO-9" in all_pg)
-chk("/tickets?app=* allows multi-select PER project (a checkbox form per app, each single-app scoped)",
-    'name=ticket' in all_pg and "Develop selected in" in all_pg and 'name=app value="Elite-Unit"' in all_pg)
-one_pg = client.get("/tickets?app=Elite-Unit").get_data(as_text=True)
-chk("/tickets?app=<proj> shows the run form (checkboxes + develop)", 'name=ticket' in one_pg and "Develop selected" in one_pg and "EU-20" in one_pg)
+star_pg = client.get("/tickets?app=*").get_data(as_text=True)
+chk("/tickets?app=* falls back to one concrete project (no all-projects index)",
+    "Develop selected" in star_pg and 'name=app value="Elite-Unit"' in star_pg
+    and "Develop selected in" not in star_pg and "AUTO-9" not in star_pg)
+one_pg = client.get("/tickets?app=automatixy").get_data(as_text=True)
+chk("/tickets?app=<proj> shows that project's run form (checkboxes + develop)",
+    'name=ticket' in one_pg and "Develop selected" in one_pg and "AUTO-9" in one_pg
+    and 'name=app value="automatixy"' in one_pg)
 
 print("\n============ COCKPIT BACKLOG QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
