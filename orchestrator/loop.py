@@ -514,6 +514,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                            # lets a later pass skip the (Opus) coverage agent + re-gate
                                            # when nothing changed since.
     pm_used = False
+    # EU-90: fingerprint of the in-scope finding SET we last commented on this ticket, kept across
+    # passes so the "Builder retrying" Jira comment is posted only when that set actually CHANGES —
+    # not re-posted identically on every failing retry.
+    last_in_scope_sig: str | None = None
 
     # EU-72: one shared per-ticket artifact pool, threaded through the officers so each reads a tight
     # structured handoff instead of re-deriving from the full diff. The SpecArtifact is derived straight
@@ -744,6 +748,106 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             audit.record("needs_human", ticket_id=ticket.id, question=review.question)
             return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                 notes=f"needs decision: {review.question[:140]}")
+
+        # EU-90: PM findings triage — when the Reviewer returns FAIL with quality_issues,
+        # classify each finding into: in-scope fixes (Builder retries these unchanged),
+        # out-of-scope pre-existing issues (auto-filed as linked backlog tickets), and
+        # Commander decisions (escalated via the normal decisions queue). Placed here —
+        # after needs_human has already been handled — so only genuine FAIL+quality paths
+        # reach the triage. Wrapped in try/except so a PM error always falls through to
+        # the normal retry; the triage is a routing aid, never a gate.
+        if review.verdict.value == "FAIL" and review.quality_issues:
+            try:
+                import json as _json
+                from . import pm as _pm_mod
+                # EU-90: hand the classifier REAL diff evidence — the diff already computed for the
+                # review (above) plus the authoritative changed-file list the loop stamped onto the
+                # BuildArtifact. Without this the in-scope/out-of-scope split has no path basis.
+                ftr = await _pm_mod.triage_findings(
+                    review, ticket, cfg,
+                    diff=diff,
+                    files_changed=(store.build.files_changed if store.build is not None else None),
+                )
+                audit.record("pm_findings_triage", ticket_id=ticket.id, iteration=iteration,
+                             in_scope=len(ftr.in_scope), out_of_scope=len(ftr.out_of_scope),
+                             decisions=len(ftr.decisions))
+                # (a) in_scope — retry logic is unchanged; post a short Jira comment so the
+                # Commander can see exactly which defects the Builder is about to address. Post it
+                # ONLY when the in-scope finding SET has changed since the previous pass: an identical
+                # set on the next retry would just re-spam the same comment every failing iteration
+                # (EU-90 rejection #2). The signature is order-independent and case/whitespace tolerant.
+                if ftr.in_scope:
+                    in_scope_sig = _changes_sig(
+                        [f"{q.severity}/{q.area}: {q.detail}" for q in ftr.in_scope]
+                    )
+                    if (in_scope_sig != last_in_scope_sig
+                            and not cfg.dry_run and not ticket.ephemeral):
+                        try:
+                            lines = "\n".join(
+                                f"• [{q.severity}/{q.area}] {q.detail[:120]}"
+                                for q in ftr.in_scope
+                            )
+                            backlog.add_comment(
+                                ticket,
+                                f"🔧 Builder retrying — {len(ftr.in_scope)} in-scope "
+                                f"finding(s) to fix:\n{lines}")
+                        except Exception:  # noqa: BLE001 - comment failure must not break the run
+                            pass
+                    # Remember this set so the next identical retry stays silent (tracked even in
+                    # dry-run/ephemeral, where the comment is skipped, so the signature still advances).
+                    last_in_scope_sig = in_scope_sig
+                # (b) out_of_scope — synthesise a ===TICKETS=== block and route pre-existing
+                # issues to the backlog so they are filed as linked tickets, not silently lost.
+                # EU-90 double-filing guard: the Reviewer may have ALSO flagged the same issue in
+                # its OWN ===TICKETS=== block (already routed above as source="reviewer"). With
+                # out_of_scope_autofile defaulting on, both routes file to the same backlog — so drop
+                # any pm-findings proposal whose wording a reviewer proposal already covers.
+                fresh_oos = _dedupe_oos_against_reviewer(ftr.out_of_scope, review.raw)
+                deduped_n = len(ftr.out_of_scope) - len(fresh_oos)
+                if deduped_n:
+                    audit.record("pm_findings_oos_deduped", ticket_id=ticket.id,
+                                 iteration=iteration, skipped=deduped_n)
+                if fresh_oos:
+                    oos_proposals = [
+                        {
+                            "title": f"[{q['severity'].upper()}/{q['area']}] {q['detail'][:160]}",
+                            "type": "Bug",
+                            "severity": q["severity"].upper(),
+                            "body": q["detail"],
+                        }
+                        for q in fresh_oos
+                    ]
+                    oos_block = f"===TICKETS===\n{_json.dumps(oos_proposals)}\n===END==="
+                    _route_out_of_scope(cfg, ticket, app, audit, oos_block, source="pm-findings")
+                # (c) decisions — scope/product ambiguities only the Commander can settle;
+                # add them with a distinct entry_id so they don't overwrite the main decision.
+                # EU-90: this is the ONLY findings route that pages the Commander, and it pages
+                # BRIEFLY — a bulleted Needs-you line (EU-79), never the old wall-of-text dump. The
+                # in-scope (Builder retries) and out-of-scope (auto-filed) routes stay silent.
+                if ftr.decisions:
+                    bullets = "\n".join(
+                        f"• [{q.severity}/{q.area}] {q.detail}" for q in ftr.decisions
+                    )
+                    question = ("Reviewer raised scope/product ambiguities that need your call:\n"
+                                + bullets)
+                    # Page the Commander ONLY when this parks a genuinely NEW decision. On a repeated
+                    # retry the same question hits the EU-89 dedup gate, so decisions.add returns the id
+                    # of the EXISTING entry (no new row is written) rather than a fresh one — re-paging
+                    # it every failing pass is exactly the spam EU-90 removes. Snapshot the parked ids
+                    # before the add and page only when a new id appears (the contract documented in
+                    # eu89_stateful_chat_test._park_and_notify — decisions.add never returns None, so a
+                    # bare `is not None` check would page on every retry).
+                    parked_before = {e.get("id") for e in decisions.load(cfg)}
+                    eid = decisions.add(
+                        cfg, ticket, app.name, question,
+                        entry_id=f"{ticket.id}#pm-findings-decisions",
+                    )
+                    if eid and eid not in parked_before:
+                        _notify(cfg, f"❓ {ticket.id} — needs YOUR decision "
+                                     f"({len(ftr.decisions)} reviewer finding(s)):\n{bullets}"
+                                     f"\n\n{decisions.reply_hint(ticket.id)}")
+            except Exception as exc:  # noqa: BLE001 - findings triage must never break the run
+                print(f"  · PM findings triage skipped: {exc}", flush=True)
 
         # 4) DECIDE
         if review.is_ship_ready():
@@ -1003,6 +1107,46 @@ async def _after_merge_scout(cfg, app, ticket, audit) -> None:
                 + (("\n\n" + block) if block else ""))
     except Exception as exc:  # noqa: BLE001 - after-merge recon must never break the run
         print(f"  scout smoke skipped: {exc}", flush=True)
+
+
+def _distinctive_tokens(text: str) -> set[str]:
+    """EU-90: distinctive (length ≥ 4) lowercase alphanumeric tokens of *text*. Dropping short tokens
+    skips stopwords ('the', 'and', 'with', 'this') that would otherwise inflate the overlap score and
+    cause false dedups — leaving the content words that actually identify a finding."""
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) >= 4}
+
+
+def _dedupe_oos_against_reviewer(out_of_scope: list[dict], reviewer_raw: str,
+                                 *, threshold: float = 0.6) -> list[dict]:
+    """EU-90 double-filing guard. Return the PM out-of-scope findings that are NOT already covered by
+    a proposal in the Reviewer's own ===TICKETS=== block (parsed from `reviewer_raw`).
+
+    Both the reviewer block and these PM findings feed the SAME backlog through `_route_out_of_scope`,
+    so once `out_of_scope_autofile` is on a finding flagged in BOTH would be filed twice. A PM finding
+    is treated as a duplicate when its distinctive wording substantially overlaps a reviewer proposal
+    (≥2 shared content tokens AND ≥ `threshold` of the finding's tokens). Order is preserved, and a
+    finding with too little text to compare is KEPT (EU-44: never silently drop a real finding)."""
+    from . import filing
+    reviewer_props, _ = filing.parse_tickets(reviewer_raw or "")
+    if not reviewer_props:
+        return list(out_of_scope)
+    rev_token_sets = [
+        _distinctive_tokens(f"{p.get('title', '')} {p.get('body', '')}")
+        for p in reviewer_props
+    ]
+    fresh: list[dict] = []
+    for q in out_of_scope:
+        q_tokens = _distinctive_tokens(q.get("detail", ""))
+        is_dup = False
+        if q_tokens:
+            for rt in rev_token_sets:
+                overlap = len(q_tokens & rt)
+                if overlap >= 2 and overlap / len(q_tokens) >= threshold:
+                    is_dup = True
+                    break
+        if not is_dup:
+            fresh.append(q)
+    return fresh
 
 
 def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:

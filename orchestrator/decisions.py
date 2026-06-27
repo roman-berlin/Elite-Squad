@@ -84,8 +84,14 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     EU-89 dedup gate: if a pending entry with the same base ticket id AND the same question
     fingerprint already exists, the write is skipped and the existing entry's id is returned.
     This prevents the autopilot from stacking duplicate 'which date format?' cards when a
-    re-run re-hits the same escalation point. Returns the stored entry id on success (new or
-    pre-existing), or None on a dedup hit (existing id returned instead)."""
+    re-run re-hits the same escalation point.
+
+    Returns the stored entry id — the newly written one on a fresh park, or the EXISTING entry's
+    id on a dedup hit (no new row). It does NOT return None to flag a dedup hit, so a caller that
+    must page the Commander only on a GENUINELY new park cannot use `is not None`: snapshot the
+    parked ids via load() before calling and notify only when the returned id is absent from that
+    snapshot (see loop.py's findings-decisions route and eu89_stateful_chat_test._park_and_notify).
+    In practice the return is always a non-None id; the ``| None`` annotation is permissive only."""
     eid = entry_id or ticket.id
     base_tid = str(ticket.id).split("#", 1)[0]
     q_fp = _question_fingerprint(question)
