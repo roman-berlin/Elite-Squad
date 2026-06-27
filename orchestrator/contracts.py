@@ -176,6 +176,96 @@ AUDIT_EVENT_OUTCOME: dict[str, Outcome] = {
 PARKED: tuple[Outcome, ...] = (Outcome.ESCALATED, Outcome.PR_OPENED)
 
 
+# --------------------------------------------------------------------------- #
+# Structured handoff artifacts — EU-72 (MetaGPT pattern)
+#
+# Three dataclasses carry typed information between officers so the next officer
+# reads a tight structured input instead of re-deriving from the full diff. The
+# loop instantiates ONE PerTicketArtifactStore per ticket in _attempt() and
+# threads it through the officers: the builder publishes a BuildArtifact and the
+# reviewer a ReviewVerdict, while the SpecArtifact is derived from the ticket.
+# Artifact-first, full-context-on-demand — the full summary/diff is always still
+# available, so a digest never has to carry everything.
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class SpecArtifact:
+    """Written by the Spec officer; consumed by the Builder and Reviewer.
+
+    Carries the structured version of the ticket's acceptance criteria so that
+    downstream officers never have to re-parse the raw Jira description.
+    """
+    acceptance: list[str]   # parsed acceptance criteria, one item per criterion
+    scope: str              # one-sentence description of what IS in scope
+    non_goals: list[str]    # explicit out-of-scope items; prevents scope creep
+
+
+@dataclass
+class BuildArtifact:
+    """Written by the Builder; consumed by the Test Engineer and Reviewer.
+
+    Gives the Test Engineer and Reviewer a machine-readable summary of what
+    changed so they can focus their checks instead of re-reading the diff.
+    """
+    files_changed: list[str]    # repo-relative paths that were modified
+    diff_digest: str            # short (≤ 500 char) human-readable summary of the diff
+    decisions: list[str]        # key design decisions made during the build
+    open_questions: list[str]   # concerns the Builder couldn't resolve unilaterally
+
+    def __post_init__(self) -> None:
+        # Enforce the digest ceiling the docstring promises: the artifact is a SUMMARY, not a second
+        # copy of the diff. An over-long digest means the builder inlined the diff — reject it so the
+        # handoff stays cheap (the full summary/raw lives on BuildResult for on-demand digging).
+        if len(self.diff_digest) > 500:
+            raise ValueError(
+                f"BuildArtifact.diff_digest must be ≤ 500 chars, got {len(self.diff_digest)}; "
+                "summarise the diff instead of inlining it."
+            )
+
+
+@dataclass
+class ReviewVerdict:
+    """Written by the Reviewer; consumed by the orchestrator loop.
+
+    A typed counterpart to ReviewResult for the structured-artifact pipeline —
+    ReviewResult keeps its existing parser/enum surface; ReviewVerdict is the
+    lightweight version emitted into the PerTicketArtifactStore.
+    """
+    verdict: Verdict        # Verdict.PASS | Verdict.FAIL (the same enum ReviewResult uses)
+    blocking: list[str]     # blocking issues that must be resolved before merge
+    notes: list[str]        # non-blocking observations for the next iteration
+
+
+@dataclass
+class PerTicketArtifactStore:
+    """The shared per-ticket pool. Instantiated once per ticket in _attempt() and threaded through
+    the officers; each officer publishes its artifact with put() and reads the upstream one (passed
+    by the loop as a named argument) as its primary input.
+
+    Each slot is Optional so a downstream officer can tell whether a given artifact has been produced
+    yet (None → that stage didn't run / didn't publish) and fall back to the full diff/description.
+    The store is cheap: three small dataclasses, no I/O.
+    """
+    spec: Optional[SpecArtifact] = None
+    build: Optional[BuildArtifact] = None
+    review: Optional[ReviewVerdict] = None
+
+    def put(self, artifact: SpecArtifact | BuildArtifact | ReviewVerdict) -> None:
+        """Store *artifact* in the correct slot (determined by type).
+
+        Raises TypeError for unknown artifact types so callers discover
+        misuse immediately rather than silently dropping data.
+        """
+        if isinstance(artifact, SpecArtifact):
+            self.spec = artifact
+        elif isinstance(artifact, BuildArtifact):
+            self.build = artifact
+        elif isinstance(artifact, ReviewVerdict):
+            self.review = artifact
+        else:
+            raise TypeError(f"Unknown artifact type: {type(artifact)!r}")
+
+
 @dataclass
 class TicketReport:
     ticket_id: str
