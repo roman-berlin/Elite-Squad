@@ -106,6 +106,28 @@ chk("officer defaults its ceiling to reviewer_model",
     M.for_officer(Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, reviewer_model=M.SONNET),
                   size="XL")[0] == M.SONNET)
 
+# --- for_soldier_build: cheap-first escalation ladder, same rules as for_builder ---
+chk("soldier auto OFF -> uses configured builder_model unchanged",
+    M.for_soldier_build(off, effort="high")[0] == M.OPUS)
+ms_low, why_ms = M.for_soldier_build(on, effort="low")
+chk("soldier auto ON: pass 1, low effort -> Sonnet-first (cheap)", ms_low == M.SONNET, ms_low)
+chk("soldier auto ON: pass 1, 'high' effort -> Sonnet-first (not a heavy pin)",
+    M.for_soldier_build(on, effort="high")[0] == M.SONNET)
+chk("soldier auto ON: 'xhigh' effort -> Sonnet-first (not an explicit top pin)",
+    M.for_soldier_build(on, effort="xhigh")[0] == M.SONNET)
+chk("soldier only explicit top pin (max/maximum/ultra) starts on Opus from pass 1",
+    M.for_soldier_build(on, effort="max")[0] == M.OPUS
+    and M.for_soldier_build(on, effort="maximum")[0] == M.OPUS
+    and M.for_soldier_build(on, effort="ultra")[0] == M.OPUS)
+chk("soldier rejected cheap pass ESCALATES to Opus on retry",
+    M.for_soldier_build(on, effort="low", iteration=2)[0] == M.OPUS)
+chk("soldier floor is Sonnet, never Haiku for code", ms_low != M.HAIKU)
+chk("soldier escalation never exceeds configured ceiling",
+    M.for_soldier_build(
+        Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=True, builder_model=M.SONNET),
+        effort="low", iteration=5)[0] == M.SONNET)
+chk("soldier reason names the model", "sonnet" in why_ms.lower())
+
 # --- budget signal flows from the real ledger ---
 tmp = Path(tempfile.mkdtemp()); led = tmp / "audit.jsonl"
 usage.configure(str(led))

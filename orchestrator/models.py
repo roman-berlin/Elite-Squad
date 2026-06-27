@@ -128,6 +128,33 @@ def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]
                        budget_pct=_budget_pct(cfg), floor_tier=1, why=f"{effort or '?'} effort")
 
 
+def for_soldier_build(cfg, *, effort: str, iteration: int = 1) -> tuple[str, str]:
+    """The model for a soldier's code-build turn.
+
+    Soldiers execute delegated build work (write/patch code) at the direction of an officer.
+    They must use the same cheap-first escalation ladder as the Builder — start on Sonnet
+    (pass 1) and climb one tier per retry — rather than ``for_officer``'s size-once approach.
+    ``for_officer`` picks the *one* cheapest model that fits and never revisits that choice;
+    that is correct for advisory officers whose output is accepted or discarded whole.  But a
+    soldier build is exactly like a builder pass: cheap enough on the first attempt, then
+    escalated to a stronger model when a cheap pass is rejected, so the unit neither wastes
+    Opus tokens on trivial work nor gets stuck retrying the same cheap model forever.
+
+    Rules (same as ``for_builder``):
+    - Floor = Sonnet (Haiku is too weak for code; failing cheap costs more retries).
+    - Ceiling = ``cfg.builder_model`` (never exceed what the Commander configured).
+    - Pass 1: Sonnet, *unless* effort is 'max'/'maximum'/'ultra', which pins to Opus.
+    - Each subsequent retry escalates one tier until the ceiling is reached.
+    - A tight daily budget lowers the effective ceiling to stretch remaining quota.
+    """
+    ceiling = getattr(cfg, "builder_model", OPUS)
+    if not getattr(cfg, "auto_model", False):
+        return ceiling, "fixed"
+    base = 2 if (effort or "").lower() in _HEAVY_EFFORT else 1   # explicit max pin→Opus, else Sonnet-first
+    return _escalating(ceiling, base_tier=base, iteration=iteration,
+                       budget_pct=_budget_pct(cfg), floor_tier=1, why=f"{effort or '?'} effort")
+
+
 def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | None = None,
                 ) -> tuple[str, str]:
     """A non-Builder officer's model (scout, council chair, drillmaster, PM, QM, security review…).
