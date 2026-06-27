@@ -79,6 +79,30 @@ def record(model: str, input_tokens: int, output_tokens: int,
         locking.locked_append(p, json.dumps(row))
     except OSError:
         pass
+    # EU-84: a model call is a liveness signal — bump last_activity for every active run.
+    # During soldier-build delegation the soldier's stdout never flows through bump_log_seq
+    # for the parent, so last_activity freezes at delegation time and the cockpit liveness
+    # chip falsely shows "⚠ no step for Nm — may be stuck".  A model call proves the run
+    # is alive at least as strongly as a printed step, so we propagate the heartbeat here.
+    #
+    # KNOWN LIMITATION — cross-run heartbeat contamination (EU-84 review, iter 2): the ledger
+    # line records WHICH model call happened but not WHICH run owns it (run_agent is a shared
+    # choke-point with no app attribution), so when two or more runs are active at once we bump
+    # last_activity for ALL of them.  A model call belonging to run A therefore keeps run B's
+    # liveness chip green even if B is genuinely stuck.  This is deliberately accepted for now:
+    # the common case is a single active run (max_parallel_runs defaults to 1), and the failure
+    # mode is a *false-green* on a co-running stuck run — strictly less harmful than the
+    # false-"stuck" this ticket fixes.  The clean fix (thread an `app_key` from run_agent so the
+    # heartbeat bumps only the owning run) is deferred to a follow-up; test 8 in
+    # tests/liveness_heartbeat_test.py pins this current "bump all active runs" behaviour so the
+    # contamination is documented and any future change to it is a conscious one.
+    try:
+        from . import cockpit_state as _cs  # local import — avoids any circular-import risk
+        _now = time.time()
+        for _app_key in _cs.active_runs():
+            _cs.get_state(_app_key)["last_activity"] = _now
+    except Exception:  # noqa: BLE001 — heartbeat must never break a run
+        pass
 
 
 def _rows(cfg: Config | None, since: float) -> list[dict]:
