@@ -28,6 +28,8 @@ CRON_TZ=Asia/Jerusalem
 30 6 * * * cd $HOME/General && ./general council >> council/cron.log 2>&1
 0 11,14,16 * * * bash -c 'sleep $((RANDOM % 2100)); cd $HOME/General && ./general smalltalk >> council/cron.log 2>&1'
 0 9 * * 1 cd $HOME/General && ./general patrol >> council/cron.log 2>&1
+# SWE-bench Verified weekly benchmark — Mon 04:00 (off-peak), deterministic sample via --weekly seed
+0 4 * * 1 cd $HOME/General && python3 scripts/swebench_builder.py --weekly --sample 20 >> council/cron.log 2>&1
 CRON
 crontab "$TMP"
 rm -f "$TMP"
