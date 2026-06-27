@@ -275,7 +275,7 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
             f"(effort {st.effort()}) — {st.title}",
             flush=True,
         )
-        run = await _soldier(st, req, app, cfg, i, len(subtasks), specialists=specialists)
+        run, _ = await _soldier(st, req, app, cfg, i, len(subtasks), specialists=specialists)
         cost += run.cost_usd
         turns += run.num_turns
         tools += run.tools
@@ -478,8 +478,9 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
 
 
 async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, idx: int, total: int,
-                   specialists: dict[str, dict] | None = None):
-    """Dispatch one soldier (fixed SQUAD lane OR ephemeral specialist) and return its AgentRun.
+                   specialists: dict[str, dict] | None = None,
+                   iteration: int = 1) -> tuple:
+    """Dispatch one soldier (fixed SQUAD lane OR ephemeral specialist); return ``(AgentRun, mreason)``.
 
     When `specialists` is provided and `st.role` matches a lane_key, the ephemeral charter text is
     injected as the system prompt instead of loading from ``~/.claude/agents/``. The fixed-lane
@@ -495,6 +496,9 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
         specialists: Optional dict keyed by lane_key → ephemeral charter dict from
             ``hr.synthesize_specialists()``. When None (or when ``st.role`` is not a key),
             the fixed SQUAD lookup is used unchanged.
+        iteration: Pass number from the parent BuildRequest (1 = first attempt). Drives the
+            cheap-first escalation ladder in ``for_soldier_build`` — a rejected cheap pass
+            re-runs on a stronger model automatically.
     """
     from .builder import turns_for
     guard.warn_if_absent(f"soldier·{st.role}")   # EU-2 F7: loud one-liner if guard is absent under bypass
@@ -518,10 +522,11 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
         label, focus = SQUAD.get(st.role, SQUAD["generalist"])
         system_prompt = memory.preamble() + _SOLDIER_SYSTEM.format(label=label, focus=focus)
 
-    # EU-52: a squad engineer writes production code under the Builder's ceiling — route it through the
-    # ladder sized off the slice's own effort (floor stays Sonnet, never Haiku, for code). Squads only
-    # run on the first pass; a rejection retries as a single Builder via for_builder, which escalates.
-    model, mreason = models.for_officer(cfg, effort=st.effort(), ceiling_model=cfg.builder_model)
+    # EU-91: all SQUAD roles emit code — use for_soldier_build (same cheap-first escalation as the
+    # Builder) rather than for_officer's size-once approach. Pass the current iteration so that a
+    # rejected cheap pass automatically escalates to a stronger model on retry. Floor = Sonnet;
+    # ceiling = cfg.builder_model.
+    model, mreason = models.for_soldier_build(cfg, effort=st.effort(), iteration=iteration)
     if getattr(cfg, "auto_model", False):
         print(f"  · soldier·{st.role} model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
@@ -531,10 +536,11 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         hooks=guard.hooks_config(),    # same hard denylist as the builder
         setting_sources=[], max_turns=turns_for(cfg, st.effort()), effort=st.effort())
-    return await run_agent(
+    run = await run_agent(
         _soldier_prompt(st, req, idx, total, specialists=specialists),
         options, tag=f"soldier·{st.role}",
     )
+    return run, mreason
 
 
 def should_delegate(cfg: Config, req: BuildRequest) -> bool:
@@ -599,7 +605,7 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
     for i, st in enumerate(subtasks, 1):
         print(f"  engineer {i}/{len(subtasks)} · {SQUAD[st.role][0]} (effort {st.effort()}) — {st.title}",
               flush=True)
-        run = await _soldier(st, req, app, cfg, i, len(subtasks))
+        run, mreason = await _soldier(st, req, app, cfg, i, len(subtasks), iteration=req.iteration)
         cost += run.cost_usd
         turns += run.num_turns
         tools += run.tools
@@ -609,7 +615,7 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
         if audit is not None:
             audit.record("soldier_build", ticket_id=req.ticket.id, role=st.role, size=st.size,
                          effort=st.effort(), ok=not run.is_error, cost_usd=run.cost_usd,
-                         turns=run.num_turns, tools=run.tools)
+                         turns=run.num_turns, tools=run.tools, mreason=mreason)
 
     summary = (f"Squad delegation — {len(subtasks)} subtasks dispatched:\n\n" + "\n\n".join(summaries))
     return BuildResult(ok=ok, summary=summary, cost_usd=cost, num_turns=turns,
