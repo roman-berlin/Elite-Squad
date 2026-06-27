@@ -57,7 +57,8 @@ chk("in-flight: no runs -> not live", not warroom._run_in_flight(cfg, [], "autom
 # --- render_board: a background build (state.active False) renders LIVE with the phase bar lit ---
 write({"event": "ticket_start", "ticket_id": "AUTO-14", "app": "automatixy", "ts": stamp(4)})
 board = warroom.render_board(cfg, "automatixy", {}, log_lines=[])   # empty state = cockpit didn't start it
-chk("board: in-flight run shows '● running'", "● running" in board, "expected running status")
+chk("board: in-flight run shows hero-merged live header (runlive + hgdot)",
+    "runlive" in board and "hgdot" in board, "expected runlive/hgdot in board HTML")
 chk("board: the current phase is highlighted (ph now)", 'class="ph now"' in board)
 chk("board: it is NOT shown as 'last run'", "last run" not in board)
 
@@ -65,7 +66,8 @@ chk("board: it is NOT shown as 'last run'", "last run" not in board)
 write({"event": "ticket_start", "ticket_id": "AUTO-9", "app": "automatixy", "ts": stamp(300)},
       {"event": "merged", "ticket_id": "AUTO-9", "app": "automatixy", "ts": stamp(290)})
 board2 = warroom.render_board(cfg, "automatixy", {}, log_lines=[])
-chk("board: a finished run shows 'last run', not running", "last run" in board2 and "● running" not in board2)
+chk("board: a finished run shows 'last run', not running",
+    "last run" in board2 and "runlive" not in board2)
 
 # --- the Activity panel is collapsible + the terminal is taller/resizable ---
 chk("board: Activity is a collapsible panel", "id=actpanel" in board and 'class="panel collapse"' in board)

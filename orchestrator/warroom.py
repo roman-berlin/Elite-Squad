@@ -17,7 +17,7 @@ import html
 import json
 import os
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Optional
@@ -101,11 +101,71 @@ def _scope(tasks: list[dict], app: Optional[str]) -> list[dict]:
     return [t for t in tasks if (t.get("app") or "") == app]
 
 
+def _day_keys(days: int) -> list[str]:
+    """The last `days` calendar dates as 'YYYY-MM-DD' strings (local), oldest→newest.
+
+    EU-76 fix: built with calendar-date arithmetic (``date.today() - timedelta(days=k)``) rather than
+    subtracting fixed 86400s chunks from a unix clock. A spring-forward / fall-back DST day is 23h or
+    25h long, so stepping back 86400s at a time drifts across local midnight and can land two keys on
+    the same calendar day — collapsing/skipping a bucket. Counting whole calendar days avoids that.
+    """
+    today = date.today()
+    return [(today - timedelta(days=k)).isoformat() for k in range(days - 1, -1, -1)]
+
+
+def _merges_per_day(cfg, days: int = 14) -> list[int]:
+    """Daily count of 'merged' audit events for the last `days` calendar days, oldest→newest.
+
+    EU-76 perf fix: the per-day buckets are produced by the single ``_scan()`` pass (memoized on the
+    audit's (size, mtime_ns) signature), so rendering this sparkline no longer adds an extra
+    full-history JSON parse on every SSE board frame — it just slices an already-computed dict. Days
+    with no merges are zero; any failure returns all-zeros rather than breaking the board.
+    """
+    keys = _day_keys(days)
+    try:
+        by_day = _scan(cfg.audit_path).get("merged_by_day", {})
+        return [int(by_day.get(k, 0)) for k in keys]
+    except Exception:  # noqa: BLE001 — never break the board on aggregation failure
+        return [0] * days
+
+
+def _daily_token_burn(cfg, days: int = 14) -> list[float]:
+    """Daily token COST (USD) for the last `days` calendar days, oldest→newest.
+
+    EU-76 perf fix: delegates to ``usage.daily_burn_series``, which reads ``usage_ledger.jsonl`` at most
+    once per (size, mtime_ns) change and caches the computed series — so the board's burn sparkline no
+    longer calls ``read_text()`` on the whole ledger every render. Day buckets use calendar-date
+    arithmetic there too. Returns all-zeros when usage metering or the ledger is unavailable.
+    """
+    try:
+        from . import usage as _usage
+        return _usage.daily_burn_series(cfg, days=days)
+    except Exception:  # noqa: BLE001 — never break the board on metering failure
+        return [0.0] * days
+
+
+# One-pass audit scan, memoized on the audit's (size, mtime_ns) signature — the same fingerprint
+# dashboard._audit_cache keys on — so a burst of SSE board frames / open tabs share ONE JSON parse of
+# the merged history instead of re-parsing it every frame. The cached dict is read-only for all callers
+# (kpis, roster, _merges_per_day); none mutate it, so sharing one instance is safe.
+_scan_cache: dict[str, tuple[tuple, dict[str, Any]]] = {}   # audit path -> (sig, scan result)
+
+
 def _scan(audit_path: str | Path) -> dict[str, Any]:
-    """One pass over the raw audit: last-seen ts and count per event kind,
-    optionally per app. Cheap and used by every panel."""
+    """One pass over the raw audit: last-seen ts + count per event kind, and a per-calendar-day count
+    of 'merged' events (``merged_by_day``) for the KPI trend sparkline. Cheap and used by every panel.
+
+    EU-76: memoized on the audit's (size, mtime_ns) signature, so the full parse runs at most once per
+    change. The merges sparkline now reads ``merged_by_day`` from this shared pass instead of triggering
+    its own extra full-history parse on every board frame."""
+    key = str(audit_path)
+    sig = D._audit_sig(D._audit_paths(audit_path))
+    hit = _scan_cache.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
     last: dict[str, datetime] = {}
     count: dict[str, int] = {}
+    merged_by_day: dict[str, int] = {}
     # Merged view: this machine's audit + every synced shared/<host>.jsonl (see dashboard.audit_lines).
     for line in D.audit_lines(audit_path):
         line = line.strip()
@@ -122,7 +182,14 @@ def _scan(audit_path: str | Path) -> dict[str, Any]:
         dt = _parse(ev.get("ts", ""))
         if dt and (k not in last or last[k] is None or dt > last[k]):
             last[k] = dt
-    return {"last": last, "count": count}
+        # EU-76: bucket 'merged' events by local calendar day in this same pass so the merges
+        # sparkline (see _merges_per_day) costs no extra full-history parse.
+        if k == "merged" and dt:
+            ds = dt.strftime("%Y-%m-%d")
+            merged_by_day[ds] = merged_by_day.get(ds, 0) + 1
+    result = {"last": last, "count": count, "merged_by_day": merged_by_day}
+    _scan_cache[key] = (sig, result)
+    return result
 
 
 def _load_blocked(cfg) -> list[str]:
@@ -175,6 +242,12 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     blocked = _load_blocked(cfg)
     sec_blocks = _scan(cfg.audit_path)["count"].get("security_block", 0)
 
+    # EU-76: pre-compute sparkline series for the Merged→DEV and cost/burn KPI cards.
+    # Both helpers are best-effort: an empty audit or absent ledger yields all-zeros, which
+    # _kpi_sparkline_svg then silently drops (< 2 non-zero points → returns "").
+    merges_series = _merges_per_day(cfg, days=14)   # list[int], oldest→newest
+    burn_series = _daily_token_burn(cfg, days=14)    # list[float] USD, oldest→newest
+
     # Single-source needs count: pull from needs.count() so the KPI card matches the side-panel
     # badge and the /needs inbox (decisions + approvals + proposals + tasks), not tasks alone.
     try:
@@ -194,7 +267,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
          "href": "/tasks?filter=merged"},
         {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok",
-         "href": "/tasks?filter=merged"},
+         "href": "/tasks?filter=merged",
+         "sparkline": merges_series},  # EU-76: 14-day daily merge trend
         {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
          "tone": "warn" if _needs_count else None, "href": "/tasks?filter=needs"},   # -> the tickets that need you
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
@@ -234,6 +308,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
             # gauge = fill fraction 0-1; None when no cap is configured (bar stays hidden)
             "gauge": bs["pct"] if bs["on"] else None,
             "href": "/usage",
+            "sparkline": burn_series,  # EU-76: 14-day daily token-burn trend
         })
         cards.append({
             "label": "Tokens this week",
@@ -476,10 +551,22 @@ def _kpi_html(cards: list[dict]) -> str:
                 'border-radius:3px;overflow:hidden">'
                 f'<div style="height:100%;width:{pct:.1f}%;background:{gcol};'
                 'border-radius:3px;transition:width .4s ease"></div></div>')
+        # EU-76: optional inline sparkline SVG beneath the hint/gauge.
+        # Colour tracks the card tone: ok→green, warn→amber, bad→red, else info-blue.
+        spark_html = ""
+        sp = c.get("sparkline")
+        if sp is not None:
+            sp_stroke = (
+                "var(--ok)" if tone == "ok" else
+                "var(--warn)" if tone == "warn" else
+                "var(--bad)" if tone == "bad" else
+                "var(--info)"
+            )
+            spark_html = _kpi_sparkline_svg(sp, stroke=sp_stroke)
         out.append(
             f'<{tag} class="kpi {tone}{link}"{attr}><div class=kv>{_esc(c["value"])}</div>'
             f'<div class=kl>{_esc(c["label"])}</div>'
-            f'<div class=kh>{_esc(c["hint"])}</div>{gauge_html}</{tag}>')
+            f'<div class=kh>{_esc(c["hint"])}</div>{gauge_html}{spark_html}</{tag}>')
     return "".join(out)
 
 
@@ -512,8 +599,58 @@ def _sparkline_svg(values: list[int], width: int = 88, height: int = 28) -> str:
     )
 
 
+def _kpi_sparkline_svg(
+    values: list[float],
+    width: int = 60,
+    height: int = 20,
+    stroke: str = "var(--info)",
+) -> str:
+    """Render a tiny inline SVG polyline for a KPI trend series (EU-76).
+
+    Plots `values` as a `width`×`height` px polyline — no axes, labels, or ticks,
+    just the shape so the eye can read the trend at a glance. Older values are on
+    the left, newer on the right. Returns an empty string when fewer than 2 points
+    are available (nothing meaningful to draw). All-equal series still render as a
+    flat mid-line so the card always has a consistent visual footprint once data
+    arrives.
+    """
+    if len(values) < 2:
+        return ""
+    n = len(values)
+    max_v = max(values)
+    min_v = min(values)
+    span = float(max_v - min_v)
+    # SVG y-axis is top-down; invert so higher values sit visually higher (more merges → peak, more
+    # cost → also a peak). A flat series (span == 0) has no trend to show, so every point maps to the
+    # vertical middle (fraction 0.5) — a centred mid-line, matching the docstring — rather than being
+    # pinned to an edge (the pre-EU-76 `span or 1.0` form drove flat series to the bottom).
+    def _y(v: float) -> float:
+        frac = 0.5 if span == 0 else (v - min_v) / span
+        return 3.0 + (1.0 - frac) * (height - 6)
+    pts = " ".join(
+        f"{2.0 + i * (width - 4) / (n - 1):.1f},{_y(v):.1f}"
+        for i, v in enumerate(values)
+    )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg" aria-hidden="true" '
+        f'style="display:block;margin-top:7px;flex:none">'
+        f'<polyline points="{pts}" fill="none" stroke="{stroke}" '
+        f'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/>'
+        f'</svg>'
+    )
+
+
 def _run_html(run: Optional[dict], mode: Optional[str] = None,
               elapsed: Optional[str] = None, manual: bool = False) -> str:
+    """Render the Active Run panel body.
+
+    EU-76: this is the single authoritative slot for the in-flight (or most-recent) run.
+    The standalone hero div has been retired; when a run is live the header inside this
+    panel is promoted to a hero-style layout — pulsing dot, large ticket ID, current phase
+    name, mode chip — so the most important information stays prominent without the
+    duplication of a separate .hero card above.
+    """
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
                 'No runs yet for this project. Launch one from the bar above.</div>')
@@ -546,21 +683,6 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             'no merge, nothing left half-applied.\')">'
             '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
             '</form>') if (run["live"] and manual) else ""
-    if run["live"]:
-        status = '<span class="b live">● running</span>'
-        chip = ('<span class="b mode">live → DEV</span>' if mode == "live"
-                else '<span class="b dry">dry-run · no changes</span>' if mode == "dry" else "")
-    else:
-        # Idle: this is the LAST run, not a live one. Show its real outcome and a muted bar so it
-        # never reads as "in progress".
-        status = '<span class="b muted">last run</span>'
-        oc = run.get("outcome") or ""
-        otone = {"merged→dev": "ok", "errored": "bad", "awaiting decision": "warn",
-                 "escalated": "warn", "PR / needs you": "warn"}.get(oc, "muted")
-        olabel = {"merged→dev": "merged → DEV", "errored": "errored", "escalated": "escalated",
-                  "PR / needs you": "PR — needs you", "awaiting decision": "needs you",
-                  "running": "interrupted"}.get(oc, oc or "—")
-        chip = f'<span class="b {otone}">{_esc(olabel)}</span>'
     verdict = (f'<span class=meta>verdict <b>{_esc(run["verdict"])}</b></span>'
                if run["verdict"] else "")
     extra = ""
@@ -588,14 +710,55 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                 f'{_esc(lbl)}</span>'
                 '</div>'
             )
+    # ── Panel header: hero-style when live, compact when idle ─────────────────
+    app_span = f'<span class=runtapp>{_esc(run["app"])}</span>' if run["app"] else ""
+    if run["live"]:
+        # EU-76 merged hero: promote ticket ID + current phase to a hero-level header directly
+        # inside the Active Run panel.  No separate .hero card above — this IS the hero.
+        # Reuses .hgdot and .hgchip (already defined in the CSS block) for visual consistency.
+        phases_list = run.get("phases") or []
+        reached = run.get("reached", 0)
+        phase_name = (phases_list[reached] if reached < len(phases_list)
+                      else (phases_list[-1] if phases_list else "—"))
+        modechip = ('<span class="hgchip live">live → DEV</span>' if mode == "live"
+                    else '<span class="hgchip dry">dry-run · no changes</span>' if mode == "dry"
+                    else "")
+        runhead = (
+            '<div class="runhead runlive">'
+            '<div style="display:flex;align-items:center;gap:12px;min-width:0">'
+            '<span class=hgdot></span>'
+            '<div style="min-width:0">'
+            f'<div class=runtitle><span style="font-family:var(--mono)">{_esc(run["ticket"])}</span>'
+            f'{app_span}</div>'
+            f'<div class=runsub>Working &middot; <b>{_esc(phase_name)}</b>'
+            f'{(" &nbsp;" + modechip) if modechip else ""}</div>'
+            '</div></div>'
+            f'<div style="display:flex;gap:7px;align-items:center">{stop}</div>'
+            '</div>'
+        )
+    else:
+        # Idle: compact header — ticket ID + outcome chip + "last run" badge.
+        oc = run.get("outcome") or ""
+        otone = {"merged→dev": "ok", "errored": "bad", "awaiting decision": "warn",
+                 "escalated": "warn", "PR / needs you": "warn"}.get(oc, "muted")
+        olabel = {"merged→dev": "merged → DEV", "errored": "errored", "escalated": "escalated",
+                  "PR / needs you": "PR — needs you", "awaiting decision": "needs you",
+                  "running": "interrupted"}.get(oc, oc or "—")
+        chip = f'<span class="b {otone}">{_esc(olabel)}</span>'
+        runhead = (
+            f'<div class=runhead>'
+            f'<div class=runtitle><span style="font-family:var(--mono)">{_esc(run["ticket"])}</span>'
+            f'{app_span}</div>'
+            f'<div style="display:flex;gap:7px;align-items:center">'
+            f'{chip}<span class="b muted">last run</span></div></div>'
+        )
     return (
         f'{now_css}'
-        f'<div class=runhead><div><span class=mono>{_esc(run["ticket"])}</span> '
-        f'<span class=muted>{_esc(run["app"])}</span></div>'
-        f'<div style="display:flex;gap:7px;align-items:center">{chip}{status}{stop}</div></div>'
+        f'{runhead}'
         f'<div class="phasebar{"" if run["live"] else " idle"}">{"".join(bar)}</div>'
         f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
-        f'{verdict}{extra}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>'
+        f'{verdict}{extra}'
+        f'<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>'
         f'{spark_html}')
 
 
@@ -1156,6 +1319,11 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 @keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(245,179,74,.28)}50%{box-shadow:0 0 0 8px rgba(245,179,74,0)}}
 .runmeta{display:flex;gap:24px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);flex-wrap:wrap}
 .meta{font-size:12px;color:var(--dim)}.meta b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+/* EU-76: hero-merged header inside the Active Run panel */
+.runlive{align-items:flex-start!important}
+.runtitle{font-size:18px;font-weight:700;letter-spacing:-.25px;line-height:1.2;margin-bottom:4px}
+.runtapp{font-size:12.5px;color:var(--dim);font-weight:500;margin-left:9px;vertical-align:middle}
+.runsub{font-size:12.5px;color:var(--dim)}.runsub b{color:var(--warn)}
 .runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
 .dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}
 .stoprun{margin:0;display:inline}

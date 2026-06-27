@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,13 @@ from .config import Config
 
 _PATH: Optional[Path] = None
 _DAY = 86400.0
+
+# EU-76 daily-burn series cache. The cockpit board renders a 14-day token-burn sparkline on every SSE
+# frame / open tab; re-reading + JSON-parsing the whole ledger each render repeats work the ledger's
+# (size, mtime_ns) signature shows is unchanged. Cache the computed series keyed on that signature (plus
+# the day window) so a burst of frames shares ONE read, invalidating the instant the ledger is appended
+# to — the same shape as dashboard._audit_cache keeps for the audit.
+_burn_series_cache: dict[str, tuple] = {}   # ledger path -> (sig, day_keys, series)
 
 
 def configure(audit_path: str | os.PathLike) -> None:
@@ -201,6 +209,49 @@ def plan_usage(cfg: Config | None = None) -> dict:
         "weekly": week["total"],           # rolling 7-day window
         "weekly_calls": week["calls"],
     }
+
+
+def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:
+    """Per-calendar-day token COST (USD) for the last `days` days, oldest→newest (EU-76 board sparkline).
+
+    Reads ``usage_ledger.jsonl`` at most once per (size, mtime_ns) change — the computed series is cached
+    on that signature, so repeat cockpit frames cost a ``stat()`` rather than a full ledger parse. Day
+    buckets are built with calendar-date arithmetic (``date.today() - timedelta(days=k)``) so a DST
+    transition can't collapse or skip a day. Returns all-zeros when the ledger is absent or unreadable.
+    """
+    today = date.today()
+    day_keys = [(today - timedelta(days=k)).isoformat() for k in range(days - 1, -1, -1)]
+    p = _path(cfg)
+    if p is None or not p.exists():
+        return [0.0] * days
+    key = str(p)
+    try:
+        st = p.stat()
+        sig = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return [0.0] * days
+    hit = _burn_series_cache.get(key)
+    if hit is not None and hit[0] == sig and hit[1] == day_keys:
+        return list(hit[2])             # copy so callers can't mutate the cached series
+    day_set = set(day_keys)
+    totals: dict[str, float] = {k: 0.0 for k in day_keys}
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            try:
+                ds = datetime.fromtimestamp(float(r.get("t", 0) or 0)).strftime("%Y-%m-%d")
+            except (OverflowError, OSError, ValueError):
+                continue
+            if ds in day_set:
+                totals[ds] += float(r.get("c", 0.0) or 0.0)
+    except OSError:
+        return [0.0] * days
+    series = [totals[k] for k in day_keys]
+    _burn_series_cache[key] = (sig, day_keys, series)
+    return series
 
 
 def prune(cfg: Config | None = None, keep_days: int = 35) -> None:
