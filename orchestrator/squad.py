@@ -149,6 +149,31 @@ async def detect_domain_gap(ticket_text: str, squad: dict) -> tuple[bool, str | 
         return False, None
 
 
+def _ticket_in_backlog(ticket_id: str, app: AppConfig, cfg: Config) -> bool:
+    """Check whether *ticket_id* exists in the Jira backlog.
+
+    Fail-**open**: returns ``True`` on any error except a clear HTTP 404 (ticket genuinely
+    absent) so a transient network blip never blocks specialist provisioning.  Returns
+    ``True`` unconditionally for apps with ``backlog_backend: none`` (no Jira to check)."""
+    try:
+        from .backlog.base import make_backlog, NoneBacklog
+        bl = make_backlog(app)
+        if isinstance(bl, NoneBacklog):
+            return True   # no backlog — allow provisioning
+        bl.get_task(ticket_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        # Fail-closed only on a definitive "not found" HTTP 404.
+        try:
+            import requests
+            if isinstance(exc, requests.exceptions.HTTPError):
+                if getattr(exc.response, "status_code", None) == 404:
+                    return False
+        except ImportError:
+            pass
+        return True   # network error / misconfigured backlog: fail-open
+
+
 async def _run_gate(gate_cmd: str | None, cwd: str) -> tuple[str, str]:
     """Execute the specialist's domain_gate command in the worktree; return ``(status, report)``.
 
@@ -214,16 +239,23 @@ async def _run_gate(gate_cmd: str | None, cwd: str) -> tuple[str, str]:
 
 
 async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg: Config):
-    """Provision ephemeral specialists via HR and dispatch each as a soldier (EU-69).
+    """Provision ephemeral specialists via HR and dispatch each as a soldier (EU-69/EU-88).
 
-    Replaces the original stub. Flow:
-      1. HR synthesizes specialist charter(s) for the gap domain/ticket.
-      2. One ``Subtask`` is created per specialist (``role = lane_key``).
-      3. Each soldier runs with the charter injected as its system prompt via ``_soldier()``.
-      4. After each soldier, the specialist's ``domain_gate`` is executed; pass/fail is surfaced
-         in the returned ``BuildResult``.
+    EU-88 ask-once / park discipline:
+      • Non-automode + real (non-ephemeral) ticket: the approval request is posted to Telegram
+        ONCE, a "pending" state is written to ``pending_specialist_approvals.json``, and the
+        function returns ``None`` (solo-build fallback) until the Commander approves.  On every
+        subsequent call for the same (ticket, domain) pair the "pending" guard fires BEFORE the
+        model call — no re-post, no wasted tokens.
+      • A "declined" state also short-circuits without a model call.
+      • An "approved" state (set by ``decisions.handle_reply`` → ``hr.resolve_specialist_approval_reply``)
+        bypasses the gate and proceeds directly to specialist dispatch.
+      • EU-88 Jira existence check: a roster is NEVER proposed for a ticket that doesn't exist in
+        the backlog — provisioning for a phantom ticket is skipped with a Telegram warning.
+      • automode: proceeds automatically as before (no Telegram gate, no state tracking).
 
-    Returns ``None`` (signalling solo fallback) when HR returns no usable charters.
+    Returns ``None`` (signalling solo fallback) when HR returns no usable charters or when
+    the gate parks the ticket for Commander approval.
 
     Args:
         gap_domain: Short domain label from ``detect_domain_gap`` (e.g. ``'mql5'``).
@@ -233,15 +265,110 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
     """
     from . import hr as _hr
 
-    ticket_text = "\n".join(filter(None, [
-        req.ticket.summary or "",
-        req.ticket.description or "",
-        *list(req.ticket.acceptance_criteria or []),
-    ]))
+    is_auto = bool(getattr(cfg, "auto_mode", False))
+    # tid is None for ephemeral (trackerless) tickets — they skip the Telegram gate entirely.
+    tid = req.ticket.id if not getattr(req.ticket, "ephemeral", False) else None
 
-    charters = await _hr.synthesize_specialists(gap_domain, ticket_text, cfg)
-    if not charters:
-        return None  # no usable specialists — caller falls through to solo build
+    # Current approval status (non-automode + real ticket only); None everywhere else.
+    status = _hr.get_spec_approval(cfg, tid, gap_domain) if (not is_auto and tid) else None
+
+    # ── EU-88 ask-once dedup: check state BEFORE any model call ────────────
+    if status == "pending":
+        print(
+            f"  squad · specialist approval already pending for {tid} [{gap_domain}] — "
+            f"skipping (dedup, no re-post).", flush=True,
+        )
+        return None
+    if status == "declined":
+        print(
+            f"  squad · specialist provisioning was declined for {tid} [{gap_domain}] — "
+            f"skipped.", flush=True,
+        )
+        return None
+
+    # ── EU-88: on an APPROVED re-run, reuse the EXACT roster the Commander approved ──
+    # The charters were pinned to the approval entry when the request was posted, so the
+    # specialists (and their domain_gate commands) we provision are precisely the ones approved —
+    # NOT a freshly re-synthesized roster that could differ. If the entry has no pinned charters
+    # (e.g. an 'approved' state set directly), fall back to synthesis below.
+    approved_charters = (
+        _hr.get_spec_charters(cfg, tid, gap_domain) if status == "approved" else None
+    )
+
+    if approved_charters:
+        charters = approved_charters
+        print(
+            f"  squad · provisioning the approved roster for {tid} [{gap_domain}] "
+            f"({len(charters)} specialist(s)) — reusing the pinned charters.", flush=True,
+        )
+    else:
+        # ── EU-88 Jira existence gate: never propose a roster for a phantom ticket ──
+        if tid and not getattr(cfg, "dry_run", False):
+            if not _ticket_in_backlog(tid, app, cfg):
+                try:
+                    from . import notify as _notify
+                    _notify.send(
+                        f"⚠️ HR: cannot provision specialists for {tid} — "
+                        f"ticket does not exist in Jira. Create the ticket first."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                print(
+                    f"  squad · domain gap '{gap_domain}' skipped — {tid} not found in Jira.",
+                    flush=True,
+                )
+                return None
+
+        ticket_text = "\n".join(filter(None, [
+            req.ticket.summary or "",
+            req.ticket.description or "",
+            *list(req.ticket.acceptance_criteria or []),
+        ]))
+
+        # When the Telegram gate manages the real approval (non-automode + real ticket), inject an
+        # auto-approving callback so synthesize_specialists returns charters without blocking on
+        # stdin. The Telegram gate below is then the only approval surface for this path.
+        _telegram_gate = not is_auto and tid is not None
+        _synth_approver = (lambda _: "y") if _telegram_gate else _hr._tty_input
+
+        charters = await _hr.synthesize_specialists(
+            gap_domain, ticket_text, cfg, approver=_synth_approver
+        )
+        if not charters:
+            return None  # no usable specialists — caller falls through to solo build
+
+        # ── EU-88 non-automode Telegram gate (post ONCE, park, await Commander) ──
+        # status is None here (pending/declined returned above; approved+pinned used the roster
+        # above). Pin the synthesized charters so the approved re-run provisions exactly these.
+        if _telegram_gate and status != "approved":
+            roster_lines = "\n".join(
+                f"  {i}. [{c['lane_key']}] {c['name']}"
+                for i, c in enumerate(charters, 1)
+            )
+            msg = (
+                f"🎖 HR — Specialist roster for domain '{gap_domain}' (ticket {tid}):\n"
+                f"{roster_lines}\n"
+                f"⏸ Awaiting Commander approval before provisioning these specialists.\n"
+                f"Reply  {tid}: approve  to provision, or  {tid}: decline  to skip."
+            )
+            _hr.set_spec_approval(
+                cfg, tid, gap_domain, "pending",
+                charters=charters,
+                ticket_summary=req.ticket.summary or "",
+                ticket_description=req.ticket.description or "",
+                ticket_ac=list(req.ticket.acceptance_criteria or []),
+                app_name=app.name,
+            )
+            try:
+                from . import notify as _notify
+                _notify.send(msg)
+            except Exception:  # noqa: BLE001 — Telegram failure must not crash the build
+                pass
+            print(
+                f"  squad · specialist approval request posted for {tid} [{gap_domain}] — "
+                f"awaiting Commander (ticket parked).", flush=True,
+            )
+            return None  # park — do not provision until the Commander approves
 
     # Key by lane_key for O(1) lookup in _soldier() and _run_gate().
     specialists: dict[str, dict] = {c["lane_key"]: c for c in charters}
@@ -320,6 +447,16 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
             + "\n  - ".join(manual_notes)
         )
     summary = header + "\n\n" + "\n\n".join(summaries)
+
+    # ── EU-88: an approved re-run has now provisioned — expire the approval entry so a FUTURE run
+    # of the same (ticket, domain) re-asks the Commander rather than silently re-provisioning from
+    # the stale 'approved' state. Best-effort: a state-write hiccup must not lose the BuildResult.
+    if status == "approved" and tid:
+        try:
+            _hr.clear_spec_approval(cfg, tid, gap_domain)
+        except Exception:  # noqa: BLE001
+            pass
+
     return BuildResult(ok=ok, summary=summary, cost_usd=cost, num_turns=turns,
                        raw=summary, tools=tools)
 

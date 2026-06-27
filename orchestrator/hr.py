@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
@@ -414,3 +415,185 @@ def check_promote(domain: str, cfg, threshold: int = AUTO_PROMOTE_THRESHOLD,
     except FileExistsError:
         pass  # already in post — idempotent
     return True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Specialist-provisioning approval state (EU-88 — ask-once / park / no-spam)
+#
+# Non-automode specialist provisioning posts ONE Telegram approval request and
+# records a "pending" entry here.  Every subsequent loop cycle sees "pending"
+# and returns early — no model call, no re-post.  On Commander approval the
+# status advances to "approved" and the ticket is re-run to provision.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _spec_approvals_file(cfg) -> Path:
+    """Persistent JSON state for specialist-provisioning approvals."""
+    return Path(cfg.audit_path).with_name("pending_specialist_approvals.json")
+
+
+def _load_spec_approvals(cfg) -> dict:
+    try:
+        d = json.loads(_spec_approvals_file(cfg).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _spec_key(ticket_id: str, domain: str) -> str:
+    return f"{ticket_id.upper()}::{domain.lower()}"
+
+
+def get_spec_approval(cfg, ticket_id: str, domain: str) -> str | None:
+    """Return the approval status for (ticket_id, domain): 'pending', 'approved', 'declined', or None."""
+    entry = _load_spec_approvals(cfg).get(_spec_key(ticket_id, domain))
+    return entry.get("status") if isinstance(entry, dict) else None
+
+
+def get_spec_charters(cfg, ticket_id: str, domain: str) -> list[dict] | None:
+    """Return the roster of charters PINNED to the (ticket_id, domain) approval entry, or None.
+
+    The synthesized charters are stored at request-post time (status='pending') so that the
+    approved re-run provisions EXACTLY the specialists — and their ``domain_gate`` commands — the
+    Commander saw and approved, rather than calling ``synthesize_specialists`` again and getting a
+    freshly (possibly differently) synthesized roster."""
+    entry = _load_spec_approvals(cfg).get(_spec_key(ticket_id, domain))
+    if isinstance(entry, dict):
+        ch = entry.get("charters")
+        if isinstance(ch, list) and ch:
+            return ch
+    return None
+
+
+def clear_spec_approval(cfg, ticket_id: str, domain: str) -> None:
+    """Remove the (ticket_id, domain) approval entry entirely (EU-88).
+
+    Called after an approved re-run has provisioned, so a FUTURE run of the same ticket/domain
+    re-asks the Commander rather than silently re-provisioning from a stale 'approved' state."""
+    from . import locking
+    key = _spec_key(ticket_id, domain)
+
+    def _mutate(current):
+        current = current if isinstance(current, dict) else {}
+        current.pop(key, None)
+        return current
+
+    locking.locked_rmw(_spec_approvals_file(cfg), _mutate, default={})
+
+
+def set_spec_approval(cfg, ticket_id: str, domain: str, status: str, **meta) -> None:
+    """Record or update the approval status.  Thread-safe via locked read-modify-write.
+
+    Optional ``meta`` kwargs (ticket_summary, ticket_description, ticket_ac, app_name, charters)
+    are stored alongside so that ``resolve_specialist_approval_reply`` can reconstruct the Ticket
+    for the background re-run without hitting Jira again, and so the approved re-run can reuse the
+    pinned ``charters`` instead of re-synthesizing the roster."""
+    from . import locking
+    key = _spec_key(ticket_id, domain)
+
+    def _mutate(current):
+        current = current if isinstance(current, dict) else {}
+        entry = current.get(key) or {}
+        entry.update({"ticket_id": ticket_id, "domain": domain, "status": status, "ts": time.time()})
+        entry.update({k: v for k, v in meta.items() if v is not None})
+        current[key] = entry
+        return current
+
+    locking.locked_rmw(_spec_approvals_file(cfg), _mutate, default={})
+
+
+def pending_specialist_approvals(cfg) -> list[dict]:
+    """All pending specialist-provisioning approval entries (for the Needs-you surface)."""
+    return [v for v in _load_spec_approvals(cfg).values()
+            if isinstance(v, dict) and v.get("status") == "pending"]
+
+
+def resolve_specialist_approval_reply(cfg, audit, ticket_id: str, answer: str) -> bool:
+    """Handle a Commander reply that targets a pending specialist-provisioning approval
+    (called from ``decisions.handle_reply`` when normal decision resolution finds no match).
+
+    Returns True when a pending entry was found and acted on (approve or decline)."""
+    pending = [e for e in pending_specialist_approvals(cfg)
+               if e.get("ticket_id", "").upper() == ticket_id.upper()]
+    if not pending:
+        return False
+
+    ans = (answer or "").strip().lower()
+    is_approve = ans in ("approve", "approved", "yes", "y", "proceed", "go ahead")
+    is_decline = ans in ("decline", "declined", "no", "n", "skip", "reject", "rejected", "cancel")
+
+    # Safe interpretation: a reply that is NEITHER an explicit approve NOR an explicit decline
+    # must NOT silently decline (that would skip provisioning the Commander actually wanted). Leave
+    # the entry 'pending' and ask for an unambiguous keyword. We still return True (the reply was
+    # CONSUMED — it targeted a parked roster) so the chat layer doesn't double-handle it.
+    if not is_approve and not is_decline:
+        try:
+            from . import notify as _notify
+            _notify.send(
+                f"❓ {ticket_id}: I couldn't read that as approve or decline. The specialist "
+                f"roster is still parked — reply  {ticket_id}: approve  to provision, or  "
+                f"{ticket_id}: decline  to skip."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    decision = "approved" if is_approve else "declined"
+
+    for e in pending:
+        set_spec_approval(cfg, e["ticket_id"], e["domain"], decision)
+
+    try:
+        from . import notify as _notify
+        if is_approve:
+            domains = ", ".join(e["domain"] for e in pending)
+            _notify.send(
+                f"✅ Specialist provisioning approved for {ticket_id} [{domains}] — "
+                f"re-running ticket to provision."
+            )
+        else:
+            _notify.send(
+                f"❌ Specialist provisioning declined for {ticket_id} — skipped; "
+                f"the unit will use a solo build instead."
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    if audit is not None:
+        try:
+            audit.record("specialist_approval_resolved",
+                         ticket_id=ticket_id, decision=decision,
+                         domains=[e["domain"] for e in pending])
+        except Exception:  # noqa: BLE001
+            pass
+
+    if is_approve:
+        _rerun_after_specialist_approval(cfg, audit, pending[0])
+
+    return True
+
+
+def _rerun_after_specialist_approval(cfg, audit, entry: dict) -> None:
+    """Kick off a background re-run for the approved ticket so specialists are provisioned."""
+    try:
+        from .contracts import Ticket
+        from . import decisions as _dec
+        app_name = entry.get("app_name") or ""
+        try:
+            app = cfg.app(app_name) if app_name else None
+        except Exception:  # noqa: BLE001
+            app = None
+        if app is None and getattr(cfg, "apps", None):
+            app = cfg.apps[0]
+        if app is None:
+            return
+        ticket = Ticket(
+            id=entry["ticket_id"],
+            key=entry["ticket_id"],
+            summary=entry.get("ticket_summary", ""),
+            description=entry.get("ticket_description", ""),
+            acceptance_criteria=entry.get("ticket_ac") or [],
+            app=app.name,
+        )
+        _dec._run_bg(cfg, audit, [(app, ticket)])
+    except Exception as exc:  # noqa: BLE001 — re-run failure must not crash the reply handler
+        print(f"  HR: specialist re-run failed ({exc!r})", flush=True)
