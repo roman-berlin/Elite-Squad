@@ -126,7 +126,18 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
     """Run the verification gate. When per-app gate commands are configured and the diff's
     changed paths map to one or more configured components, run ONLY those components' gates
     (naming each in the failure report). Otherwise fall back to the repo-wide `gate_commands`
-    (the original single-command behaviour). (EU-19)"""
+    (the original single-command behaviour). (EU-19)
+
+    Args:
+        app: App configuration (gate commands, env, timeout, etc.).
+        changed_paths: Paths modified by the diff; used to select per-app gate groups.
+
+    Note (EU-85): the gate no longer carries a domain-gap note. Domain-gap classification
+    lives in ONE place — the squad delegation path (``squad._plan`` → ``detect_domain_gap``),
+    where it actually routes provisioning — so the gate doesn't re-run the classifier just to
+    attach an advisory line (which was inaccurate whenever delegation was off or the ticket was
+    too small to delegate).
+    """
     # EU-54: fail fast and clearly if the gate interpreter can't even import its deps, before we
     # spend the whole suite producing a confusing mid-run ModuleNotFoundError.
     pf = preflight_imports(app)

@@ -139,7 +139,7 @@ import orchestrator.loop as loop
 
 loop._notify = lambda c, t: None
 loop._route_out_of_scope = lambda *a, **k: None
-loop.run_gate = lambda app, changed=None: GateResult(passed=True, report="")
+loop.run_gate = lambda app, changed=None, **_: GateResult(passed=True, report="")
 loop._land = lambda *a, **k: TicketReport("AUTO-72", Outcome.MERGED, 1, 0.0, "automatixy", "b")
 
 class Audit:

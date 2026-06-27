@@ -89,7 +89,7 @@ class Audit:
     def record(s, kind, **kw): s.events.append((kind, kw))
 
 # Neutralise everything in _land that isn't the smoke wiring (offline, no real git/gate/notify).
-loop.run_gate = lambda app, paths: GateResult(passed=True, report="gate green")
+loop.run_gate = lambda app, paths=None, **_: GateResult(passed=True, report="gate green")
 loop._notify = lambda *a, **k: None
 loop._record_changelog = lambda *a, **k: None
 loop._bar = lambda *a, **k: None

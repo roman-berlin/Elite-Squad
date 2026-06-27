@@ -35,7 +35,7 @@ class Git:
     def changed_paths(s): return ["apps/automatixy/x.ts"]   # EU-19: gate detects touched apps from the diff
 
 loop._notify = lambda c, t: None
-loop.run_gate = lambda app, changed_paths=None: GateResult(passed=True, report="")  # EU-19: gate now takes the diff's changed paths
+loop.run_gate = lambda app, changed_paths=None, **_: GateResult(passed=True, report="")  # EU-19: gate now takes the diff's changed paths
 # Don't exercise real merge/git plumbing — certify the decision routed to land.
 loop._land = lambda *a, **k: TicketReport("EU-11", Outcome.MERGED, 1, 0.0, "automatixy", "b")
 # EU-37: the Test Engineer coverage stage runs between gate and review — stub it out here so this

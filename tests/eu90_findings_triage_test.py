@@ -172,7 +172,7 @@ notify_calls: list[str] = []   # every _notify(cfg, text) body the loop emits th
 loop.builder_mod = StubBuilder
 loop.reviewer_mod.review = _stub_review
 loop._notify = lambda cfg, text: notify_calls.append(text)
-loop.run_gate = lambda app, paths: GateResult(passed=True, report="")
+loop.run_gate = lambda app, paths=None, **_: GateResult(passed=True, report="")
 
 # Stub async _decision_brief so the post-loop escalation path doesn't network.
 async def _stub_decision_brief(cfg, ticket_id, raw):
