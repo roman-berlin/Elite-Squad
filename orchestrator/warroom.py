@@ -213,12 +213,22 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         from . import usage as _usage
         bs = _usage.budget_status(cfg)
         pu = _usage.plan_usage(cfg)
-        tok_hint = (f"cap {_fmt_tokens(bs['cap'])}" if bs["on"]
-                    else f"{pu['session_calls']} calls · no daily cap set")
+        if bs["on"] and bs.get("over"):
+            # Budget exhausted — pause state trumps everything else.
+            tok_value = "⛔ paused — budget hit"
+            tok_hint = "daily cap reached · resets at local midnight"
+        elif bs["on"]:
+            # Cap configured and not yet hit — show % consumed in both value and hint.
+            pct_str = f"{round(bs['pct'] * 100)}%"
+            tok_value = f"{_fmt_tokens(pu['session'])} · {pct_str}"
+            tok_hint = f"cap {_fmt_tokens(bs['cap'])} · {pct_str} · resets at local midnight"
+        else:
+            tok_value = _fmt_tokens(pu["session"])
+            tok_hint = f"{pu['session_calls']} calls · no daily cap set"
         tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
         cards.append({
             "label": "Tokens today",
-            "value": _fmt_tokens(pu["session"]),
+            "value": tok_value,
             "hint": tok_hint,
             "tone": tok_tone,
             # gauge = fill fraction 0-1; None when no cap is configured (bar stays hidden)
