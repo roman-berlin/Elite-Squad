@@ -45,7 +45,8 @@ print("PAGE_LEN", len(page), "BOARD_LEN", len(board_all))
 print("KPIS", [(c["label"], c["value"], c.get("tone")) for c in warroom.kpis(cfg, tasks, None)])
 print("ROSTER", [(r["name"], r["dot"], r["last"]) for r in warroom.roster(cfg, tasks, True)])
 print("FEED_all", [(f["ticket"], f["tone"], f["text"][:34]) for f in warroom.feed(cfg, tasks, None)])
-print("RUN_all", warroom.active_run(cfg, tasks, None, True))
+run_obj = warroom.active_run(cfg, tasks, None, True)
+print("RUN_all", run_obj)
 print("AUTO-12 in board_all?", "AUTO-12" in board_all)
 print("AUTO-13 in board_sd?", "AUTO-13" in board_sd)
 print("AUTO-12 in board_sd?", "AUTO-12" in board_sd)
@@ -56,6 +57,48 @@ assert "BAR" in page, "control bar not injected"
 assert "Merged" in page, "kpi missing"
 assert "AUTO-13" in board_sd, "signaldesk active run missing"
 assert "AUTO-12" not in board_sd, "scope leak: automatixy task showed under signaldesk"
+
+# EU-55 / F12: active_run() must expose the phase metadata the phasebar renders from.
+assert "phases" in run_obj and run_obj["phases"] == list(warroom.PHASES), \
+    "EU-55: phases list in active_run() must match the PHASES constant"
+assert "reached" in run_obj and isinstance(run_obj["reached"], int), \
+    "EU-55: reached must be an int index into phases"
+assert "failed_phase" in run_obj, "EU-55: failed_phase key missing from active_run()"
+
+# EU-76: active_run() must include a sparkline list for the trend chart.
+assert "sparkline" in run_obj, "EU-76: sparkline key missing from active_run()"
+assert isinstance(run_obj["sparkline"], list), "EU-76: sparkline must be a list"
+# Only completed (merged→dev) runs appear; AUTO-12 merged, AUTO-13 still in flight.
+assert all(isinstance(p, int) for p in run_obj["sparkline"]), \
+    "EU-76: sparkline values must all be ints"
+
+# EU-76: _run_html() must render sparkline HTML when data has ≥2 points.
+# Build a synthetic run_obj with two sparkline points to exercise the chart path.
+import copy
+two_point_run = copy.copy(run_obj)
+two_point_run["sparkline"] = [1, 3]
+spark_html = warroom._run_html(two_point_run)
+assert "passes trend" in spark_html, "EU-76: sparkline label missing from _run_html()"
+assert "<svg" in spark_html and "<polyline" in spark_html, \
+    "EU-76: SVG sparkline element missing from _run_html()"
+assert "polyline" in spark_html, "EU-76: sparkline polyline missing"
+
+# EU-55: _run_html() must inject the now::after gradient CSS when the run is live.
+live_run = copy.copy(run_obj)
+live_run["live"] = True
+live_run["reached"] = 1  # Gate is "now"
+live_html = warroom._run_html(live_run)
+assert "ph.now::after" in live_html, \
+    "EU-55: now-phase connector CSS not injected by _run_html() for live runs"
+assert "linear-gradient" in live_html, \
+    "EU-55: now-phase connector gradient animation missing in live run HTML"
+
+# Idle runs (live=False) must NOT inject the now-connector CSS (it would be misleading).
+idle_run = copy.copy(run_obj)
+idle_run["live"] = False
+idle_html = warroom._run_html(idle_run)
+assert "ph.now::after" not in idle_html, \
+    "EU-55: now-connector CSS must not appear in idle (non-live) run HTML"
 
 # EU-33: a long feed note is trimmed to a word boundary + ellipsis, not a mid-word cut.
 long_note = ("The reviewer blocked this run because the tenant filter was missing on the "

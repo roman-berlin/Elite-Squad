@@ -1574,6 +1574,27 @@ def create_app(cfg: Config):
             jira_base = str((getattr(app_cfg, "backlog", {}) or {}).get("base_url", "")).rstrip("/")
         except Exception:  # noqa: BLE001
             jira_base = ""
+        # EU-55/F12(b): the commit SHAs rendered as dead text — make each a real deep-link to the
+        # commit on the git host so "what's about to ship" is actually inspectable. Derive the web
+        # base from the app repo's origin remote (handles both scp-style ssh and https URLs); when
+        # no usable http(s) origin resolves, degrade to plain text (no broken link).
+        def _web_base() -> str:
+            try:
+                raw = (_sync._origin_url(Path(app_cfg.repo_path).expanduser()) or "").strip()
+            except Exception:  # noqa: BLE001
+                raw = ""
+            if not raw:
+                return ""
+            if raw.endswith(".git"):
+                raw = raw[:-4]
+            if raw.startswith("git@") and ":" in raw:        # git@github.com:owner/repo
+                host, _, path = raw[4:].partition(":")
+                return f"https://{host}/{path.lstrip('/')}"
+            if raw.startswith("ssh://"):                     # ssh://git@host/owner/repo
+                rest = raw[len("ssh://"):]
+                return "https://" + (rest.split("@", 1)[1] if "@" in rest else rest)
+            return raw if raw.startswith(("http://", "https://")) else ""
+        commit_base = _web_base().rstrip("/")
         cards = []
         for tk in tickets + (["—"] if "—" in groups else []):
             cs = groups[tk]
@@ -1582,8 +1603,12 @@ def create_app(cfg: Config):
             label = (f'<a href="{html.escape(jira_base)}/browse/{quote(tk)}" target=_blank '
                      f'rel=noopener>{html.escape(tk)}</a>' if (tk != "—" and jira_base)
                      else (html.escape(tk) if tk != "—" else "No ticket"))
-            lis = "".join(f'<li><span class=sha>{html.escape(c["sha"])}</span>'
-                          f'<span>{html.escape(c["subject"])}</span></li>' for c in cs)
+            lis = "".join(
+                '<li>'
+                + (f'<a class=sha href="{html.escape(commit_base)}/commit/{quote(c["sha"])}" '
+                   f'target=_blank rel=noopener>{html.escape(c["sha"])}</a>' if commit_base
+                   else f'<span class=sha>{html.escape(c["sha"])}</span>')
+                + f'<span>{html.escape(c["subject"])}</span></li>' for c in cs)
             cards.append(f'<div class=shcard><div class=tk>{label}<span class=n>· {len(cs)} commit'
                          f'{"s" if len(cs) != 1 else ""}</span></div><ul>{lis}</ul></div>')
         tix_summary = ", ".join(tickets) if tickets else "none tagged"

@@ -87,6 +87,19 @@ cfg2.detected_auth = lambda: "test"
 b2 = server.create_app(cfg2).test_client().get("/ship-preview?app=x").get_data(as_text=True)
 chk("in-sync app -> nothing to ship", "Nothing to ship" in b2 or "in sync" in b2)
 
+# --- EU-55/F12: commit SHAs deep-link to the git host, tickets deep-link to Jira (no dead links) ---
+# Give the repo a github origin + the app a Jira base_url, then assert both link kinds resolve.
+G("remote", "add", "origin", "git@github.com:roman-berlin/automatixy.git")
+app_links = AppConfig(name="automatixy", repo_path=str(tmp), base_branch="DEV", protected_branch="MAIN",
+                      backlog_backend="jira", backlog={"base_url": "https://acme.atlassian.net/"})
+cfg_links = Config(apps=[app_links], audit_path=str(tmp / "a4.jsonl"), use_worktree=False)
+cfg_links.detected_auth = lambda: "test"
+b_links = server.create_app(cfg_links).test_client().get("/ship-preview?app=automatixy").get_data(as_text=True)
+chk("EU-55/F12: commit sha deep-links to the git host commit page",
+    "https://github.com/roman-berlin/automatixy/commit/" in b_links)
+chk("EU-55/F12: ticket deep-links to the Jira browse URL",
+    "https://acme.atlassian.net/browse/AUTO-7" in b_links)
+
 print("\n=============== SHIP PREVIEW QA ===============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

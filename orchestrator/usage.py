@@ -182,6 +182,27 @@ def over_budget(cfg: Config) -> bool:
     return budget_status(cfg)["over"]
 
 
+def plan_usage(cfg: Config | None = None) -> dict:
+    """Session (today) and weekly token totals from the local ledger.
+
+    EU-77 spike result: the Max plan exposes no public machine-readable API for
+    subscription quota — Anthropic's billing endpoints are scoped to pay-per-call
+    API keys only, not Max seats. The local ``usage_ledger.jsonl`` is therefore the
+    authoritative source for all plan-usage metrics. 'Session' is the rolling
+    calendar day (same window as ``budget_status``); 'weekly' is a 7-day rolling
+    window. Returns zero counts gracefully when the ledger is absent or unconfigured.
+    """
+    w = windows(cfg)
+    today = w["today"]
+    week = w["week"]
+    return {
+        "session": today["total"],        # input + output tokens for today
+        "session_calls": today["calls"],
+        "weekly": week["total"],           # rolling 7-day window
+        "weekly_calls": week["calls"],
+    }
+
+
 def prune(cfg: Config | None = None, keep_days: int = 35) -> None:
     """Drop ledger lines older than keep_days so the file can't grow without bound."""
     p = _path(cfg)
