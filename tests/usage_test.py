@@ -89,6 +89,10 @@ scfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(repo), base_branc
                               protected_branch="MAIN", backlog_backend="none")],
               audit_path=str(audit), use_worktree=False, daily_token_budget=10000)
 scfg.detected_auth = lambda: "test"
+# EU-77: keep the /usage render hermetic — stub the live CLI probe so no real `claude` is spawned in
+# tests/CI. An empty probe → plan_usage reports unavailable → the own-ledger fallback note renders.
+usage._plan_cache.clear()
+usage._probe_plan_limits = lambda: []
 client = server.create_app(scfg).test_client()
 r = client.get("/usage"); body = r.get_data(as_text=True)
 chk("/usage returns 200", r.status_code == 200, str(r.status_code))
@@ -96,6 +100,9 @@ chk("/usage shows the three windows", "Today" in body and "Last 7 days" in body 
 chk("/usage shows the daily budget bar", "Daily budget" in body and "tokens" in body)
 chk("/usage shows a per-model breakdown", "opus" in body and "model" in body)
 chk("/usage shows the model-ladder readout (measures the economy change)", "Model ladder today" in body)
+chk("/usage shows the EU-77 subscription-limits panel", "Claude Max — subscription limits" in body)
+chk("/usage falls back to the own-ledger note when the probe yields nothing",
+    "machine-readable" in body.lower())
 
 # --- code_mix: the model-ladder readout (builder / reviewer / soldiers by tier) ---
 mixfresh = Path(tempfile.mkdtemp()) / "audit.jsonl"

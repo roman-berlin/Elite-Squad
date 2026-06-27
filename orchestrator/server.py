@@ -1209,7 +1209,59 @@ def create_app(cfg: Config):
             ".bar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
             ".bar .fill{display:block;height:100%}.bar .fill.ok{background:#3b6cff}.bar .fill.warn{background:#d99a2b}.bar .fill.over{background:#f0676b}"
             ".bnote{color:#8a929f;font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:#8a929f}"
+            # EU-77 — live Claude Max subscription-limits panel (the real ceiling), green→amber→red.
+            ".plan{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
+            ".plan .ph{color:#e9ecf1;font-size:13px;font-weight:650;display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
+            ".plan .ps{color:#6b7480;font-size:11px;font-weight:500}"
+            ".plan .pl{margin-top:13px}"
+            ".plan .plh{display:flex;justify-content:space-between;align-items:baseline;color:#c3cad6;font-size:12px;margin-bottom:5px}"
+            ".plan .plh .pp{font-family:ui-monospace,Menlo,monospace;color:#e9ecf1;font-weight:650}"
+            ".plan .pm{color:#6b7480;font-size:11px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}"
+            ".pbar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+            ".pbar .pf{display:block;height:100%}"
+            ".pbar .pf.g{background:#3fb950}.pbar .pf.a{background:#d99a2b}.pbar .pf.r{background:#f0676b}"
+            ".plan .pnote{color:#8a929f;font-size:12px;margin-top:8px}"
             "</style>")
+
+        # EU-77 — the REAL Claude Max ceiling (session / weekly · all models / per-model), read live.
+        # plan_usage() probes Claude Code ONLY on this render (cached 5 min, best-effort); on any
+        # failure it reports unavailable and we fall back to the EU-75 own-ledger gauge (the daily
+        # budget bar below) with a "not machine-readable" note.
+        _PLAN_TONE_CLS = {"ok": "g", "warn": "a", "bad": "r"}
+
+        def plan_panel(pu: dict) -> str:
+            head = ("<div class=ph><span>Claude Max — subscription limits</span>"
+                    "<span class=ps>live · the real ceiling</span></div>")
+            if not pu.get("available"):
+                return ("<div class=plan>" + head +
+                        "<div class=pnote>Live subscription limits aren’t machine-readable right now "
+                        "(CLI probe unavailable) — falling back to the unit’s own token ledger below "
+                        "(the daily-budget gauge). They’ll appear here when the probe can reach them."
+                        "</div></div>")
+            rows = []
+            for lim in pu.get("limits", []):
+                cls = _PLAN_TONE_CLS.get(lim.get("tone"), "g")
+                pct = int(lim.get("pct", 0))
+                wpct = min(100, max(0, pct))
+                label = html.escape(str(lim.get("label", "")))
+                reset = html.escape(str(lim.get("resets_in", "")))
+                over = lim.get("overage")
+                if reset and reset not in ("now", ""):
+                    meta = f"resets in {reset}" + (" · using overage" if over else "")
+                elif reset == "now":
+                    meta = "resetting now" + (" · using overage" if over else "")
+                else:
+                    meta = "using overage" if over else ""
+                aria = f"{label} {pct}% used" + (f", resets in {reset}" if reset and reset not in ("now", "") else "")
+                rows.append(
+                    "<div class=pl>"
+                    f"<div class=plh><span>{label}</span><span class=pp>{pct}%</span></div>"
+                    f"<div class=pbar role=progressbar aria-valuemin=0 aria-valuemax=100 "
+                    f'aria-valuenow={wpct} aria-label="{aria}">'
+                    f"<span class='pf {cls}' style='width:{wpct}%'></span></div>"
+                    + (f"<div class=pm>{meta}</div>" if meta else "")
+                    + "</div>")
+            return "<div class=plan>" + head + "".join(rows) + "</div>"
 
         def card(title: str, d: dict) -> str:
             rows = "".join(
@@ -1249,7 +1301,11 @@ def create_app(cfg: Config):
         else:
             mixbanner = ""
 
-        body = (style + budget + mixbanner + "<div class=ugrid>"
+        # The live subscription ceiling (EU-77) sits beside the own-ledger daily-budget gauge (EU-75):
+        # one shows the real plan cap, the other the unit's self-imposed budget. Best-effort probe.
+        plan = plan_panel(_usage.plan_usage(cfg))
+
+        body = (style + plan + budget + mixbanner + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
