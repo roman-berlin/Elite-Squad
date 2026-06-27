@@ -288,6 +288,57 @@ async def synthesize_specialists(domain: str, ticket_text: str, cfg, *, approver
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Ephemeral invariant guard (EU-86)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ensure_no_charter_written(charters: list[dict],
+                              officers_path: "Path | str | None" = None) -> None:
+    """Assert the ephemeral-charter invariant: synthesized specialist charters MUST
+    never be written to ``officers/``.  Called by ``squad._run_synthesis`` after
+    dispatching specialists to enforce the contract documented in the module docstring.
+
+    Checks two things:
+      1. Every charter carries ``ephemeral=True`` (the in-memory marker that guarantees
+         it lives only for the duration of this task).
+      2. No corresponding officer file exists on disk under ``officers_path`` (defaults
+         to ``officers/`` relative to the repo root).
+
+    Best-effort: violations are logged with a warning prefix so they surface in the
+    build output but the function NEVER raises — a guard failure must not abort a run.
+
+    Args:
+        charters:       List of ephemeral charter dicts from ``synthesize_specialists``.
+        officers_path:  Path to the ``officers/`` directory to scan.  ``None`` resolves
+                        to ``<repo-root>/officers/`` at call time.
+    """
+    for c in (charters or []):
+        if not c.get("ephemeral"):
+            print(
+                f"  ⚠️  HR invariant: charter '{c.get('lane_key', '?')}' lacks "
+                f"ephemeral=True — synthesized specialists must live in memory only, "
+                f"never as committed officer files.",
+                flush=True,
+            )
+    if officers_path is None:
+        try:
+            officers_path = Path(__file__).resolve().parent.parent / "officers"
+        except Exception:  # noqa: BLE001
+            return
+    od = Path(str(officers_path))
+    for c in (charters or []):
+        lane = c.get("lane_key", "")
+        if not lane:
+            continue
+        candidate = od / f"{lane}.md"
+        if candidate.exists():
+            print(
+                f"  ⚠️  HR invariant: officers/{lane}.md exists for ephemeral specialist "
+                f"'{lane}' — this file must not exist (ephemeral charters stay in memory).",
+                flush=True,
+            )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Usage tracking and auto-promote pipeline (EU-69 ephemeral lifecycle)
 # ──────────────────────────────────────────────────────────────────────────────
 
