@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,6 +33,38 @@ _DAY = 86400.0
 # the day window) so a burst of frames shares ONE read, invalidating the instant the ledger is appended
 # to — the same shape as dashboard._audit_cache keeps for the audit.
 _burn_series_cache: dict[str, tuple] = {}   # ledger path -> (sig, day_keys, series)
+
+# ── EU-77: live Claude Max subscription-limit probe ─────────────────────────────────────────────
+# The Max plan's REAL ceiling (the rolling 5-hour "session", the 7-day "weekly · all models", and the
+# per-model weekly windows) is NOT in any public billing API — those are scoped to pay-per-call API
+# keys, not Max seats. It IS, however, emitted by Claude Code itself: a headless
+# `claude -p . --output-format stream-json --verbose` run prints one `rate_limit_event` per active
+# unified limit, each carrying {utilization 0-1, resetsAt epoch, rateLimitType, status}. That is the
+# exact source Claude Code's own `/usage` panel reads, so we read it the same way — with a throwaway
+# 1-token probe.
+#
+# Cost & safety (per the EU-77 product decision):
+#   • the probe fires ONLY from an actual `/usage` cockpit render — never on a background timer — so an
+#     idle cockpit burns zero quota (the board KPI cards read the local ledger via windows(), below);
+#   • results are cached for 5 minutes (a failed/empty read for 1 minute) so a burst of refreshes
+#     shares ONE call (≤~12 probes/hour worst case, far fewer in practice);
+#   • everything is best-effort — any failure returns {"available": False} and the cockpit falls back
+#     to the EU-75 own-ledger gauge with a "not machine-readable" note. The probe never raises.
+_PLAN_PROBE_TIMEOUT = 45.0      # hard cap on the throwaway CLI call (it normally returns in <10s)
+_PLAN_TTL_OK = 300.0           # cache a good read for 5 minutes
+_PLAN_TTL_ERR = 60.0           # re-try a failed/empty probe sooner
+_plan_cache: dict = {}         # {"ts": <epoch>, "data": <plan_usage() result>}
+
+# rateLimitType → (stable key, brand label). Unknown/future types are prettified on the fly.
+_PLAN_LIMIT_LABELS = {
+    "five_hour": ("session", "Current session"),
+    "seven_day": ("weekly", "Weekly · All models"),
+    "seven_day_opus": ("weekly_opus", "Weekly · Opus"),
+    "seven_day_sonnet": ("weekly_sonnet", "Weekly · Sonnet"),
+    "seven_day_haiku": ("weekly_haiku", "Weekly · Haiku"),
+}
+# Stable display order: session first, then all-models weekly, then per-model.
+_PLAN_LIMIT_ORDER = ["session", "weekly", "weekly_opus", "weekly_sonnet", "weekly_haiku"]
 
 
 def configure(audit_path: str | os.PathLike) -> None:
@@ -214,25 +249,139 @@ def over_budget(cfg: Config) -> bool:
     return budget_status(cfg)["over"]
 
 
-def plan_usage(cfg: Config | None = None) -> dict:
-    """Session (today) and weekly token totals from the local ledger.
+def _fmt_reset_in(resets_at, now: float) -> str:
+    """'6d 4h' / '3h 20m' / '12m' / '<1m' from an epoch-seconds reset time, '' if unknown."""
+    try:
+        secs = int(resets_at) - int(now)
+    except (TypeError, ValueError):
+        return ""
+    if secs <= 0:
+        return "now"
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m, _ = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m"
+    return "<1m"
 
-    EU-77 spike result: the Max plan exposes no public machine-readable API for
-    subscription quota — Anthropic's billing endpoints are scoped to pay-per-call
-    API keys only, not Max seats. The local ``usage_ledger.jsonl`` is therefore the
-    authoritative source for all plan-usage metrics. 'Session' is the rolling
-    calendar day (same window as ``budget_status``); 'weekly' is a 7-day rolling
-    window. Returns zero counts gracefully when the ledger is absent or unconfigured.
+
+def _plan_tone(util: float, status: str) -> str:
+    """green→amber→red for a 0-1 utilisation, honouring an explicit reject/warning status."""
+    s = (status or "").lower()
+    if s in ("rejected", "blocked", "exceeded") or util >= 0.95:
+        return "bad"
+    if "warning" in s or util >= 0.8:
+        return "warn"
+    return "ok"
+
+
+def _plan_label_for(limit_type: str) -> tuple[str, str]:
+    """(stable key, brand label) for a rateLimitType; prettify unknown/future types."""
+    key, label = _PLAN_LIMIT_LABELS.get(limit_type, ("", ""))
+    if key:
+        return key, label
+    pretty = (limit_type or "limit").replace("_", " ").strip().capitalize()
+    return (limit_type or "limit"), pretty
+
+
+def _parse_plan_limits(infos: list[dict], now: float) -> list[dict]:
+    """Turn raw ``rate_limit_info`` dicts into ordered, display-ready limit rows (de-duped by type)."""
+    by_key: dict[str, dict] = {}
+    for info in infos or []:
+        if not isinstance(info, dict):
+            continue
+        ltype = str(info.get("rateLimitType") or "")
+        try:
+            util = max(0.0, float(info.get("utilization") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        key, label = _plan_label_for(ltype)
+        resets_at = info.get("resetsAt")
+        status = str(info.get("status") or "")
+        by_key[key] = {                       # last event of a given type wins (the freshest reading)
+            "key": key,
+            "label": label,
+            "type": ltype,
+            "utilization": util,
+            "pct": int(round(util * 100)),    # may exceed 100 when in overage (bar clamps; number is honest)
+            "resets_at": resets_at,
+            "resets_in": _fmt_reset_in(resets_at, now),
+            "status": status,
+            "tone": _plan_tone(util, status),
+            "overage": bool(info.get("isUsingOverage")),
+        }
+    ordered = [by_key[k] for k in _PLAN_LIMIT_ORDER if k in by_key]
+    ordered += [v for k, v in by_key.items() if k not in _PLAN_LIMIT_ORDER]  # unknown types, first-seen
+    return ordered
+
+
+def _probe_plan_limits() -> list[dict]:
+    """Fire ONE throwaway ``claude -p`` and return the raw ``rate_limit_info`` dicts it emits.
+
+    Isolated so tests can stub it without spawning a real CLI. Uses the cheapest model and a neutral
+    cwd (so it doesn't load the repo's CLAUDE.md / MCP context), bounded by a hard timeout."""
+    claude = shutil.which("claude")
+    if not claude:
+        raise RuntimeError("claude CLI not on PATH")
+    proc = subprocess.run(
+        [claude, "-p", ".", "--output-format", "stream-json", "--verbose", "--model", "haiku"],
+        capture_output=True, text=True, timeout=_PLAN_PROBE_TIMEOUT,
+        cwd=tempfile.gettempdir(),
+    )
+    infos: list[dict] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line or "rate_limit" not in line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "rate_limit_event":
+            info = ev.get("rate_limit_info")
+            if isinstance(info, dict):
+                infos.append(info)
+    return infos
+
+
+def plan_usage(cfg: Config | None = None, *, now: float | None = None, force: bool = False) -> dict:
+    """The REAL Claude Max subscription ceiling — session / weekly / per-model — read live (EU-77).
+
+    Probes Claude Code (see ``_probe_plan_limits``) and returns, on success::
+
+        {"available": True,
+         "limits": [ {key, label, type, utilization, pct, resets_at, resets_in, status, tone, overage}, … ],
+         "probed_at": <epoch>}
+
+    and on any failure / when the CLI exposes nothing::
+
+        {"available": False, "reason": "<short>", "probed_at": <epoch>}
+
+    Cached for 5 minutes (a failed read for 1 minute). Best-effort — never raises. Fire it ONLY from a
+    user-driven ``/usage`` render so an idle cockpit costs nothing; the cockpit board reads the local
+    ledger via ``windows()``/``budget_status()``, never this probe.
     """
-    w = windows(cfg)
-    today = w["today"]
-    week = w["week"]
-    return {
-        "session": today["total"],        # input + output tokens for today
-        "session_calls": today["calls"],
-        "weekly": week["total"],           # rolling 7-day window
-        "weekly_calls": week["calls"],
-    }
+    t = now if now is not None else time.time()
+    cached = _plan_cache.get("data")
+    if cached is not None and not force:
+        ttl = _PLAN_TTL_OK if cached.get("available") else _PLAN_TTL_ERR
+        if t - float(_plan_cache.get("ts", 0.0)) < ttl:
+            return cached
+    try:
+        limits = _parse_plan_limits(_probe_plan_limits(), now=t)
+        if limits:
+            data = {"available": True, "limits": limits, "probed_at": t}
+        else:
+            data = {"available": False, "reason": "no subscription-limit data returned", "probed_at": t}
+    except Exception as e:  # noqa: BLE001 — a probe failure must never break the /usage render
+        data = {"available": False, "reason": str(e)[:140], "probed_at": t}
+    _plan_cache["ts"] = t
+    _plan_cache["data"] = data
+    return data
 
 
 def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:

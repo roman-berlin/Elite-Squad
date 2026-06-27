@@ -278,15 +278,18 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "tone": "bad" if sec_blocks else None, "href": "/forensics?cat=security_block"},
     ]
 
-    # EU-75 / EU-77 — token-burn KPI cards wired from the local ledger.
-    # budget_status() gives today's usage vs. the daily cap (EU-75 gauge).
-    # plan_usage() exposes today + 7-day rolling totals from the same ledger (EU-77).
-    # Both are best-effort: if the ledger is absent or usage is unconfigured the block
-    # silently skips so no board breakage occurs.
+    # EU-75 — token-burn KPI cards, wired straight from the local ledger.
+    #   budget_status() → today's burn vs. the daily cap (the EU-75 gauge).
+    #   windows()       → today + 7-day rolling totals/calls for the two cards below.
+    # The board re-renders on every SSE frame, so it stays ledger-only on purpose: the EU-77 live
+    # subscription-limit probe (usage.plan_usage) fires ONLY from the /usage page, never here, so an
+    # idle cockpit burns no quota. Best-effort: if the ledger is absent the block silently skips.
     try:
         from . import usage as _usage
         bs = _usage.budget_status(cfg)
-        pu = _usage.plan_usage(cfg)
+        w = _usage.windows(cfg)
+        sess_total, sess_calls = w["today"]["total"], w["today"]["calls"]
+        week_total, week_calls = w["week"]["total"], w["week"]["calls"]
         if bs["on"] and bs.get("over"):
             # Budget exhausted — pause state trumps everything else.
             tok_value = "⛔ paused — budget hit"
@@ -294,11 +297,11 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         elif bs["on"]:
             # Cap configured and not yet hit — show % consumed in both value and hint.
             pct_str = f"{round(bs['pct'] * 100)}%"
-            tok_value = f"{_fmt_tokens(pu['session'])} · {pct_str}"
+            tok_value = f"{_fmt_tokens(sess_total)} · {pct_str}"
             tok_hint = f"cap {_fmt_tokens(bs['cap'])} · {pct_str} · resets at local midnight"
         else:
-            tok_value = _fmt_tokens(pu["session"])
-            tok_hint = f"{pu['session_calls']} calls · no daily cap set"
+            tok_value = _fmt_tokens(sess_total)
+            tok_hint = f"{sess_calls} calls · no daily cap set"
         tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
         cards.append({
             "label": "Tokens today",
@@ -312,8 +315,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         })
         cards.append({
             "label": "Tokens this week",
-            "value": _fmt_tokens(pu["weekly"]),
-            "hint": f'{pu["weekly_calls"]} calls · 7-day rolling',
+            "value": _fmt_tokens(week_total),
+            "hint": f'{week_calls} calls · 7-day rolling',
             "href": "/usage",
         })
     except Exception:  # noqa: BLE001 — never let usage metering break the board
