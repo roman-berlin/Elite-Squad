@@ -214,7 +214,7 @@ class Config:
     # When the Builder surfaces a finding outside the current ticket's scope, file it into the backlog
     # instead of losing it (see filing.py). Default False = PROPOSE-FIRST: the finding is proposed (a
     # comment / de-duped suggestion) but a backlog ticket is only opened when this is flipped on.
-    out_of_scope_autofile: bool = False
+    out_of_scope_autofile: bool = True
 
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)

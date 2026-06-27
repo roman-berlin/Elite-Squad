@@ -13,8 +13,13 @@ answers; the product-direction ones it routes to Roman with a recommendation.
 """
 from __future__ import annotations
 
+import json
+import re
+from dataclasses import dataclass, field
+
 from . import filing
 from .config import Config
+from .contracts import QualityIssue, ReviewResult, Ticket
 
 PM_SYSTEM = """\
 You are the PRODUCT MANAGER (S-5) of an elite autonomous software unit, reporting to THE CTO and
@@ -174,6 +179,213 @@ async def triage(cfg: Config, app_name: str, ticket_id: str, last_build: str = "
         soldier_tools=["Read", "Grep", "Glob"], max_turns=14, effort="high",
         empty="TRIAGE: ESCALATE")
     return parse_triage(report)
+
+
+# --------------------------------------------------------------------------- #
+# EU-90: PM findings triage — classify reviewer quality_issues by scope
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class FindingsTriage:
+    """PM classification of a Reviewer's quality_issues by scope.
+
+    in_scope   — defects introduced (or worsened) by THIS ticket's change; the Builder must fix
+                 these before the ticket can ship.
+    out_of_scope — pre-existing / unrelated issues that were not caused by this PR; the unit
+                   auto-files them as linked backlog tickets so they are not lost.
+    decisions  — genuine product/scope ambiguities that only the Commander can settle; escalated
+                 via the normal needs_human path.
+    """
+    in_scope: list[QualityIssue] = field(default_factory=list)
+    out_of_scope: list[dict] = field(default_factory=list)   # dicts: {severity, area, detail}
+    decisions: list[QualityIssue] = field(default_factory=list)
+
+
+PM_FINDINGS_SYSTEM = """\
+You are the PRODUCT MANAGER classifying a Reviewer's quality findings after a build review.
+
+Your task: for each finding in the numbered QUALITY ISSUES list, decide the bucket:
+
+  in_scope   — the finding is a defect INTRODUCED or WORSENED by this ticket's change.
+               Evidence: the diff touches the file/path where the issue lives.
+               The Builder must fix these in the current iteration.
+
+  out_of_scope — the finding is a pre-existing bug, technical debt, or unrelated issue that
+                 existed BEFORE this ticket and was NOT caused by it.
+                 These are auto-filed as linked backlog tickets; do NOT block the current ticket.
+
+  decision   — a genuine product/scope ambiguity the Commander must settle (a missing acceptance
+               criterion, a conflicting requirement, a call only he can make). NOT for ordinary
+               code defects — do not abuse this bucket to avoid work.
+
+Classification rules:
+1. Only classify as in_scope if the diff evidence shows this ticket CAUSED or WORSENED the issue —
+   i.e. the finding lives in a path listed under CHANGED FILES, or the DIFF EXCERPT shows this
+   change introduced it.
+2. Classify as out_of_scope when the code/pattern predates this PR, or the file the finding is
+   about is NOT in CHANGED FILES and the DIFF EXCERPT does not touch it.
+3. Classify as decision only for irreducible requirement conflicts or missing AC values.
+4. When in doubt, prefer in_scope — the Builder always gets at least one retry.
+5. Every finding must appear in exactly one bucket.
+
+You are given:
+  TICKET SUMMARY + ACCEPTANCE CRITERIA — what the ticket was supposed to change.
+  CHANGED FILES                         — the repo-relative paths THIS ticket's diff touched
+                                          (the authoritative in-scope surface).
+  DIFF EXCERPT                          — a bounded excerpt of the actual diff under review.
+  REVIEWER SUMMARY                      — the Reviewer's prose synopsis, for context only.
+  QUALITY ISSUES                        — the Reviewer's findings, numbered 0-based.
+
+Respond with a fenced ```json block and NOTHING after it:
+```json
+{
+  "in_scope":    [<0-based indices>],
+  "out_of_scope": [<0-based indices>],
+  "decisions":   [<0-based indices>]
+}
+```
+Any index not listed is treated as in_scope by the caller (fail-safe)."""
+
+
+# EU-90: cap the diff excerpt handed to the classifier so a huge diff can't blow the prompt budget.
+# The classifier needs enough of the diff to see WHICH paths changed and roughly what — not the whole
+# patch. The authoritative changed-file list is passed separately and is never truncated.
+_DIFF_EXCERPT_LIMIT = 4000
+
+
+def _findings_prompt(review: ReviewResult, ticket: Ticket,
+                     diff: str = "", files_changed: list[str] | None = None) -> str:
+    """Build the PM findings-triage task prompt from a ReviewResult and Ticket.
+
+    EU-90: the in-scope vs out-of-scope split needs REAL diff evidence, not the reviewer's prose
+    synopsis (which carries no path information). The loop owns git, so it passes:
+      * ``files_changed`` — the authoritative repo-relative paths this ticket's diff touched, and
+      * ``diff``          — the actual diff under review (bounded to ``_DIFF_EXCERPT_LIMIT`` here).
+    The reviewer summary is still included, but only as secondary context."""
+    ac = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(ticket.acceptance_criteria)) or "  (none)"
+    issues_block = "\n".join(
+        f"  [{i}] ({q.severity}/{q.area}) {q.detail}"
+        for i, q in enumerate(review.quality_issues)
+    ) or "  (none)"
+    files_block = "\n".join(f"  - {p}" for p in (files_changed or [])) or "  (changed-file list unavailable)"
+    diff_excerpt = (diff or "").strip()
+    if not diff_excerpt:
+        diff_excerpt = "(diff unavailable — fall back to CHANGED FILES and the reviewer summary)"
+    elif len(diff_excerpt) > _DIFF_EXCERPT_LIMIT:
+        diff_excerpt = diff_excerpt[:_DIFF_EXCERPT_LIMIT] + "\n… (diff truncated — see CHANGED FILES for the full surface)"
+    return "\n".join([
+        f"TICKET: {ticket.id} — {ticket.summary}",
+        "",
+        "ACCEPTANCE CRITERIA:",
+        ac,
+        "",
+        "CHANGED FILES (the paths THIS ticket's diff touched — the in-scope surface):",
+        files_block,
+        "",
+        "DIFF EXCERPT (the actual diff under review, bounded):",
+        "```diff",
+        diff_excerpt,
+        "```",
+        "",
+        "REVIEWER SUMMARY (prose synopsis, context only):",
+        f"  {(review.summary or '(none)')[:600]}",
+        "",
+        "QUALITY ISSUES (classify each by index):",
+        issues_block,
+        "",
+        "Classify every finding now and emit the JSON verdict.",
+    ])
+
+
+def _parse_findings_verdict(text: str, issues: list[QualityIssue]) -> FindingsTriage:
+    """Parse the PM's findings-triage JSON from a fenced ```json block.
+
+    On ANY parse failure the function falls back to treating ALL findings as
+    in_scope — this guarantees the Builder loop always has at least one retry
+    and no finding silently disappears when the model output is malformed.
+    """
+    fences = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    data: dict | None = None
+    for cand in reversed(fences):
+        try:
+            data = json.loads(cand)
+            break
+        except json.JSONDecodeError:
+            continue
+
+    # Fail-safe: unparseable → all findings in_scope so the Builder gets a retry.
+    if data is None or not isinstance(data, dict):
+        return FindingsTriage(in_scope=list(issues), out_of_scope=[], decisions=[])
+
+    def _valid_indices(key: str) -> list[int]:
+        """Return valid 0-based indices from a JSON list field, silently dropping bad values."""
+        raw = data.get(key) or []
+        return [i for i in raw if isinstance(i, int) and 0 <= i < len(issues)]
+
+    in_idx = _valid_indices("in_scope")
+    out_idx = _valid_indices("out_of_scope")
+    dec_idx = _valid_indices("decisions")
+
+    classified = set(in_idx) | set(out_idx) | set(dec_idx)
+    # Any finding the model omitted falls back to in_scope (no silent drops).
+    unclassified = [i for i in range(len(issues)) if i not in classified]
+
+    return FindingsTriage(
+        in_scope=[issues[i] for i in in_idx] + [issues[i] for i in unclassified],
+        out_of_scope=[
+            {"severity": issues[i].severity, "area": issues[i].area, "detail": issues[i].detail}
+            for i in out_idx
+        ],
+        decisions=[issues[i] for i in dec_idx],
+    )
+
+
+async def triage_findings(review: ReviewResult, ticket: Ticket, cfg: "Config",
+                          diff: str = "", files_changed: list[str] | None = None) -> FindingsTriage:
+    """Classify a Reviewer's quality_issues into in-scope fixes, out-of-scope backlog items,
+    and Commander decisions.
+
+    Called by the auto-route layer (EU-90) after a FAIL review to separate:
+    - findings the Builder must fix NOW (in_scope),
+    - pre-existing issues to auto-file as linked tickets (out_of_scope),
+    - genuine product ambiguities to escalate to the Commander (decisions).
+
+    On LLM parse failure all findings are treated as in_scope so the Builder loop
+    always receives at least one actionable retry rather than silently stalling.
+
+    Args:
+        review:        The Reviewer's ReviewResult for the current iteration.
+        ticket:        The Ticket being built (provides acceptance criteria + scope context).
+        cfg:           Pipeline Config (used for model selection and app lookup).
+        diff:          The actual diff under review — the real evidence for the in-scope vs
+                       out-of-scope split (EU-90). Bounded inside ``_findings_prompt``.
+        files_changed: The authoritative repo-relative paths this ticket's diff touched
+                       (the loop owns git and passes ``store.build.files_changed``).
+
+    Returns:
+        FindingsTriage with findings distributed across the three buckets.
+    """
+    from . import recon, models
+
+    if not review.quality_issues:
+        return FindingsTriage(in_scope=[], out_of_scope=[], decisions=[])
+
+    app = cfg.app(ticket.app or cfg.apps[0].name)
+    model, mreason = models.for_officer(cfg, effort="medium")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · pm findings-triage model: {mreason}", flush=True)
+
+    task = _findings_prompt(review, ticket, diff, files_changed)
+    raw = await recon.run_officer(
+        officer="pm", label="PM Findings Triage",
+        system=PM_FINDINGS_SYSTEM,
+        task=task,
+        cfg=cfg, cwd=app.repo_path, model=model,
+        soldier_tools=["Read", "Grep", "Glob"],
+        max_turns=10, effort="medium",
+        empty="",
+    )
+    return _parse_findings_verdict(raw or "", review.quality_issues)
 
 
 async def review(cfg: Config, app_name: str, ticket_id: str, question: str, context: str = "") -> dict[str, str]:
