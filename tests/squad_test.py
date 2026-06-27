@@ -300,6 +300,14 @@ check("gate: dangerous command -> 'manual' + BLOCKED", _g_danger == "manual" and
 # ============================ _run_synthesis (ephemeral soldier + gate integration) ============================
 import orchestrator.hr as _hr_mod
 
+# EU-88: _run_synthesis now has a non-automode Telegram approval gate. The soldier-dispatch
+# tests below are testing the DISPATCH path (charter → soldiers → gate runner), not the
+# approval gate itself (which is covered by eu88_specialist_approval_test.py). Use
+# auto_mode=True so the gate is bypassed and synthesis proceeds directly to dispatch.
+import os as _os_syn, tempfile as _tmp_syn
+_aud_syn_fd, _aud_syn_path = _tmp_syn.mkstemp(suffix=".jsonl"); _os_syn.close(_aud_syn_fd)
+_cfg_syn = Config(apps=[app], audit_path=_aud_syn_path, use_worktree=False, auto_mode=True)
+
 _CHARTER_SINGLE = [{
     "name": "MQL5 Algo Engineer",
     "lane_key": "mql5-algo",
@@ -320,7 +328,7 @@ with _tmp.TemporaryDirectory() as _syn_dir:
     _app_syn = AppConfig(name="x", repo_path=_syn_dir, base_branch="DEV", protected_branch="MAIN",
                          backlog_backend="none")
     _syn_res = asyncio.run(squad._run_synthesis(
-        "mql5", BuildRequest(mk(big_ac, summary="Build MQL5 EA"), "b", iteration=1), _app_syn, cfg))
+        "mql5", BuildRequest(mk(big_ac, summary="Build MQL5 EA"), "b", iteration=1), _app_syn, _cfg_syn))
 
 check("synthesis: returns BuildResult (not None)", _syn_res is not None)
 check("synthesis: ok=True when gate passes", getattr(_syn_res, "ok", None) is True)
@@ -333,7 +341,7 @@ check("synthesis: cost aggregated (1 soldier x 0.20)", abs(getattr(_syn_res, "co
 async def _fake_synthesize_empty(domain, tt, c2, approver=None):
     return []
 _hr_mod.synthesize_specialists = _fake_synthesize_empty
-_syn_none = asyncio.run(squad._run_synthesis("mql5", BuildRequest(mk(big_ac), "b", iteration=1), app, cfg))
+_syn_none = asyncio.run(squad._run_synthesis("mql5", BuildRequest(mk(big_ac), "b", iteration=1), app, _cfg_syn))
 check("synthesis: no charters -> None (solo fallback)", _syn_none is None)
 
 # Failing gate -> ok=False in BuildResult.
@@ -346,7 +354,7 @@ with _tmp.TemporaryDirectory() as _fail_dir:
     _app_fail = AppConfig(name="x", repo_path=_fail_dir, base_branch="DEV", protected_branch="MAIN",
                           backlog_backend="none")
     _syn_fail = asyncio.run(squad._run_synthesis(
-        "mql5", BuildRequest(mk(big_ac), "b", iteration=1), _app_fail, cfg))
+        "mql5", BuildRequest(mk(big_ac), "b", iteration=1), _app_fail, _cfg_syn))
 
 check("synthesis: failing gate -> ok=False", getattr(_syn_fail, "ok", None) is False)
 check("synthesis: failing gate -> FAIL in summary", "gate:FAIL" in getattr(_syn_fail, "summary", ""))
@@ -365,7 +373,7 @@ with _tmp.TemporaryDirectory() as _prose_dir:
     _app_prose = AppConfig(name="x", repo_path=_prose_dir, base_branch="DEV", protected_branch="MAIN",
                            backlog_backend="none")
     _syn_prose = asyncio.run(squad._run_synthesis(
-        "mql5", BuildRequest(mk(big_ac, summary="Build MQL5 EA"), "b", iteration=1), _app_prose, cfg))
+        "mql5", BuildRequest(mk(big_ac, summary="Build MQL5 EA"), "b", iteration=1), _app_prose, _cfg_syn))
 
 check("synthesis: prose gate -> ok=True (lands, NOT ERRORED)",
       getattr(_syn_prose, "ok", None) is True, str(getattr(_syn_prose, "ok", None)))
