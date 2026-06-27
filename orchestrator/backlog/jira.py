@@ -91,6 +91,15 @@ class JiraAdapter(BacklogAdapter):
 
     # -- helpers ---------------------------------------------------------- #
     def _url(self, path: str) -> str:
+        # EU-83: '#' in a REST path means an internal decision-entry suffix (e.g. '#out-of-scope')
+        # has leaked into a Jira URL — that produces 404/405. Catch it here as a hard error so the
+        # regression is visible in tests and doesn't silently drop findings in production.
+        if "#" in path:
+            raise ValueError(
+                f"Jira REST path contains '#': {path!r}. An internal decision-entry suffix "
+                "(e.g. '#out-of-scope') has leaked into the REST URL. Strip it before the call "
+                "(see decisions.to_worklist / EU-83)."
+            )
         return f"{self.base_url}/rest/api/3/{path.lstrip('/')}"
 
     def _fields(self) -> list[str]:

@@ -1045,7 +1045,10 @@ def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
                         "automatically next time.)")
             # Distinct decision id so the proposal doesn't clobber (or get clobbered by) a needs_human
             # decision recorded for the SAME ticket — both must survive in the cockpit 'Needs you'.
-            decisions.add(cfg, ticket, app.name, question, entry_id=f"{ticket.id}#out-of-scope")
+            # EU-83: store the raw report so handle_reply can file the findings directly on resume
+            # (rather than re-running the build with a '#out-of-scope' key that 404s/405s on Jira).
+            decisions.add(cfg, ticket, app.name, question, entry_id=f"{ticket.id}#out-of-scope",
+                          extra={"out_of_scope_report": report})
             if audit is not None:
                 audit.record("out_of_scope_proposed", ticket_id=ticket.id, source=source,
                              titles=[p.get("title") for p in proposals])

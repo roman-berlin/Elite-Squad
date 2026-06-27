@@ -86,7 +86,7 @@ class CaptureAudit:
     def record(self, event, **kw): self.records.append((event, kw))
 
 decision_calls = []
-loop.decisions.add = (lambda cfg, ticket, app_name, question, entry_id=None:
+loop.decisions.add = (lambda cfg, ticket, app_name, question, entry_id=None, **_kw:
                       decision_calls.append((ticket.id, question, entry_id)))
 notify_calls = []
 loop._notify = lambda cfg, text: notify_calls.append(text)

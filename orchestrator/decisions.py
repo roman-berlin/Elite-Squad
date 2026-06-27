@@ -47,7 +47,7 @@ def _save(cfg, items: list[dict]) -> None:
 
 
 def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None,
-        *, block: bool = True) -> None:
+        *, block: bool = True, extra: dict | None = None) -> None:
     """Record a pending decision for the cockpit 'Needs you'. `entry_id` overrides the storage/de-dup
     key (defaults to the ticket id); pass a distinct key — e.g. f'{ticket.id}#out-of-scope' (EU-42) —
     when one ticket carries more than one kind of pending decision, so they don't overwrite each other.
@@ -57,7 +57,11 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     snapshots the latest human comment as a resume *baseline* (the autopilot uses it to tell a NEW Jira
     answer from a pre-existing comment). A SUB-decision carrying a distinct ``entry_id`` (the out-of-scope
     proposal) rides alongside without changing the ticket's status; pass ``block=False`` for a hand-back
-    that owns its own status (e.g. the readiness gate → 'Needs Human')."""
+    that owns its own status (e.g. the readiness gate → 'Needs Human').
+
+    EU-83: ``extra`` is merged into the stored entry verbatim. Use it to attach payload that the resume
+    path needs — e.g. ``extra={"out_of_scope_report": report}`` for out-of-scope proposals so the
+    original ===TICKETS=== block survives to the Commander's reply and can be filed directly."""
     eid = entry_id or ticket.id
     entry = {
         "id": eid, "app": app_name, "question": question,
@@ -65,6 +69,8 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
         "acceptance": ticket.acceptance_criteria, "ephemeral": ticket.ephemeral,
         "ts": time.time(),
     }
+    if extra:
+        entry.update(extra)
     # Only the ticket's own (main) decision parks it to 'Blocked'; a distinct-entry_id sub-decision
     # must not move the ticket's status out from under an in-flight build.
     if block and (entry_id is None or entry_id == ticket.id):
@@ -169,12 +175,18 @@ def resolve(cfg, answer: str, ticket_id: str | None = None, *, comment: bool = T
 
 
 def to_worklist(cfg, resolved: dict):
-    """Rebuild the ticket with the Commander's decision appended, ready to re-run."""
+    """Rebuild the ticket with the Commander's decision appended, ready to re-run.
+
+    EU-83: strips any '#…' sub-decision suffix from the ticket id/key — those are decision-store
+    discriminators only and must never reach a Jira REST URL as an issue key."""
     app = cfg.app(resolved["app"])
+    # EU-83: strip the internal sub-decision discriminator (e.g. '#out-of-scope') so the Ticket
+    # always carries a real Jira key. Jira REST calls on 'EU-81#out-of-scope' return 404/405.
+    base_key = str(resolved["id"]).split("#", 1)[0]
     desc = (resolved.get("description") or resolved["summary"])
     desc += f"\n\nCommander's decision on the open question: {resolved['answer']}"
     ticket = Ticket(
-        id=resolved["id"], key=resolved["id"], summary=resolved["summary"],
+        id=base_key, key=base_key, summary=resolved["summary"],
         description=desc, acceptance_criteria=resolved.get("acceptance") or [],
         app=app.name, ephemeral=resolved.get("ephemeral", True),
     )
@@ -218,6 +230,42 @@ def is_explicit_reply(text: str) -> bool:
     return ticket_id is not None
 
 
+def _file_out_of_scope_resume(cfg, resolved: dict) -> None:
+    """EU-83: Commander approved filing the out-of-scope findings — file them directly.
+
+    The ===TICKETS=== report is stored in ``resolved['out_of_scope_report']`` by
+    ``loop._route_out_of_scope`` (EU-83). If it is absent (a decision entry parked before
+    EU-83), fall back gracefully with a notification rather than silently dropping."""
+    base_id = str(resolved.get("id", "")).split("#", 1)[0]
+    report = resolved.get("out_of_scope_report")
+    if not report:
+        notify.send(
+            f"⚠️ {base_id} out-of-scope proposal has no stored report — nothing to file. "
+            "(Decision was parked before the EU-83 fix; set out_of_scope_autofile to avoid "
+            "this on future tickets.)"
+        )
+        return
+    try:
+        from . import filing as filing_mod
+        app = cfg.app(resolved["app"])
+        if getattr(cfg, "dry_run", False):
+            proposals, _ = filing_mod.parse_tickets(report)
+            titles = ", ".join(str(p.get("title", "?")) for p in proposals)
+            print(f"  filing · out-of-scope resume (dry-run — not filed): {titles}", flush=True)
+            return
+        result = filing_mod.file_findings(app, "out-of-scope", report)
+        for ln in result.lines:
+            print(f"  filing · {ln}", flush=True)
+        if result.filed:
+            notify.send(f"✓ Out-of-scope findings filed: {', '.join(result.filed)}")
+        if result.failed:
+            notify.send(f"⚠️ Failed to file out-of-scope findings: "
+                        + ", ".join(t for t, _ in result.failed))
+    except Exception as exc:  # noqa: BLE001 - filing must not crash the reply handler
+        print(f"  filing · out-of-scope resume failed: {exc}", flush=True)
+        notify.send(f"⚠️ out-of-scope filing for {base_id} failed: {exc}")
+
+
 def handle_reply(cfg, audit, text: str) -> bool:
     """Resolve a pending decision from a reply and re-run the ticket. Returns True
     if a ticket was resumed."""
@@ -227,6 +275,12 @@ def handle_reply(cfg, audit, text: str) -> bool:
         return False
     notify.send(f"▶️ Resuming {resolved['id']} with your decision: {answer}")
     audit.record("decision_resumed", ticket_id=resolved["id"], answer=answer)
+    # EU-83: out-of-scope sub-decisions must NOT re-run the original build — the '#out-of-scope'
+    # id is an internal discriminator that would produce 404/405 REST calls. Instead, file the
+    # findings from the stored report and return without queuing a rebuild.
+    if str(resolved.get("id", "")).endswith("#out-of-scope"):
+        _file_out_of_scope_resume(cfg, resolved)
+        return True
     worklist = to_worklist(cfg, resolved)
     # Run the resumed build in a background thread so we never block the Telegram
     # poll thread — /unblock and other replies keep being processed meanwhile.
