@@ -470,6 +470,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
   <a class="btn" href="/onboard" title="Scaffold a new product into the unit (config + Jira)">&#10133; Product</a>
   <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
+  <a class="btn" href="/roster-doc" title="Officers, soldiers &amp; duties — the full unit roster">&#128101; Roster</a>
   {promote_html}
   {ship_html}
 
