@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from . import dashboard as D
 from .officers import display as _display
-from .phases import BUILD, GATE, PHASES, REVIEW, SECURITY
+from .phases import BUILD, GATE, LAND, PHASES, REVIEW, SECURITY, TESTS
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
@@ -193,6 +193,37 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         {"label": "Security blocks", "value": sec_blocks, "hint": "Security Engineer gate (all time)",
          "tone": "bad" if sec_blocks else None, "href": "/forensics?cat=security_block"},
     ]
+
+    # EU-75 / EU-77 — token-burn KPI cards wired from the local ledger.
+    # budget_status() gives today's usage vs. the daily cap (EU-75 gauge).
+    # plan_usage() exposes today + 7-day rolling totals from the same ledger (EU-77).
+    # Both are best-effort: if the ledger is absent or usage is unconfigured the block
+    # silently skips so no board breakage occurs.
+    try:
+        from . import usage as _usage
+        bs = _usage.budget_status(cfg)
+        pu = _usage.plan_usage(cfg)
+        tok_hint = (f"cap {_fmt_tokens(bs['cap'])}" if bs["on"]
+                    else f"{pu['session_calls']} calls · no daily cap set")
+        tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
+        cards.append({
+            "label": "Tokens today",
+            "value": _fmt_tokens(pu["session"]),
+            "hint": tok_hint,
+            "tone": tok_tone,
+            # gauge = fill fraction 0-1; None when no cap is configured (bar stays hidden)
+            "gauge": bs["pct"] if bs["on"] else None,
+            "href": "/usage",
+        })
+        cards.append({
+            "label": "Tokens this week",
+            "value": _fmt_tokens(pu["weekly"]),
+            "hint": f'{pu["weekly_calls"]} calls · 7-day rolling',
+            "href": "/usage",
+        })
+    except Exception:  # noqa: BLE001 — never let usage metering break the board
+        pass
+
     return cards
 
 
@@ -322,6 +353,25 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
             failed_phase = REVIEW                              # review verdict was a rejection
         else:
             failed_phase = SECURITY                            # passed review, broke at Security/Land
+    # EU-55 / F12 audit: phases.py is the single source of truth. Ordering confirmed:
+    #   PHASES[BUILD]="Build", PHASES[GATE]="Gate", PHASES[TESTS]="Tests",
+    #   PHASES[REVIEW]="Review", PHASES[SECURITY]="Security", PHASES[LAND]="Land".
+    # TESTS (idx 2) has no distinct audit signal today — the bar stays at Gate until
+    # a review verdict is recorded. LAND (idx 5) is not used as a "reached" value;
+    # len(PHASES) marks all phases complete after merge (same effect as LAND+1). ✓
+    _EXPECTED = ("Build", "Gate", "Tests", "Review", "Security", "Land")
+    if PHASES != _EXPECTED:
+        raise AssertionError(
+            f"phases.py PHASES order drifted from index constants — "
+            f"got {PHASES!r}, expected {_EXPECTED!r}"
+        )
+
+    # EU-76: collect pass-count history across the 10 most recent completed runs
+    # (oldest→newest) so _run_html() can render a trend sparkline mini-chart.
+    # Only runs with a terminal outcome are included; in-flight runs lack `passes` data.
+    completed = [t2 for t2 in ts if t2.get("outcome")]  # newest-first
+    sparkline = [t2.get("passes") or 0 for t2 in reversed(completed[:10])]  # oldest→newest
+
     return {
         "live": live,
         "ticket": str(t.get("ticket_id") or "—"),
@@ -334,6 +384,7 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         "phases": phases,
         "reached": reached,
         "failed_phase": failed_phase,
+        "sparkline": sparkline,  # EU-76: list[int] oldest→newest, for trend chart
     }
 
 
@@ -369,6 +420,15 @@ def _fmt_dur(secs: float) -> str:
     return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
 
 
+def _fmt_tokens(n: int) -> str:
+    """Format a token count into a compact human-readable string (e.g. 1.2M, 340k, 852)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(n)
+
+
 # --------------------------------------------------------------------------- #
 # Render
 
@@ -382,11 +442,54 @@ def _kpi_html(cards: list[dict]) -> str:
         tone = c.get("tone") or ""
         href = c.get("href")
         tag, attr, link = ("a", f' href="{href}"', " link") if href else ("div", "", "")
+        # Optional inline gauge bar (EU-75 tokens-today/cap card). Rendered via inline
+        # style so the existing CSS block is untouched; bar colour tracks the card tone.
+        gauge_html = ""
+        g = c.get("gauge")
+        if g is not None:
+            pct = min(1.0, max(0.0, float(g))) * 100
+            gcol = ("var(--bad)" if tone == "bad" else
+                    "var(--warn)" if tone == "warn" else
+                    "var(--ok)")
+            gauge_html = (
+                '<div style="margin-top:8px;height:3px;background:var(--line2);'
+                'border-radius:3px;overflow:hidden">'
+                f'<div style="height:100%;width:{pct:.1f}%;background:{gcol};'
+                'border-radius:3px;transition:width .4s ease"></div></div>')
         out.append(
             f'<{tag} class="kpi {tone}{link}"{attr}><div class=kv>{_esc(c["value"])}</div>'
             f'<div class=kl>{_esc(c["label"])}</div>'
-            f'<div class=kh>{_esc(c["hint"])}</div></{tag}>')
+            f'<div class=kh>{_esc(c["hint"])}</div>{gauge_html}</{tag}>')
     return "".join(out)
+
+
+def _sparkline_svg(values: list[int], width: int = 88, height: int = 28) -> str:
+    """Render a tiny inline-SVG polyline for a pass-count trend series (EU-76).
+
+    Each point represents one completed run; x-axis is time (oldest left, newest right),
+    y-axis is pass count (higher = more passes = worse quality trend).
+    Returns an empty string when fewer than 2 data points are available.
+    """
+    if len(values) < 2:
+        return ""
+    n = len(values)
+    max_v = max(values) or 1
+    min_v = min(values)
+    span = float(max_v - min_v) or 1.0
+    # SVG y-axis is top-down; invert so a high pass count (bad) appears near the top.
+    # x is spread across [2, width-2] to keep points clear of the SVG edge.
+    pts = " ".join(
+        f"{2.0 + i * (width - 4) / (n - 1):.1f},"
+        f"{3.0 + (1.0 - (v - min_v) / span) * (height - 6):.1f}"
+        for i, v in enumerate(values)
+    )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="flex:none">'
+        f'<polyline points="{pts}" fill="none" stroke="var(--info)" '
+        f'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".65"/>'
+        f'</svg>'
+    )
 
 
 def _run_html(run: Optional[dict], mode: Optional[str] = None,
@@ -394,6 +497,17 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
                 'No runs yet for this project. Launch one from the bar above.</div>')
+    # EU-55 / F12: when a run is live, inject a scoped rule that highlights the connector
+    # segment going right from the active ("now") phase dot — gradient from the active
+    # colour into grey so the eye lands on the right segment, not just the pulsing dot.
+    # Placed here (not the CSS block) so the rule is only emitted when the bar is live.
+    now_css = ""
+    if run.get("live") and run.get("reached", -1) < len(run.get("phases") or []):
+        now_css = (
+            '<style>.phasebar .ph.now::after{'
+            'background:linear-gradient(90deg,var(--warn),var(--line2));opacity:.45}'
+            '</style>'
+        )
     bar = []
     failed_phase = run.get("failed_phase")
     for i, ph in enumerate(run["phases"]):
@@ -435,13 +549,34 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     # $ cost is meaningless on the Max plan — only show it when actually billing via an API key.
     if run.get("cost") and os.environ.get("ANTHROPIC_API_KEY"):
         extra += f'<span class=meta>cost <b>${run["cost"]:.2f}</b></span>'
+    # EU-76: trend sparkline — pass-count history rendered below the run-meta row.
+    spark_html = ""
+    sparkline = run.get("sparkline") or []
+    if len(sparkline) >= 2:
+        svg = _sparkline_svg(sparkline)
+        if svg:
+            lbl = f"last {len(sparkline)} runs"
+            tip = "passes per run · ↓ fewer passes = cleaner tickets"
+            spark_html = (
+                '<div style="display:flex;align-items:center;gap:10px;margin-top:12px;'
+                'padding-top:11px;border-top:1px solid var(--line)">'
+                '<span style="font-size:10.5px;font-weight:700;text-transform:uppercase;'
+                f'letter-spacing:.08em;color:var(--faint)" title="{_esc(tip)}">'
+                'passes trend</span>'
+                f'{svg}'
+                f'<span style="font-family:var(--mono);font-size:10.5px;color:var(--dim)">'
+                f'{_esc(lbl)}</span>'
+                '</div>'
+            )
     return (
+        f'{now_css}'
         f'<div class=runhead><div><span class=mono>{_esc(run["ticket"])}</span> '
         f'<span class=muted>{_esc(run["app"])}</span></div>'
         f'<div style="display:flex;gap:7px;align-items:center">{chip}{status}{stop}</div></div>'
         f'<div class="phasebar{"" if run["live"] else " idle"}">{"".join(bar)}</div>'
         f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
-        f'{verdict}{extra}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>')
+        f'{verdict}{extra}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>'
+        f'{spark_html}')
 
 
 def _log_html(lines) -> str:
@@ -676,7 +811,12 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     run_obj = active_run(cfg, tasks, app, active)
     k = _kpi_html(kpis(cfg, tasks, app))
     run = _run_html(run_obj, mode, elapsed, manual)
-    hero = _hero_html(run_obj, elapsed, mode)
+    # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
+    # headline and again in the "Active run" panel below it (same ticket/phase/elapsed/pass). The
+    # Active-run panel is the canonical slot: it carries the EU-55/F12 phase bar and the pass-trend
+    # sparkline, and it renders in BOTH the live and idle (last-run) states, so the hero was pure
+    # duplication. Keep the single panel; `_hero_html` stays a public helper (unit-tested directly)
+    # but is no longer emitted here.
     fd = _feed_html(feed(cfg, tasks, app))
     try:
         from . import needs as _needs
@@ -690,7 +830,6 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         log_panel = (f'<section class=panel><div class=ph>Live feed{_liveness(state, active)}</div>'
                      f'{_log_html(log_lines)}</section>')
     return (
-        f'{hero}'
         f'<div class=kpis>{k}</div>'
         f'{_sync_html(cfg)}'
         '<div class=cols>'
