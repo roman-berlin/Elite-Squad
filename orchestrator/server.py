@@ -1796,47 +1796,152 @@ def create_app(cfg: Config):
 
     @app.post("/api/answer")
     def answer_api():
-        """Ship the Commander's answer to a parked ticket straight from the Needs-you page. Resolves a
-        pending decision and re-runs the ticket with the answer baked into its spec; if there's no pending
-        decision on file, it records the answer as a ticket comment (the next build reads ALL comments)
-        and unblocks the ticket so autopilot retries it."""
+        """Ship the Commander's answer to a parked ticket straight from the Needs-you page.
+
+        The reply is classified (orchestrator/intent.py) and routed to the matching action, so a
+        directive is *executed* instead of being baked into the parked ticket's re-run (EU-82):
+
+          'file_ticket'   — File a NEW backlog ticket from the directive, linked to the parked
+                            one; do NOT re-run the original ticket.
+          'close'         — Transition the parked ticket to Done via the backlog adapter; do NOT
+                            re-run.
+          'defer'         — Dismiss the row only (done below); do NOT re-run.
+          'clarification' — Existing behaviour: resolve the pending decision and re-run the ticket
+                            with the answer baked into its spec (decisions.handle_reply). If there's
+                            no pending decision on file, record the answer as a ticket comment (the
+                            next build reads ALL comments) and unblock so autopilot retries it.
+
+        A Commander directive is authoritative — it is NEVER handed to out-of-scope triage
+        (_route_out_of_scope).
+
+        The Needs-you row is cleared only when the chosen action actually succeeds: 'file_ticket'
+        clears it once create_task returns a key (else the row stays and the real outcome is
+        reported, not a fake "Logged"), and 'close' clears it once the transition succeeds.
+        'file_ticket'/'close' make a single backlog call synchronously so they can report that real
+        outcome; the 'clarification'/fallback branch (handle_reply + comment/unblock) self-backgrounds
+        in a thread so the redirect stays snappy.
+        """
         tid = (request.form.get("ticket") or "").strip()
         app_name = (request.form.get("app") or "").strip()
         ans = (request.form.get("text") or "").strip()
         if not (tid and ans):
             return redirect("/needs")
 
-        # Clear the Needs-you row NOW (synchronous, fast local write) so it visibly disappears on the
-        # redirect, and give immediate confirmation — the actual re-run is slow, so it runs in the
-        # background. If the ticket re-escalates later, a fresh row reappears.
-        try:
-            D.dismiss(cfg.audit_path, tid)
-        except Exception:  # noqa: BLE001
-            pass
+        from .intent import classify_intent
+        intent = classify_intent(ans)
+        appcfg = cfg.app(app_name) if app_name else None
+        supports_backlog = bool(appcfg) and getattr(appcfg, "backlog_backend", "none") != "none"
 
-        def _bg():
+        def _dismiss_row() -> None:
+            # Fast local write so the row visibly disappears on redirect; if the ticket
+            # re-escalates later a fresh row reappears. Called ONLY once the action succeeded.
             try:
-                from . import decisions
-                if decisions.handle_reply(cfg, audit, f"{tid}: {ans}"):
-                    return   # a real pending decision — resolved + re-running with the answer baked in
-                # No pending decision on file: persist the answer ON the ticket + unblock for retry.
+                D.dismiss(cfg.audit_path, tid)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if intent == "file_ticket":
+            # Commander wants a NEW backlog ticket — file it, linked to the parked one, and stop.
+            # Never re-run the parked ticket and never call _route_out_of_scope. Clear the row ONLY
+            # once the ticket is actually filed; on a none/failed backend keep the row and report
+            # the real outcome (never a fake "Logged"). (EU-82 iter-3.)
+            key = None
+            err = ""
+            if supports_backlog:
                 try:
-                    appcfg = cfg.app(app_name) if app_name else None
-                    if appcfg and getattr(appcfg, "backlog_backend", "") == "jira":
-                        from .backlog.base import make_backlog
-                        from .contracts import Ticket
-                        make_backlog(appcfg).add_comment(
-                            Ticket(id=tid, key=tid, summary=tid, description="", app=app_name), ans)
-                except Exception:  # noqa: BLE001 - a comment failure must not block the unblock
-                    pass
+                    from .backlog.base import make_backlog
+                    summary = f"[Commander directive from {tid}] {ans[:200]}"
+                    description = (
+                        f"Filed from a Commander directive on the Needs-you reply to {tid}.\n\n"
+                        f"Directive: {ans}\n\nRelates to {tid}."
+                    )
+                    key = make_backlog(appcfg).create_task(
+                        summary, description, labels=["commander-directive"])
+                except Exception as exc:  # noqa: BLE001 - filing must never crash the cockpit
+                    err = str(exc)
+            if key:
+                _dismiss_row()
                 try:
-                    from . import autopilot as _ap
-                    _ap.unblock(cfg, tid)
+                    from . import notify as _notify
+                    _notify.send(f"✓ Commander directive filed as {key} (from {tid})")
                 except Exception:  # noqa: BLE001
                     pass
-            except Exception:  # noqa: BLE001 - the re-run must never break the cockpit
-                pass
-        threading.Thread(target=_bg, daemon=True).start()
+                _state["last_msg"] = (
+                    f"✓ Filed {key} from your directive (linked to {tid}) — cleared from Needs-you.")
+            elif not supports_backlog:
+                _state["last_msg"] = (
+                    f"⚠ Couldn't file a ticket for {tid}: no backlog is configured for "
+                    f"{app_name or 'this app'}. Left it in Needs-you.")
+            else:
+                _state["last_msg"] = (
+                    f"⚠ Couldn't file a ticket from your directive — {tid} kept in Needs-you."
+                    + (f" ({err})" if err else " (the backlog rejected the request)."))
+            return redirect("/needs")
+
+        if intent == "close":
+            # Commander wants the parked ticket closed — transition it to Done; do NOT re-run.
+            # Clear the row only once the transition actually succeeds (EU-82 iter-3).
+            ok = False
+            if supports_backlog:
+                try:
+                    from .backlog.base import make_backlog
+                    from .contracts import Ticket
+                    bl = make_backlog(appcfg)
+                    t_obj = Ticket(id=tid, key=tid, summary=tid, description="", app=app_name)
+                    bl.set_status(t_obj, "Done")
+                    bl.add_comment(t_obj, f"Closed by the Commander: {ans}")
+                    ok = True
+                except Exception:  # noqa: BLE001 - close must never crash the cockpit
+                    ok = False
+            if ok:
+                _dismiss_row()
+                _state["last_msg"] = f"✓ Closed {tid} per your reply — cleared from Needs-you."
+            elif not supports_backlog:
+                _state["last_msg"] = (
+                    f"⚠ Couldn't close {tid}: no backlog is configured for "
+                    f"{app_name or 'this app'}. Left it in Needs-you.")
+            else:
+                _state["last_msg"] = f"⚠ Couldn't close {tid} (backlog error) — left it in Needs-you."
+            return redirect("/needs")
+
+        if intent == "defer":
+            # Commander defers — leave the ticket parked, don't re-run, never call
+            # _route_out_of_scope. Dismissing the row just stops it nagging; it re-appears if the
+            # ticket re-escalates later.
+            _dismiss_row()
+            _state["last_msg"] = f"✓ Deferred {tid} — cleared from Needs-you (left parked)."
+            return redirect("/needs")
+
+        # intent == 'clarification': resolve the pending decision and re-run the original ticket with
+        # the answer baked in; if there's no pending decision on file, post the answer as a comment
+        # and unblock for an autopilot retry. handle_reply (a Jira comment) and the fallback
+        # comment/unblock are synchronous network calls, so run them in a background thread — the row
+        # is dismissed and the redirect returns immediately.
+        _dismiss_row()
+
+        def _bg_clarify():
+            try:
+                from . import decisions
+                if not decisions.handle_reply(cfg, audit, f"{tid}: {ans}"):
+                    # No pending decision on file: persist the answer ON the ticket + unblock.
+                    try:
+                        if appcfg and getattr(appcfg, "backlog_backend", "") == "jira":
+                            from .backlog.base import make_backlog
+                            from .contracts import Ticket
+                            make_backlog(appcfg).add_comment(
+                                Ticket(id=tid, key=tid, summary=tid, description="", app=app_name),
+                                ans)
+                    except Exception:  # noqa: BLE001 - a comment failure must not block the unblock
+                        pass
+                    try:
+                        from . import autopilot as _ap
+                        _ap.unblock(cfg, tid)
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception as exc:  # noqa: BLE001 - the re-run must never break the cockpit
+                _state["last_msg"] = f"answer to {tid} failed: {exc}"
+
+        threading.Thread(target=_bg_clarify, daemon=True).start()
         _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; the unit is "
                               "re-running it with your decision.")
         return redirect("/needs")
