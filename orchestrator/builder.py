@@ -259,12 +259,19 @@ def _prompt(req: BuildRequest, cfg=None) -> str:
 async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None) -> BuildResult:
     """Implement the ticket. For a sized-big ticket on its first pass (and only when delegation is
     armed), the Dev Team Lead splits it across sized soldiers; otherwise a single focused builder
-    pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build."""
+    pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build.
+
+    ``n`` from ``build_delegated`` encodes the flow used:
+      0   → thin plan or synthesis stub not ready → fall through to solo.
+      1   → synthesis flow produced a result (EU-69 domain gap, single specialist).
+      ≥2  → normal squad delegation with n soldiers.
+    All three cases keep the fail-safe: any exception → solo build.
+    """
     from . import squad
     if squad.should_delegate(cfg, req):
         try:
             result, n = await squad.build_delegated(req, app, cfg, audit=audit)
-            if result is not None and n >= 2:
+            if result is not None and n >= 1:   # n=1: synthesis; n>=2: squad split
                 return result
         except Exception as exc:  # noqa: BLE001 - delegation must never break a run
             print(f"  · delegation off ({str(exc).splitlines()[0][:80]}); building solo", flush=True)
