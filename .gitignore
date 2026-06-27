@@ -7,6 +7,9 @@ config.yaml
 config.yaml.bak
 *.bak
 audit.jsonl
+# SWE-bench benchmark trend (EU-71) — runtime-appended one line per run; never version it so the
+# trend starts clean and test runs / local gauges don't pollute the committed history.
+audit/swebench_runs.jsonl
 run.log
 # runtime artifacts
 dashboard.html
