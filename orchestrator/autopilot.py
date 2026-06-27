@@ -163,6 +163,43 @@ def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
         pass
 
 
+def _auto_clear_merged_ghosts(cfg: Config, blocked: set[str], audit: "AuditLog") -> set[str]:
+    """Remove ghost-parked tickets from ``blocked`` — tickets whose latest audit run already succeeded.
+
+    Ghost scenario: a ticket was parked in a previous session (escalated / PR opened), then the
+    Commander ran it manually and it merged — but blocked_tickets.json was never cleaned up.
+    Result: the parked KPI card over-counted and the row sat there forever. This function is called
+    at the start of each autopilot cycle so the count self-heals without manual intervention (EU-78).
+
+    Best-effort: any exception leaves ``blocked`` unchanged so the loop never breaks on cleanup."""
+    if not blocked:
+        return blocked
+    try:
+        from . import dashboard as D
+        tasks = D.load_tasks(cfg.audit_path)
+        # Find the latest run per blocked ticket.
+        latest: dict[str, dict] = {}
+        for t in tasks:
+            tid = str(t.get("ticket_id") or "")
+            if tid not in blocked:
+                continue
+            if tid not in latest or D._started_key(t) >= D._started_key(latest[tid]):
+                latest[tid] = t
+        # Tickets whose most-recent run merged into DEV are done — drop them from the parked set.
+        to_clear = {tid for tid, t in latest.items() if t.get("outcome") == "merged→dev"}
+        if to_clear:
+            blocked_fresh = load_blocked(cfg)
+            blocked_fresh -= to_clear
+            save_blocked(cfg, blocked_fresh)
+            audit.record("parked_ghost_cleared", tickets=sorted(to_clear))
+            print(f"  · auto-cleared ghost-parked: {', '.join(sorted(to_clear))} "
+                  f"(latest run already merged)", flush=True)
+            return blocked - to_clear
+    except Exception:  # noqa: BLE001 — ghost-clearing must never crash the autopilot loop
+        pass
+    return blocked
+
+
 def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     """Clear a parked ticket (or all). Autopilot will retry it next cycle."""
     blocked = load_blocked(cfg)
@@ -354,6 +391,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             git_held = False
 
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
+            # EU-78: auto-clear ghost-parked tickets whose latest audit run already succeeded
+            # (e.g. parked in a previous session, then ran manually and merged).
+            blocked = _auto_clear_merged_ghosts(cfg, blocked, audit)
             # EU-61: a parked ticket the Commander answered directly on Jira auto-resumes — lift it out
             # of the skip-set and put it at the FRONT of the queue (resume before taking new work).
             resumed = _resumable_answered(cfg, app_name, blocked)
