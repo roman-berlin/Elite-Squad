@@ -24,7 +24,7 @@ results = []
 def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
-# --- autopilot_switch: the three states ---
+# --- autopilot_switch: the render states ---
 on = warroom.autopilot_switch({"autopilot": {"on": True, "app": "all projects"}}, "*", True)
 chk("ON offers both 'Finish & stop' (drain) and 'Stop'", "value=drain" in on and "value=stop" in on and "Finish" in on)
 stopping = warroom.autopilot_switch({"autopilot": {"on": True, "stopping": True, "app": "x"}}, "*", True)
@@ -32,6 +32,17 @@ chk("stopping shows the finishing-current-ticket state", "Stopping" in stopping 
 chk("stopping hides the action buttons (already winding down)", "value=drain" not in stopping and "value=stop" not in stopping)
 off = warroom.autopilot_switch({"autopilot": {"on": False}}, "*", True)
 chk("off offers Start", "value=start" in off and "Start" in off)
+# EU-73: a DETACHED daemon (running outside this cockpit process) surfaces as on=False +
+# daemon_running=True — exactly what server._view_state() injects. The badge must read ON (single
+# source of truth = the live PID probe), but offer NO drain/stop buttons (the cockpit holds no
+# stop_event for an external process) — instead it shows the "external" hint.
+ext = warroom.autopilot_switch(
+    {"autopilot": {"on": False, "daemon_running": True, "stopping": False, "app": "(external daemon)"}}, "*", True)
+chk("detached daemon badge reads ON (reflects real daemon state, not the stale in-memory flag)",
+    "<b>ON</b>" in ext)
+chk("detached daemon offers no cockpit drain/stop buttons (no stop_event to honour)",
+    "value=drain" not in ext and "value=stop" not in ext)
+chk("detached daemon shows the 'external' hint (stop it from the terminal)", "external" in ext)
 
 # --- the /api/autopilot drain handler ---
 tmp = Path(tempfile.mkdtemp())

@@ -165,9 +165,30 @@ def create_app(cfg: Config):
         Returns ``app``'s own per-app run-state (so each tab's board/live-feed reflect ONLY that
         project's run), with the still-unit-wide ``autopilot`` field overlaid so the header autopilot
         switch + the autopilot 'live' chip keep working until autopilot itself goes per-project. The
-        overlay is a shallow copy — render is read-only, so the live state is never mutated."""
+        per-app state is shallow-copied before the overlay, so that dict is never mutated; this path is
+        NOT fully read-only, though — it refreshes the unit-wide ``_state['autopilot']`` sub-dict in
+        place (the live ``daemon_running`` probe below) and, for a daemon this cockpit process never
+        started, CREATES that entry so the badge has something to read (EU-73).
+
+        EU-73: injects a live ``daemon_running`` field (PID-file check via ``autopilot.daemon_running()``)
+        into the autopilot sub-dict so ``autopilot_switch()`` in warroom.py has a single source of
+        truth regardless of how autopilot was launched (cockpit Start button vs. detached terminal
+        daemon whose War Room terminal has since closed).
+        """
+        from . import autopilot as _ap
         st = get_state(app or None)
         ap = _state.get("autopilot")
+        # EU-73: live PID-file probe — replaces the stale in-memory boolean.
+        daemon_alive = _ap.daemon_running()
+        if ap is not None:
+            # Refresh in-place so subsequent renders (SSE ticks) always see the current value.
+            ap["daemon_running"] = daemon_alive
+        elif daemon_alive:
+            # Daemon is alive but was not started through this cockpit process (e.g. terminal
+            # launched, terminal closed, launchd keepalive).  Create a minimal autopilot entry so
+            # the badge shows ON — there is no stop_event so the cockpit can't stop it directly.
+            ap = {"on": False, "daemon_running": True, "stopping": False, "app": "(external daemon)"}
+            _state["autopilot"] = ap
         if st is _state or not ap:
             return st
         view = dict(st)
@@ -222,6 +243,31 @@ def create_app(cfg: Config):
         from flask import jsonify
         return jsonify(health.summary(cfg))
 
+    @app.get("/api/autopilot")
+    def autopilot_status_api():
+        """Live autopilot state: PID-based daemon check + in-memory cockpit flags.
+
+        Returns a JSON object with:
+          - ``daemon_running``: True if the autopilot PID file exists and the process is alive
+            (the single source of truth — EU-73)
+          - ``on``: the in-memory cockpit flag (True only when started via the cockpit Start button)
+          - ``stopping``: True while a graceful drain is in progress
+          - ``app``: the project the autopilot is working (or None)
+        """
+        from flask import jsonify
+        from . import autopilot as _ap
+        alive = _ap.daemon_running()
+        cur = _state.get("autopilot") or {}
+        # Refresh daemon_running in the live state dict so subsequent page renders are consistent.
+        if cur:
+            cur["daemon_running"] = alive
+        return jsonify({
+            "on": cur.get("on", False),
+            "daemon_running": alive,
+            "stopping": cur.get("stopping", False),
+            "app": cur.get("app"),
+        })
+
     @app.post("/api/autopilot")
     def autopilot_api():
         import copy
@@ -252,6 +298,17 @@ def create_app(cfg: Config):
                 if _state["active"]:
                     _state["last_msg"] = ("a run is already in progress — stop it and wait for it to "
                                           "finish, then start autopilot")
+                    return redirect("/")
+                # EU-73: a detached autopilot daemon (started from a terminal / the launchd keepalive,
+                # whose window has since closed) is invisible to this cockpit's in-memory flags but very
+                # much alive — its PID file proves it. Refuse so a Start click can't run a SECOND
+                # autopilot against the same queue (double-building, racing the same tickets).
+                # daemon_running() is the single source of truth here — a live os.kill probe, not a
+                # stale boolean.
+                if ap.daemon_running():
+                    _state["last_msg"] = ("autopilot is already running as a detached daemon — stop it "
+                                          "first (unload the launchd keepalive agent, or close the "
+                                          "terminal it runs in) before starting another")
                     return redirect("/")
                 _state["active"] = True
                 _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "(no project)",

@@ -29,12 +29,19 @@ stray_plists = sorted(p.name for p in SCRIPTS.glob("*.plist"))
 chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_plists}")
 
 # 3) No source file resurrects a launchctl / LaunchAgents / .plist reference (a dangling loader).
+#    The NEW keepalive install script (install-mac-autopilot-daemon.sh) legitimately writes the
+#    com.roman.general.autopilot-keepalive plist and calls launchctl — it is explicitly allow-listed
+#    here because it is the CURRENT daemon installer, not a retired scheduler.
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
+SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh"}
 offenders = []
 for p in list(ROOT.glob("orchestrator/**/*.py")) + list(SCRIPTS.glob("*.sh")):
+    rel = p.relative_to(ROOT).as_posix()
+    if rel in SRC_ALLOW:
+        continue
     text = p.read_text(encoding="utf-8", errors="ignore")
     if any(n in text for n in NEEDLES):
-        offenders.append(p.relative_to(ROOT).as_posix())
+        offenders.append(rel)
 chk("no orchestrator/scripts source references the retired launchd scheduler",
     not offenders, f"offenders={offenders}")
 

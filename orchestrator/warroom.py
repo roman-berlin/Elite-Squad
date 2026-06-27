@@ -801,7 +801,9 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
 
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
-    ap_on = bool((state.get("autopilot") or {}).get("on"))
+    _ap = state.get("autopilot") or {}
+    # EU-73: treat autopilot as on if either the cockpit flag or the live daemon PID check says so.
+    ap_on = bool(_ap.get("on") or _ap.get("daemon_running", False))
     tasks = D.load_tasks(cfg.audit_path)
     # A run is live if the cockpit started it, autopilot is on, OR there's fresh audit activity with no
     # terminal outcome yet — the last case covers builds started by the answer box / /unblock / another
@@ -925,22 +927,42 @@ def health_banner(h: dict) -> str:
 
 
 def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
+    """Render the autopilot ON/OFF toggle in the War Room header.
+
+    EU-73: ``is_on`` is derived from EITHER the in-memory cockpit flag (set when autopilot was
+    started via the cockpit Start button) OR the ``daemon_running`` field (a live PID-file probe
+    injected by ``server._view_state()`` on every render).  This is the single-source-of-truth
+    fix: the badge now reflects reality even after the War Room terminal that launched a detached
+    autopilot daemon has been closed.
+    """
     ap = (state or {}).get("autopilot") or {}
-    if ap.get("on") and ap.get("stopping"):
+    # Treat autopilot as ON if either the cockpit in-memory flag is set OR the daemon PID is alive.
+    is_on = ap.get("on") or ap.get("daemon_running", False)
+    if is_on and ap.get("stopping"):
         return ('<div class="apsw on" title="The current ticket finishes landing on DEV, then the '
                 'autopilot stands down — it takes no new tickets.">'
                 '<span class="apdot on"></span><span class=aplabel>&#9203; Stopping &middot; finishing the '
                 'current ticket, then standing down…</span></div>')
-    if ap.get("on"):
+    if is_on:
         scope = _esc(ap.get("app") or "all projects")
+        # Only show Stop/Drain buttons when autopilot is cockpit-managed — i.e. the cockpit's own
+        # ``on`` flag is set (server.py sets ``on`` and the ``stop`` Event together when Start is
+        # pressed, so ``on`` is the authoritative cockpit-managed signal). A detached daemon shows up
+        # as ``daemon_running=True`` with ``on=False`` (server._view_state) and can only be stopped
+        # from the terminal — it gets the "external" hint instead of buttons the cockpit can't honour.
+        if ap.get("on"):
+            btns = ('<button class="apbtn drain" name=action value=drain '
+                    'title="Let the current ticket finish landing on DEV, then stand down — takes no new tickets">'
+                    'Finish&nbsp;&amp;&nbsp;stop</button>'
+                    '<button class="apbtn stop" name=action value=stop '
+                    'title="Mark the autopilot off now — the in-flight build still finishes in the background">'
+                    'Stop</button>')
+        else:
+            btns = ('<span style="font-size:11px;color:var(--faint)" '
+                    'title="Autopilot is running as an external daemon — stop it from the terminal">external</span>')
         return ('<form method=post action=/api/autopilot class="apsw on">'
                 f'<span class="apdot on"></span><span class=aplabel>Autopilot&nbsp;<b>ON</b> · {scope}</span>'
-                '<button class="apbtn drain" name=action value=drain '
-                'title="Let the current ticket finish landing on DEV, then stand down — takes no new tickets">'
-                'Finish&nbsp;&amp;&nbsp;stop</button>'
-                '<button class="apbtn stop" name=action value=stop '
-                'title="Mark the autopilot off now — the in-flight build still finishes in the background">'
-                'Stop</button></form>')
+                f'{btns}</form>')
     appq = _esc(app if app and app != "*" else "")
     dis = "" if healthy else "disabled"
     confirm = ('onsubmit="return confirm(\'Start Autopilot? The unit will work the queue '
