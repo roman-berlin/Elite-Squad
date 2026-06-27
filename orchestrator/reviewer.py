@@ -48,7 +48,7 @@ matching exactly this schema:
   "required_changes": ["concrete instruction for the builder if FAIL"],
   "needs_human": false,
   "question": "",
-  "summary": "one-paragraph rationale"
+  "summary": "≤5 tight bullets — lead with each blocking issue and what to fix, then a one-sentence overall rationale. Example: '• Missing tenant filter on /leads query\\n• No test for the error path\\n• Passes otherwise.'"
 }
 ```
 
