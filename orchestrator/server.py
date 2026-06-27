@@ -327,9 +327,14 @@ def create_app(cfg: Config):
         flt = (request.args.get("filter") or "").strip()
         # 'parked' scopes to the auto-skipped blocked set, which lives outside the task log.
         blocked = warroom._load_blocked(cfg) if flt.lower() == "parked" else None
+        try:
+            from . import needs as _needs_mod
+            _needs_cnt = _needs_mod.count(cfg)
+        except Exception:  # noqa: BLE001
+            _needs_cnt = None
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
-                             active_filter=flt, blocked=blocked)
+                             active_filter=flt, blocked=blocked, needs_count=_needs_cnt)
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
         # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
@@ -1024,7 +1029,13 @@ def create_app(cfg: Config):
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=app value='{dapp}'>"
                     "<input type=text name=text placeholder='Your decision — it re-runs the ticket with this baked in'>"
-                    "<button class='nbtn send'>Ship answer</button></form></div>")
+                    "<button class='nbtn send'>Ship answer</button></form>"
+                    # Secondary: dismiss without re-running (mark the question handled, remove from list)
+                    "<div class=nrow>"
+                    "<form method=post action=/needs/resolve style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    "<button class='nbtn x'>Dismiss</button></form></div>"
+                    "</div>")
             out.append("</div>")
         if s["approvals"]:
             out.append(f"<div class=nsec><h3>&#9989; Officer recommendations · {len(s['approvals'])}</h3>")
@@ -1762,6 +1773,25 @@ def create_app(cfg: Config):
         threading.Thread(target=_bg, daemon=True).start()
         _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; the unit is "
                               "re-running it with your decision.")
+        return redirect("/needs")
+
+    @app.post("/needs/resolve")
+    def needs_resolve():
+        """Dismiss a pending decision without re-running the ticket.
+
+        Pops the entry from pending_decisions.json (same as resolving a Telegram reply, but
+        without kicking off a build). Use when the question is moot or the Commander already
+        handled it another way. The item disappears from Needs-you immediately; if the ticket
+        re-escalates later it will re-appear as a fresh row."""
+        from . import decisions
+        tid = (request.form.get("ticket") or "").strip()
+        if tid:
+            try:
+                # comment=False: the Commander chose to dismiss, not answer — nothing to echo back.
+                decisions.resolve(cfg, "dismissed by Commander", ticket_id=tid, comment=False)
+            except Exception:  # noqa: BLE001 - never block the redirect
+                pass
+            _state["last_msg"] = f"✓ Decision for {tid} dismissed — removed from Needs you."
         return redirect("/needs")
 
     @app.get("/report")
