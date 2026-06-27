@@ -9,7 +9,8 @@ from . import memory
 from .agent import run_agent
 from .config import (AppConfig, Config, EFFORT_LADDER, effort_step_index,
                      normalize_effort)
-from .contracts import BuildRequest, BuildResult
+from .contracts import (BuildArtifact, BuildRequest, BuildResult,
+                       PerTicketArtifactStore, SpecArtifact)
 
 BUILDER_SYSTEM = """\
 You are the Builder in an automated dev pipeline. You implement exactly one ticket
@@ -232,8 +233,55 @@ def _trim_preamble(text: str, cfg=None) -> str:
     return text[:limit].rstrip() + "\n… (unit memory truncated to bound builder context)\n\n"
 
 
-def _prompt(req: BuildRequest, cfg=None) -> str:
-    ac = "\n".join(f"  - {c}" for c in req.ticket.acceptance_criteria) or "  (none specified)"
+def _digest(text: str, limit: int = 500) -> str:
+    """Collapse the builder's summary into a ≤ ``limit``-char one-liner for BuildArtifact.diff_digest:
+    whitespace-collapsed, then truncated with a single-char ellipsis so the result is ALWAYS ≤ limit
+    (BuildArtifact.__post_init__ enforces the ceiling)."""
+    s = " ".join((text or "").split())
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
+
+def _section_bullets(text: str, heading: str) -> list[str]:
+    """Best-effort: the bullet/numbered items under a ``<heading>…:`` line in the builder's summary
+    (e.g. ``Decisions:`` / ``Open questions:``), stopping at the next blank line or non-bullet. Returns
+    [] when the builder emitted no such section — the full summary stays on the BuildResult for digging,
+    so the artifact is a digest, never the only copy."""
+    items: list[str] = []
+    capturing = False
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not capturing:
+            if re.match(rf"^\**\s*{re.escape(heading)}s?\b[^:]*:", s, re.IGNORECASE):
+                capturing = True
+            continue
+        if not s:
+            break
+        m = re.match(r"^[-*•]\s+(.*)$", s) or re.match(r"^\d+[.)]\s+(.*)$", s)
+        if not m:
+            break
+        items.append(m.group(1).strip())
+    return items
+
+
+def _build_artifact(result: BuildResult) -> BuildArtifact:
+    """Distil a BuildResult into the typed BuildArtifact handoff (EU-72). ``files_changed`` is left
+    empty for the loop to stamp (it owns git); the digest and any Decisions/Open-questions sections
+    come from the builder's own summary."""
+    summary = result.summary or result.raw or ""
+    return BuildArtifact(
+        files_changed=[],
+        diff_digest=_digest(summary),
+        decisions=_section_bullets(summary, "decision"),
+        open_questions=_section_bullets(summary, "open question"),
+    )
+
+
+def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> str:
+    # EU-72: when the loop hands us a SpecArtifact, read the acceptance criteria (and non-goals) from
+    # that structured handoff as the primary spec; otherwise fall back to the raw ticket. The full
+    # description is always included either way — artifact-first, full-context-on-demand.
+    criteria = spec.acceptance if spec is not None else req.ticket.acceptance_criteria
+    ac = "\n".join(f"  - {c}" for c in criteria) or "  (none specified)"
     parts = [
         f"TICKET {req.ticket.id}: {req.ticket.summary}",
         "",
@@ -243,6 +291,9 @@ def _prompt(req: BuildRequest, cfg=None) -> str:
         "ACCEPTANCE CRITERIA:",
         ac,
     ]
+    if spec is not None and spec.non_goals:
+        parts += ["", "NON-GOALS (explicitly out of scope — do NOT touch):",
+                  "\n".join(f"  - {g}" for g in spec.non_goals)]
     capped = _cap_feedback(req.prior_issues, cfg)
     if capped:
         issues = "\n".join(f"  - {i}" for i in capped)
@@ -256,10 +307,18 @@ def _prompt(req: BuildRequest, cfg=None) -> str:
     return "\n".join(parts)
 
 
-async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None) -> BuildResult:
+async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None,
+                *, store: PerTicketArtifactStore | None = None,
+                spec: SpecArtifact | None = None) -> BuildResult:
     """Implement the ticket. For a sized-big ticket on its first pass (and only when delegation is
     armed), the Dev Team Lead splits it across sized soldiers; otherwise a single focused builder
     pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build.
+
+    EU-72: ``spec`` is the upstream SpecArtifact (primary context — the builder reads its acceptance
+    criteria / non-goals, falling back to the raw ticket when None). After the build, the typed
+    BuildArtifact is published into ``store`` so the Test Engineer + Reviewer read a tight handoff
+    instead of re-deriving from the full diff. Both default to None so direct/CLI callers are
+    unaffected.
 
     ``n`` from ``build_delegated`` encodes the flow used:
       0   → thin plan or synthesis stub not ready → fall through to solo.
@@ -268,17 +327,25 @@ async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None) -> B
     All three cases keep the fail-safe: any exception → solo build.
     """
     from . import squad
+    result: BuildResult | None = None
     if squad.should_delegate(cfg, req):
         try:
-            result, n = await squad.build_delegated(req, app, cfg, audit=audit)
-            if result is not None and n >= 1:   # n=1: synthesis; n>=2: squad split
-                return result
+            delegated, n = await squad.build_delegated(req, app, cfg, audit=audit)
+            if delegated is not None and n >= 1:   # n=1: synthesis; n>=2: squad split
+                result = delegated
         except Exception as exc:  # noqa: BLE001 - delegation must never break a run
             print(f"  · delegation off ({str(exc).splitlines()[0][:80]}); building solo", flush=True)
-    return await _solo_build(req, app, cfg)
+    if result is None:
+        result = await _solo_build(req, app, cfg, spec=spec)
+    # EU-72: publish the typed BuildArtifact into the shared per-ticket pool. The loop stamps the
+    # authoritative files_changed (it owns git); the full summary/raw stays on the result for digging.
+    if store is not None:
+        store.put(_build_artifact(result))
+    return result
 
 
-async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildResult:
+async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
+                      *, spec: SpecArtifact | None = None) -> BuildResult:
     workdir = app.workdir or app.repo_path
     # Fully unattended: load NO filesystem settings (setting_sources=[]) so the repo's
     # `ask: [Edit/Write]` permission rules — at the root OR nested under a subdir like backend/ —
@@ -305,7 +372,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config) -> BuildRe
     )
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
-    run = await run_agent(_prompt(req, cfg), options, tag="builder",
+    run = await run_agent(_prompt(req, cfg, spec), options, tag="builder",
                           ticket_id=req.ticket.id, pass_number=req.iteration)
     return BuildResult(
         ok=not run.is_error,

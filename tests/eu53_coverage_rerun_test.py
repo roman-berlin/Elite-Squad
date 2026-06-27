@@ -71,14 +71,14 @@ class FakeBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         git.product = f"P{req.iteration}"      # a different tree every pass
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="", tools=[])
 loop.builder_mod = FakeBuilder
 
 class FakeTE:
     @staticmethod
-    async def ensure_coverage(t, a, c):
+    async def ensure_coverage(t, a, c, **_):   # EU-72: absorb store=/build_artifact= kwargs
         te_calls["n"] += 1
         te_hashes.append(git.diff_against_base())
         git.tests = f"T{te_calls['n']}"        # the TE writes test files each time it runs
@@ -90,7 +90,7 @@ class FakeReviewer:
     """FAIL with DIFFERENT feedback each pass so the retry-stuck guard does not short-circuit and
     the loop actually runs every iteration (1..max_iterations)."""
     @staticmethod
-    async def review(diff, ticket, app, cfg, iteration):
+    async def review(diff, ticket, app, cfg, iteration, **_):   # EU-72: absorb store=/build_artifact= kwargs
         return ReviewResult(verdict=Verdict.FAIL, spec_met=False,
                             required_changes=[f"address gap #{iteration}"], summary="no", raw="")
 loop.reviewer_mod = FakeReviewer

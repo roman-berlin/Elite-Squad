@@ -14,7 +14,8 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import filing, memory
 from .agent import run_agent
 from .config import AppConfig, Config, normalize_effort
-from .contracts import QualityIssue, ReviewResult, Ticket, Verdict
+from .contracts import (BuildArtifact, PerTicketArtifactStore, QualityIssue,
+                       ReviewResult, ReviewVerdict, Ticket, Verdict)
 
 REVIEWER_SYSTEM = """\
 You are the Reviewer in an automated dev pipeline. You are deliberately adversarial:
@@ -68,9 +69,9 @@ Rules for the verdict:
 REVIEWER_SYSTEM += filing.TICKET_BLOCK_RULE
 
 
-def _prompt(diff: str, ticket: Ticket) -> str:
+def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = None) -> str:
     ac = "\n".join(f"  - {c}" for c in ticket.acceptance_criteria) or "  (none specified)"
-    return "\n".join([
+    parts = [
         f"TICKET {ticket.id}: {ticket.summary}",
         "",
         "DESCRIPTION:",
@@ -78,6 +79,21 @@ def _prompt(diff: str, ticket: Ticket) -> str:
         "",
         "ACCEPTANCE CRITERIA:",
         ac,
+    ]
+    # EU-72: lead with the Builder's structured handoff (read it first), THEN the full diff below —
+    # artifact-first, full-context-on-demand. Falls back to the diff alone when no artifact was passed.
+    if build_artifact is not None:
+        parts.append("")
+        parts.append("BUILDER'S STRUCTURED HANDOFF (read first, then verify against the diff):")
+        if build_artifact.files_changed:
+            parts.append("  files changed: " + ", ".join(build_artifact.files_changed))
+        if build_artifact.diff_digest:
+            parts.append("  summary: " + build_artifact.diff_digest)
+        if build_artifact.decisions:
+            parts.append("  decisions: " + "; ".join(build_artifact.decisions))
+        if build_artifact.open_questions:
+            parts.append("  open questions: " + "; ".join(build_artifact.open_questions))
+    parts += [
         "",
         "DIFF UNDER REVIEW (feature branch vs base):",
         "```diff",
@@ -85,11 +101,20 @@ def _prompt(diff: str, ticket: Ticket) -> str:
         "```",
         "",
         "Review it now. Read any files you need for context, then emit the JSON verdict.",
-    ])
+    ]
+    return "\n".join(parts)
 
 
-async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1) -> ReviewResult:
+async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1,
+                 *, store: PerTicketArtifactStore | None = None,
+                 build_artifact: BuildArtifact | None = None) -> ReviewResult:
     from . import models
+    # EU-72: read the Builder's BuildArtifact (passed by the loop, or from the shared pool) as the
+    # primary handoff; the full diff is still under review below. After parsing, publish a typed
+    # ReviewVerdict into the pool for the next iteration / audit. Both default None so direct callers
+    # are unaffected.
+    if build_artifact is None and store is not None:
+        build_artifact = store.build
     # EU-52: thread the build iteration so the Reviewer escalates one tier per re-review — a small diff
     # is judged on Sonnet on pass 1 and on Opus when a rebuilt diff comes back (for_reviewer climbs a
     # tier per retry). Without this the iteration>1 escalation branch was dead and every review pinned
@@ -108,10 +133,19 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
         max_turns=30,
         effort=normalize_effort(cfg.reviewer_effort),
     )
-    run = await run_agent(_prompt(diff, ticket), options, tag="reviewer")
+    run = await run_agent(_prompt(diff, ticket, build_artifact), options, tag="reviewer")
     result = _parse(run.final or run.text)
     result.cost_usd = run.cost_usd
     result.raw = run.final
+    # EU-72: publish the typed ReviewVerdict into the shared pool — a small, auditable record of the
+    # verdict + blockers the next iteration reads (the rich ReviewResult keeps its own enum/parser
+    # surface for the loop's decision logic).
+    if store is not None:
+        store.put(ReviewVerdict(
+            verdict=result.verdict,
+            blocking=[q.detail for q in result.blocking_issues] + list(result.spec_gaps),
+            notes=[q.detail for q in result.quality_issues if q.severity == "minor"],
+        ))
     return result
 
 

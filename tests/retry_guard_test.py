@@ -43,7 +43,7 @@ class Git:
 loop._notify = lambda c, t: None
 loop.run_gate = lambda app, changed_paths=None: GateResult(passed=True, report="")
 loop._land = lambda *a, **k: TicketReport("AUTO-14", Outcome.MERGED, 1, 0.0, "automatixy", "b")
-async def fake_te(ticket, app, cfg):
+async def fake_te(ticket, app, cfg, **_):   # EU-72: absorb store=/build_artifact= kwargs
     return TestEngineerResult(ok=True, coverage="lines 80%→85%")
 loop.test_engineer_mod.ensure_coverage = fake_te
 
@@ -52,14 +52,14 @@ class FakeBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         built.append(req.iteration)
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="did it", tools=[])
 loop.builder_mod = FakeBuilder
 
 SAME = ["Add an explicit tenant_id filter to the query"]
 review_calls = []
-async def fake_review(diff, ticket, app, cfg, iteration=1):   # EU-52: review() now takes the build iteration
+async def fake_review(diff, ticket, app, cfg, iteration=1, **_):   # EU-52 iter + EU-72 store=/build_artifact=
     review_calls.append(1)
     return ReviewResult(verdict=Verdict.FAIL, spec_met=False, required_changes=list(SAME), cost_usd=0.0)
 reviewer_mod.review = fake_review
@@ -90,14 +90,14 @@ class OscBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         osc_built.append(req.iteration)
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="did it", tools=[])
 loop.builder_mod = OscBuilder
 
 OSC = [["Add a tenant_id filter to the query"], ["Add a regression test for the empty case"]]
 osc_reviews = []
-async def fake_review_osc(diff, ticket, app, cfg, iteration=1):
+async def fake_review_osc(diff, ticket, app, cfg, iteration=1, **_):   # EU-72: absorb store=/build_artifact=
     osc_reviews.append(1)
     changes = OSC[(len(osc_reviews) - 1) % 2]   # A, B, A, B, …
     return ReviewResult(verdict=Verdict.FAIL, spec_met=False, required_changes=list(changes), cost_usd=0.0)
@@ -123,7 +123,7 @@ class ProgBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         prog_built.append(req.iteration)
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="did it", tools=[])
 loop.builder_mod = ProgBuilder
@@ -131,7 +131,7 @@ loop.builder_mod = ProgBuilder
 DISTINCT = [["Add a tenant_id filter"], ["Add a regression test"],
             ["Annotate the return type"], ["Add a docstring explaining why"]]
 prog_reviews = []
-async def fake_review_prog(diff, ticket, app, cfg, iteration=1):
+async def fake_review_prog(diff, ticket, app, cfg, iteration=1, **_):   # EU-72: absorb store=/build_artifact=
     changes = DISTINCT[len(prog_reviews) % len(DISTINCT)]   # A, B, C, D — all different
     prog_reviews.append(1)
     return ReviewResult(verdict=Verdict.FAIL, spec_met=False, required_changes=list(changes), cost_usd=0.0)
@@ -160,12 +160,12 @@ class BlankBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         blank_built.append(req.iteration)
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="did it", tools=[])
 loop.builder_mod = BlankBuilder
 
-async def fake_review_blank(diff, ticket, app, cfg, iteration=1):
+async def fake_review_blank(diff, ticket, app, cfg, iteration=1, **_):   # EU-72: absorb store=/build_artifact=
     # FAIL with nothing actionable — required_changes / spec_gaps / blocking_issues all empty.
     return ReviewResult(verdict=Verdict.FAIL, spec_met=False, required_changes=[], cost_usd=0.0)
 reviewer_mod.review = fake_review_blank

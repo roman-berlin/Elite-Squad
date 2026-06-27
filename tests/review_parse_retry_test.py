@@ -40,7 +40,7 @@ loop.run_gate = lambda app, changed_paths=None: GateResult(passed=True, report="
 loop._land = lambda *a, **k: TicketReport("EU-11", Outcome.MERGED, 1, 0.0, "automatixy", "b")
 # EU-37: the Test Engineer coverage stage runs between gate and review — stub it out here so this
 # test stays focused on the review-retry path (it has its own dedicated harness).
-async def fake_te(ticket, app, cfg):
+async def fake_te(ticket, app, cfg, **_):   # EU-72: absorb store=/build_artifact= kwargs
     return TestEngineerResult(ok=True, coverage="lines 80%→85%")
 loop.test_engineer_mod.ensure_coverage = fake_te
 
@@ -49,13 +49,13 @@ class FakeBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         built.append(req.iteration)
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="did it", tools=[])
 loop.builder_mod = FakeBuilder
 
 review_calls = []
-async def fake_review(diff, ticket, app, cfg, iteration=1):
+async def fake_review(diff, ticket, app, cfg, iteration=1, **_):   # EU-72: absorb store=/build_artifact= kwargs
     review_calls.append(iteration)   # EU-52: capture the build iteration the loop now threads in
     if len(review_calls) == 1:
         # first pass: unparseable -> fail-safe FAIL with parse_failed set

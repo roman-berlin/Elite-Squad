@@ -46,7 +46,7 @@ class FakeBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="", tools=[])
 loop.builder_mod = FakeBuilder
 
@@ -54,7 +54,7 @@ loop.builder_mod = FakeBuilder
 # breaks (we only need >1 pass to prove the skip on the second pass).
 class FakeReviewer:
     @staticmethod
-    async def review(diff, ticket, app, cfg, iteration):
+    async def review(diff, ticket, app, cfg, iteration, **_):   # EU-72: absorb store=/build_artifact= kwargs
         return ReviewResult(verdict=Verdict.FAIL, spec_met=False,
                             required_changes=["address the gap"], summary="no", raw="")
 loop.reviewer_mod = FakeReviewer
@@ -82,7 +82,7 @@ def run_attempt(te_adds_files: bool):
     te_calls = {"n": 0}
     class FakeTE:
         @staticmethod
-        async def ensure_coverage(t, a, c):
+        async def ensure_coverage(t, a, c, **_):   # EU-72: absorb store=/build_artifact= kwargs
             te_calls["n"] += 1
             if te_adds_files:
                 git.tests = "T1"          # the TE wrote test files -> the diff changes

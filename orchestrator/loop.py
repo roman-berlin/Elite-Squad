@@ -23,7 +23,8 @@ from . import test_engineer as test_engineer_mod
 from .audit import AuditLog
 from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
-from .contracts import BuildRequest, Outcome, Ticket, TicketReport
+from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
+                       SpecArtifact, Ticket, TicketReport)
 from .gate import run_gate
 from .git_ops import Git, GitError
 from .officers import display
@@ -514,6 +515,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                            # when nothing changed since.
     pm_used = False
 
+    # EU-72: one shared per-ticket artifact pool, threaded through the officers so each reads a tight
+    # structured handoff instead of re-deriving from the full diff. The SpecArtifact is derived straight
+    # from the ticket (there is no separate Spec officer yet); the builder publishes its BuildArtifact
+    # and the reviewer its ReviewVerdict into the same store as the iterations run.
+    store = PerTicketArtifactStore()
+    store.put(SpecArtifact(acceptance=list(ticket.acceptance_criteria or []),
+                           scope=ticket.summary or "", non_goals=[]))
+
     for iteration in range(1, cfg.max_iterations + 1):
         if stop_event is not None and stop_event.is_set():
             audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-build")
@@ -531,7 +540,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
               f"— builder working (can take a few minutes)…", flush=True)
         _bar(BUILD, active=BUILD)
         req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration)
-        build = await builder_mod.build(req, app, cfg, audit=audit)
+        # EU-72: hand the builder the typed SpecArtifact (primary context) + the shared pool it
+        # publishes its BuildArtifact into.
+        build = await builder_mod.build(req, app, cfg, audit=audit, store=store, spec=store.spec)
         cost += build.cost_usd
         budget.add(build.cost_usd)
         audit.record("build", ticket_id=ticket.id, iteration=iteration, ok=build.ok,
@@ -601,6 +612,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                 notes="builder produced no changes")
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
+        # EU-72: the builder published its BuildArtifact but can't know the changed-file list (the loop
+        # owns git) — stamp the authoritative paths onto it so the Test Engineer + Reviewer read an
+        # accurate handoff.
+        if store.build is not None and not store.build.files_changed:
+            store.build.files_changed = git.changed_paths()
         _bar(GATE, active=GATE)
         if cfg.notify_verbose:
             _notify(cfg, f"🔧 {ticket.id} — {display('field_engineer')} implemented (pass {iteration})")
@@ -636,7 +652,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                              reason="diff unchanged since last coverage pass")
             else:
                 print("  tests · Test Engineer covering the change…", flush=True)
-                te = await test_engineer_mod.ensure_coverage(ticket, app, cfg)
+                # EU-72: hand the Test Engineer the Builder's BuildArtifact as primary context.
+                te = await test_engineer_mod.ensure_coverage(ticket, app, cfg,
+                                                             store=store, build_artifact=store.build)
                 cost += te.cost_usd
                 budget.add(te.cost_usd)
                 audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
@@ -676,7 +694,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         _bar(REVIEW, active=REVIEW)
         print("  review · reviewer reading the diff…", flush=True)
         diff = git.diff_against_base()
-        review = await reviewer_mod.review(diff, ticket, app, cfg, iteration)   # EU-52: escalate the reviewer on re-review
+        # EU-72: hand the Reviewer the Builder's BuildArtifact (primary context) + the pool it
+        # publishes its ReviewVerdict into. EU-52: escalate the reviewer on re-review.
+        review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
+                                           store=store, build_artifact=store.build)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         # Unparseable reviewer output fails closed. Before paying for a full rebuild+review pass,
@@ -686,7 +707,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         if review.parse_failed:
             print("  review · unparseable verdict → re-reviewing once (no rebuild)", flush=True)
             audit.record("review_parse_retry", ticket_id=ticket.id, iteration=iteration)
-            review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1)
+            review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
+                                               store=store, build_artifact=store.build)
             cost += review.cost_usd
             budget.add(review.cost_usd)
         audit.record("review", ticket_id=ticket.id, iteration=iteration,

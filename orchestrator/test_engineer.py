@@ -23,7 +23,8 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import memory, models
 from .agent import run_agent
 from .config import AppConfig, Config, normalize_effort
-from .contracts import TestEngineerResult, Ticket
+from .contracts import (BuildArtifact, PerTicketArtifactStore, TestEngineerResult,
+                       Ticket)
 
 _OFFICER_FILE = "test-engineer.md"
 
@@ -108,9 +109,9 @@ def extract_coverage(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def _prompt(ticket: Ticket) -> str:
+def _prompt(ticket: Ticket, build_artifact: BuildArtifact | None = None) -> str:
     ac = "\n".join(f"  - {c}" for c in ticket.acceptance_criteria) or "  (none specified)"
-    return "\n".join([
+    parts = [
         f"TICKET {ticket.id}: {ticket.summary}",
         "",
         "DESCRIPTION:",
@@ -118,17 +119,41 @@ def _prompt(ticket: Ticket) -> str:
         "",
         "ACCEPTANCE CRITERIA:",
         ac,
+    ]
+    # EU-72: when the loop hands us the Builder's structured artifact, lead with it so the coverage
+    # pass targets exactly what changed instead of re-deriving from the whole diff.
+    if build_artifact is not None:
+        parts.append("")
+        parts.append("BUILDER HANDOFF — focus your coverage on what changed:")
+        if build_artifact.files_changed:
+            parts.append("  files changed: " + ", ".join(build_artifact.files_changed))
+        if build_artifact.diff_digest:
+            parts.append("  summary: " + build_artifact.diff_digest)
+        if build_artifact.open_questions:
+            parts.append("  open questions: " + "; ".join(build_artifact.open_questions))
+    parts += [
         "",
         "The Builder has implemented this on the current branch. Ensure it is proven by tests and "
         "report the coverage artifact now.",
-    ])
+    ]
+    return "\n".join(parts)
 
 
-async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config) -> TestEngineerResult:
+async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
+                          *, store: PerTicketArtifactStore | None = None,
+                          build_artifact: BuildArtifact | None = None) -> TestEngineerResult:
     """Run the Test Engineer coverage pass on the just-built branch. Returns the coverage artifact
     for the PR description. Fail-safe: any process error returns ok=False with an empty artifact —
-    the caller keeps moving to review rather than dead-stopping the pipeline."""
+    the caller keeps moving to review rather than dead-stopping the pipeline.
+
+    EU-72: reads the Builder's BuildArtifact (the loop passes it, or it falls back to ``store.build``)
+    as its primary context — what changed — instead of re-deriving from the diff. The Test Engineer
+    is a CONSUMER stage: it publishes no artifact of its own (there is no TestArtifact in the
+    contracts), so it never calls ``store.put``."""
     from . import guard
+    # EU-72: prefer the explicit handoff arg; fall back to the shared pool's BuildArtifact.
+    if build_artifact is None and store is not None:
+        build_artifact = store.build
     workdir = app.workdir or app.repo_path
     eff = normalize_effort(getattr(cfg, "test_engineer_effort", "medium"))
     # EU-52: the Test Engineer writes test code under the Builder's ceiling — route it through the ladder
@@ -147,7 +172,7 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config) -> TestEn
         max_turns=int(getattr(cfg, "builder_max_turns", 60) or 60),
         effort=eff,
     )
-    run = await run_agent(_prompt(ticket), options, tag="test-engineer")
+    run = await run_agent(_prompt(ticket, build_artifact), options, tag="test-engineer")
     return TestEngineerResult(
         ok=not run.is_error,
         coverage=extract_coverage(run.final or run.text),

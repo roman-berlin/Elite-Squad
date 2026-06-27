@@ -38,7 +38,7 @@ class FakeBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         built.append(req.ticket.description or "")
         return BuildResult(ok=True, summary=HALT, cost_usd=0.0, num_turns=1, raw=HALT, tools=[])
 loop.builder_mod = FakeBuilder
@@ -89,7 +89,7 @@ class QuietBuilder:
     @staticmethod
     def effort_plan(cfg, it, ticket): return ("low", "sized")
     @staticmethod
-    async def build(req, app, cfg, audit=None):
+    async def build(req, app, cfg, audit=None, **_):   # EU-72: absorb store=/spec= kwargs
         return BuildResult(ok=True, summary=NO_HALT, cost_usd=0.0, num_turns=1, raw=NO_HALT, tools=[])
 loop.builder_mod = QuietBuilder
 
