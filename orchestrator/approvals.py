@@ -200,12 +200,17 @@ def enqueue_proposals(cfg: Config, *, app_name: str, officer_label: str, source:
     them straight to the board. `report` may be a raw report string (parsed with
     filing.parse_tickets) or an already-parsed list of proposal dicts. Returns the batch id, or
     None when there's nothing fileable. Identical pending batches collapse (idempotent) so a
-    re-run of the same council/meeting doesn't stack duplicate cards."""
+    re-run of the same council/meeting doesn't stack duplicate cards.
+
+    The full report body is stored in ``body_raw`` alongside the normalised ``proposals`` list so
+    that ``materialize_proposal`` can reconstruct the filing block without re-parsing (EU-89)."""
     if isinstance(report, str):
+        body_raw = report
         from . import filing
         proposals, _ = filing.parse_tickets(report)
     else:
         proposals = list(report or [])
+        body_raw = json.dumps(proposals)
     clean = _normalize_proposals(proposals)
     if not clean:
         return None
@@ -216,7 +221,8 @@ def enqueue_proposals(cfg: Config, *, app_name: str, officer_label: str, source:
             return bid
     items.append({
         "id": bid, "kind": "proposal", "source": source, "app": app_name,
-        "label": officer_label, "proposals": clean, "ts": time.time(), "status": "pending",
+        "label": officer_label, "proposals": clean, "body_raw": body_raw,
+        "ts": time.time(), "status": "pending",
     })
     # Bound the file: keep all pending + the most recent actioned batches.
     pending_b = [b for b in items if b.get("status") == "pending"]
@@ -283,3 +289,41 @@ def deny_proposals(cfg: Config, batch_id: str, reason: str = "") -> bool:
     batch["actioned_ts"] = time.time()
     _save_proposals(cfg, items)
     return True
+
+
+def materialize_proposal(cfg: Config, ticket_ref: str) -> str:
+    """File the pending proposal batch whose source mentions ticket_ref — directly to the board,
+    without a separate Commander approve prompt.  Used when the Commander replies 'create it' /
+    'approve' / 'yes' in the Telegram thread, so the unit acts immediately (EU-89).
+
+    Exactly one matching batch must be found; if zero or more than one match, the ambiguity is
+    reported back so the Commander can be more specific.  Uses the stored ``body_raw`` to
+    reconstruct the filing block and delegates to ``approve_proposals`` (which applies the
+    existing de-dup + Jira create-ticket logic)."""
+    ref_up = ticket_ref.strip().upper()
+    items = _load_proposals(cfg)
+    matched = [
+        b for b in items
+        if b.get("status") == "pending"
+        and ref_up in str(b.get("source", "")).upper()
+    ]
+    if not matched:
+        return f"No pending proposals found for {ticket_ref}."
+    if len(matched) > 1:
+        labels = ", ".join(b.get("source", b.get("id", "?")) for b in matched)
+        return (
+            f"Multiple pending proposal batches mention {ticket_ref} ({labels}). "
+            "Reply with the batch id or be more specific."
+        )
+    batch = matched[0]
+    result = approve_proposals(cfg, batch["id"])
+    if result is None:
+        return (f"Proposal batch for {ticket_ref} could not be filed "
+                "(already actioned or unknown).")
+    n_filed = result.filed_n if result else 0
+    n_dup = result.deduped_n if result else 0
+    return (
+        f"✅ Filed {n_filed} ticket(s) for {ticket_ref}"
+        + (f" ({n_dup} already open, skipped)" if n_dup else "")
+        + "."
+    )

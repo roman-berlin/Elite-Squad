@@ -740,6 +740,57 @@ async def _needs_context(cfg: Config) -> str:
         return ""
 
 
+def recent_thread_context(cfg: Config, ticket_ref: str | None = None,
+                          n_turns: int = 12) -> str:
+    """Bundle recent chat turns and any pending proposals that mention ticket_ref.
+
+    (a) Last n_turns lines from commander_chat.md — the untruncated Q/A thread so
+        short follow-ups like 'create it' or 'approve' resolve without re-asking.
+    (b) Pending proposal batches whose source or proposal titles/bodies mention ticket_ref.
+
+    Returns a formatted string ready to embed in the LLM prompt, or '' when there
+    is nothing useful to inject.
+    """
+    from . import approvals as _approvals
+
+    parts: list[str] = []
+
+    # (a) Recent conversation thread (full text, not the truncated commander_notes summary).
+    thread = chat_transcript(cfg, lines=n_turns)
+    if thread:
+        parts.append(f"Recent conversation thread (last ~{n_turns} turns):\n{thread}")
+
+    # (b) Pending proposal batches the Commander may be referring to with 'approve'/'create it'.
+    if ticket_ref:
+        ref_up = ticket_ref.strip().upper()
+        matched: list[dict] = []
+        for batch in _approvals.pending_proposals(cfg):
+            haystack = " ".join([
+                str(batch.get("source", "")),
+                *[p.get("title", "") + " " + p.get("body", "")
+                  for p in batch.get("proposals", [])],
+            ]).upper()
+            if ref_up in haystack:
+                matched.append(batch)
+        if matched:
+            lines: list[str] = []
+            for batch in matched:
+                lines.append(
+                    f"Pending proposal batch '{batch.get('source', '?')}' "
+                    f"(id {batch.get('id', '?')}, app {batch.get('app', '?')}):"
+                )
+                for p in batch.get("proposals", []):
+                    lines.append(
+                        f"  • [{p.get('severity', '?')}] {p.get('title', '?')}"
+                        + (f": {p['body'][:200]}" if p.get("body") else "")
+                    )
+            parts.append(
+                "Pending proposals the Commander may be referring to:\n" + "\n".join(lines)
+            )
+
+    return "\n\n".join(parts)
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The CTO answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs
@@ -779,6 +830,10 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     ticket_ctx = await _ticket_context(cfg, message)
     board_ctx = await _board_status(cfg) if _BOARD_Q.search(message or "") else ""
     needs_ctx = await _needs_context(cfg)
+    # Thread context: last N chat turns + pending proposals matching any ticket key in the
+    # message, so 'create it' / 'approve' / 'yes go ahead' can resolve without re-asking.
+    _msg_refs = _TICKET_KEY.findall(message or "")
+    thread_ctx = recent_thread_context(cfg, ticket_ref=_msg_refs[0] if _msg_refs else None)
     apps_brief = "\n".join(
         f"- {a.name}: repo {getattr(a, 'repo_path', '?')} · branches "
         f"{getattr(a, 'base_branch', '?')}/{getattr(a, 'protected_branch', '?')}"
@@ -796,6 +851,9 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
           if context else []),
         *([f"Ticket(s) the Commander referenced — live from the unit's own backlog:\n{ticket_ctx}\n"]
           if ticket_ctx else []),
+        *([f"Thread context (recent turns + pending proposals for this ticket — "
+           f"use this to resolve 'it' / 'approve' / 'create it' without re-asking):\n{thread_ctx}\n"]
+          if thread_ctx else []),
         *([f"What you've already discussed with him:\n{notes}\n"] if notes else []),
         f"The Commander says: {message}", "",
         "Reply like a colleague — short and natural.",

@@ -12,13 +12,31 @@ If you omit the id, the oldest pending decision is used.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import threading
 import time
 from pathlib import Path
 
 from . import locking, notify
 from .contracts import Ticket
+
+# Jira-style ticket key (e.g. AUTO-14, EU-89) — used to extract refs from chat history.
+_TICKET_KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+")
+
+# Telegram phrases the Commander uses to confirm a queued proposal without repeating its name.
+_APPROVAL_PHRASE_RE = re.compile(
+    r"^(create\s+it|approve|yes|go\s+ahead|file\s+it|do\s+it)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _question_fingerprint(question: str) -> str:
+    """Short SHA-1 of the normalised question text — used as the dedup key (EU-89).
+    Normalise whitespace and lower-case so minor rephrasing doesn't defeat the gate."""
+    normalised = " ".join(question.lower().split()).strip()
+    return hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:12]
 
 
 def _store(cfg) -> Path:
@@ -47,7 +65,7 @@ def _save(cfg, items: list[dict]) -> None:
 
 
 def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None,
-        *, block: bool = True, extra: dict | None = None) -> None:
+        *, block: bool = True, extra: dict | None = None) -> str | None:
     """Record a pending decision for the cockpit 'Needs you'. `entry_id` overrides the storage/de-dup
     key (defaults to the ticket id); pass a distinct key — e.g. f'{ticket.id}#out-of-scope' (EU-42) —
     when one ticket carries more than one kind of pending decision, so they don't overwrite each other.
@@ -61,13 +79,31 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
 
     EU-83: ``extra`` is merged into the stored entry verbatim. Use it to attach payload that the resume
     path needs — e.g. ``extra={"out_of_scope_report": report}`` for out-of-scope proposals so the
-    original ===TICKETS=== block survives to the Commander's reply and can be filed directly."""
+    original ===TICKETS=== block survives to the Commander's reply and can be filed directly.
+
+    EU-89 dedup gate: if a pending entry with the same base ticket id AND the same question
+    fingerprint already exists, the write is skipped and the existing entry's id is returned.
+    This prevents the autopilot from stacking duplicate 'which date format?' cards when a
+    re-run re-hits the same escalation point. Returns the stored entry id on success (new or
+    pre-existing), or None on a dedup hit (existing id returned instead)."""
     eid = entry_id or ticket.id
+    base_tid = str(ticket.id).split("#", 1)[0]
+    q_fp = _question_fingerprint(question)
+
+    # Dedup gate (EU-89): scan the store BEFORE parking on the tracker so a duplicate question
+    # never triggers a second Jira status transition.  A brief TOCTOU window is acceptable here —
+    # if two identical questions slip through concurrently the RMW de-dupe by entry_id still
+    # collapses them to a single row.
+    for it in load(cfg):
+        it_base = str(it.get("id", "")).split("#", 1)[0]
+        if it_base == base_tid and it.get("_question_fp") == q_fp:
+            return it["id"]   # already pending — skip the write
+
     entry = {
         "id": eid, "app": app_name, "question": question,
         "summary": ticket.summary, "description": ticket.description,
         "acceptance": ticket.acceptance_criteria, "ephemeral": ticket.ephemeral,
-        "ts": time.time(),
+        "ts": time.time(), "_question_fp": q_fp,
     }
     if extra:
         entry.update(extra)
@@ -85,6 +121,7 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
 
     # One atomic read-modify-write so a concurrent add/resolve can't drop this decision.
     locking.locked_rmw(_store(cfg), _mutate, default=[])
+    return eid
 
 
 def _park_on_tracker(cfg, ticket: Ticket, app_name: str) -> str | None:
@@ -424,6 +461,34 @@ def route_message(cfg, audit, text: str) -> bool:
     if load(cfg) and is_explicit_reply(text):
         if handle_reply(cfg, audit, _strip_reply_marker(text)):
             return True
+    # Approval shorthand: 'create it' / 'approve' / 'yes' with exactly one matching pending
+    # proposal batch → file immediately without a separate prompt (EU-89).  Scan recent chat
+    # for the most recently mentioned ticket key and match against pending proposals by source;
+    # if ambiguous or no match found, fall through to the CTO (which can clarify or ask).
+    if _APPROVAL_PHRASE_RE.match(text):
+        from . import approvals as _approvals
+        from . import council as _council_mod
+        thread = _council_mod.chat_transcript(cfg, lines=20)
+        # Collect ticket refs from the thread, newest first (last in file = most recent).
+        refs = _TICKET_KEY_RE.findall(thread)
+        batch_id = None
+        matched_ref = None
+        for ref in reversed(refs):
+            batches = [b for b in _approvals.pending_proposals(cfg)
+                       if ref.upper() in str(b.get("source", "")).upper()]
+            if len(batches) == 1:
+                batch_id = batches[0]["id"]
+                matched_ref = ref
+                break
+        if batch_id and matched_ref:
+            result_msg = _approvals.materialize_proposal(cfg, matched_ref)
+            notify.send(result_msg)
+            try:
+                audit.record("proposal_materialized", ref=matched_ref, batch=batch_id)
+            except Exception:  # noqa: BLE001 - audit failure must not crash the reply path
+                pass
+            return True
+
     # Otherwise: a free-text message (e.g. a reply to a council question). The CTO
     # answers it in Telegram and logs the exchange as standing guidance for the unit.
     from . import council
