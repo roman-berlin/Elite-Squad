@@ -333,6 +333,9 @@ class JiraAdapter(BacklogAdapter):
             app=self.app_name,
             labels=list(f.get("labels") or []),
             issue_type=((f.get("issuetype") or {}) or {}).get("name"),
+            # Carry the Jira status through so the autopilot can split In Progress vs To Do
+            # for the three-tier drain order (EU-87) without a second API call.
+            status=((f.get("status") or {}) or {}).get("name"),
         )
 
 

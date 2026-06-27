@@ -362,11 +362,37 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 save_blocked(cfg, blocked)
                 notify.send("▶️ Resuming (answered on Jira): " + ", ".join(sorted(resumed)))
                 audit.record("decision_resumed", tickets=sorted(resumed), via="jira-comment")
-            worklist = intake.from_drain(cfg, app_name, cap + len(blocked) + 5)
-            worklist = [(a, t) for (a, t) in worklist if t.id not in blocked][:cap]
-            # Prepend the Jira-answered resumes, de-duped against what the drain already returned.
-            in_wl = {t.id for _, t in worklist}
-            worklist = [v for k, v in resumed.items() if k not in in_wl] + worklist
+            # Three-tier worklist assembly (EU-87): In Progress → answered/unblocked → To Do.
+            # Pull more than cap so the blocked filter still leaves enough to fill the cap, then cap
+            # the DRAWN (new) work here — `cap` bounds only how much fresh backlog a cycle pulls.
+            # Answered/resumed tickets (Tier-2 below) are work already in flight that the Commander
+            # explicitly replied to, so they ride ON TOP of the cap and are never dropped — this is
+            # the pre-EU-87 contract eu61_autopilot_resume_queue_test.py pins (capping the *combined*
+            # list instead silently truncated the To Do tail when cap was small).
+            raw = intake.from_drain(cfg, app_name, cap + len(blocked) + len(resumed) + 5)
+            raw = [(a, t) for (a, t) in raw if t.id not in blocked][:cap]
+
+            # Tier-1: tickets the board already shows as In Progress — always run these first so
+            # a ticket we started in a previous cycle is never delayed by new To Do items.
+            # Use getattr for robustness in tests / adapters that return plain namespaces.
+            in_progress = [(a, t) for (a, t) in raw
+                           if (s := getattr(t, "status", None)) and "progress" in s.lower()]
+            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order.
+            to_do = [(a, t) for (a, t) in raw
+                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())]
+
+            # Tier-2: parked tickets the Commander answered directly on Jira. They sit between
+            # In Progress and To Do so a replied-to ticket is never left behind a fresh To Do.
+            # Unanswered blocked tickets stay in `blocked` and are excluded by the raw filter
+            # above — only tickets lifted by _resumable_answered() enter this tier.
+            # De-dup against the drain: an answered ticket that is still In Progress on the board
+            # comes through tier-1 via the drain and must not appear in tier-2 as well.
+            in_drain = {t.id for _, t in raw}
+            answered_items = [v for k, v in resumed.items() if k not in in_drain]
+
+            # Final ordering: In Progress → answered → To Do. The cap was already applied to the
+            # drawn work above; answered resumes are intentionally additive (see note above).
+            worklist = in_progress + answered_items + to_do
 
             if not worklist:
                 # An empty worklist is NOT necessarily a clear queue: a board that failed to drain
@@ -411,6 +437,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
 
             # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
             # parking so a transient blip doesn't sideline a ticket for hours.
+            #
+            # Re-escalation loop guard (EU-87): if an answered/resumed ticket escalates again,
+            # the loop calls decisions.add() which re-parks it on the tracker AND records a NEW
+            # answer_baseline (the current latest Jira comment). Next cycle, _resumable_answered()
+            # compares against that new baseline — the same comment now MATCHES the baseline, so
+            # auto-resume does NOT fire. The cycle is Blocked→(Commander answers again)→resume,
+            # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
+            # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
             retrying: list[str] = []
             counts_changed = False
