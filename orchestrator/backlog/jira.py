@@ -177,6 +177,16 @@ class JiraAdapter(BacklogAdapter):
                 return txt.strip()
         return None
 
+    def latest_builder_comment(self, key: str) -> str | None:
+        """The most recent [General]-prefixed comment posted by the unit — Builder next-step
+        instructions, CI guardrail handoffs, escalation notes. Used by the CTO chat to surface
+        the concrete action for the Commander when they ask 'what do I need to do about X?'"""
+        for c in reversed(self.comments(key)):
+            txt = _adf_to_text(c.get("body"))
+            if txt and txt.strip().startswith("[General]"):
+                return txt.strip()
+        return None
+
     def _current_status(self, key: str) -> str | None:
         try:
             r = self.session.get(self._url(f"issue/{key}"), params={"fields": "status"})

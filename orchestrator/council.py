@@ -626,6 +626,11 @@ async def _ticket_context(cfg: Config, message: str) -> str:
     adapter — the Jira token it already holds — and hand the CTO the facts inline. That way the
     CTO answers 'is this ticket ok?' from the unit's own access, instead of reaching for an
     ambient Atlassian MCP that would stall on a permission prompt the headless server can't answer.
+
+    Also surfaces the LAST unit-posted ([General]) comment — these carry the Builder's concrete
+    next-step instructions (ready diff to paste, secrets to set, CI guardrail notes, etc.) that
+    are exactly what the Commander needs when they ask 'what do I need to do about X?'
+
     Best-effort: an unmatched key, wrong project, or transient failure just yields no context."""
     keys = list(dict.fromkeys(_TICKET_KEY.findall(message or "")))
     if not keys:
@@ -639,11 +644,30 @@ async def _ticket_context(cfg: Config, message: str) -> str:
                 if getattr(app, "backlog_backend", "none") == "none":
                     continue
                 try:
-                    t = make_backlog(app).get_task(key)
+                    backlog = make_backlog(app)
+                    t = backlog.get_task(key)
                 except Exception:   # noqa: BLE001 — wrong project/app or transient; try the next app
                     continue
+                # 3 000 chars fits the description + any appended Commander-feedback section while
+                # keeping the prompt payload sane (the 1 500-char cap was cutting off comments).
                 desc = " ".join((t.description or "").split())
-                out.append(f"[{t.key}] {t.summary}\n{desc[:1500]}")
+                block = f"[{t.key}] {t.summary}\n{desc[:3000]}"
+                # Explicitly surface the LAST [General] comment — the unit's own post (Builder
+                # handoffs, CI guardrail instructions, escalation notes). These are filtered out of
+                # the description fed to the Builder (so it doesn't re-read its own generic posts as
+                # QA feedback), but they ARE what the Commander needs to know when they ask
+                # "what exactly do I have to do about this ticket?"
+                try:
+                    builder_note = backlog.latest_builder_comment(key)
+                    if builder_note:
+                        block += (
+                            f"\n\nLast unit post on {key} (the Builder/CTO's own comment — "
+                            f"read this first when the Commander asks 'what to do'):\n"
+                            f"{builder_note[:2000]}"
+                        )
+                except Exception:   # noqa: BLE001 — best-effort
+                    pass
+                out.append(block)
                 break
         return out
 
@@ -681,6 +705,41 @@ async def _board_status(cfg: Config) -> str:
     return "\n".join(lines)
 
 
+async def _needs_context(cfg: Config) -> str:
+    """Real Needs-you counts derived from the four live streams (decisions, approvals, proposals,
+    tasks) — injected into every CTO reply so any number it cites is grounded in reality, never
+    invented.  Best-effort: a missing/broken stream degrades gracefully."""
+    def _compute() -> str:
+        try:
+            from . import needs as _needs
+            s = _needs.summary(cfg)
+            parts: list[str] = []
+            if s["decisions"]:
+                ids = ", ".join(d.get("id", "?") for d in s["decisions"])
+                parts.append(f"{len(s['decisions'])} open decision(s) awaiting your answer"
+                             f" (ticket(s): {ids})")
+            if s["approvals"]:
+                parts.append(f"{len(s['approvals'])} approval(s) pending")
+            if s["proposals"]:
+                parts.append(f"{len(s['proposals'])} proposal batch(es) to approve/deny")
+            if s["tasks"]:
+                t_ids = ", ".join(
+                    t.get("ticket_id", "?") for t in s["tasks"] if t.get("ticket_id"))
+                parts.append(f"{len(s['tasks'])} run(s) needing attention"
+                             + (f" ({t_ids})" if t_ids else ""))
+            if not parts:
+                return ("Needs-you (live — cite ONLY this, never guess): 0 items — "
+                        "nothing is waiting for the Commander right now.")
+            return ("Needs-you (live — cite ONLY these numbers, never guess): "
+                    f"{s['total']} total — " + "; ".join(parts) + ".")
+        except Exception:  # noqa: BLE001
+            return ""
+    try:
+        return await asyncio.to_thread(_compute)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The CTO answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, and logs
@@ -713,9 +772,13 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         "Needs-you box; or he sends '/unblock <id>' or '/run <app> <what>' here. If he says 'run AUTO-9', "
         "that means the UNIT runs it — reassure him it's queued / tell him to /unblock it, do NOT tell him "
         "to run it elsewhere. NEVER invent a file path: the unit's products and their real repo paths are "
-        "listed below — use those exact paths or none.")
+        "listed below — use those exact paths or none. "
+        "NEVER invent a count: the real live Needs-you state is always provided below — "
+        "if you quote any number (decisions awaiting, tickets blocked, tasks pending) it MUST "
+        "come from that provided state; if it is not there, say you don't know rather than guess.")
     ticket_ctx = await _ticket_context(cfg, message)
     board_ctx = await _board_status(cfg) if _BOARD_Q.search(message or "") else ""
+    needs_ctx = await _needs_context(cfg)
     apps_brief = "\n".join(
         f"- {a.name}: repo {getattr(a, 'repo_path', '?')} · branches "
         f"{getattr(a, 'base_branch', '?')}/{getattr(a, 'protected_branch', '?')}"
@@ -726,6 +789,9 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         f"The unit's products and where they REALLY live (use these exact paths — never invent one):\n{apps_brief}\n",
         *([f"LIVE board status across ALL the unit's products — open work assigned to the Commander, "
            f"pulled from each Jira just now:\n{board_ctx}\n"] if board_ctx else []),
+        # Always inject the real Needs-you state so the CTO can never invent a count.
+        *([f"LIVE Needs-you state (ground every count you quote in this — never guess):\n{needs_ctx}\n"]
+          if needs_ctx else []),
         *([f"Background you may lean on if relevant — do NOT recite or summarize it:\n{context[:1200]}\n"]
           if context else []),
         *([f"Ticket(s) the Commander referenced — live from the unit's own backlog:\n{ticket_ctx}\n"]
