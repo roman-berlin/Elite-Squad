@@ -28,6 +28,7 @@ class Ticket:
     ephemeral: bool = False       # ad-hoc (not in a backlog) -> skip status writes
     labels: list[str] = field(default_factory=list)   # Jira labels (complexity + effort override)
     issue_type: Optional[str] = None                  # "Bug" | "Story" | "Epic" | ...
+    status: Optional[str] = None                      # Jira status name at fetch time (e.g. "In Progress", "To Do")
 
     def slug(self) -> str:
         import re
