@@ -430,12 +430,17 @@ def needs_chat_summary(t: dict[str, Any]) -> str:
 
 
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
-                active_filter: str | None = None, blocked: list[str] | None = None) -> str:
+                active_filter: str | None = None, blocked: list[str] | None = None,
+                needs_count: int | None = None) -> str:
     # Cards summarize the FULL run set, regardless of any active scope filter.
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
     needs = latest_needs_you(tasks, dismissed)   # one row per ticket (latest run), not every old run
-    cards = [("Tasks", total, "all"), ("Merged → dev", merged, "merged"), ("Needs you", len(needs), "needs")]
+    # needs_count may be supplied by the caller (server.py) as the full cross-stream total from
+    # needs.summary() — decisions + approvals + proposals + tasks.  Fall back to the task-only
+    # len(needs) when the caller hasn't provided it (e.g. the static `general dashboard` command).
+    _needs_display = needs_count if needs_count is not None else len(needs)
+    cards = [("Tasks", total, "all"), ("Merged → dev", merged, "merged"), ("Needs you", _needs_display, "needs")]
     if show_cost:
         cards.append(("Est. cost", f"${sum(t['cost'] for t in tasks):.2f}", None))
 

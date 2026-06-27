@@ -170,12 +170,22 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    _dismissed = D.load_dismissed(cfg.audit_path)
-    needs = [t for t in ts if t.get("outcome") in D._NEEDS_YOU and not D._is_dismissed(t, _dismissed)]
     passes = [t["passes"] for t in merged if t.get("passes")]
     avg_passes = round(sum(passes) / len(passes), 1) if passes else 0
     blocked = _load_blocked(cfg)
     sec_blocks = _scan(cfg.audit_path)["count"].get("security_block", 0)
+
+    # Single-source needs count: pull from needs.count() so the KPI card matches the side-panel
+    # badge and the /needs inbox (decisions + approvals + proposals + tasks), not tasks alone.
+    try:
+        from . import needs as _needs_mod
+        _needs_count = _needs_mod.count(cfg)
+    except Exception:  # noqa: BLE001
+        # Defensive fallback: task-only count so the card never breaks the board.
+        _dismissed = D.load_dismissed(cfg.audit_path)
+        _needs_count = len([t for t in ts
+                            if t.get("outcome") in D._NEEDS_YOU
+                            and not D._is_dismissed(t, _dismissed)])
 
     # Each card deep-links to a view scoped to the count it shows: the /tasks log auto-applies the
     # ?filter= (merged / needs / parked) so the destination honors the click, and Security blocks
@@ -185,8 +195,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "href": "/tasks?filter=merged"},
         {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok",
          "href": "/tasks?filter=merged"},
-        {"label": "Needs you", "value": len(needs), "hint": "PR · escalated · errored",
-         "tone": "warn" if needs else None, "href": "/tasks?filter=needs"},   # -> the tickets that need you
+        {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
+         "tone": "warn" if _needs_count else None, "href": "/tasks?filter=needs"},   # -> the tickets that need you
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
         {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
          "tone": "warn" if blocked else None, "href": "/tasks?filter=parked"},

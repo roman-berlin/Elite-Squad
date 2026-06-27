@@ -513,7 +513,12 @@ async def _main(argv: list[str]) -> int:
             print(D.render_status(tasks, show_cost=charged))
             return 0
         out = Path(cfg.audit_path).with_name("dashboard.html")
-        out.write_text(D.render_html(tasks, show_cost=charged), encoding="utf-8")
+        try:
+            from . import needs as _needs_mod
+            _needs_cnt = _needs_mod.count(cfg)
+        except Exception:  # noqa: BLE001
+            _needs_cnt = None
+        out.write_text(D.render_html(tasks, show_cost=charged, needs_count=_needs_cnt), encoding="utf-8")
         print(f"dashboard written: {out}  ({len(tasks)} task(s))")
         if getattr(args, "open", False):
             subprocess.run(["open", str(out)], check=False)
