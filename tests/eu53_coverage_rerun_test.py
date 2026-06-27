@@ -47,7 +47,7 @@ class Git:
     def changed_paths(s): return ["orchestrator/loop.py"]
 
 gate_calls = {"n": 0}
-def fake_gate(app, changed=None):
+def fake_gate(app, changed=None, **_):
     gate_calls["n"] += 1
     return GateResult(passed=True, report="")
 loop.run_gate = fake_gate

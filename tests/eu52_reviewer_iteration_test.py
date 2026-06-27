@@ -82,7 +82,7 @@ class Git:
     def changed_paths(s): return ["apps/automatixy/x.ts"]
 
 loop._notify = lambda c, t: None
-loop.run_gate = lambda app, changed_paths=None: GateResult(passed=True, report="")
+loop.run_gate = lambda app, changed_paths=None, **_: GateResult(passed=True, report="")
 loop._land = lambda *a, **k: TicketReport("AUTO-52", Outcome.MERGED, 1, 0.0, "automatixy", "b")
 async def fake_te(ticket, app, cfg, **_):   # EU-72: absorb store=/build_artifact= kwargs
     return TestEngineerResult(ok=True, coverage="lines 80%→85%")

@@ -628,6 +628,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 2) VERIFICATION GATE on the feature branch (cheap filter, before review)
         # Gate only the monorepo apps/packages this ticket actually touched (EU-19) —
         # falls back to the repo-wide gate when no per-app config matches the diff.
+        # (EU-85: domain-gap classification lives solely in the squad delegation path —
+        # squad._plan → detect_domain_gap — where it actually routes provisioning; the gate
+        # no longer re-classifies here just to attach an advisory note.)
         gate = run_gate(app, git.changed_paths())
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
                      report=("" if gate.passed else (gate.report or "")[:2500]))

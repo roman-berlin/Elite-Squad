@@ -92,6 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     adj = sub.add_parser("adjutant", help="Engineering Manager (S-1): personnel review — propose hires/retirements")
     adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
     adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
+    adj.add_argument("--ticket", help="preview the task-scoped specialist roster for a Jira ticket whose "
+                                      "domain falls outside the fixed squad lanes (e.g. EU-85); advisory only")
+    adj.add_argument("--app", help="app whose backlog holds --ticket (default: first configured app)")
     sct = sub.add_parser("scout", help="QA Engineer (S-2): smoke-test DEV in a browser (e2e / a11y) and report")
     sct.add_argument("app")
     sct.add_argument("--url", help="a deployed DEV URL to test (else the app's local dev server)")
@@ -498,7 +501,19 @@ async def _main(argv: list[str]) -> int:
             if getattr(args, "telegram", False):
                 notify.send("🪖 Personnel action applied:\n\n" + out[:1500])
             return 0
-        report = await adjutant.propose(cfg)
+        # EU-85: `--ticket KEY` fetches that ticket and feeds its text to propose(), which detects
+        # an out-of-lane domain and returns an advisory preview of the specialist roster the unit
+        # would synthesize for it. Without --ticket, propose() runs the normal personnel review.
+        ticket_text = None
+        if getattr(args, "ticket", None):
+            app_name = getattr(args, "app", None) or cfg.apps[0].name
+            _app, _t = intake.from_tickets(cfg, app_name, [args.ticket])[0]
+            ticket_text = "\n".join(filter(None, [
+                _t.summary or "",
+                _t.description or "",
+                *list(_t.acceptance_criteria or []),
+            ]))
+        report = await adjutant.propose(cfg, ticket_text=ticket_text)
         print(report)
         Path(cfg.audit_path).with_name("adjutant-report.md").write_text(report, encoding="utf-8")
         if getattr(args, "telegram", False):
