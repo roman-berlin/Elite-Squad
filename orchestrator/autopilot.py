@@ -16,6 +16,8 @@ would be re-picked every cycle. Use --once for dry-run checks.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import threading
 import time
 from pathlib import Path
@@ -25,6 +27,55 @@ from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
 from .loop import run as run_loop
+
+# PID file — single source of truth for "is the daemon actually running?"
+# Written at startup and removed on clean exit or SIGTERM. The Mac launchd keepalive daemon
+# (scripts/install-mac-autopilot-daemon.sh) relies on this file for external status checks.
+_PID_FILE = Path("/tmp/general-autopilot.pid")
+
+
+def _write_pid() -> None:
+    """Write the current process PID to _PID_FILE (best-effort; failure is non-fatal)."""
+    try:
+        _PID_FILE.write_text(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _remove_pid() -> None:
+    """Remove the PID file on clean exit — but ONLY when it still points at THIS process.
+
+    Best-effort (failure is non-fatal). The ownership check hardens the single-instance design: if a
+    second autopilot ever overwrote the file with its own PID, this exiting instance must NOT delete it
+    — otherwise daemon_running() (the single source of truth for the cockpit badge, EU-73) would read
+    'not running' while that other instance is still alive. We own the file only when its contents equal
+    os.getpid(); a missing or garbled file simply means there is nothing of ours to remove.
+    """
+    try:
+        if _PID_FILE.read_text().strip() == str(os.getpid()):
+            _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def daemon_running() -> bool:
+    """Return True when the autopilot daemon process is alive.
+
+    Reads _PID_FILE and probes the recorded PID with ``os.kill(pid, 0)`` (signal 0 = existence
+    check, no signal delivered). Returns False if the file is missing, unreadable, non-numeric,
+    or the process is no longer alive — i.e. any I/O or permission error means "not running".
+
+    This is the single source of truth for the cockpit ON/OFF badge (EU-73): it reflects reality
+    even when autopilot was launched outside the cockpit process (terminal that was later closed,
+    launchd keepalive daemon) where the in-memory ``_state['autopilot']['on']`` flag is stale.
+    """
+    try:
+        pid = int(_PID_FILE.read_text().strip())
+        os.kill(pid, 0)  # probe only — raises OSError(ESRCH) if gone, OSError(EPERM) if alive but not ours
+        return True
+    except (OSError, ValueError):
+        return False
+
 
 # `PARKED` (the outcomes that park a ticket IMMEDIATELY — a human decision / a PR is waiting, no point
 # retrying) is the canonical tuple in contracts.py (EU-56), imported above. ERRORED is handled
@@ -183,46 +234,77 @@ def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
 
 async def autopilot(cfg: Config, app_name: str | None = None,
                     once: bool = False, interval: int = 60, stop_event=None) -> None:
+    # Only the MAIN thread may install signal handlers — signal.signal() raises ValueError on any
+    # other thread. The cockpit Start button runs autopilot() in a background thread (server.py's
+    # _bg), so guard BOTH the SIGTERM registration (below) and its restore (in the finally) to the
+    # main thread. EU-73: the previously-unguarded registration crashed every cockpit-started
+    # autopilot with `signal only works in main thread of the main interpreter`.
+    _on_main_thread = threading.current_thread() is threading.main_thread()
+    _orig_sigterm = None
+    # Always have a stop Event so SIGTERM (e.g. a launchd unload of the keepalive daemon) can stand
+    # the loop down GRACEFULLY — the CLI/launchd daemon path passes none. The loop and _sleep() poll it, so
+    # an in-flight ticket finishes landing on DEV before we exit, rather than the daemon swallowing
+    # SIGTERM and being SIGKILLed (which would skip the PID-file cleanup in the finally).
+    if stop_event is None:
+        stop_event = threading.Event()
+
+    def _handle_sigterm(signum, frame):  # noqa: ANN001 — signal-handler signature
+        """SIGTERM (e.g. a launchd unload of the keepalive daemon) → graceful stand-down: set the stop Event and let
+        the loop notice it, finish any in-flight ticket, and run its finally (PID-file cleanup,
+        run-state release). Mirrors the cockpit Stop toggle and Ctrl-C."""
+        stop_event.set()
+
     audit = AuditLog(cfg.audit_path)
-    blocked = load_blocked(cfg)
-    error_counts = load_error_counts(cfg)   # per-ticket consecutive-ERROR tally (retry-before-park)
-    cap = max(1, cfg.max_tickets_per_run)
-    mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
-
-    # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
-    if notify.configured():
-        from . import decisions
-        threading.Thread(target=decisions.poll_loop, args=(cfg, audit), daemon=True).start()
-
-    scope = app_name or "all backlog apps"
-    notify.send(f"🛸 Autopilot {mode} online — working {scope}")
-    print(f"🛸 Autopilot {mode} — {scope}. Ctrl-C to stop.", flush=True)
-    if not cfg.dry_run and not once:
-        pass
-    elif cfg.dry_run and not once:
-        print("  ⚠ continuous + dry-run would re-pick the same ticket forever; use --live for "
-              "continuous, or keep --once for a dry test.", flush=True)
-
-    audit.record("autopilot_start", mode=mode, app=app_name, once=once)
-    budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
-    budget_alerted = False
-    # Last-announced idle REASON, as (bool(unreachable), frozenset(unreachable boards)) — or None when
-    # not idling. Keying on the reason (not a bare "already announced" flag) is the EU-50 fix: a board
-    # going dark AFTER the queue idled clear is a state change that must push once.
-    idle_state: tuple[bool, frozenset[str]] | None = None
-    git_held = False         # hold (once-announced) while the Commander is mid-rebase/merge locally
-
-    # EU-64: reflect this autopilot on its OWN project's cockpit run-state (keyed per app), so a
-    # per-project board shows autopilot working THIS project without reading/writing another's state.
-    # ``app_name=None`` (all backlog apps) maps to the unit-wide default key. We claim the slot for the
-    # project; if it's already held — e.g. server.py holds the unit-wide guard for autopilot's whole
-    # lifetime, or a manual run owns this app — we run anyway but DON'T own the release, so we never
-    # clear or clobber someone else's run-state.
     from . import cockpit_state
     run_key = app_name or None
-    owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
-    run_state = cockpit_state.get_state(run_key)
+    owns_run_state = False    # set True only once claim_run succeeds; gates release in the finally
+    run_state = None
     try:
+        # Write the PID file FIRST, inside the try, so the finally's _remove_pid() always runs — even
+        # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
+        # early raise would orphan /tmp/general-autopilot.pid pointing at this live process and pin
+        # daemon_running() True forever (EU-73 — this is the single source of truth for the cockpit badge).
+        _write_pid()
+        if _on_main_thread:
+            _orig_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, _handle_sigterm)
+
+        blocked = load_blocked(cfg)
+        error_counts = load_error_counts(cfg)   # per-ticket consecutive-ERROR tally (retry-before-park)
+        cap = max(1, cfg.max_tickets_per_run)
+        mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
+
+        # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
+        if notify.configured():
+            from . import decisions
+            threading.Thread(target=decisions.poll_loop, args=(cfg, audit), daemon=True).start()
+
+        scope = app_name or "all backlog apps"
+        notify.send(f"🛸 Autopilot {mode} online — working {scope}")
+        print(f"🛸 Autopilot {mode} — {scope}. Ctrl-C to stop.", flush=True)
+        if not cfg.dry_run and not once:
+            pass
+        elif cfg.dry_run and not once:
+            print("  ⚠ continuous + dry-run would re-pick the same ticket forever; use --live for "
+                  "continuous, or keep --once for a dry test.", flush=True)
+
+        audit.record("autopilot_start", mode=mode, app=app_name, once=once)
+        budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
+        budget_alerted = False
+        # Last-announced idle REASON, as (bool(unreachable), frozenset(unreachable boards)) — or None
+        # when not idling. Keying on the reason (not a bare "already announced" flag) is the EU-50 fix:
+        # a board going dark AFTER the queue idled clear is a state change that must push once.
+        idle_state: tuple[bool, frozenset[str]] | None = None
+        git_held = False         # hold (once-announced) while the Commander is mid-rebase/merge locally
+
+        # EU-64: reflect this autopilot on its OWN project's cockpit run-state (keyed per app), so a
+        # per-project board shows autopilot working THIS project without reading/writing another's
+        # state. ``app_name=None`` (all backlog apps) maps to the unit-wide default key. We claim the
+        # slot for the project; if it's already held — e.g. server.py holds the unit-wide guard for
+        # autopilot's whole lifetime, or a manual run owns this app — we run anyway but DON'T own the
+        # release, so we never clear or clobber someone else's run-state.
+        owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
+        run_state = cockpit_state.get_state(run_key)
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
@@ -376,7 +458,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     finally:
         # Release THIS project's run-state if we own it (clears active / run_started / stop_event) and
         # drop the dry/live tag, so the per-project board shows no stale run once autopilot stands down.
+        # (run_state may still be None if claim_run() never ran — an early raise during setup.)
         if owns_run_state:
             cockpit_state.release_run(run_key)
-            run_state["dry_run"] = None
+            if run_state is not None:
+                run_state["dry_run"] = None
+        # Remove the PID file on any clean exit path (KeyboardInterrupt, stop_event, budget halt, once=True).
+        # The launchd daemon treats a missing PID file as "not running" — this is the handshake.
+        _remove_pid()
+        # Restore the original SIGTERM handler — main thread only, mirroring the registration guard
+        # above (signal.signal() raises ValueError off the main thread, e.g. the cockpit _bg path).
+        if _on_main_thread and _orig_sigterm is not None:
+            signal.signal(signal.SIGTERM, _orig_sigterm)
     audit.record("autopilot_stop")
