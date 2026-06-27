@@ -52,6 +52,12 @@ class BacklogAdapter(ABC):
         the unit's own comments, as plain text. Default: not supported."""
         return None
 
+    def latest_builder_comment(self, key: str) -> Optional[str]:
+        """Optional: the most recent [General]-prefixed comment posted by the unit itself (Builder
+        next-step instructions, CI guardrail handoffs, escalation notes), as plain text.
+        Used by the CTO chat to surface the concrete action for the Commander. Default: not supported."""
+        return None
+
 
 class NoneBacklog(BacklogAdapter):
     """For apps with no tracker (ad-hoc / free-text only)."""

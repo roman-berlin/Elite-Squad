@@ -58,6 +58,8 @@ class _FakeBacklog:
     def get_task(s, key):
         calls["n"] += 1
         return _FakeTicket(key)
+    def latest_builder_comment(s, key):  # no unit post on this fake ticket
+        return None
 def _fake_make_backlog(app):
     return _FakeBacklog()
 backlog_base.make_backlog = _fake_make_backlog
@@ -66,7 +68,8 @@ jcfg = types.SimpleNamespace(apps=[types.SimpleNamespace(name="automatixy", back
 
 out = asyncio.run(council._ticket_context(jcfg, "I think it's AUTO-14. Check if this ticket is ok"))
 chk("ticket context found AUTO-14", "[AUTO-14]" in out and "Summary of AUTO-14" in out, out[:60])
-chk("ticket description is truncated (<=1500)", len(out.split("\n", 1)[1]) <= 1500 if "\n" in out else False)
+# EU-70: limit raised from 1500 → 3000 so the Builder's appended comment section is not cut off.
+chk("ticket description is truncated (<=3000)", len(out.split("\n", 1)[1]) <= 3000 if "\n" in out else False)
 
 calls["n"] = 0
 out2 = asyncio.run(council._ticket_context(jcfg, "compare AUTO-14 and AUTO-14 and ZEL-9"))
