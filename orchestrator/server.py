@@ -418,6 +418,20 @@ def create_app(cfg: Config):
             D.dismiss(cfg.audit_path, tid)
         return redirect(back if back in ("/tasks", "/needs") else "/tasks")
 
+    @app.post("/api/unblock")
+    def unblock_api():
+        """Remove a ticket from blocked_tickets.json (the parked set).
+
+        The Dismiss/Unblock button on the /tasks?filter=parked view posts here — NOT to
+        /api/dismiss — so it removes the ticket from blocked_tickets.json (the authoritative
+        parked store), not just from dismissed.json. After this the autopilot will retry it
+        next cycle and the row disappears from the parked count (EU-78)."""
+        tid = (request.form.get("ticket") or "").strip()
+        if tid:
+            from . import autopilot as _ap
+            _ap.unblock(cfg, tid)
+        return redirect("/tasks?filter=parked")
+
     @app.get("/tickets")
     def tickets_page():
         # EU-63: one concrete project per tab — the retired "All projects"/`*` grouped view is gone, so

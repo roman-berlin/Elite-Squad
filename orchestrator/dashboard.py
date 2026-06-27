@@ -295,6 +295,32 @@ def latest_needs_you(tasks: list[dict[str, Any]], dismissed: dict | None = None)
             if t.get("outcome") in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
 
 
+def latest_parked(tasks: list[dict[str, Any]], blocked_set: set[str]) -> list[dict[str, Any]]:
+    """The Parked list: ONE row per blocked ticket — its most recent run.
+
+    Mirrors latest_needs_you's deduplication so the parked view shows ONE row per ticket
+    instead of the full run history. Tickets in blocked_set with no audit history (never
+    ran, or log rotated — the 'ghost' scenario) get stub rows so they are still visible
+    and Unblockable. Returned newest-first by 'started'."""
+    _stub: dict[str, Any] = {"outcome": None, "started": None, "ended": None,
+                              "passes": 0, "turns": 0, "cost": 0.0, "verdict": None,
+                              "note": "", "branch": "", "app": "", "passes_list": [],
+                              "duration": None, "dry_run": None, "detail": {}, "pr_url": None}
+    latest: dict[str, dict[str, Any]] = {}
+    for t in tasks:
+        tid = str(t.get("ticket_id") or "")
+        if not tid or tid not in blocked_set:
+            continue
+        if tid not in latest or _started_key(t) >= _started_key(latest[tid]):
+            latest[tid] = t
+    # Ghost tickets — in blocked but no audit history; include as stub rows so Unblock works.
+    for tid in blocked_set:
+        if tid not in latest:
+            latest[tid] = {"ticket_id": tid, **_stub}
+    return sorted(latest.values(),
+                  key=lambda t: _started_key(t) or datetime.min, reverse=True)
+
+
 # --------------------------------------------------------------------------- #
 def _badge(outcome: Optional[str]) -> str:
     cls = {"merged→dev": "ok", "dry-run": "muted", "PR / needs you": "warn",
@@ -454,7 +480,9 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     elif flt == "needs":
         tasks = [t for t in tasks if t["outcome"] in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
     elif flt == "parked":
-        tasks = [t for t in tasks if str(t.get("ticket_id")) in blocked_set]
+        # One row per parked ticket (latest run) — same dedup as latest_needs_you.
+        # Ghost tickets (in blocked but no audit history) get stub rows so Unblock works.
+        tasks = latest_parked(tasks, blocked_set)
     else:
         flt = ""
 
@@ -484,7 +512,33 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
         )
 
     panel = ""
-    if needs:
+    if flt == "parked":
+        # Parked panel: one row per blocked ticket with Unblock action.
+        # Replaces the needs panel when viewing the parked filter so the Commander
+        # has a clear action on every row — no parked ticket is un-clearable (EU-78).
+        if tasks:
+            items = "".join(
+                '<div class=need>'
+                f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
+                f'<span class=mono>{html.escape(str(t["ticket_id"]))}</span> {_badge(t["outcome"])} '
+                f'<span class=muted>{html.escape(_short(str(t.get("note") or ""), 80))}</span></span>'
+                + (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR &#8599;</a>'
+                   if t.get("pr_url") else "")
+                + ('<a class=x style="text-decoration:none" href="/needs" '
+                   'title="Go to Needs you to answer this ticket">Answer</a>'
+                   if t.get("outcome") in _NEEDS_YOU else "")
+                + '<form method=post action=/api/unblock class=dismiss>'
+                f'<input type=hidden name=ticket value="{html.escape(str(t["ticket_id"]))}">'
+                '<button class=x title="Unblock — remove from parked, autopilot will retry">Unblock</button></form>'
+                '</div>'
+                for t in tasks)
+            panel = (f'<div class=panel><div class=ph>Parked ({len(tasks)}) '
+                     f'&#8212; auto-skipped by autopilot</div>{items}</div>')
+        else:
+            panel = ('<div class=panel><div class=ph>Parked</div>'
+                     '<div class=need><span class=muted>&#10003; No parked tickets &#8212; all clear.</span>'
+                     '</div></div>')
+    elif needs:
         items = "".join(
             '<div class=need>'
             f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
