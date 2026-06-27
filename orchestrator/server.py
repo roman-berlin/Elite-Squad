@@ -274,11 +274,20 @@ def create_app(cfg: Config):
         from . import autopilot as ap
         cur = _state.get("autopilot") or {}
         action = request.form.get("action", "toggle")
+        # EU-74: preserve ?app= on every redirect so the project selector stays in sync with the
+        # autopilot badge after Start/Stop/drain.  For Start the form always carries `app`; for
+        # Stop/drain (which don't POST an `app` field) fall back to the running autopilot's scope.
+        _form_app = (request.form.get("app") or "").strip()
+        _state_app = (cur.get("app") or "").strip()
+        if _state_app in {"(no project)", "(external daemon)"}:
+            _state_app = ""
+        _redir_app = _form_app or _state_app
+        _redir = f"/?app={_redir_app}" if _redir_app else "/"
         want_on = action == "start" or (action == "toggle" and not cur.get("on"))
         if want_on and not cur.get("on"):
             if not health.summary(cfg)["healthy"]:
                 _state["last_msg"] = "autopilot blocked — fix the health problems first"
-                return redirect("/")
+                return redirect(_redir)
             app_name = _scope(request.form.get("app")) or None   # autopilot works ONE concrete project
             ev = threading.Event()
             ap_cfg = copy.copy(cfg)
@@ -294,11 +303,11 @@ def create_app(cfg: Config):
             with _run_lock:
                 if (_state.get("autopilot") or {}).get("on"):
                     _state["last_msg"] = "autopilot is already running"
-                    return redirect("/")
+                    return redirect(_redir)
                 if _state["active"]:
                     _state["last_msg"] = ("a run is already in progress — stop it and wait for it to "
                                           "finish, then start autopilot")
-                    return redirect("/")
+                    return redirect(_redir)
                 # EU-73: a detached autopilot daemon (started from a terminal / the launchd keepalive,
                 # whose window has since closed) is invisible to this cockpit's in-memory flags but very
                 # much alive — its PID file proves it. Refuse so a Start click can't run a SECOND
@@ -309,7 +318,7 @@ def create_app(cfg: Config):
                     _state["last_msg"] = ("autopilot is already running as a detached daemon — stop it "
                                           "first (unload the launchd keepalive agent, or close the "
                                           "terminal it runs in) before starting another")
-                    return redirect("/")
+                    return redirect(_redir)
                 _state["active"] = True
                 _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "(no project)",
                                        "stopping": False}
@@ -337,7 +346,7 @@ def create_app(cfg: Config):
             # the idempotent no-op the guard above already made it.
             cur["stop"].set()
             cur["on"] = False
-        return redirect("/")
+        return redirect(_redir)
 
     @app.get("/api/board")
     def board_api():
