@@ -31,6 +31,11 @@ mirrors that map for humans; the regression suite (`tests/eu57_officer_naming_te
 | `pm`             | Product Manager    | Product Manager *(unchanged)* |
 | `devops`         | DevOps             | DevOps *(unchanged)* |
 | `test_engineer`  | Test Engineer      | Test Engineer *(unchanged)* |
+| `liaison`        | *(new — EU-66)*    | **Mayor** |
+
+The `liaison` officer (EU-66) is new — it has no retired army name. Its internal key is the stable
+`liaison`; its human-facing display name, decided by the Commander, is **Mayor** (the inter-unit
+ambassador / outward voice to the allied unit).
 
 ## What is intentional and MUST NOT be renamed
 

@@ -39,6 +39,7 @@ OFFICER_NAMES: dict[str, str] = {
     "scribe": "Technical Writer",
     "devops": "DevOps",
     "soldiers": "engineers",   # the squad members a Dev Team Lead fields (plural / collective)
+    "liaison": "Mayor",        # EU-66 inter-unit ambassador (friendly outward voice, no task execution)
 }
 
 

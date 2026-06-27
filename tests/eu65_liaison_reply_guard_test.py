@@ -90,7 +90,7 @@ check("reply is a single turn", seen["max_turns"] == 1)
 check("reply metered under the dedicated 'liaison' tag (its own cap)", seen["tag"] == "liaison")
 # The no-exfil core: the unit's internal memory / standing orders are NEVER fed to this agent.
 sp = (seen["system_prompt"] or "")
-check("system prompt carries the liaison guardrails", sp == liaison._SYSTEM and "UNTRUSTED" in sp)
+check("system prompt carries the liaison guardrails", sp == liaison.LIAISON_SYSTEM and "UNTRUSTED" in sp)
 for leak in ("UNIT MEMORY", "Standing Orders", "TELEGRAM_CHAT_ID", "SUPABASE", "Commander"):
     check(f"no internal context leaked into the prompt: {leak!r}", leak not in sp, sp[:60])
 # The untrusted message is fenced as DATA, never spliced in as an instruction.
