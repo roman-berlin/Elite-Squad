@@ -373,6 +373,13 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
     # Key by lane_key for O(1) lookup in _soldier() and _run_gate().
     specialists: dict[str, dict] = {c["lane_key"]: c for c in charters}
 
+    # EU-86: enforce the ephemeral invariant — charters must never be written to officers/.
+    # Best-effort (never raises); a guard hiccup must not abort the build loop.
+    try:
+        _hr.ensure_no_charter_written(charters)
+    except Exception:  # noqa: BLE001
+        pass
+
     # One subtask per specialist: implement the full ticket in their domain.
     subtasks = [
         Subtask(
