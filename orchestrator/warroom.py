@@ -385,6 +385,9 @@ def feed(cfg, tasks: list[dict], app: Optional[str], limit: int = 16) -> list[di
         if not when:
             continue
         tone, label = _FEED_META.get(out, ("muted", "in progress"))
+        # The feed is a one-line-per-ticket activity strip: flatten any newlines and
+        # word-boundary-trim the note to keep each row tight (EU-33). Officer-report bullets
+        # are rendered in full on the cockpit transcript (dashboard._detail_html), not here.
         note = (t.get("note") or "").strip().replace("\n", " ")
         items.append({
             "when": when, "tone": tone,
@@ -847,6 +850,64 @@ _TALK_HTML = (
     '</div>')
 
 
+def _md_to_html(text: str) -> str:
+    """Convert light markdown in officer text to HTML.
+
+    Lines starting with '• ' or '- ' are grouped into <ul class=fbullets><li>
+    elements so bullet-formatted officer reports render as proper lists rather
+    than a wall of plain text. Other line-breaks become <br>. Blank lines flush
+    the current paragraph/bullet group.
+    """
+    if "\n" not in text and not text.startswith(("• ", "- ")):
+        return _esc(text)
+    out: list[str] = []
+    bullets: list[str] = []
+    prose: list[str] = []
+
+    def _emit_prose() -> None:
+        if prose:
+            if out:
+                out.append("<br>")
+            out.append("<br>".join(_esc(s) for s in prose))
+            prose.clear()
+
+    def _emit_bullets() -> None:
+        if bullets:
+            lis = "".join(f"<li>{_esc(b)}</li>" for b in bullets)
+            out.append(f"<ul class=fbullets>{lis}</ul>")
+            bullets.clear()
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith(("• ", "- ")):
+            _emit_prose()
+            bullets.append(s[2:].strip())
+        elif s:
+            _emit_bullets()
+            prose.append(s)
+        else:                   # blank line — flush both buffers
+            _emit_prose()
+            _emit_bullets()
+
+    _emit_prose()
+    _emit_bullets()
+    return "".join(out)
+
+
+def _render_feed_text(text: str) -> str:
+    """Render a feed item's text field as HTML with markdown bullet support.
+
+    Feed text has the shape "label" or "label — body". The em-dash prefix
+    (the tone label) is kept as plain escaped text; only the body after the
+    first ' — ' separator gets markdown conversion via _md_to_html().
+    """
+    _SEP = " — "   # " — "
+    if _SEP in text:
+        prefix, _, body = text.partition(_SEP)
+        return _esc(prefix) + _esc(_SEP) + _md_to_html(body)
+    return _md_to_html(text)
+
+
 def _feed_html(items: list[dict]) -> str:
     if not items:
         return '<div class=muted style="padding:14px">No activity yet.</div>'
@@ -855,7 +916,7 @@ def _feed_html(items: list[dict]) -> str:
         tk = (f'<span class=mono>{_esc(it["ticket"])}</span> ' if it["ticket"] else "")
         out.append(
             f'<div class=fitem><span class="fd {it["tone"]}"></span>'
-            f'<div class=fbody>{tk}{_esc(it["text"])}'
+            f'<div class=fbody>{tk}{_render_feed_text(it["text"])}'
             f'<div class=fmeta>{_esc(it["app"])}{" · " if it["app"] else ""}{_esc(it["ago"])}</div></div></div>')
     return "".join(out)
 
@@ -1361,6 +1422,7 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .fd.ok{background:var(--ok)}.fd.warn{background:var(--warn)}.fd.bad{background:var(--bad)}
 .fd.info{background:var(--info)}.fd.muted{background:var(--faint)}
 .fbody{font-size:13px;min-width:0}.fmeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:3px}
+.fbullets{margin:3px 0 2px 0;padding-left:15px;font-size:12px}.fbullets li{margin:1px 0;line-height:1.4}
 /* live log */
 .logbox{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#b9c2cf;background:#070a0e;
 margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;

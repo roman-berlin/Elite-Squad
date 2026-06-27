@@ -347,9 +347,9 @@ def _detail_html(t: dict[str, Any]) -> str:
         blocks.append(
             f'<div class=pass><div class=passhead>Pass {d.get("n","?")} '
             f'<span class=eff>effort {html.escape(str(d.get("effort") or "—"))}</span></div>'
-            f'<div class=sub><b>Builder:</b> {html.escape(d.get("build_summary") or "—")}</div>'
+            f'<div class="sub pre"><b>Builder:</b> {html.escape(d.get("build_summary") or "—")}</div>'
             f'<div class=sub><b>Tools:</b> <span class=mono>{tools}</span></div>'
-            f'<div class=sub><b>Reviewer {vbadge}:</b> {html.escape(d.get("review_summary") or "—")}</div>'
+            f'<div class="sub pre"><b>Reviewer {vbadge}:</b> {html.escape(d.get("review_summary") or "—")}</div>'
             f'{rc_html}{is_html}</div>'
         )
     return '<div class=det>' + "".join(blocks) + '</div>'
@@ -397,6 +397,27 @@ def brief(text: Any, n: int = 360) -> str:
             break
         out += (" " if out else "") + s
     return _short(out or raw, n)
+
+
+def bullets(text: Any, limit: int = 3, width: int = 200) -> str:
+    """Render an officer summary as ≤`limit` tight "• …" lines for a hand-off comment (EU-79).
+
+    The officers now LEAD their summary with bullets (what was done / the gap / what changed), so we
+    reuse those lines directly; when the source carries no explicit bullets we fall back to brief()
+    split into its first sentences. Each line is whitespace-collapsed and word-boundary trimmed to
+    `width`, so the result is always a short, scannable bullet list — never the wall of prose Roman
+    flagged on the QA hand-off comment. Always returns at least one non-empty bullet."""
+    import re
+    raw = str(text or "").strip()
+    if not raw:
+        return "• (no summary)"
+    items = [m.group(1).strip() for ln in raw.splitlines()
+             if (m := re.match(r"^\s*(?:[-*•]|\d+[.)])\s+(.*\S)\s*$", ln))]
+    if not items:
+        # No explicit bullets — split the brief into its first sentences instead.
+        items = [s.strip() for s in re.split(r"(?<=[.!?])\s+", brief(raw, n=width * limit)) if s.strip()]
+    lines = [_short(it, width) for it in items[:limit] if it.strip()]
+    return "\n".join(f"• {it}" for it in lines) or f"• {_short(raw, width)}"
 
 
 def needs_detail_html(t: dict[str, Any]) -> str:
@@ -601,6 +622,7 @@ th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-
 .det{padding:14px 22px}.pass{border-left:2px solid #2a3140;padding:6px 0 12px 14px;margin:4px 0}
 .passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:#8a909c;font-weight:400;font-size:12px;margin-left:6px}
 .sub{font-size:13px;color:#c4c9d2;margin:3px 0}.sub b{color:#e8eaed}
+.sub.pre{white-space:pre-wrap}
 .sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:#fbbf24;font-weight:600;text-transform:uppercase;font-size:11px}
 .fltbar{margin:6px 30px 0;color:#c4c9d2;font-size:13px}
 </style></head><body>

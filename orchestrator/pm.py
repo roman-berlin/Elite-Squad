@@ -44,7 +44,11 @@ End your reply with EXACTLY one line, nothing after it:
   PM VERDICT: ESCALATE
 
 Above that line:
-- DECIDE → one short paragraph: the decision + a one-line rationale the Builder can act on.
+- DECIDE → lead with ≤3 tight bullets:
+    • Decision: <what was decided>
+    • Rationale: <one-line why>
+    • Action: <the single thing the Builder must do next>
+  One sentence of prose may follow if essential context is needed.
 - ESCALATE → a BRIEF for the Commander, at most 6 lines, in EXACTLY this shape — no preamble, no
   re-derivation, no quoting the whole ticket:
     BLOCKER: <one sentence — what is blocked and why it's his call>

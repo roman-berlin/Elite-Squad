@@ -68,8 +68,11 @@ worktree (your cwd is the repo root). Do NOT run git at all — no fetch, status
 worktree, log, diff — and never commit, push, switch branches, or touch history. Spend your
 turns on the code, not on inspecting the repo.
 
-Finish with a short plain-text summary: what you changed, which file(s), and which
-acceptance criterion each change satisfies. End with a line EXACTLY in this form:
+Finish with a plain-text summary that MUST open with ≤5 tight bullets in this order:
+  • (a) what was done — which file(s) changed and which acceptance criterion each satisfies
+  • (b) any gap or known limitation (omit the bullet if none)
+  • (c) what changed vs the previous attempt — decisions made, approach shifted (omit on first pass)
+Any brief prose detail may follow the bullets. End with a line EXACTLY in this form (keep it last):
   TEST: <the single page/route to verify this on DEV, e.g. /leads — or a full URL>
 so the Commander knows exactly where to check. If the change has no UI (pure backend/config),
 write 'TEST: (no UI — <how to verify, e.g. an endpoint/command>)'.

@@ -580,9 +580,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     # ticket so you can review it (and reverse — it's on DEV, never production).
                     if auto and not cfg.dry_run and not ticket.ephemeral:
                         try:
-                            backlog.add_comment(ticket, "🤖 Automode — the PM decided this "
-                                "autonomously (review & reverse if needed; lands on DEV, not "
-                                "production):\n\n" + pm_outcome["body"][:1200])
+                            backlog.add_comment(ticket,
+                                "🤖 Automode — PM decided autonomously (DEV only — review & reverse if needed).\n\n"
+                                + pm_outcome["body"][:1200])
                         except Exception:  # noqa: BLE001 - a comment failure must not break the run
                             pass
                     head = ("🤖 Automode — the PM decided autonomously" if auto
@@ -1028,14 +1028,17 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         _bar(len(PHASES))
         turl = _test_url(app, build.summary)
         test_line = f"\n🔗 Test on {app.base_branch}: {turl}" if turl else ""
-        # QA hand-off: a brief 'what was done' + the DEV test link — NOT the reviewer's full essay.
+        # QA hand-off: a brief, BULLETED 'what was done' + the DEV test link — NOT the reviewer's full
+        # essay (EU-79). The officers lead their summary with bullets; bullets() keeps ≤3 tight ones and
+        # the test link drops onto its own line below, so the comment is scannable, never a prose wall.
         if not ticket.ephemeral:
             from . import dashboard as _D
-            whatdone = _D.brief(review.summary or build.summary, n=220)
+            whatdone = _D.bullets(review.summary or build.summary, limit=3, width=200)
             head = "marked Done" if cfg.mark_done_on_merge else "moved to QA"
             backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
             backlog.add_comment(
-                ticket, f"✅ Merged to {app.base_branch} — {head}.\nWhat was done: {whatdone}{test_line}")
+                ticket,
+                f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
         done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,
@@ -1051,7 +1054,9 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             if not ok:
                 if not ticket.ephemeral:
                     backlog.set_status(ticket, "Needs Human")
-                    backlog.add_comment(ticket, f"⚠️ SRE rolled this back from {app.base_branch}. {snote[:900]}")
+                    backlog.add_comment(ticket,
+                        f"⚠️ SRE rolled back from {app.base_branch}.\n"
+                        f"• {snote[:900]}")
                 print(f"  🛡️ {ticket.id}: SRE reverted the merge — needs you.", flush=True)
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                     notes=f"sentinel reverted: {snote[:160]}")
@@ -1067,8 +1072,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             if not sok:
                 smoke_note = " · ⚠️ post-merge smoke FAILED"
                 if not ticket.ephemeral:
-                    backlog.add_comment(ticket, f"🚨 Post-merge smoke FAILED on {app.base_branch} — "
-                                        f"DEV is live with a failing smoke. {smnote[:900]}")
+                    backlog.add_comment(ticket,
+                        f"🚨 Post-merge smoke FAILED on {app.base_branch}.\n"
+                        f"• DEV is live with a failing smoke.\n"
+                        f"• {smnote[:900]}")
 
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
@@ -1083,8 +1090,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
           + (f"PR {pr_url}" if pr_url else "open a PR manually"), flush=True)
     _bar(fail_idx, fail=fail_idx)
     if not ticket.ephemeral:
-        backlog.add_comment(ticket, f"Passed review but not auto-merged ({reason})."
-                            + (f" PR: {pr_url}" if pr_url else " Open a PR manually."))
+        backlog.add_comment(ticket,
+            f"⚠️ Passed review — not auto-merged.\n"
+            f"• Reason: {reason}\n"
+            + (f"• PR: {pr_url}" if pr_url else "• Open a PR manually."))
         if pr_url:
             backlog.attach_pr(ticket, pr_url)
     _notify(cfg, f"⚠️ {ticket.id} needs you — not auto-merged ({reason})\n"
