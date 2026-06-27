@@ -94,6 +94,13 @@ r = server.create_app(scfg).test_client().get("/roster-doc")
 chk("/roster-doc returns 200", r.status_code == 200, str(r.status_code))
 chk("/roster-doc shows the roster", "Chain of command" in r.get_data(as_text=True))
 
+# --- Roster nav button: one-click access from the cockpit top bar ---
+from orchestrator import cockpit_views, sync as _sync
+_sync.can_promote = lambda: False   # keep the bar off git/network
+bar = cockpit_views._control_bar(scfg, "automatixy")
+chk("Roster button present in the top nav bar", 'href="/roster-doc"' in bar, "missing /roster-doc link")
+chk("Roster nav link carries the descriptive title", "Officers, soldiers" in bar, "missing title attr")
+
 print("\n================== ROSTER QA ==================")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
