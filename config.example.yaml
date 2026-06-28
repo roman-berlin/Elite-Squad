@@ -110,6 +110,18 @@ apps:
                                      # gate_env + bounded by gate_timeout_sec, same as the gate. Keep it NARROW
                                      # + STABLE — a red here auto-reverts the merge and hands the ticket back:
       - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
+      # EU-98: two-tenant LIVE tenant-isolation check on the just-landed DEV — proves a guard that
+      # exists in code is actually evaluated in the right middleware position in the running stack
+      # (only a live request catches a middleware-ordering error). ABSOLUTE paths are REQUIRED:
+      # Sentinel runs postmerge_commands with cwd = THIS app's repo (automatixy), NOT the EU repo
+      # where the script lives. A non-zero exit — an isolation breach (Tenant B reads Tenant A's
+      # resource) OR a non-functional gate (Tenant A can't even read its OWN resource) — makes
+      # gate.run_commands report RED, so sentinel.guard reverts the merge and blocks the ticket
+      # going green. The EU venv interpreter is named explicitly because the script imports
+      # `requests`. Tenant creds + the DEV URL are injected from the autopilot ENV, never hardcoded
+      # (TENANT_A_EMAIL/TENANT_A_PASSWORD, TENANT_B_EMAIL/TENANT_B_PASSWORD, DEV_BASE_URL — put them
+      # in .env alongside ANTHROPIC_API_KEY/JIRA_*):
+      - "/Users/romanberlin/Projects/General/.venv/bin/python /Users/romanberlin/Projects/General/tests/two_tenant_smoke.py"
     # smoke_command: "npx playwright test e2e/auth-redirect.smoke.ts"   # EU-60: a single FAST post-merge
                                      # canary on the landed <base>. On red it FLAGS (Telegram + audit + ticket
                                      # comment) but never reverts — the auth-redirect smoke lives in the AUTO repo
