@@ -645,7 +645,8 @@ def _kpi_sparkline_svg(
 
 
 def _run_html(run: Optional[dict], mode: Optional[str] = None,
-              elapsed: Optional[str] = None, manual: bool = False) -> str:
+              elapsed: Optional[str] = None, manual: bool = False,
+              log_path: Optional[str] = None) -> str:
     """Render the Active Run panel body.
 
     EU-76: this is the single authoritative slot for the in-flight (or most-recent) run.
@@ -653,6 +654,10 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     panel is promoted to a hero-style layout — pulsing dot, large ticket ID, current phase
     name, mode chip — so the most important information stays prominent without the
     duplication of a separate .hero card above.
+
+    EU-106: ``log_path`` — when the BE subtask stores a path in state['log_path'], a small
+    '📂 open log' link is rendered right after the phase bar so you can jump to the MQL5-style
+    local run log without leaving the cockpit.
     """
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
@@ -755,10 +760,21 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             f'<div style="display:flex;gap:7px;align-items:center">'
             f'{chip}<span class="b muted">last run</span></div></div>'
         )
+    # EU-106: per-run 'open log' link — shown only when log_path is set by the BE subtask.
+    # Rendered as a small anchor right after the phase bar so it's near the run context.
+    log_link = ""
+    if log_path:
+        log_link = (
+            f'<div style="margin-top:9px;padding-bottom:2px">'
+            f'<a href="/api/open-logs?path={quote(str(log_path))}" '
+            f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
+            f'title="Open run log in Finder">&#128194; open log</a></div>'
+        )
     return (
         f'{now_css}'
         f'{runhead}'
         f'<div class="phasebar{"" if run["live"] else " idle"}">{"".join(bar)}</div>'
+        f'{log_link}'
         f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
         f'{verdict}{extra}'
         f'<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>'
@@ -1096,8 +1112,14 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
     return warn + f'<div class=blhead>{head}</div><div class=bllist>{"".join(rows)}</div>'
 
 
-def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
-    """Inner board (everything that updates on the poll)."""
+def render_board(cfg, app: Optional[str], state: dict) -> str:
+    """Inner board (everything that updates on the poll).
+
+    EU-106: lean board — only the Active Run panel (with _liveness chip + per-run open-log link),
+    Needs-you, and Talk-to-the-unit are rendered.  The Live Feed, Activity, and Tickets-to-work
+    panels have been retired; the _liveness heartbeat chip moved from the Live Feed header into
+    the Active Run header so the health signal stays visible.
+    """
     _ap = state.get("autopilot") or {}
     # EU-103: a per-project autopilot lights the board via THIS project's own run-state flag
     # (``state["autopilot_on"]`` — set when its autopilot loop claims the run), so a cockpit-started
@@ -1133,14 +1155,15 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         elapsed = None
         manual = False
     k = _kpi_html(kpis(cfg, tasks, app))
-    run = _run_html(run_obj, mode, elapsed, manual)
+    # EU-106: pass log_path from state so the per-run 'open log' link appears next to the phase bar.
+    log_path = state.get("log_path")
+    run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path)
     # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
     # headline and again in the "Active run" panel below it (same ticket/phase/elapsed/pass). The
     # Active-run panel is the canonical slot: it carries the EU-55/F12 phase bar and the pass-trend
     # sparkline, and it renders in BOTH the live and idle (last-run) states, so the hero was pure
     # duplication. Keep the single panel; `_hero_html` stays a public helper (unit-tested directly)
     # but is no longer emitted here.
-    fd = _feed_html(feed(cfg, tasks, app))
     try:
         from . import needs as _needs
         ns = _needs.summary(cfg)
@@ -1152,25 +1175,24 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     # total == count == len(rows), so "count == list" holds on the board (EU-102 iter-3).
     _nrows = len(ns.get("rows") or [])
     ncount = f' · {_nrows}' if _nrows else ""
-    log_panel = ""
-    if log_lines is not None:
-        # EU-104: ``state`` is this tab's own per-app snapshot (server._view_state(app)), so the
-        # heartbeat chip reads THIS project's last_activity, not a different concurrent project's.
-        log_panel = (f'<section class=panel><div class=ph>Live feed{_liveness(state, active)}</div>'
-                     f'{_log_html(log_lines)}</section>')
+    # EU-106: _liveness chip moves from the retired Live Feed header into the Active Run header
+    # so the heartbeat stays visible.  EU-84 contract is preserved: _liveness reads THIS tab's
+    # own per-app snapshot (passed as `state`), never a different project's heartbeat.
+    liveness = _liveness(state, active)
+    # EU-106: name the project on its status panel.  The lean board is per-project (one tab = one
+    # project — EU-63/EU-64), so the Active-run panel header carries the project label.  This is also
+    # what makes a per-tab board identifiable in the HTML, the invariant the EU-63 per-tab board tests
+    # pin (``/api/board?app=<proj>`` must render THAT project's board).  Omitted when app is None
+    # (the legacy all-projects render path used by some older tests).
+    proj_tag = f'<span class=boardproj>{_esc(app)}</span>' if app else ""
     return (
         f'<div class=kpis>{k}</div>'
         f'{_sync_html(cfg)}'
         '<div class=cols>'
         f'<div class=col-main>'
-        f'<section class=panel><div class=ph>Active run</div><div class=run>{run}</div></section>'
-        f'{log_panel}'
-        f'<details class="panel collapse" id=blpanel open>'
-        f'<summary class=ph>Tickets to work &middot; '
-        f'{"all projects" if (not app or app == "*") else _esc(app)}</summary>'
-        f'<div class=backlog id=blbox>{_backlog_html(cfg, app)}</div></details>'
-        f'<details class="panel collapse" id=actpanel open><summary class=ph>Activity</summary>'
-        f'<div class=feed id=actbox>{fd}</div></details>'
+        f'<section class=panel>'
+        f'<div class=ph>Active run{proj_tag}{liveness}</div>'
+        f'<div class=run>{run}</div></section>'
         '</div>'
         f'<div class=col-side>'
         f'<section class="panel needspanel"><div class=ph>Needs you{ncount}</div>'
@@ -1279,8 +1301,12 @@ def _host_tag(cfg) -> str:
     return f'<span class=hosttag title="this cockpit is running on this machine">{html.escape(h)}</span>'
 
 
-def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: dict,
-                log_lines=None) -> str:
+def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: dict) -> str:
+    """Render the full War Room page.
+
+    EU-106: ``log_lines`` parameter removed — the Live Feed panel is gone and logs are
+    accessed via the per-run 'open log' link in the Active Run panel.
+    """
     return (_PAGE
             .replace("{{HOST}}", _host_tag(cfg))
             .replace("{{PROJ}}", project_selector(cfg, app))
@@ -1288,7 +1314,7 @@ def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: 
             .replace("{{HEALTHPILL}}", health_pill(health))
             .replace("{{HEALTHBAR}}", health_banner(health))
             .replace("{{BAR}}", control_bar)
-            .replace("{{BOARD}}", render_board(cfg, app, state, log_lines))
+            .replace("{{BOARD}}", render_board(cfg, app, state))
             .replace("{{APP}}", _esc(app or "*"))
             .replace("{{GEN}}", datetime.now().strftime("%H:%M:%S")))
 
@@ -1444,6 +1470,9 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .runlive{align-items:flex-start!important}
 .runtitle{font-size:18px;font-weight:700;letter-spacing:-.25px;line-height:1.2;margin-bottom:4px}
 .runtapp{font-size:12.5px;color:var(--dim);font-weight:500;margin-left:9px;vertical-align:middle}
+/* EU-106: project label on the per-project Active-run panel header (text-transform:none so a name
+   like "Elite-Unit" isn't upper-cased by the .ph rule) */
+.boardproj{text-transform:none;letter-spacing:0;font-size:11.5px;font-weight:600;color:var(--ink);background:#141a25;border:1px solid var(--line);border-radius:6px;padding:2px 8px}
 .runsub{font-size:12.5px;color:var(--dim)}.runsub b{color:var(--warn)}
 .runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
 .dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}

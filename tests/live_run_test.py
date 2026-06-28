@@ -1,6 +1,9 @@
 """Live-run status QA: a build started outside the cockpit (answer box / /unblock / autopilot) is still
 recognized as LIVE from fresh audit activity, so the phase bar lights up instead of showing 'last run ·
-interrupted'. Plus the taller/resizable terminal + collapsible Activity panel render."""
+interrupted'.
+
+EU-106 update: the Live Feed, Activity, and Tickets-to-work panels have been removed from render_board.
+Tests that asserted their presence are updated to assert their absence."""
 import sys, types, tempfile, json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -56,7 +59,7 @@ chk("in-flight: no runs -> not live", not warroom._run_in_flight(cfg, [], "autom
 
 # --- render_board: a background build (state.active False) renders LIVE with the phase bar lit ---
 write({"event": "ticket_start", "ticket_id": "AUTO-14", "app": "automatixy", "ts": stamp(4)})
-board = warroom.render_board(cfg, "automatixy", {}, log_lines=[])   # empty state = cockpit didn't start it
+board = warroom.render_board(cfg, "automatixy", {})   # empty state = cockpit didn't start it
 chk("board: in-flight run shows hero-merged live header (runlive + hgdot)",
     "runlive" in board and "hgdot" in board, "expected runlive/hgdot in board HTML")
 chk("board: the current phase is highlighted (ph now)", 'class="ph now"' in board)
@@ -65,20 +68,17 @@ chk("board: it is NOT shown as 'last run'", "last run" not in board)
 # a genuinely finished run still reads as the last run (no false 'running')
 write({"event": "ticket_start", "ticket_id": "AUTO-9", "app": "automatixy", "ts": stamp(300)},
       {"event": "merged", "ticket_id": "AUTO-9", "app": "automatixy", "ts": stamp(290)})
-board2 = warroom.render_board(cfg, "automatixy", {}, log_lines=[])
+board2 = warroom.render_board(cfg, "automatixy", {})
 chk("board: a finished run shows 'last run', not running",
     "last run" in board2 and "runlive" not in board2)
 
-# --- the Activity panel is collapsible + the terminal is taller/resizable ---
-chk("board: Activity is a collapsible panel", "id=actpanel" in board and 'class="panel collapse"' in board)
-page = warroom.render_page(cfg, "automatixy", {}, "", {"healthy": True, "checks": []}, log_lines=[])
-chk("page: terminal is taller + resizable", "height:380px" in page and "resize:vertical" in page)
-chk("page: collapse state persists (applyUi + localStorage)", "applyUi" in page and "ui.open." in page)
-chk("page: Tickets-to-work panel persists collapse + resize (blpanel/blbox)",
-    "blpanel" in page and "id=blbox" in page)
-chk("page: Live feed renders before Tickets-to-work before Activity",
-    0 < board.find("Live feed") < board.find("id=blpanel") < board.find("id=actpanel"))
-chk("page: collapsible panels excluded from menu auto-close", 'classList.contains("collapse")' in page)
+# --- EU-106: Live Feed, Activity, and Tickets-to-work panels are removed ---
+page = warroom.render_page(cfg, "automatixy", {}, "", {"healthy": True, "checks": []})
+chk("EU-106 board: Live feed panel removed", "Live feed" not in board)
+chk("EU-106 board: Activity panel removed", "id=actpanel" not in board)
+chk("EU-106 board: Tickets-to-work panel removed", "id=blpanel" not in board)
+chk("EU-106 board: _liveness chip in Active run panel header (not live feed)",
+    "Active run" in board)
 chk("page: scroll position preserved across the 2s refresh (no jump while reading)",
     "_atBottom" in page and "keep[id]" in page)
 

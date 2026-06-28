@@ -233,18 +233,62 @@ def create_app(cfg: Config):
         h = health.summary(cfg)
         # One-shot result banner for ship/promote/patrol — shown once, then cleared (read-and-clear),
         # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
-        bar = _result_banner(_state) + _control_bar(cfg, appq, h["healthy"])
+        # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
+        import platform as _platform
+        bar = (_result_banner(_state)
+               + _control_bar(cfg, appq, h["healthy"],
+                              is_mac=_platform.system() == "Darwin"))
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
         # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
         # unit-level actions, not per-project runs.)
-        # EU-104: scope the live feed to this tab's project so a different project's run never
-        # bleeds into this tab's Live feed panel.
-        return warroom.render_page(cfg, appq, _view_state(appq), bar, h, log_lines=recent_log(app=appq))
+        return warroom.render_page(cfg, appq, _view_state(appq), bar, h)
 
     @app.get("/api/health")
     def health_api():
+        import platform
         from flask import jsonify
-        return jsonify(health.summary(cfg))
+        # EU-106: include is_mac so the UI layer can decide whether to show "Open logs" buttons.
+        return jsonify({**health.summary(cfg), "is_mac": platform.system() == "Darwin"})
+
+    @app.get("/api/open-logs")
+    def open_logs_api():
+        """Open a local log file or folder in macOS Finder (macOS only).
+
+        Query param: ``path=<log path>`` — absolute or relative path to the log file or folder.
+
+        Security:
+        * Path traversal guard: the resolved path must be under ``cfg.log_folder``;
+          anything outside returns 403.
+        * macOS only: non-Mac returns 403 (the ``open`` command is Darwin-specific).
+
+        Returns JSON ``{"ok": true, "path": "<resolved>"}`` on success.
+        """
+        import platform
+        import subprocess
+        from flask import jsonify
+        # Only macOS has the `open` shell command that opens Finder/default app.
+        if platform.system() != "Darwin":
+            return Response("This endpoint is only available on macOS.", status=403,
+                            mimetype="text/plain")
+        path_param = (request.args.get("path") or "").strip()
+        if not path_param:
+            return Response("'path' query parameter is required.", status=400,
+                            mimetype="text/plain")
+        from . import run_logger as _rl
+        root = _rl.log_root(cfg)
+        try:
+            requested = Path(path_param).resolve()
+        except Exception:
+            return Response("Invalid path.", status=400, mimetype="text/plain")
+        # Path traversal guard: the resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+        # Shell out to `open` — non-blocking; Finder/default app opens in the background.
+        subprocess.Popen(["open", str(requested)], close_fds=True)   # noqa: S603,S607
+        return jsonify({"ok": True, "path": str(requested)})
 
     @app.get("/api/autopilot")
     def autopilot_status_api():
@@ -406,8 +450,8 @@ def create_app(cfg: Config):
     def board_api():
         from flask import Response
         appq = _board_project(request.args.get("app"))   # board is per-tab — one concrete project
-        # EU-104: scope live feed to this tab's project.
-        return Response(warroom.render_board(cfg, appq, _view_state(appq), recent_log(app=appq)),
+        # EU-106: log_lines param removed from render_board (Live Feed panel retired).
+        return Response(warroom.render_board(cfg, appq, _view_state(appq)),
                         mimetype="text/html")
 
     @app.get("/api/stream")
@@ -434,9 +478,9 @@ def create_app(cfg: Config):
                 if seq != last_seq or now - last_emit >= 2.0:
                     last_seq, last_emit = seq, now
                     try:
-                        # EU-104: scope live feed to this tab's project.
+                        # EU-106: log_lines param removed from render_board (Live Feed panel retired).
                         yield _sse("board",
-                                   warroom.render_board(cfg, appq, _view_state(appq), recent_log(app=appq)))
+                                   warroom.render_board(cfg, appq, _view_state(appq)))
                     except Exception:  # noqa: BLE001 - never let a render error kill the stream
                         yield ": render-error\n\n"
                 time.sleep(0.5)
@@ -581,6 +625,18 @@ def create_app(cfg: Config):
             st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
+        # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
+        # Derive the label from the first ticket's id; fall back gracefully so test stubs never crash.
+        try:
+            _ticket_label = worklist[0][1].id if worklist else (keys[0] if keys else "run")
+        except (IndexError, AttributeError, TypeError):
+            _ticket_label = keys[0] if keys else "run"
+        try:
+            from . import run_logger as _rl
+            _rl.open_run_log(rcfg, app_name, _ticket_label)
+        except Exception:  # noqa: BLE001 — log setup must never block a run
+            pass
+
         def _bg():
             st["last_msg"] = ""
             ev = threading.Event()
@@ -592,6 +648,12 @@ def create_app(cfg: Config):
                 errored = True
                 st["last_msg"] = str(exc)
             finally:
+                # EU-106: close the run log before releasing the run slot.
+                try:
+                    from . import run_logger as _rl
+                    _rl.close_run_log(app_name or None)
+                except Exception:  # noqa: BLE001
+                    pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
@@ -645,6 +707,19 @@ def create_app(cfg: Config):
             st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
+        # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
+        # Derive the label from the first ticket's id; fall back gracefully to the run kind so test
+        # stubs (which may return plain strings as worklist items) never crash the request.
+        try:
+            _ticket_label = worklist[0][1].id if worklist else kind
+        except (IndexError, AttributeError, TypeError):
+            _ticket_label = kind
+        try:
+            from . import run_logger as _rl
+            _rl.open_run_log(rcfg, app_name, _ticket_label)
+        except Exception:  # noqa: BLE001 — log setup must never block a run
+            pass
+
         def _bg():
             st["last_msg"] = ""
             ev = threading.Event()
@@ -656,6 +731,12 @@ def create_app(cfg: Config):
                 errored = True
                 st["last_msg"] = str(exc)
             finally:
+                # EU-106: close the run log before releasing the run slot.
+                try:
+                    from . import run_logger as _rl
+                    _rl.close_run_log(app_name or None)
+                except Exception:  # noqa: BLE001
+                    pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'

@@ -31,14 +31,14 @@ from dataclasses import asdict, dataclass, field
 
 _STATE_KEYS = ("active", "last_msg", "last_result", "drilling", "dry_run",
                "last_activity", "run_started", "stop_event", "log_seq", "approving",
-               "autopilot_mode", "autopilot_on")
+               "autopilot_mode", "autopilot_on", "log_path")
 
 
 def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
     return {"active": False, "last_msg": "", "last_result": "", "drilling": False, "dry_run": None,
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
-            "approving": None, "autopilot_mode": None, "autopilot_on": False}
+            "approving": None, "autopilot_mode": None, "autopilot_on": False, "log_path": None}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions
@@ -298,6 +298,13 @@ class _Tee:
                 # AND the per-app seq (wakes that project's tab streamer).  Falls back to the
                 # default (None-key) state when no concrete app is active.
                 bump_log_seq(app_key)
+                # EU-106: stream the line to the per-run log file (if one is open for this app).
+                # Lazy import avoids a circular dependency at module load time.
+                try:
+                    from . import run_logger as _rl
+                    _rl.write_line(app_key, t)
+                except Exception:  # noqa: BLE001 — log writes must never abort a run
+                    pass
 
     def flush(self):
         self._real.flush()

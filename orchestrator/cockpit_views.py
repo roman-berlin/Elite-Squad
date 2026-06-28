@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from . import dashboard as D
 from .cockpit_state import _state, get_autopilot_status
@@ -250,7 +251,15 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
-def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True) -> str:
+def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
+                 is_mac: bool = False) -> str:
+    """Render the cockpit's top control bar.
+
+    EU-106: ``is_mac`` — when True, a global '📂 Open logs' button is appended that calls
+    ``/api/open-logs?path=<cfg.log_folder>``.  The button is gated on macOS because the
+    ``open`` shell command is Darwin-specific; on non-Mac machines the button would call
+    an endpoint that returns 403.
+    """
     # "*" is the retired "All projects" selector — it is truthy but NOT a real app, so it must never
     # become app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
     # cfg.app("*") -> KeyError). Normalize to a concrete app for single-app ACTION buttons. EU-63:
@@ -469,6 +478,16 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             '&#9654;&nbsp;Auto-drain</button></form>'
             '</div>')
 
+    # EU-106: global 'Open logs' button — macOS only (Darwin `open` command opens Finder).
+    # Calls /api/open-logs with the configured log folder so a single click reveals ALL run logs.
+    open_logs_html = ""
+    if is_mac:
+        log_folder = str(getattr(cfg, "log_folder", None) or "logs/")
+        open_logs_html = (
+            f'<a class="btn" href="/api/open-logs?path={html.escape(quote(log_folder))}" '
+            f'title="Open the run-logs folder in Finder">&#128194; Open logs</a>'
+        )
+
     return tab_bar + f"""
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
@@ -568,6 +587,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   {promote_html}
   {ship_html}
   {ap_html}
+  {open_logs_html}
 
   <details class=menu>
     <summary class=btn>&#128202; Reports</summary>
