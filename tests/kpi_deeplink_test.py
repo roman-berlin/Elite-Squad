@@ -1,6 +1,7 @@
-"""KPI deep-link QA (EU-32): the War Room KPI cards must link to a view SCOPED to the count they
-show. Parked -> /tasks?filter=parked (only the parked subset), Needs/Merged -> the matching subset,
-and Security blocks -> a security-scoped forensics view (not the unrelated /council)."""
+"""KPI deep-link QA (EU-32 / EU-102): the War Room KPI cards must link to a view SCOPED to the
+count they show.  EU-102: the separate Parked KPI card is retired — parked items are folded into
+the unified Needs-you inbox, so the Needs-you card now links to /needs (not /tasks?filter=needs).
+Merged -> /tasks?filter=merged, Security blocks -> /forensics?cat=security_block (not /council)."""
 import sys, types, tempfile, json
 from pathlib import Path
 
@@ -49,7 +50,8 @@ scfg.detected_auth = lambda: "test"
 
 # --- 1. KPI cards point at scoped destinations (not the flat log / unrelated councils) ---
 cards = {c["label"]: c.get("href") for c in warroom.kpis(scfg, warroom.D.load_tasks(str(audit)), None)}
-chk("Parked card -> /tasks?filter=parked", cards.get("Parked") == "/tasks?filter=parked", str(cards.get("Parked")))
+# EU-102: the standalone Parked card is retired — parked items fold into Needs-you.
+chk("Parked card is gone (retired by EU-102)", "Parked" not in cards, str(list(cards.keys())))
 chk("Needs you card -> /needs (unified inbox)", cards.get("Needs you") == "/needs", str(cards.get("Needs you")))
 chk("Merged total card -> /tasks?filter=merged", cards.get("Merged total") == "/tasks?filter=merged", str(cards.get("Merged total")))
 chk("Security blocks card -> security-scoped forensics",

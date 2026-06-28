@@ -422,15 +422,15 @@ def create_app(cfg: Config):
     def unblock_api():
         """Remove a ticket from blocked_tickets.json (the parked set).
 
-        The Dismiss/Unblock button on the /tasks?filter=parked view posts here — NOT to
-        /api/dismiss — so it removes the ticket from blocked_tickets.json (the authoritative
-        parked store), not just from dismissed.json. After this the autopilot will retry it
-        next cycle and the row disappears from the parked count (EU-78)."""
+        EU-102: redirects to /needs (unified inbox) instead of /tasks?filter=parked.
+        Removes the ticket from blocked_tickets.json (the authoritative parked store),
+        not just from dismissed.json. After this the autopilot will retry it next cycle
+        and the row disappears from the parked section of the Needs-you inbox (EU-78)."""
         tid = (request.form.get("ticket") or "").strip()
         if tid:
             from . import autopilot as _ap
             _ap.unblock(cfg, tid)
-        return redirect("/tasks?filter=parked")
+        return redirect("/needs")
 
     @app.get("/tickets")
     def tickets_page():
@@ -1057,6 +1057,12 @@ def create_app(cfg: Config):
 
     @app.get("/needs")
     def needs_page():
+        """Unified Commander inbox — decisions, errored runs, parked tickets, open PRs.
+
+        EU-102: renders s['rows'] (already typed with category+why) grouped into four
+        labelled sections.  Officer recommendations and ticket proposals (not yet in rows)
+        are appended below as before.
+        """
         from . import needs as _needs
         s = _needs.summary(cfg)
         style = (
@@ -1090,34 +1096,149 @@ def create_app(cfg: Config):
             "color:#c3cad6;font-size:13.5px;cursor:pointer}"
             ".ncard label.pcheck input{margin-top:3px}"
             ".ncard .psev{color:#fbbf24;font-weight:650}.ncard .ptype{color:#6b7480;font-size:12px}"
-            ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}</style>")
+            ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}"
+            # EU-102 — colour-coded category badges for the unified inbox
+            ".nbadge{display:inline-block;border-radius:5px;padding:2px 7px;font-size:11px;"
+            "font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-right:6px}"
+            ".nbadge.dec{background:#1e1450;color:#a78bfa}"    # decision   — purple
+            ".nbadge.err{background:#2a1010;color:#f87171}"    # errored    — red
+            ".nbadge.prk{background:#1f1600;color:#fbbf24}"    # parked     — amber
+            ".nbadge.opr{background:#0c1f20;color:#34d399}"    # open PR    — teal
+            ".nbadge.spc{background:#0c1a2a;color:#60a5fa}"    # specialist — blue
+            "</style>")
         # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
         _m = _state.pop("last_msg", "") or ""
         banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if _m else ""
-        if not s["total"]:
+        if not s.get("total"):
             return _wrap("Needs you", style + banner
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
         out = [style, banner]
-        if s["decisions"]:
-            out.append(f"<div class=nsec><h3>&#128172; Questions from the CTO · {len(s['decisions'])}</h3>")
-            for d in s["decisions"]:
+
+        # ── Unified inbox rows — grouped by category (EU-102) ────────────────
+        from urllib.parse import quote
+        from . import dashboard as _dash
+        from collections import defaultdict
+
+        # Real needs.summary() always provides typed ``rows``; tests (and any legacy caller) may
+        # hand us only the per-stream keys, so rebuild rows from them when absent. Either way the
+        # page renders one section per category — count == the rows it shows (EU-102).
+        rows = list(s.get("rows") or [])
+        if not rows:
+            for _d in s.get("decisions", []):
+                rows.append({**_d, "category": "decision",
+                             "why": _d.get("question") or _d.get("summary") or "pending decision"})
+            for _t in s.get("tasks", []):
+                _oc = _t.get("outcome") or ""
+                rows.append({**_t, "category": "pr" if _oc == "PR / needs you" else "errored",
+                             "why": _t.get("note") or _oc})
+        by_cat: dict = defaultdict(list)
+        for _row in rows:
+            by_cat[_row.get("category")].append(_row)
+
+        # ── 1. Decisions — the CTO's open questions ───────────────────────────
+        if by_cat["decision"]:
+            _items = by_cat["decision"]
+            out.append(f"<div class=nsec><h3>&#128172; Decisions &middot; {len(_items)}</h3>")
+            for d in _items:
                 tid = html.escape(str(d.get("id") or ""))
                 dapp = html.escape(str(d.get("app") or ""))
-                q = html.escape(str(d.get("question") or d.get("summary") or "(question)"))
+                why = html.escape(str(d.get("why") or "(no question on file)"))
                 out.append(
-                    f"<div class=ncard><div class=q>{q}</div><div class=meta>{tid} · {dapp}</div>"
+                    "<div class=ncard>"
+                    f"<div class=q><span class='nbadge dec'>Decision</span>{why}</div>"
+                    f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
                     "<form method=post action=/api/answer class=nrow>"
-                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=app value='{dapp}'>"
-                    "<input type=text name=text placeholder='Your decision — it re-runs the ticket with this baked in'>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    f"<input type=hidden name=app value='{dapp}'>"
+                    "<input type=text name=text placeholder='Answer the unit — your decision re-runs the ticket with it baked in'>"
                     "<button class='nbtn send'>Ship answer</button></form>"
-                    # Secondary: dismiss without re-running (mark the question handled, remove from list)
+                    # Dismiss without re-running — marks question handled, removes from inbox.
                     "<div class=nrow>"
                     "<form method=post action=/needs/resolve style='margin:0'>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     "<button class='nbtn x'>Dismiss</button></form></div>"
                     "</div>")
             out.append("</div>")
-        if s["approvals"]:
+
+        # ── 2. Errored runs — tickets that ended errored / escalated ──────────
+        if by_cat["errored"]:
+            _items = by_cat["errored"]
+            out.append(f"<div class=nsec><h3>&#9888;&#65039; Errored runs &middot; {len(_items)}</h3>")
+            for t in _items:
+                tid = html.escape(str(t.get("ticket_id") or ""))
+                tapp = html.escape(str(t.get("app") or ""))
+                why = html.escape(str(t.get("why") or "run ended with an error"))
+                note = html.escape(_dash._short(t.get("note") or "", 120))
+                detail = _dash.needs_detail_html(t)          # full 'what went wrong' block
+                prefill = quote(_dash.needs_chat_summary(t)) # pre-loaded into the CTO chat
+                out.append(
+                    "<div class=ncard><details><summary>"
+                    f"<span class='nbadge err'>Errored run</span>"
+                    f"<span class=meta>{tid}</span>"
+                    + (f" &nbsp;<span style='color:#6b7480'>&mdash; {note}</span>" if note else "")
+                    + f"</summary>"
+                    f"<div class=ndetail><div class=ndt>{why}</div>{detail}</div></details>"
+                    # Primary: provide a directive — re-runs the ticket with the answer baked in.
+                    "<form method=post action=/api/answer class=nrow>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    f"<input type=hidden name=app value='{tapp}'>"
+                    "<input type=text name=text placeholder='Answer the unit — your directive re-runs the ticket'>"
+                    "<button class='nbtn send'>Ship answer</button></form>"
+                    # Secondary: talk it through with the CTO, or clear the row.
+                    f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the CTO</a>"
+                    "<form method=post action=/api/dismiss style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
+                    "<button class='nbtn x'>Dismiss</button></form></div></div>")
+            out.append("</div>")
+
+        # ── 3. Parked tickets — autopilot is skipping these ───────────────────
+        if by_cat["parked"]:
+            _items = by_cat["parked"]
+            out.append(f"<div class=nsec><h3>&#128274; Parked tickets &middot; {len(_items)}</h3>")
+            for t in _items:
+                tid = html.escape(str(t.get("ticket_id") or ""))
+                tapp = html.escape(str(t.get("app") or ""))
+                why = html.escape(str(t.get("why") or "blocked — autopilot skipping"))
+                out.append(
+                    "<div class=ncard>"
+                    f"<div class=q><span class='nbadge prk'>Parked</span>{why}</div>"
+                    f"<div class=meta>{tid}{(' &middot; ' + tapp) if tapp else ''}</div>"
+                    # Unblock removes the ticket from blocked_tickets.json so autopilot retries it.
+                    "<div class=nrow>"
+                    "<form method=post action=/api/unblock style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    "<button class='nbtn ok'>Unblock</button></form>"
+                    "</div>"
+                    "</div>")
+            out.append("</div>")
+
+        # ── 4. Open PRs — runs that ended with a PR opened ────────────────────
+        if by_cat["pr"]:
+            _items = by_cat["pr"]
+            out.append(f"<div class=nsec><h3>&#128257; Open PRs &middot; {len(_items)}</h3>")
+            for t in _items:
+                tid = html.escape(str(t.get("ticket_id") or ""))
+                tapp = html.escape(str(t.get("app") or ""))
+                why = html.escape(str(t.get("why") or "PR opened — review needed"))
+                pr_url = str(t.get("pr_url") or "")
+                pr_link = (f" &middot; <a href='{html.escape(pr_url)}' target=_blank "
+                           f"style='color:#34d399'>{html.escape(pr_url)}</a>") if pr_url else ""
+                review_btn = (f"<a class='nbtn ok' href='{html.escape(pr_url)}' target=_blank>"
+                              "Review PR</a>") if pr_url else ""
+                out.append(
+                    "<div class=ncard>"
+                    f"<div class=q><span class='nbadge opr'>Open PR</span>{why}</div>"
+                    f"<div class=meta>{tid}{(' &middot; ' + tapp) if tapp else ''}{pr_link}</div>"
+                    f"<div class=nrow>{review_btn}"
+                    "<form method=post action=/api/dismiss style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
+                    "<button class='nbtn x'>Dismiss</button></form>"
+                    "</div>"
+                    "</div>")
+            out.append("</div>")
+
+        # ── Officer recommendations — own action form (also counted in rows) ──
+        if s.get("approvals"):
             out.append(f"<div class=nsec><h3>&#9989; Officer recommendations · {len(s['approvals'])}</h3>")
             for it in s["approvals"]:
                 out.append(
@@ -1133,6 +1254,7 @@ def create_app(cfg: Config):
                     "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)'>"
                     "<button class='nbtn no'>Disapprove</button></form></div></div>")
             out.append("</div>")
+
         if s.get("proposals"):
             out.append(f"<div class=nsec><h3>&#128203; Tickets to file &middot; {len(s['proposals'])}</h3>")
             for b in s["proposals"]:
@@ -1140,52 +1262,73 @@ def create_app(cfg: Config):
                 src = html.escape(str(b.get("source") or "proposed"))
                 bapp = html.escape(str(b.get("app") or ""))
                 props = b.get("proposals") or []
-                rows = ""
+                prows = ""
                 for p in props:
-                    t = html.escape(str(p.get("title") or ""))
+                    pt = html.escape(str(p.get("title") or ""))
                     sev = html.escape(str(p.get("severity") or "?"))
                     typ = html.escape(str(p.get("type") or "Task"))
-                    rows += (f"<label class=pcheck><input type=checkbox name=titles value=\"{t}\" checked> "
-                             f"<span><span class=psev>[{sev}]</span> {t} <span class=ptype>{typ}</span></span></label>")
+                    prows += (f"<label class=pcheck><input type=checkbox name=titles value=\"{pt}\" checked> "
+                              f"<span><span class=psev>[{sev}]</span> {pt} <span class=ptype>{typ}</span></span></label>")
                 out.append(
                     "<div class=ncard>"
                     f"<div class=q>Proposed tickets &mdash; {src}</div>"
                     f"<div class=meta>{bapp} &middot; {len(props)} ticket(s) &mdash; pick which to file</div>"
                     "<form method=post action=/api/approve-proposals>"
                     f"<input type=hidden name=batch value=\"{bid}\">"
-                    + rows +
+                    + prows +
                     "<div class=nrow><button class='nbtn ok'>&#9989; Approve &amp; file selected</button></div></form>"
                     "<form method=post action=/api/deny-proposals class=nrow style='margin:6px 0 0'>"
                     f"<input type=hidden name=batch value=\"{bid}\">"
                     "<button class='nbtn no'>Deny &mdash; discard</button></form></div>")
             out.append("</div>")
-        if s["tasks"]:
-            from urllib.parse import quote
-            from . import dashboard as _dash
-            out.append(f"<div class=nsec><h3>&#9888;&#65039; Runs that need you · {len(s['tasks'])}</h3>")
-            for t in s["tasks"]:
-                tid = html.escape(str(t.get("ticket_id") or ""))
-                tapp = html.escape(str(t.get("app") or ""))
-                oc = html.escape(str(t.get("outcome") or ""))
-                note = html.escape(_dash._short(t.get("note") or "", 120))
-                detail = _dash.needs_detail_html(t)            # the full 'what went wrong'
-                prefill = quote(_dash.needs_chat_summary(t))   # pre-loaded into the CTO chat
+
+        # ── Specialist rosters — provisioning awaiting approve/decline (EU-102 iter-3) ──
+        # Folded into rows/count, so they MUST render here too — otherwise a non-zero badge would
+        # point at an empty inbox (the specialist-only dead-end this iteration fixes). Approve/decline
+        # route through /api/answer → decisions.handle_reply → hr.resolve_specialist_approval_reply,
+        # which reads 'approve' / 'decline' (no new endpoint needed).
+        if s.get("specialist_approvals"):
+            _specs = s["specialist_approvals"]
+            out.append(f"<div class=nsec><h3>&#129513; Specialist rosters &middot; {len(_specs)}</h3>")
+            for sp in _specs:
+                tid = html.escape(str(sp.get("ticket_id") or ""))
+                dom = html.escape(str(sp.get("domain") or ""))
+                sapp = html.escape(str(sp.get("app_name") or sp.get("app") or ""))
+                tsum = html.escape(str(sp.get("ticket_summary") or ""))
+                roster = ""
+                charters = sp.get("charters") or []
+                if charters:
+                    lis = "".join(
+                        f"<li>{html.escape(str(c.get('name') or c.get('lane_key') or 'specialist'))}"
+                        + (f" <span class=ptype>&middot; {html.escape(str(c.get('lane_key')))}</span>"
+                           if c.get('lane_key') else "")
+                        + "</li>"
+                        for c in charters if isinstance(c, dict))
+                    if lis:
+                        roster = ("<ul style='margin:8px 0 2px 18px;padding:0;color:#c3cad6;"
+                                  f"font-size:13px'>{lis}</ul>")
                 out.append(
-                    "<div class=ncard><details><summary>"
-                    f"<span class=meta>{tid}</span> &nbsp;{oc}"
-                    + (f" <span class=muted>— {note}</span>" if note else "")
-                    + f"</summary><div class=ndetail>{detail}</div></details>"
-                    # Primary action: ship a real answer — resolves the decision + re-runs the ticket.
-                    + "<form method=post action=/api/answer class=nrow>"
-                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=app value='{tapp}'>"
-                    "<input type=text name=text placeholder='Answer the unit — your decision; it re-runs the ticket'>"
-                    "<button class='nbtn send'>Ship answer</button></form>"
-                    # Secondary: talk it through, or clear it.
-                    + f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the CTO</a>"
-                    "<form method=post action=/api/dismiss style='margin:0'>"
-                    f"<input type=hidden name=ticket value='{tid}'><input type=hidden name=back value='/needs'>"
-                    "<button class='nbtn x'>Dismiss</button></form></div></div>")
+                    "<div class=ncard>"
+                    f"<div class=q><span class='nbadge spc'>Specialist</span>"
+                    f"Provision a {dom or 'specialist'} squad to build {tid}"
+                    + (f" &mdash; {tsum}" if tsum else "")
+                    + "</div>"
+                    f"<div class=meta>{tid}{(' &middot; ' + sapp) if sapp else ''}</div>"
+                    + roster +
+                    "<div class=nrow>"
+                    "<form method=post action=/api/answer style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    f"<input type=hidden name=app value='{sapp}'>"
+                    "<input type=hidden name=text value='approve'>"
+                    "<button class='nbtn ok'>&#9989; Approve &amp; provision</button></form>"
+                    "<form method=post action=/api/answer style='margin:0'>"
+                    f"<input type=hidden name=ticket value='{tid}'>"
+                    f"<input type=hidden name=app value='{sapp}'>"
+                    "<input type=hidden name=text value='decline'>"
+                    "<button class='nbtn no'>Decline &mdash; solo build</button></form>"
+                    "</div></div>")
             out.append("</div>")
+
         return _wrap("Needs you", "".join(out))
 
     @app.get("/usage")
