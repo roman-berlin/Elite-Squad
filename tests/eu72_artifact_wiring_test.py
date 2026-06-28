@@ -62,6 +62,7 @@ chk("_build_artifact diff_digest is bounded", len(_art.diff_digest) <= 500)
 from orchestrator import agent as agent_mod, reviewer, test_engineer
 from orchestrator.agent import AgentRun
 from orchestrator.config import Config, AppConfig
+from orchestrator.contracts import TestEngineerArtifact
 
 
 def mkcfg(**kw):
@@ -107,8 +108,26 @@ res_te = asyncio.run(test_engineer.ensure_coverage(tk, app, cfg, store=store_te,
 chk("ensure_coverage returns a TestEngineerResult", isinstance(res_te, TestEngineerResult))
 chk("ensure_coverage leads with the builder's changed files", "orchestrator/zzz.py" in te_prompt.get("p", ""))
 chk("ensure_coverage surfaces the builder's diff digest", "DIGEST_TOKEN" in te_prompt.get("p", ""))
-chk("ensure_coverage (a consumer stage) publishes nothing — no review/build slot churn",
+chk("ensure_coverage does not churn the review/build slots",
     store_te.review is None and store_te.build is ba)
+# EU-96: Test Engineer now publishes a TestEngineerArtifact into the test slot.
+chk("ensure_coverage publishes a TestEngineerArtifact into store.test",
+    isinstance(store_te.test, TestEngineerArtifact))
+chk("TestEngineerArtifact.ok matches run success", store_te.test.ok is True)
+# The fake agent returns "COVERAGE: lines 80→90" — no '%' so coverage_pct is None.
+chk("TestEngineerArtifact.coverage_pct is None when no % in COVERAGE line",
+    store_te.test.coverage_pct is None)
+# A COVERAGE line with a percentage parses correctly.
+async def fake_te_pct(prompt, options, tag=""):
+    return AgentRun(text="COVERAGE: lines 82→91%", final="COVERAGE: lines 82→91%",
+                    cost_usd=0.0, num_turns=1, is_error=False, tools=[])
+test_engineer.run_agent = fake_te_pct
+store_pct = PerTicketArtifactStore(); store_pct.put(ba)
+asyncio.run(test_engineer.ensure_coverage(tk, app, cfg, store=store_pct, build_artifact=ba))
+chk("TestEngineerArtifact.coverage_pct parsed from 'lines 82→91%'",
+    store_pct.test is not None and store_pct.test.coverage_pct == 91.0)
+# Restore original fake for fallback test.
+test_engineer.run_agent = fake_te_agent
 # falls back to store.build when no explicit artifact is passed
 te_prompt.clear()
 asyncio.run(test_engineer.ensure_coverage(tk, app, cfg, store=store_te))

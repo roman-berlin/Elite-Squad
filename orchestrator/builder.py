@@ -391,4 +391,6 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         num_turns=run.num_turns,
         raw=run.text,
         tools=run.tools,
+        input_tokens=getattr(run, "input_tokens", 0),   # EU-96: expose for per-officer burn tracking
+        output_tokens=getattr(run, "output_tokens", 0),  # getattr-guarded: stubs may omit these
     )

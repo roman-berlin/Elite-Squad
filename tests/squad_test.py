@@ -31,11 +31,15 @@ async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=No
     if tag == "squad-lead":
         if _mode["raise_plan"]:
             raise RuntimeError("planner exploded")
+        # EU-96: the planner ('squad-lead') carries its own token burn — build_delegated must seed
+        # the delegated BuildResult's tokens from it (not soldiers-only), mirroring cost/turns.
         return AgentRun(text=_mode["plan"], final=_mode["plan"], cost_usd=0.10, num_turns=3,
-                        is_error=False, tools=["Read"])
+                        is_error=False, tools=["Read"], input_tokens=500, output_tokens=120)
     if tag.startswith("soldier"):
+        # EU-96: soldiers carry non-zero token usage so build_delegated / _run_synthesis can be
+        # asserted to sum it into the returned BuildResult.input_tokens/output_tokens.
         return AgentRun(text="done", final="implemented " + tag, cost_usd=0.20, num_turns=5,
-                        is_error=False, tools=["Edit"])
+                        is_error=False, tools=["Edit"], input_tokens=1000, output_tokens=250)
     return AgentRun(text="solo", final="SOLO build done", cost_usd=0.5, num_turns=9,
                     is_error=False, tools=["Edit"])
 squad.run_agent = fake_run_agent
@@ -100,6 +104,14 @@ check("delegated: 3 soldiers dispatched", n == 3, str(n))
 check("delegated: cost aggregated (plan .10 + 3x .20)", abs(res.cost_usd - 0.70) < 1e-6, str(res.cost_usd))
 check("delegated: turns aggregated (3 + 3x5)", res.num_turns == 18, str(res.num_turns))
 check("delegated: tools aggregated", res.tools == ["Read", "Edit", "Edit", "Edit"], str(res.tools))
+# EU-96 (iter-4): the delegated BuildResult must carry BOTH the planner ('squad-lead') and the
+# soldiers' token burn so the loop's _burn("builder", build.input_tokens, build.output_tokens) records
+# real numbers for big delegated tickets — it read 0 before this fix, the exact path
+# eu96_artifact_contract_test.py skips by forcing delegation_enabled=False. The accumulator SEEDS from
+# the planner run (mirroring how cost/turns start from p_cost/p_turns) and adds each soldier's burn —
+# counting soldiers only under-reported the delegated build's real burn.
+check("delegated: input_tokens = planner + 3 soldiers (500 + 3x1000)", res.input_tokens == 3500, str(res.input_tokens))
+check("delegated: output_tokens = planner + 3 soldiers (120 + 3x250)", res.output_tokens == 870, str(res.output_tokens))
 check("delegated: ok=True", res.ok is True)
 check("delegated: summary names the squad", "Squad delegation" in res.summary and "Ordnance BE" in res.summary)
 check("delegated: audit has 1 delegation + 3 soldier_build",
@@ -336,6 +348,10 @@ check("synthesis: summary mentions ephemeral delegation", "Ephemeral-specialist 
 check("synthesis: summary mentions domain", "mql5" in getattr(_syn_res, "summary", "").lower())
 check("synthesis: summary mentions gate PASS", "gate:PASS" in getattr(_syn_res, "summary", ""))
 check("synthesis: cost aggregated (1 soldier x 0.20)", abs(getattr(_syn_res, "cost_usd", -1) - 0.20) < 1e-6, str(getattr(_syn_res, "cost_usd", "?")))
+# EU-96 (iter-3): the n=1 synthesis path (single delegated specialist) must also carry its token
+# burn into the BuildResult so loop _burn("builder", ...) is non-zero for domain-gap tickets.
+check("synthesis: input_tokens = sum across specialists (1 x 1000)", getattr(_syn_res, "input_tokens", -1) == 1000, str(getattr(_syn_res, "input_tokens", "?")))
+check("synthesis: output_tokens = sum across specialists (1 x 250)", getattr(_syn_res, "output_tokens", -1) == 250, str(getattr(_syn_res, "output_tokens", "?")))
 
 # No charters returned by HR -> None (solo fallback).
 async def _fake_synthesize_empty(domain, tt, c2, approver=None):

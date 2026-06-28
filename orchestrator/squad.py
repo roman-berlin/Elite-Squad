@@ -393,6 +393,7 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
 
     cwd = app.workdir or app.repo_path
     cost, turns, tools, summaries = 0.0, 0, [], []
+    in_tok = out_tok = 0   # EU-96: per-officer burn tracking — sum specialist soldier token usage
     ok = True
     manual_notes: list[str] = []   # gates that couldn't run AS a verification (prose / missing / blocked / timeout)
 
@@ -413,6 +414,8 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
         cost += run.cost_usd
         turns += run.num_turns
         tools += run.tools
+        in_tok += getattr(run, "input_tokens", 0)    # EU-96: accumulate this specialist's burn
+        out_tok += getattr(run, "output_tokens", 0)
         if run.is_error:
             ok = False
 
@@ -465,7 +468,8 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
             pass
 
     return BuildResult(ok=ok, summary=summary, cost_usd=cost, num_turns=turns,
-                       raw=summary, tools=tools)
+                       raw=summary, tools=tools,
+                       input_tokens=in_tok, output_tokens=out_tok)
 
 
 _PLANNER_SYSTEM = """\
@@ -587,7 +591,7 @@ def _soldier_prompt(st: Subtask, req: BuildRequest, idx: int, total: int,
 
 
 async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
-    """Read-only planning pass. Returns (subtasks, cost, turns, tools, gap_domain).
+    """Read-only planning pass. Returns (subtasks, cost, turns, tools, in_tok, out_tok, gap_domain).
 
     ``gap_domain`` is ``None`` for tickets that fit the fixed squad lanes, or a short domain
     label (e.g. ``'mql5'``) when ``detect_domain_gap`` finds no covering lane.  When a gap is
@@ -602,7 +606,8 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
     ]))
     gap, gap_domain = await detect_domain_gap(ticket_text, SQUAD)
     if gap:
-        return [], 0.0, 0, [], gap_domain
+        # On a gap the planner LLM call is skipped, so there is no 'squad-lead' burn to report (0/0).
+        return [], 0.0, 0, [], 0, 0, gap_domain
 
     cwd = app.workdir or app.repo_path
     # EU-52: the read-only squad-planning pass runs through the ladder under the Builder's ceiling — a
@@ -618,7 +623,12 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
         disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit"],
         setting_sources=[], max_turns=14, effort="medium")
     run = await run_agent(_planner_prompt(req), options, tag="squad-lead")
-    return parse_subtasks(run.final or run.text), run.cost_usd, run.num_turns, run.tools, None
+    # EU-96: also surface the planner's own token burn so build_delegated can seed the delegated
+    # BuildResult's input/output tokens from it — the 'squad-lead' pass is a real (often Opus-tier)
+    # call, and its cost/turns are already threaded back via run.cost_usd/run.num_turns, so its tokens
+    # must be too or the delegated build's burn is under-reported.
+    return (parse_subtasks(run.final or run.text), run.cost_usd, run.num_turns, run.tools,
+            getattr(run, "input_tokens", 0), getattr(run, "output_tokens", 0), None)
 
 
 async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, idx: int, total: int,
@@ -715,7 +725,7 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
     Returns (None, 0) when the plan has <2 subtasks, signalling the caller to do a solo build.
     Returns (None, 0) when a domain gap is detected but HR provisioned no usable specialist.
     """
-    subtasks, p_cost, p_turns, p_tools, gap_domain = await _plan(req, app, cfg)
+    subtasks, p_cost, p_turns, p_tools, p_in_tok, p_out_tok, gap_domain = await _plan(req, app, cfg)
 
     # EU-69: a detected domain gap skips the soldier loop entirely and hands off to synthesis.
     if gap_domain is not None:
@@ -746,6 +756,10 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
                      roles=[s.role for s in subtasks])
 
     cost, turns, tools, summaries, ok = p_cost, p_turns, list(p_tools), [], True
+    # EU-96: seed token burn from the planner's 'squad-lead' run (mirroring how cost/turns start from
+    # p_cost/p_turns) so the planner pass is counted alongside the soldiers; the loop reads
+    # BuildResult.input_tokens/output_tokens into _burn("builder", ...). Each soldier's burn is added below.
+    in_tok, out_tok = p_in_tok, p_out_tok
     for i, st in enumerate(subtasks, 1):
         print(f"  engineer {i}/{len(subtasks)} · {SQUAD[st.role][0]} (effort {st.effort()}) — {st.title}",
               flush=True)
@@ -753,6 +767,8 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
         cost += run.cost_usd
         turns += run.num_turns
         tools += run.tools
+        in_tok += getattr(run, "input_tokens", 0)    # EU-96: accumulate this soldier's burn
+        out_tok += getattr(run, "output_tokens", 0)
         summaries.append(f"[{SQUAD[st.role][0]} · {st.size}] {st.title}\n{(run.final or '').strip()}")
         if run.is_error:
             ok = False
@@ -763,4 +779,5 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
 
     summary = (f"Squad delegation — {len(subtasks)} subtasks dispatched:\n\n" + "\n\n".join(summaries))
     return BuildResult(ok=ok, summary=summary, cost_usd=cost, num_turns=turns,
-                       raw=summary, tools=tools), len(subtasks)
+                       raw=summary, tools=tools,
+                       input_tokens=in_tok, output_tokens=out_tok), len(subtasks)
