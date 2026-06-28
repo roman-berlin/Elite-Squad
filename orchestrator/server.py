@@ -36,6 +36,7 @@ from .cockpit_state import _LOG, _Tee, _run_lock, _sse, _state, recent_log  # no
 from .cockpit_state import (  # noqa: F401
     active_runs,
     claim_run,
+    get_autopilot_status,
     get_state,
     is_active,
     release_run,
@@ -250,9 +251,12 @@ def create_app(cfg: Config):
         Returns a JSON object with:
           - ``daemon_running``: True if the autopilot PID file exists and the process is alive
             (the single source of truth — EU-73)
-          - ``on``: the in-memory cockpit flag (True only when started via the cockpit Start button)
-          - ``stopping``: True while a graceful drain is in progress
-          - ``app``: the project the autopilot is working (or None)
+          - ``on``: the unit-wide in-memory cockpit flag (True only when started via Start button)
+          - ``stopping``: True while a graceful drain is in progress (unit-wide)
+          - ``app``: the project the autopilot is working (or None) (unit-wide)
+          - ``apps``: per-app map keyed by app slug; each entry is
+            ``{on, stopping, ticket, mode}`` read from the per-app run-state for every tab
+            open in the current workspace session (EU-103).
         """
         from flask import jsonify
         from . import autopilot as _ap
@@ -261,91 +265,139 @@ def create_app(cfg: Config):
         # Refresh daemon_running in the live state dict so subsequent page renders are consistent.
         if cur:
             cur["daemon_running"] = alive
+
+        # EU-103: build per-app map for every tab open in this session's workspace.
+        ws = cockpit_state.workspace_for(_session_id())
+        apps_map: dict = {}
+        for tab in ws.tabs:
+            status = get_autopilot_status(tab.project)
+            status["ticket"] = tab.ticket   # overlay the tab's selected ticket (workspace layer)
+            apps_map[tab.project] = status
+
         return jsonify({
             "on": cur.get("on", False),
             "daemon_running": alive,
             "stopping": cur.get("stopping", False),
             "app": cur.get("app"),
+            "apps": apps_map,
         })
 
     @app.post("/api/autopilot")
     def autopilot_api():
         import copy
         from . import autopilot as ap
-        cur = _state.get("autopilot") or {}
         action = request.form.get("action", "toggle")
-        # EU-74: preserve ?app= on every redirect so the project selector stays in sync with the
-        # autopilot badge after Start/Stop/drain.  For Start the form always carries `app`; for
-        # Stop/drain (which don't POST an `app` field) fall back to the running autopilot's scope.
+
+        # EU-103: resolve the TARGET project PER-APP. The per-tab controls always post their project's
+        # `app`; a legacy form with no `app` targets the unit-wide (None-key) autopilot. ``_scope("")``
+        # would seed the first app, so only run it when an app was actually posted — otherwise this is
+        # the all-backlog-apps autopilot, keyed under None (== the default ``_state``).
         _form_app = (request.form.get("app") or "").strip()
-        _state_app = (cur.get("app") or "").strip()
+        app_name = (_scope(_form_app) or None) if _form_app else None
+        key = app_name
+        st = get_state(key)
+
+        # EU-74: preserve ?app= on every redirect so the project selector stays in sync with the
+        # per-tab autopilot control. Prefer the posted app; else fall back to the unit-wide autopilot's
+        # recorded scope (a legacy Stop/drain that carries no `app`); never leak a placeholder.
+        _state_app = ((_state.get("autopilot") or {}).get("app") or "").strip()
         if _state_app in {"(no project)", "(external daemon)"}:
             _state_app = ""
         _redir_app = _form_app or _state_app
         _redir = f"/?app={_redir_app}" if _redir_app else "/"
-        want_on = action == "start" or (action == "toggle" and not cur.get("on"))
-        if want_on and not cur.get("on"):
-            if not health.summary(cfg)["healthy"]:
-                _state["last_msg"] = "autopilot blocked — fix the health problems first"
+
+        # EU-103: persist the per-app autopilot mode ('choose' | 'drain') when supplied. Stored in the
+        # SELECTED app's run-state so each tab carries its own mode independently of whether autopilot
+        # is running. Validation rejects unknown values so the state never holds garbage.
+        _mode_param = (request.form.get("mode") or "").strip() or None
+        if _mode_param is not None:
+            if _mode_param not in ("choose", "drain"):
+                st["last_msg"] = f"invalid autopilot mode {_mode_param!r} — expected 'choose' or 'drain'"
                 return redirect(_redir)
-            app_name = _scope(request.form.get("app")) or None   # autopilot works ONE concrete project
+            st["autopilot_mode"] = _mode_param
+
+        ap_on = bool(get_autopilot_status(key)["on"])   # the per-app autopilot signal (not a manual run)
+
+        if action == "start":
+            # EU-103: actually HONOUR the mode — the two start buttons must do different things.
+            #  · 'choose' hands off to the per-ticket picker (pick specific tickets, then run them) —
+            #    this is the real per-ticket flow, not a blind drain dressed up with a lying confirm.
+            #  · 'drain' (default) starts the continuous backlog autopilot for this project.
+            mode = _mode_param or st.get("autopilot_mode")
+            if mode == "choose":
+                return redirect(f"/tickets?app={app_name}" if app_name else "/tickets")
+
+            # ── Auto-drain: start the continuous per-app autopilot ────────────────────────────────
+            if ap_on:
+                st["last_msg"] = "autopilot is already running for this project"
+                return redirect(_redir)
+            if not health.summary(cfg)["healthy"]:
+                st["last_msg"] = "autopilot blocked — fix the health problems first"
+                return redirect(_redir)
+            # Detached-daemon guard (EU-73), now per-app aware (EU-103): refuse only for a FOREIGN
+            # daemon process (a launchd keepalive / a terminal that owns the whole queue), NOT this
+            # cockpit's own in-process autopilot threads — those are tracked per-app and run in
+            # parallel, so starting Elite-Unit while automatixy already runs must NOT be refused here.
+            if ap.daemon_is_external():
+                st["last_msg"] = ("autopilot is already running as a detached daemon — stop it first "
+                                  "(unload the launchd keepalive agent, or close the terminal it runs "
+                                  "in) before starting another")
+                return redirect(_redir)
+            # Cross-guard: a unit-wide run (an all-apps autopilot / Telegram resume on the None key)
+            # blocks a per-app autopilot start too — it may touch this project. A DIFFERENT project's
+            # run does NOT block (that is the per-app parallelism this ticket is about).
+            if key is not None and is_active(None):
+                st["last_msg"] = ("a run is already in progress — stop it and wait for it to finish, "
+                                  "then start autopilot")
+                return redirect(_redir)
+
             ev = threading.Event()
             ap_cfg = copy.copy(cfg)
             ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
-
-            # Claim the run-guard atomically (mirror the run POSTs). Flask is threaded=True, so two
-            # near-simultaneous "Start" clicks would otherwise both pass the check above and the SECOND
-            # would overwrite _state["autopilot"] — stranding the first loop's stop Event so "Stop" in
-            # the War Room can never stop it (you'd have to kill the process). Idempotent Start: refuse
-            # if an autopilot Event already exists; also refuse if a manual run is live, so the two can't
-            # run_loop the same app concurrently. Holding _state["active"] for autopilot's lifetime makes
-            # the cockpit run POSTs (which check it) refuse while autopilot is on.
-            with _run_lock:
-                if (_state.get("autopilot") or {}).get("on"):
-                    _state["last_msg"] = "autopilot is already running"
-                    return redirect(_redir)
-                if _state["active"]:
-                    _state["last_msg"] = ("a run is already in progress — stop it and wait for it to "
-                                          "finish, then start autopilot")
-                    return redirect(_redir)
-                # EU-73: a detached autopilot daemon (started from a terminal / the launchd keepalive,
-                # whose window has since closed) is invisible to this cockpit's in-memory flags but very
-                # much alive — its PID file proves it. Refuse so a Start click can't run a SECOND
-                # autopilot against the same queue (double-building, racing the same tickets).
-                # daemon_running() is the single source of truth here — a live os.kill probe, not a
-                # stale boolean.
-                if ap.daemon_running():
-                    _state["last_msg"] = ("autopilot is already running as a detached daemon — stop it "
-                                          "first (unload the launchd keepalive agent, or close the "
-                                          "terminal it runs in) before starting another")
-                    return redirect(_redir)
-                _state["active"] = True
-                _state["autopilot"] = {"on": True, "stop": ev, "app": app_name or "(no project)",
-                                       "stopping": False}
+            # Claim THIS project's run slot atomically (per-app TOCTOU guard + the cross-project
+            # parallel cap). Flask is threaded=True, so two near-simultaneous Starts for the same
+            # project both pass the checks above; claim_run lets exactly one win. A manual run holding
+            # this app's slot also makes the claim fail (the two can't run_loop the same app at once).
+            if not claim_run(key, dry_run=False, stop_event=ev):
+                st["last_msg"] = ("a run is already in progress for this project — wait for it to "
+                                  "finish, then start autopilot") if is_active(key) else (
+                    "too many projects are running at once — wait for one to finish, then start this one")
+                return redirect(_redir)
+            # The dedicated autopilot signal (distinct from a manual run's bare ``active``). Set
+            # synchronously so the first render after Start already shows Autopilot ON; the loop sets it
+            # again and the _bg finally clears it.
+            st["autopilot_on"] = True
 
             def _bg():
                 try:
-                    asyncio.run(ap.autopilot(ap_cfg, app_name, once=False, stop_event=ev))
+                    asyncio.run(ap.autopilot(ap_cfg, key, once=False, stop_event=ev))
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"autopilot error: {exc}"
+                    st["last_msg"] = f"autopilot error: {exc}"
                 finally:
-                    _state["active"] = False   # release the run-guard so manual runs / a fresh Start work
-                    st = _state.get("autopilot")
-                    if st:
-                        st["on"] = False
-                        st["stopping"] = False
+                    st["autopilot_on"] = False   # autopilot off for this app
+                    release_run(key)             # clears active / run_started / stop_event for THIS app
             threading.Thread(target=_bg, daemon=True).start()
-        elif action == "drain" and cur.get("on") and cur.get("stop"):
-            # Graceful stop: let the in-flight ticket finish landing on DEV, then stand down (take no new
-            # tickets). Stays "stopping" in the UI until the worker thread exits (its finally clears it).
-            cur["stop"].set()
-            cur["stopping"] = True
-        elif action != "start" and cur.get("on") and cur.get("stop"):
-            # Immediate stop (toggle-off / explicit stop). A redundant "start" must NOT reach here:
-            # otherwise a second Start while one is live would STOP the running loop instead of being
-            # the idempotent no-op the guard above already made it.
-            cur["stop"].set()
-            cur["on"] = False
+            return redirect(_redir)
+
+        if action == "drain" and ap_on:
+            # Graceful stop for THIS project: signal only this app's stop_event, then stay on +
+            # "stopping" until the worker's finally clears autopilot_on. Acts on the SELECTED app's
+            # state — never a single global autopilot — so draining one project leaves others running.
+            ev = st.get("stop_event")
+            if ev is not None:
+                ev.set()
+            return redirect(_redir)
+
+        if action == "stop" and ap_on:
+            # Immediate stop for THIS project: flip its autopilot OFF now (the in-flight build still
+            # finishes in the background) and signal only this app's stop_event.
+            ev = st.get("stop_event")
+            if ev is not None:
+                ev.set()
+            st["autopilot_on"] = False
+            return redirect(_redir)
+
+        # toggle / unknown action → no-op (the mode persist above already took effect).
         return redirect(_redir)
 
     @app.get("/api/board")
