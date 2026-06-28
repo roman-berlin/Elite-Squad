@@ -297,6 +297,14 @@ class Config:
             return False
         return str(chat_id) in set(self.liaison_external_chat_ids)
 
+    # --- run logs (EU-106) ---
+    # log_folder: root directory for per-run log files written by run_logger.py.
+    # Resolved relative to the directory that contains audit_path.
+    log_folder: str = "logs/"
+    # log_retention_days: auto-purge day-folders older than this many days on each run start.
+    # 0 (the default) disables purging.
+    log_retention_days: int = 0
+
     # --- audit ---
     audit_path: str = "./audit.jsonl"   # keep OUTSIDE every target repo
 

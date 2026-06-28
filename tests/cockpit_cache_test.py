@@ -71,7 +71,7 @@ state = {}   # empty state = the cockpit didn't start the run (background/inflig
 
 # --- 1. One COLD render reads the audit exactly once, despite fanning out to it 3× -----------------
 _reset(clear_cache=True)
-board = warroom.render_board(cfg, "automatixy", state, log_lines=[])
+board = warroom.render_board(cfg, "automatixy", state)
 chk("cold render fans out to audit_lines ≥3× (load_tasks + _run_in_flight + _scan)",
     D.audit_lines_calls >= 3, f"calls={D.audit_lines_calls}")
 chk("…but reads the 50k-line audit from disk only ONCE per frame",
@@ -82,7 +82,7 @@ chk("render still correct (the in-flight run shows)", "AUTO-7" in board)
 _reset()                         # keep the warm cache; only reset the counters
 FRAMES = 60                      # ~2 min of SSE frames, or many duplicate tabs hammering /api/stream
 for _ in range(FRAMES):
-    warroom.render_board(cfg, "automatixy", state, log_lines=[])
+    warroom.render_board(cfg, "automatixy", state)
 chk(f"{FRAMES} more frames called audit_lines many times (frame rate × tabs)",
     D.audit_lines_calls >= FRAMES, f"calls={D.audit_lines_calls}")
 chk("≤1 parse per interval regardless of frame rate / tab count (0 re-reads while unchanged)",
