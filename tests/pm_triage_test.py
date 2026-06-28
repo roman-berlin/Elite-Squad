@@ -26,7 +26,18 @@ def chk(n, c, d=""):
 r = pm.parse_triage("Revert the supabase bump in superadmin; land the a11y.\nTRIAGE: RESOLVE")
 chk("parse: RESOLVE", r["action"] == "RESOLVE")
 chk("parse: keeps the instruction, drops the verdict line", "supabase" in r["text"] and "TRIAGE:" not in r["text"])
-chk("parse: ESCALATE", pm.parse_triage("BLOCKER: need the coordinator phone.\nTRIAGE: ESCALATE")["action"] == "ESCALATE")
+# Explicit ESCALATE WITH the mandatory WHY line → preserved; why captured.
+_tesc = pm.parse_triage(
+    "WHY PM CANNOT RESOLVE: The coordinator phone number is a Commander-only credential.\n"
+    "BLOCKER: need the coordinator phone.\nTRIAGE: ESCALATE"
+)
+chk("parse: ESCALATE (with WHY)", _tesc["action"] == "ESCALATE")
+chk("parse: ESCALATE captures why", "Commander" in _tesc.get("why", ""), str(_tesc.get("why")))
+# Explicit ESCALATE WITHOUT the WHY line → the escalation is PRESERVED (a genuine can't-decide is never
+# silently auto-resolved); the missing line is logged as possible noise. The PM prompt enforces the line.
+_tesc_no_why = pm.parse_triage("BLOCKER: need the coordinator phone.\nTRIAGE: ESCALATE")
+chk("parse: ESCALATE without WHY -> still ESCALATE (never silently auto-resolved)", _tesc_no_why["action"] == "ESCALATE")
+# Unclear/fallback → ESCALATE fail-safe (WHY enforcement does NOT fire on the fallback path).
 chk("parse: unclear -> ESCALATE (ask)", pm.parse_triage("hmm, not sure")["action"] == "ESCALATE")
 chk("parse: empty -> ESCALATE + placeholder", pm.parse_triage("")["action"] == "ESCALATE" and pm.parse_triage("")["text"])
 

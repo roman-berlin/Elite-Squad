@@ -210,10 +210,12 @@ class Config:
     #     the Commander (parked with a clear comment; the unit moves to the next ticket). ---
     pm_enabled: bool = True                 # False = halts go straight to the Commander (old behaviour)
 
-    # --- out-of-scope build findings (EU-42) ---
-    # When the Builder surfaces a finding outside the current ticket's scope, file it into the backlog
-    # instead of losing it (see filing.py). Default False = PROPOSE-FIRST: the finding is proposed (a
-    # comment / de-duped suggestion) but a backlog ticket is only opened when this is flipped on.
+    # --- out-of-scope build findings (EU-42 / EU-92) ---
+    # When the Builder/Reviewer surfaces a finding outside the current ticket's scope, file it into the
+    # backlog instead of losing it (see filing.py). EU-92 — the PM owns out-of-scope triage, so the
+    # default is AUTO-FILE: worthwhile findings land as de-duped 'out-of-scope'-labeled backlog tickets
+    # and the Commander is never paged. Flip to False to PROPOSE-FIRST instead (surface the proposal in
+    # 'Needs you' for a manual wave-through); PM-classified out-of-scope findings auto-file either way.
     out_of_scope_autofile: bool = True
 
     # --- council / meetings ---

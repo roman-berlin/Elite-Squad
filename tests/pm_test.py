@@ -17,7 +17,19 @@ def chk(n, c, d=""):
 
 # --- parse_verdict (pure) ---
 chk("DECIDE parsed", pm.parse_verdict("Group billing under one parent.\nPM VERDICT: DECIDE")["verdict"] == "DECIDE")
-chk("ESCALATE parsed", pm.parse_verdict("Recommend X; critical.\nPM VERDICT: ESCALATE")["verdict"] == "ESCALATE")
+# Explicit ESCALATE WITH the mandatory WHY line → preserved as ESCALATE; why captured.
+_esc_text = ("WHY PM CANNOT RESOLVE: Only the Commander holds the billing-tier contract.\n"
+             "Recommend X; critical.\nPM VERDICT: ESCALATE")
+_esc = pm.parse_verdict(_esc_text)
+chk("ESCALATE parsed (with WHY)", _esc["verdict"] == "ESCALATE")
+chk("ESCALATE captures why text", "Commander" in _esc.get("why", ""), str(_esc.get("why")))
+# Explicit ESCALATE WITHOUT the WHY line → the escalation is PRESERVED (a genuine can't-decide is
+# never silently auto-decided away); the missing line is logged as possible noise. The PM *prompt*
+# is what enforces the WHY line — parse-time coercion would only bury the critical calls this surfaces.
+_esc_no_why = pm.parse_verdict("Recommend X; critical.\nPM VERDICT: ESCALATE")
+chk("ESCALATE without WHY -> still ESCALATE (never silently auto-decided)", _esc_no_why["verdict"] == "ESCALATE")
+chk("why absent when the WHY line is missing", "why" not in _esc_no_why)
+# Unclear reply → ESCALATE fail-safe (no WHY enforcement on the fallback path).
 chk("unclear -> ESCALATE (fail-safe: ask the Commander)", pm.parse_verdict("hmm, not sure")["verdict"] == "ESCALATE")
 d = pm.parse_verdict("The call: use 4 groups.\nPM VERDICT: DECIDE")
 chk("body excludes the verdict line", "PM VERDICT" not in d["body"] and "4 groups" in d["body"])
@@ -37,12 +49,14 @@ chk("review parses DECIDE", r["verdict"] == "DECIDE" and "Observe" in r["body"],
 chk("PM goes through the recon squad path (officer=pm)", captured.get("officer") == "pm" and captured.get("label") == "Product Manager", str(captured.get("officer")))
 chk("PM soldiers are read-only", captured.get("soldier_tools") == ["Read", "Grep", "Glob"], str(captured.get("soldier_tools")))
 
-# --- escalate path ---
+# --- escalate path (with mandatory WHY line) ---
 async def fake_esc(**kw):
-    return "Recommend: keep 'Premium' label for now.\nWhy critical: changes billing semantics.\nPM VERDICT: ESCALATE"
+    return ("WHY PM CANNOT RESOLVE: Only the Commander can approve a tier rename that changes billing copy.\n"
+            "Recommend: keep 'Premium' label for now.\nPM VERDICT: ESCALATE")
 recon.run_officer = fake_esc
 r2 = asyncio.run(pm.review(cfg, "automatixy", "AUTO-14", "rename Premium tier?"))
 chk("review parses ESCALATE on a critical call", r2["verdict"] == "ESCALATE" and "Premium" in r2["body"], str(r2))
+chk("review captures why on ESCALATE", "Commander" in r2.get("why", ""), str(r2.get("why")))
 
 print("\n================ PRODUCT MANAGER OFFICER QA ================")
 passed = sum(1 for _, ok, _ in results if ok)

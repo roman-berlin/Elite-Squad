@@ -595,6 +595,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # halt OR the PM returned a recommendation; otherwise it's a truly empty build -> ERRORED.
             if deliberate or pm_outcome is not None:
                 proposal = pm_outcome["body"] if pm_outcome is not None else report
+                # EU-92: prepend the WHY PM CANNOT RESOLVE line (captured by parse_verdict) so the
+                # Commander immediately sees the specific authority or context that's missing —
+                # rather than having to read into the body to find why the PM couldn't decide.
+                if pm_outcome is not None and pm_outcome.get("why"):
+                    proposal = f"WHY PM CANNOT RESOLVE: {pm_outcome['why']}\n\n{proposal}"
                 decisions.add(cfg, ticket, app.name, proposal[:1500])   # so you can answer it in Telegram
                 if not cfg.dry_run and not ticket.ephemeral:
                     try:
@@ -954,6 +959,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     # Escalate — with the PM's brief if it gave one, else the raw required-changes. Record a question so
     # Needs-you shows a readable ask (not an empty 'escalated' row) that you can answer -> re-run.
     esc = (triage.get("text") if triage else None) or _escalation_comment(last_changes)
+    # EU-92: prepend the WHY PM CANNOT RESOLVE line (captured by parse_triage) so the Commander
+    # sees immediately WHY the PM escalated rather than self-resolving — the one sentence that
+    # describes the specific authority, credential, or irreducible context only he has.
+    if triage and triage.get("why"):
+        esc = f"WHY PM CANNOT RESOLVE: {triage['why']}\n\n{esc}"
     decisions.add(cfg, ticket, app.name, esc[:1500])
     if not cfg.dry_run and not ticket.ephemeral:
         # decisions.add already parked it to 'Blocked' (EU-61) — just leave the escalation note.
@@ -1165,18 +1175,24 @@ def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
     """EU-42: route real-but-off-spec findings the Reviewer/PM flagged (their ===TICKETS=== block on
     `report`) into the backlog instead of losing them.
 
-    When ``cfg.out_of_scope_autofile`` is on we AUTO-FILE each finding as its own ticket — labeled
-    'out-of-scope', assigned to the Commander (filing.create_task assigns to you by default), and
-    de-duped against open tickets by filing's existing find_open_by_summary. When it is off we
-    PROPOSE-FIRST: record a pending decision so the proposals surface in the cockpit's 'Needs you'
-    for the Commander to wave through — never silently dropped. Never raises: routing findings out of
-    the build must not break the run."""
+    EU-92 — the PM owns out-of-scope triage. A finding the PM itself classified as out-of-scope
+    (``source="pm-findings"``) is AUTO-FILED unconditionally: the PM has already decided, so it must
+    never page the Commander. The Reviewer's own raw ===TICKETS=== block honours the
+    ``out_of_scope_autofile`` knob (default on): AUTO-FILE each finding as its own 'out-of-scope'-labeled
+    ticket — de-duped against open tickets by filing's find_open_by_summary — or, when the knob is
+    flipped off, PROPOSE-FIRST: record a pending decision so the proposals surface in the cockpit's
+    'Needs you' for the Commander to wave through — never silently dropped. Never raises: routing
+    findings out of the build must not break the run."""
     try:
         from . import filing
         proposals, _clean = filing.parse_tickets(report or "")
         if not proposals:
             return
-        if getattr(cfg, "out_of_scope_autofile", False):
+        # PM-classified findings auto-file regardless of the knob — the PM is the decision-maker for
+        # the out-of-scope class (EU-92) and never escalates it. The Reviewer's raw block follows the
+        # knob (auto-file by default, propose-first only when the Commander explicitly opts out).
+        autofile = getattr(cfg, "out_of_scope_autofile", False) or source == "pm-findings"
+        if autofile:
             if cfg.dry_run:
                 titles = ", ".join(str(p.get("title", "?")) for p in proposals)
                 print(f"  filing · {len(proposals)} out-of-scope finding(s) ({source}, dry-run — not filed): "
@@ -1201,8 +1217,8 @@ def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
                         "automatically next time.)")
             # Distinct decision id so the proposal doesn't clobber (or get clobbered by) a needs_human
             # decision recorded for the SAME ticket — both must survive in the cockpit 'Needs you'.
-            # EU-83: store the raw report so handle_reply can file the findings directly on resume
-            # (rather than re-running the build with a '#out-of-scope' key that 404s/405s on Jira).
+            # EU-83: attach the raw ===TICKETS=== report so handle_reply's _file_out_of_scope_resume can
+            # file these findings when the Commander approves — without it the resume has nothing to file.
             decisions.add(cfg, ticket, app.name, question, entry_id=f"{ticket.id}#out-of-scope",
                           extra={"out_of_scope_report": report})
             if audit is not None:
