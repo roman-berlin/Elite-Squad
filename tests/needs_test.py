@@ -50,6 +50,26 @@ check("side panel shows the approval", "Engineering Coach" in side)
 check("side panel shows the failed run", "AUTO-7" in side and "errored" in side)
 check("side panel links to the inbox", "/needs" in side and "Open inbox" in side)
 
+# --- EU-93: count == len(items) invariant ---
+# needs.count() must equal the number of rows the panel will render — the single source of truth.
+# All five streams (decisions + approvals + proposals + specialist_approvals + tasks) must sum to
+# the same number that the KPI badge and the side-panel header badge both show.
+all_items = (s.get("decisions", []) + s.get("approvals", []) + s.get("proposals", [])
+             + s.get("specialist_approvals", []) + s.get("tasks", []))
+check("EU-93: count() == len(panel items)", needs.count(cfg) == len(all_items),
+      f"count={needs.count(cfg)} items={len(all_items)}")
+
+# The KPI card must deep-link to /needs (not /tasks?filter=needs) so every need type is visible.
+from orchestrator import dashboard as _dash
+kpi_cards = warroom.kpis(cfg, _dash.load_tasks(cfg.audit_path), None)
+needs_card = next((c for c in kpi_cards if c["label"] == "Needs you"), None)
+check("EU-93: KPI 'Needs you' card exists", needs_card is not None)
+check("EU-93: KPI 'Needs you' href -> /needs", needs_card and needs_card.get("href") == "/needs",
+      str(needs_card.get("href") if needs_card else "missing"))
+check("EU-93: KPI count matches needs.count()",
+      needs_card and needs_card["value"] == needs.count(cfg),
+      f"kpi={needs_card['value'] if needs_card else 'n/a'} count={needs.count(cfg)}")
+
 # --- hero (live run headline) ---
 run = {"live": True, "ticket": "AUTO-7", "app": "automatixy", "passes": 2, "cost": 0, "verdict": "",
        "branch": "auto-7", "outcome": "running",

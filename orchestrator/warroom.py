@@ -270,7 +270,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "href": "/tasks?filter=merged",
          "sparkline": merges_series},  # EU-76: 14-day daily merge trend
         {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
-         "tone": "warn" if _needs_count else None, "href": "/tasks?filter=needs"},   # -> the tickets that need you
+         "tone": "warn" if _needs_count else None, "href": "/needs"},   # EU-93: deep-link to the unified Needs-you inbox
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
         {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
          "tone": "warn" if blocked else None, "href": "/tasks?filter=parked"},
