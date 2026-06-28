@@ -237,7 +237,9 @@ def create_app(cfg: Config):
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
         # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
         # unit-level actions, not per-project runs.)
-        return warroom.render_page(cfg, appq, _view_state(appq), bar, h, log_lines=recent_log())
+        # EU-104: scope the live feed to this tab's project so a different project's run never
+        # bleeds into this tab's Live feed panel.
+        return warroom.render_page(cfg, appq, _view_state(appq), bar, h, log_lines=recent_log(app=appq))
 
     @app.get("/api/health")
     def health_api():
@@ -404,7 +406,8 @@ def create_app(cfg: Config):
     def board_api():
         from flask import Response
         appq = _board_project(request.args.get("app"))   # board is per-tab — one concrete project
-        return Response(warroom.render_board(cfg, appq, _view_state(appq), recent_log()),
+        # EU-104: scope live feed to this tab's project.
+        return Response(warroom.render_board(cfg, appq, _view_state(appq), recent_log(app=appq)),
                         mimetype="text/html")
 
     @app.get("/api/stream")
@@ -431,8 +434,9 @@ def create_app(cfg: Config):
                 if seq != last_seq or now - last_emit >= 2.0:
                     last_seq, last_emit = seq, now
                     try:
+                        # EU-104: scope live feed to this tab's project.
                         yield _sse("board",
-                                   warroom.render_board(cfg, appq, _view_state(appq), recent_log()))
+                                   warroom.render_board(cfg, appq, _view_state(appq), recent_log(app=appq)))
                     except Exception:  # noqa: BLE001 - never let a render error kill the stream
                         yield ": render-error\n\n"
                 time.sleep(0.5)
@@ -581,13 +585,21 @@ def create_app(cfg: Config):
             st["last_msg"] = ""
             ev = threading.Event()
             st["stop_event"] = ev
+            errored = False
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
+                errored = True
                 st["last_msg"] = str(exc)
             finally:
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
+                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
+                # control-bar note so a finished run never lingers as 'Working'. Guarded by
+                # ``errored`` so a real run error (set just above) stays visible — release_run no
+                # longer clears last_msg, so the operator still sees why a failed run failed.
+                if not errored:
+                    st["last_msg"] = ""
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -637,13 +649,21 @@ def create_app(cfg: Config):
             st["last_msg"] = ""
             ev = threading.Event()
             st["stop_event"] = ev
+            errored = False
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
+                errored = True
                 st["last_msg"] = str(exc)
             finally:
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
+                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
+                # control-bar note so a finished run never lingers as 'Working'. Guarded by
+                # ``errored`` so a real run error (set just above) stays visible — release_run no
+                # longer clears last_msg, so the operator still sees why a failed run failed.
+                if not errored:
+                    st["last_msg"] = ""
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -2275,13 +2295,21 @@ def create_app(cfg: Config):
             st["last_msg"] = ""
             ev = threading.Event()
             st["stop_event"] = ev
+            errored = False
             try:
                 asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
+                errored = True
                 st["last_msg"] = str(exc)
             finally:
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
+                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
+                # control-bar note so a finished run never lingers as 'Working'. Guarded by
+                # ``errored`` so a real run error (set just above) stays visible — release_run no
+                # longer clears last_msg, so the operator still sees why a failed run failed.
+                if not errored:
+                    st["last_msg"] = ""
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
