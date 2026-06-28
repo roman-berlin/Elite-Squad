@@ -50,7 +50,7 @@ scfg.detected_auth = lambda: "test"
 # --- 1. KPI cards point at scoped destinations (not the flat log / unrelated councils) ---
 cards = {c["label"]: c.get("href") for c in warroom.kpis(scfg, warroom.D.load_tasks(str(audit)), None)}
 chk("Parked card -> /tasks?filter=parked", cards.get("Parked") == "/tasks?filter=parked", str(cards.get("Parked")))
-chk("Needs you card -> /tasks?filter=needs", cards.get("Needs you") == "/tasks?filter=needs", str(cards.get("Needs you")))
+chk("Needs you card -> /needs (unified inbox)", cards.get("Needs you") == "/needs", str(cards.get("Needs you")))
 chk("Merged total card -> /tasks?filter=merged", cards.get("Merged total") == "/tasks?filter=merged", str(cards.get("Merged total")))
 chk("Security blocks card -> security-scoped forensics",
     cards.get("Security blocks") == "/forensics?cat=security_block", str(cards.get("Security blocks")))

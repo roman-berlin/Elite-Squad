@@ -1,11 +1,14 @@
 """Invariant tests for needs.count() == len(needs.summary() combined items).
 
-Four assertions (EU-67):
-  1. count() equals the sum of all item lists in summary() for any state.
+Five assertions (EU-93 / EU-88):
+  1. count() equals the sum of ALL five item lists in summary() for any state.
   2. A dismissed run item is excluded from both count() and summary() tasks list.
   3. A resolved/answered decision item (absent from pending_decisions.json) is
      excluded from both count() and summary() decisions list.
   4. A stale/phantom dismissed item does not increment the count.
+  5. The specialist_approvals stream (EU-88 5th stream) is counted in both
+     count() and summary()['total'] — guards against a new stream being added
+     to summary() without updating _total_from_summary() (the exact EU-93 bug).
 
 All network/disk calls are replaced with fixture data — no real files touched.
 """
@@ -54,11 +57,18 @@ def _make_cfg(tmp: Path) -> Config:
 
 
 def _total_from_summary(s: dict) -> int:
-    """Re-derive the total from the four item lists — the invariant's ground truth."""
+    """Re-derive the total from ALL five item lists — the invariant's ground truth.
+
+    EU-93 / EU-88: five streams are now aggregated:
+      decisions + approvals + proposals + specialist_approvals + tasks.
+    This helper must stay in sync with needs.summary() so the invariant tests
+    don't silently miss a new stream (the bug that motivated EU-93 in the first place).
+    """
     return (
         len(s.get("decisions", []))
         + len(s.get("approvals", []))
         + len(s.get("proposals", []))
+        + len(s.get("specialist_approvals", []))
         + len(s.get("tasks", []))
     )
 
@@ -256,6 +266,60 @@ def test_phantom_dismissed_item_not_counted() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 5 — specialist_approvals (EU-88 5th stream) counted in both count() and summary()
+# ---------------------------------------------------------------------------
+
+def test_specialist_approvals_counted_in_invariant() -> None:
+    """The specialist_approvals stream (EU-88, added to needs.py for EU-93) must be included
+    in both summary()['total'] and count() so the KPI badge is accurate.
+
+    This test guards against a regression where a new stream is added to summary() but
+    _total_from_summary() (the invariant helper) is not updated — exactly the bug EU-93 fixed.
+    """
+    tmp = Path(tempfile.mkdtemp())
+    cfg = _make_cfg(tmp)
+
+    # Write a pending specialist-approval entry to the file hr.pending_specialist_approvals reads.
+    spec_approvals_file = tmp / "pending_specialist_approvals.json"
+    spec_approvals_file.write_text(json.dumps({
+        "AUTO-10::security": {
+            "status": "pending",
+            "ticket_id": "AUTO-10",
+            "domain": "security",
+            "requested_at": "2026-06-28T09:00:00",
+        }
+    }), encoding="utf-8")
+
+    # No tasks or decisions; only the specialist approval is pending.
+    dashboard.load_tasks = lambda _p: []
+    dashboard.load_dismissed = lambda _p: {}
+
+    s = needs.summary(cfg)
+    derived = _total_from_summary(s)
+
+    chk(
+        "5a. specialist_approvals stream present in summary()",
+        len(s.get("specialist_approvals", [])) == 1,
+        f"specialist_approvals={s.get('specialist_approvals')}",
+    )
+    chk(
+        "5b. summary()['total'] includes the specialist approval",
+        s["total"] == 1,
+        f"total={s['total']}",
+    )
+    chk(
+        "5c. count() includes the specialist approval",
+        needs.count(cfg) == 1,
+        f"count={needs.count(cfg)}",
+    )
+    chk(
+        "5d. count() == _total_from_summary() invariant holds for specialist-approvals scenario",
+        needs.count(cfg) == derived,
+        f"count={needs.count(cfg)}  derived={derived}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 
@@ -263,6 +327,7 @@ test_count_equals_summary_len_invariant()
 test_dismissed_run_excluded_from_count_and_tasks()
 test_resolved_decision_excluded_from_count_and_decisions()
 test_phantom_dismissed_item_not_counted()
+test_specialist_approvals_counted_in_invariant()
 
 print("\n======== NEEDS COUNT INVARIANT QA ========")
 passed = sum(1 for _, ok, _ in results if ok)
