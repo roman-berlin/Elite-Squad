@@ -92,6 +92,11 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     parked ids via load() before calling and notify only when the returned id is absent from that
     snapshot (see loop.py's findings-decisions route and eu89_stateful_chat_test._park_and_notify).
     In practice the return is always a non-None id; the ``| None`` annotation is permissive only."""
+    # NB: decisions.add is a faithful storage primitive — it records whatever the routing layer hands
+    # it (the out-of-scope PROPOSE-FIRST proposal, the EU-83 resume payload, a needs_human ask) and must
+    # never silently drop a write. EU-92's "PM owns routine escalations" is enforced UPSTREAM (the PM
+    # prompt self-resolves the routine classes; loop._route_out_of_scope auto-files out-of-scope findings
+    # instead of paging) — gutting this primitive would just lose the entries those paths depend on.
     eid = entry_id or ticket.id
     base_tid = str(ticket.id).split("#", 1)[0]
     q_fp = _question_fingerprint(question)

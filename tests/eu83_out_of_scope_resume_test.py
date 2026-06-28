@@ -26,6 +26,7 @@ sdk.__getattr__ = lambda n: _D
 sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
+import orchestrator.loop as loop
 from orchestrator import decisions, filing
 from orchestrator.backlog.jira import JiraAdapter
 from orchestrator.config import Config, AppConfig
@@ -75,7 +76,35 @@ chk("extra payload is stored in the decision entry", len(oos) == 1, str(items))
 chk("out_of_scope_report is preserved verbatim",
     oos and "===TICKETS===" in oos[0].get("out_of_scope_report", ""), str(oos))
 
-# Clean up so we start fresh for the handle_reply tests
+# Clean up so we start fresh for the next tests
+(tmp / "pending_decisions.json").unlink(missing_ok=True)
+
+
+# --- 2b) loop._route_out_of_scope (non-pm source, autofile OFF) attaches the report -------- #
+# Regression (EU-92): case 2 proves decisions.add STORES `extra`; this proves the PRODUCER —
+# loop._route_out_of_scope's propose-first branch — actually PASSES it. An EU-92 refactor dropped
+# the payload, so the Commander could approve an out-of-scope proposal and _file_out_of_scope_resume
+# would find nothing to file. Pin the loop call-site so that path can't silently regress again.
+ROUTE_REPORT = (
+    "Reviewer prose.\n"
+    "===TICKETS===\n"
+    '[{"title": "Tidy a stale flag", "type": "Task", "severity": "LOW", "body": "remove dead flag"}]\n'
+    "===END===\n"
+)
+route_tkt = Ticket(id="EU-84", key="EU-84", summary="route producer test", description="")
+route_cfg = Config(apps=[app], audit_path=str(tmp / "audit.jsonl"))
+route_cfg.out_of_scope_autofile = False   # knob OFF → propose-first branch (not auto-file)
+# source="reviewer" (NON-pm): pm-findings would force auto-file and skip propose-first entirely.
+loop._route_out_of_scope(route_cfg, route_tkt, app, None, ROUTE_REPORT, source="reviewer")
+
+route_items = decisions.load(route_cfg)
+route_oos = [i for i in route_items if i.get("id") == "EU-84#out-of-scope"]
+chk("_route_out_of_scope(non-pm, autofile off) records an out-of-scope decision",
+    len(route_oos) == 1, str(route_items))
+chk("the routed entry carries out_of_scope_report (EU-83 resume payload survives the EU-92 route)",
+    bool(route_oos) and route_oos[0].get("out_of_scope_report") == ROUTE_REPORT, str(route_oos))
+
+# Clean up so the handle_reply tests start fresh
 (tmp / "pending_decisions.json").unlink(missing_ok=True)
 
 

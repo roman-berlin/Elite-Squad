@@ -14,8 +14,15 @@ answers; the product-direction ones it routes to Roman with a recommendation.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
+
+_LOG = logging.getLogger(__name__)
+
+# Matches the mandatory WHY line the PM must include on every ESCALATE verdict.
+# The absence of this line on an ESCALATE triggers a coerce-to-DECIDE/RESOLVE with a warning.
+_WHY_PATTERN = re.compile(r"WHY\s+PM\s+CANNOT\s+RESOLVE\s*:(.+)", re.IGNORECASE)
 
 from . import filing
 from .config import Config
@@ -27,17 +34,25 @@ ultimately the Commander (Roman). Your job: make the product / IA / scope calls 
 alone, so the unit keeps shipping — grounded in the ticket, the repo's own docs (audit / plan / Unit
 Memory) and existing conventions. You are READ-ONLY: you read to ground the call, you never edit code.
 
-DECIDE vs ESCALATE — judge honestly:
-- **DECIDE** the everyday calls yourself: naming, grouping/label, which-of-two-reasonable-options,
-  default copy, a reversible structure choice, anything an experienced PM would just settle. State the
-  decision crisply and give a one-line rationale the Builder can act on immediately.
-- **ESCALATE** only the CRITICAL or hard-to-reverse calls: a change to product direction, pricing /
-  billing semantics, security or legal posture, deleting a user-facing capability, or anything the
-  Commander has explicitly reserved for himself. For these you do NOT decide — you propose ONE
-  recommended solution with its key trade-off, for the Commander to approve or reject.
+DECIDE vs ESCALATE — you have strong authority to DECIDE; ESCALATE is the rare exception.
 
-When unsure whether something is critical, ESCALATE — it is cheaper to ask than to ship the wrong
-direction. Keep it short and concrete; no hedging, no walls of text.
+THREE ROUTINE CLASSES you MUST self-resolve — never escalate these:
+  1. OUT-OF-SCOPE FINDINGS: a Reviewer finding that predates this ticket or lives outside the diff
+     surface → classify it as out-of-scope, file/skip it, and unblock the build. Do NOT escalate.
+  2. ITERATION / RETRY / DEPENDENCY ISSUES: the build has looped, a dependency is ambiguous, or the
+     Builder is stuck on a corrective path → decide the next concrete action yourself. Do NOT escalate.
+  3. ANY PM-REASONABLE QUESTION: naming, grouping/label, copy, reversible structure choices,
+     which-of-two-reasonable-options, default values, anything an experienced PM just settles → decide.
+     Do NOT escalate.
+
+ESCALATE ONLY when ALL THREE of the following are true:
+  (a) the call is CRITICAL or hard to reverse (product direction, pricing/billing semantics, security
+      or legal posture, deleting a user-facing capability), AND
+  (b) you genuinely CANNOT decide it from the ticket, docs, and existing conventions alone, AND
+  (c) the Commander has the specific authority, credential, or context that is actually missing.
+  If you can't articulate all three, DECIDE.
+
+Keep it short and concrete; no hedging, no walls of text.
 
 End your reply with EXACTLY one line, nothing after it:
   PM VERDICT: DECIDE
@@ -49,12 +64,14 @@ Above that line:
     • Rationale: <one-line why>
     • Action: <the single thing the Builder must do next>
   One sentence of prose may follow if essential context is needed.
-- ESCALATE → a BRIEF for the Commander, at most 6 lines, in EXACTLY this shape — no preamble, no
+- ESCALATE → a BRIEF for the Commander, at most 7 lines, in EXACTLY this shape — no preamble, no
   re-derivation, no quoting the whole ticket:
+    WHY PM CANNOT RESOLVE: <one sentence — the specific authority, credential, or irreducible context only the Commander has>
     BLOCKER: <one sentence — what is blocked and why it's his call>
     DECISION: <the single question he must answer>
     OPTIONS: <A vs B in a few words, or "—" if not a choice>
     RECOMMENDATION: <your suggested call + the one key trade-off>
+  The WHY PM CANNOT RESOLVE line is MANDATORY — omitting it invalidates the escalation.
   The Commander reads this on his phone — if he can't grasp the decision in five seconds, it's too long."""
 
 
@@ -85,22 +102,57 @@ def _prompt(app_name: str, ticket_id: str, question: str, context: str) -> str:
 
 
 def parse_verdict(text: str | None, auto_mode: bool = False) -> dict[str, str]:
-    """Pure parse of the PM's reply into {verdict, body}. Unclear -> ESCALATE (fail-safe: ask the
-    Commander rather than auto-decide). In AUTOMODE the PM never waits on the Commander: an ESCALATE (or
-    an unclear reply) is coerced to DECIDE so the unit keeps moving — the recommendation becomes the
-    decision, logged for the Commander to review/reverse. Unit-testable without an agent."""
+    """Pure parse of the PM's reply into {verdict, body, raw[, why]}.
+
+    Unclear reply → ESCALATE (fail-safe: ask the Commander rather than auto-decide).
+
+    WHY line (EU-92): every Commander-facing ESCALATE must carry a 'WHY PM CANNOT RESOLVE:' line so
+    noise is self-evident; when present it is preserved in the returned dict under 'why'. An explicit
+    ESCALATE that OMITS it is left ESCALATE (a genuine can't-decide must never be silently auto-decided
+    away) but a warning is logged flagging it as possible noise. The WHY line is *enforced* in the PM
+    prompt, and the routine classes are kept off the Commander's desk upstream (prompt + auto-file
+    routing) — parse-time coercion would only bury the critical calls this gate exists to surface.
+
+    AUTOMODE: the PM never waits on the Commander — an ESCALATE (or an unclear reply) is coerced to
+    DECIDE so the unit keeps moving; the recommendation becomes the decision, logged for review/reversal.
+
+    Unit-testable without an agent.
+    """
     raw = (text or "").strip()
     up = raw.upper()
-    if "PM VERDICT: ESCALATE" in up:
+    # Track whether the PM *explicitly* wrote ESCALATE vs the reply being unclear/unparseable.
+    explicit_escalate = "PM VERDICT: ESCALATE" in up
+    if explicit_escalate:
         verdict = "ESCALATE"
     elif "PM VERDICT: DECIDE" in up:
         verdict = "DECIDE"
     else:
-        verdict = "ESCALATE"
+        verdict = "ESCALATE"  # unclear reply → fail-safe: ask the Commander rather than auto-decide
+
+    # Extract the WHY line from *explicit* ESCALATE verdicts (not the unclear fallback above) so the
+    # escalation that reaches the Commander carries its one-line justification. A missing WHY line is
+    # logged as possible noise but does NOT flip the verdict: coercing a genuine can't-decide into a
+    # DECIDE would bury exactly the critical call this gate exists to surface (EU-92). The routine
+    # classes are kept off the Commander's desk upstream (PM prompt + auto-file routing), not here.
+    why = ""
+    if explicit_escalate:
+        m = _WHY_PATTERN.search(raw)
+        if m:
+            why = m.group(1).strip()
+        else:
+            _LOG.warning(
+                "parse_verdict: PM VERDICT: ESCALATE is missing the mandatory "
+                "'WHY PM CANNOT RESOLVE' line — surfacing it anyway (possible noise)."
+            )
+
     if auto_mode and verdict == "ESCALATE":
         verdict = "DECIDE"   # automode: decide autonomously, never stop for the approve button
+
     body = raw.rsplit("PM VERDICT:", 1)[0].strip() if "PM VERDICT:" in up else raw
-    return {"verdict": verdict, "body": body or "(the PM gave no detail)", "raw": raw}
+    result: dict[str, str] = {"verdict": verdict, "body": body or "(the PM gave no detail)", "raw": raw}
+    if why:
+        result["why"] = why
+    return result
 
 
 PM_TRIAGE_SYSTEM = """You are the Product Manager, called when a ticket has EXHAUSTED its build passes —
@@ -108,24 +160,39 @@ the Builder built it several times and the Reviewer kept rejecting it. Before th
 you triage the run. You are given the latest Builder summary and the Reviewer's outstanding required
 changes; you may Read the repo to ground your call.
 
+THREE ROUTINE CLASSES you MUST self-resolve — never escalate these:
+  1. OUT-OF-SCOPE REJECTIONS: the remaining Reviewer objections are scope-creep, hygiene, or pre-existing
+     issues not introduced by this ticket (unrelated lockfile change, stray file, out-of-scope app
+     touched, missing config/CSP line) → TRIAGE: RESOLVE with a precise surgical instruction. Ask the
+     Commander NOTHING.
+  2. ITERATION / RETRY EXHAUSTION: the ticket looped because the Builder lacked a clear corrective path,
+     not because a Commander decision was missing → decide the corrective action and TRIAGE: RESOLVE.
+  3. DEPENDENCY / SCOPE AMBIGUITY that an experienced PM can settle from the ticket + docs → decide and
+     TRIAGE: RESOLVE. Do NOT escalate.
+
 Judge honestly:
-- If the ticket's CORE deliverable is essentially DONE and the remaining rejections are fixable
-  scope-creep / hygiene the unit can finish ITSELF — an unrelated dependency or lockfile change to back
-  out, a missing config/CSP line, a layout fix, a stray file to delete, an out-of-scope app touched —
-  then TRIAGE: RESOLVE. Give ONE precise, surgical instruction for a single final pass that lands the
-  in-scope work and drops the out-of-scope churn. Name the files and the exact action. Ask the Commander
-  NOTHING.
-- If a GENUINE Commander decision remains — a value only he has (a real phone number, a credential), a
-  product/scope call he reserved for himself, or an irreducibly ambiguous requirement — then
-  TRIAGE: ESCALATE, as a tight 1–3 line brief (BLOCKER / DECISION / RECOMMENDATION). No essay.
+- TRIAGE: RESOLVE when the ticket's CORE deliverable is essentially DONE and the remaining rejections
+  fall into one of the three routine classes above. Give ONE precise, surgical instruction: name the
+  files and the exact action. Ask the Commander NOTHING.
+- TRIAGE: SPLIT when the ticket is genuinely TOO BIG for one build — it spans many files or areas,
+  each independently substantial, and no single corrective pass could finish it (repo-wide rename,
+  multi-screen feature, cross-cutting refactor). In 1–2 lines say why it's too heavy; the Scrum Master
+  will break it into small sub-tickets.
+- TRIAGE: ESCALATE ONLY when ALL THREE of the following are true:
+    (a) a GENUINE Commander decision remains — a value only he has (real credential, phone number), a
+        product/scope call he explicitly reserved, or an irreducibly ambiguous requirement, AND
+    (b) you genuinely CANNOT resolve it from the ticket, docs, and existing conventions alone, AND
+    (c) you can state in one sentence the specific authority or information only the Commander has.
+    If you can't articulate all three, TRIAGE: RESOLVE.
+  When escalating, write a tight 1–3 line brief in EXACTLY this shape:
+    WHY PM CANNOT RESOLVE: <one sentence — the specific authority or information only the Commander has>
+    BLOCKER: <one sentence — what is blocked>
+    DECISION: <the single question he must answer>
+    RECOMMENDATION: <your suggested call>
+  The WHY PM CANNOT RESOLVE line is MANDATORY — omitting it invalidates the escalation.
 
-- If the ticket is simply TOO BIG to land within the pass budget — it spans many files or areas, each
-  independently substantial, and no single corrective pass could finish it (a repo-wide rename, a
-  multi-screen feature, a cross-cutting refactor) — then TRIAGE: SPLIT. In 1–2 lines say why it's too
-  heavy; the Scrum Master will break it into small sub-tickets that each land on their own.
-
-Bias to RESOLVE when the work is substantively done and only discipline is missing. Use SPLIT only when
-the ticket is genuinely oversized for one build. Reserve ESCALATE for what only the Commander can settle.
+Bias strongly to RESOLVE when the work is substantively done and only discipline is missing. Use SPLIT
+only when genuinely oversized. Reserve ESCALATE for what truly only the Commander can settle.
 
 End with EXACTLY one line, nothing after it:  TRIAGE: RESOLVE   or   TRIAGE: ESCALATE   or   TRIAGE: SPLIT"""
 
@@ -137,26 +204,56 @@ PM_TRIAGE_SYSTEM += filing.TICKET_BLOCK_RULE
 
 
 def parse_triage(text: str | None) -> dict[str, str]:
-    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE|SPLIT, text, raw}. Unclear -> ESCALATE.
+    """Parse the PM's triage reply into {action: RESOLVE|ESCALATE|SPLIT, text, raw[, why]}.
+
+    Unclear reply → ESCALATE (fail-safe: ask the Commander rather than silently auto-resolve).
+
+    WHY line (EU-92): every TRIAGE: ESCALATE must carry a 'WHY PM CANNOT RESOLVE:' line so noise is
+    self-evident; when present it is preserved in the returned dict under 'why'. An explicit ESCALATE
+    that omits it is left ESCALATE (a genuine can't-decide is never silently auto-resolved) but a
+    warning flags it as possible noise. The PM prompt enforces the line and self-resolves the routine
+    classes upstream, so they don't reach this verdict as escalations at all.
 
     `text` is the human-facing instruction with the TRIAGE verdict line AND any EU-42 out-of-scope
     ===TICKETS=== block stripped (so a RESOLVE comment never carries the machine block); `raw` keeps the
-    full reply so the loop can route that findings block to the backlog separately."""
+    full reply so the loop can route that findings block to the backlog separately.
+    """
     raw = (text or "").strip()
     up = raw.upper()
+    # Track whether the PM *explicitly* wrote ESCALATE vs the reply being unclear/unparseable.
+    explicit_escalate = "TRIAGE: ESCALATE" in up
     if "TRIAGE: SPLIT" in up:
         action = "SPLIT"
     elif "TRIAGE: RESOLVE" in up:
         action = "RESOLVE"
-    elif "TRIAGE: ESCALATE" in up:
+    elif explicit_escalate:
         action = "ESCALATE"
     else:
-        action = "ESCALATE"
+        action = "ESCALATE"  # unclear reply → fail-safe: ask the Commander rather than auto-resolve
+
+    # Extract the WHY line from *explicit* ESCALATE verdicts (not the unclear fallback above) so the
+    # brief that reaches the Commander carries its justification. A missing WHY line is logged as
+    # possible noise but does NOT flip the action to RESOLVE: silently auto-resolving a genuine
+    # can't-decide is the failure mode EU-92 guards against. Routine classes are self-resolved upstream.
+    why = ""
+    if explicit_escalate:
+        m = _WHY_PATTERN.search(raw)
+        if m:
+            why = m.group(1).strip()
+        else:
+            _LOG.warning(
+                "parse_triage: TRIAGE: ESCALATE is missing the mandatory "
+                "'WHY PM CANNOT RESOLVE' line — surfacing it anyway (possible noise)."
+            )
+
     # Drop the out-of-scope findings block (routed separately from `raw`) before isolating the
     # instruction, then trim the trailing TRIAGE verdict line.
     _proposals, clean = filing.parse_tickets(raw)
     body = clean.rsplit("TRIAGE:", 1)[0].strip() if "TRIAGE:" in clean.upper() else clean
-    return {"action": action, "text": body or "(the PM gave no detail)", "raw": raw}
+    result: dict[str, str] = {"action": action, "text": body or "(the PM gave no detail)", "raw": raw}
+    if why:
+        result["why"] = why
+    return result
 
 
 async def triage(cfg: Config, app_name: str, ticket_id: str, last_build: str = "",
