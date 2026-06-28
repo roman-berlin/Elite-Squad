@@ -35,7 +35,8 @@ ones per mission.
    (a) tsc + lint clean on changed files;
    (b) axe-core: zero violations on every changed/added UI surface;
    (c) `bun test --coverage`: no failing tests, coverage delta ≥ 0;
-   (d) **Pre-handoff Security Countersignature** — fill in § below.
+   (d) **Pre-handoff Security Countersignature** — fill in §Security below;
+   (e) **Pre-handoff Performance Countersignature** — fill in §Perf below.
 
 ## Constraints (hard)
 - Memory safety: never run the full test suite at default concurrency — only touched files
@@ -78,3 +79,42 @@ reject it.
 For a pure config/docs ticket with no secret-adjacent, route, or data-access changes: state
 that explicitly per field (e.g. `§1-secrets: no secret-adjacent changes`) — never leave any
 field blank.
+
+## Pre-handoff Performance Countersignature
+
+Before handing off to the Reviewer, fill in this block verbatim and paste it into your
+summary alongside the Security Countersignature. Every field is required; use the
+`cold-only` sentinel where no hot path was touched — never leave a field blank.
+A missing or paraphrased block is a gate (e) failure; the Reviewer will reject it.
+
+```
+§ Performance Countersignature
+§P1-hot-paths: <comma-separated list of hot functions examined, OR "cold-only">
+§P2-artifact:  <PERF GATE [PASS|WARN|FAIL] · Before: mean Xms p95 Yms · After: mean Xms p95 Yms · Delta: ±Z%, OR "cold-only: no benchmark required">
+§P3-verdict:   PERFORMANCE GATE: PASS  |  PERFORMANCE GATE: BLOCK
+```
+
+**Example — hot path changed:**
+```
+§ Performance Countersignature
+§P1-hot-paths: loop.py:build_loop(), gate.py:run_gate()
+§P2-artifact:  PERF GATE PASS · Before: mean 42ms p95 67ms · After: mean 39ms p95 61ms · Delta: -7%
+§P3-verdict:   PERFORMANCE GATE: PASS
+```
+
+**Example — cold-only change (docs, config, init code):**
+```
+§ Performance Countersignature
+§P1-hot-paths: cold-only
+§P2-artifact:  cold-only: no benchmark required
+§P3-verdict:   PERFORMANCE GATE: PASS
+```
+
+**Field definitions:**
+- **§P1-hot-paths** — list every changed function / module you examined for hot-path status.
+  If every changed function is cold (one-shot init, config load, migration), write `cold-only`.
+- **§P2-artifact** — paste the `PERF GATE` table from your benchmark run (before/after mean
+  and p95, with branch SHAs). For cold-only diffs write the sentinel. Do not estimate.
+- **§P3-verdict** — `PERFORMANCE GATE: PASS` if no hot path regressed ≥ 10 % (WARNs are
+  allowed through). `PERFORMANCE GATE: BLOCK` if any hot path regressed ≥ 10 % — the
+  Reviewer must not receive a BLOCK verdict; fix and re-run first.
