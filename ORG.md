@@ -22,6 +22,7 @@ graph TD
     G --> DRL["Engineering Coach · Doctrine & Training<br/>improves the officers from the record"]
     G --> SCT["QA Engineer · S-2 Recon (QA)<br/>browser / e2e on DEV"]
     G --> PRV["Security Engineer · Security<br/>secrets · tenant-isolation · CVEs"]
+    G --> PE["Performance Engineer · Perf Gate<br/>hot-path benchmark · countersign before Review"]
     G --> QM["Release Manager · S-4 DevOps<br/>CI / deploy readiness"]
 
     ENG --> SQ["Dev Team Lead's squad — your repo's .claude/agents<br/>Frontend Engineer · Ordnance BE · Logistics DB<br/>Technical Writer Docs · AI · Judge Advocate Legal · Growth"]
@@ -30,7 +31,7 @@ graph TD
     classDef active fill:#0b3d2e,stroke:#10b981,color:#d1fae5;
     classDef planned fill:#1f2937,stroke:#6b7280,color:#9ca3af,stroke-dasharray:5 5;
     class C,G command;
-    class ADJ,ENG,INS,DRL,SCT,PRV,QM,SQ active;
+    class ADJ,ENG,INS,DRL,SCT,PRV,PE,QM,SQ active;
 ```
 
 **Build vs. check (no one signs off their own bridge):** officers that *build* live inside the
@@ -54,7 +55,8 @@ flowchart LR
     GEN --> BUILD["Dev Team Lead builds<br/>isolated worktree"]
     BUILD --> GATE["Gate<br/>tests · lint · types"]
     GATE --> TE["Test Engineer<br/>coverage gate · happy-path + regression"]
-    TE --> REV{"Code Reviewer<br/>pass?"}
+    TE --> PE2["Performance Engineer<br/>hot-path benchmark · PASS countersign"]
+    PE2 --> REV{"Code Reviewer<br/>pass?"}
     REV -- "fail · up to 4 passes" --> BUILD
     REV -- "pass" --> LAND["Land<br/>ff-push DEV · retire branch<br/>sync your DEV · ticket → QA · Telegram"]
     REV -- "exhausted / needs human" --> ESC["Escalate to you<br/>PR or Needs Human"]
@@ -100,6 +102,7 @@ Run it: `general council` (now) · scheduled daily 06:30 via the server crontab 
 | Engineering Manager | S-1 | Personnel (HR): recruit / retire officers | **active** | `officers/adjutant.md`, `adjutant.py` |
 | Dev Team Lead | Builder | Implements the ticket on a worktree | **active** | `officers/engineer.md`, `builder.py` |
 | Test Engineer | Tests | Coverage gate after build, before review: happy-path + regression tests, owns the PR coverage artifact | **active** | `officers/test-engineer.md`, `test_engineer.py` |
+| Performance Engineer | Perf Gate | Hot-path benchmark gate before Reviewer: profiler trace or before/after wall-clock on hot paths; countersign required | **active** | `officers/performance-engineer.md` |
 | Code Reviewer | Reviewer | Independent read-only spec + quality audit | **active** | `officers/inspector.md`, `reviewer.py` |
 | Engineering Coach | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
 | QA Engineer | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
