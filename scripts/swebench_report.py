@@ -23,6 +23,14 @@ and does two things:
 The module is designed to be importable from swebench_builder.py and also
 runnable as a CLI to replay / display a previously-written JSONL file.
 
+CLI usage:
+
+    python3 scripts/swebench_report.py [--trend N] [--file PATH]
+
+    --trend N    Print a dated table of the last N runs from the JSONL log.
+                 N defaults to 10 when the flag is given without a value.
+    --file PATH  Path to the JSONL file (defaults to audit/swebench_runs.jsonl).
+
 Weekly deterministic seed helper:
 
     weekly_seed() -> str   — returns a seed stable across the whole ISO week,
@@ -32,6 +40,7 @@ Weekly deterministic seed helper:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import threading
@@ -216,3 +225,168 @@ def report(
     """
     print_summary(summary, file=file)
     append_run(summary, jsonl_path=jsonl_path)
+
+
+# ── trend viewer ──────────────────────────────────────────────────────────────
+
+# Column widths for the trend table.
+_TS_COL = 20       # timestamp (trimmed to 19 chars "YYYY-MM-DDTHH:MM:SS")
+_SAMPLE_COL = 6    # "Sample"
+_RATE_COL = 7      # "Pass%"
+_COST_COL = 9      # "Cost"
+_ABORT_COL = 7     # "Aborted"
+_TREND_SEP = "─" * (_TS_COL + 1 + _SAMPLE_COL + 1 + _RATE_COL + 1 + _COST_COL + 1 + _ABORT_COL)
+
+
+def print_trend(
+    jsonl_path: Path | None = None,
+    n: int = 10,
+    file: IO[str] | None = None,
+) -> None:
+    """Print a dated table of the last *n* benchmark runs from *jsonl_path*.
+
+    Reads ``audit/swebench_runs.jsonl`` (or the given path) and renders the
+    last *n* ``swebench_run`` entries as a fixed-width table so regressions and
+    improvements are visible at a glance::
+
+        Date/Time             Sample  Pass%    Cost       Aborted
+        ──────────────────────────────────────────────────────────
+        2026-06-27T10:30:00   20      35.0%    $4.2100    no
+        2026-06-28T08:00:00   50      42.0%    $9.8700    yes
+
+    If the file does not exist or contains no matching records, a short notice
+    is printed instead of the table.
+
+    Args:
+        jsonl_path: Path to the JSONL audit file.  Defaults to
+                    ``audit/swebench_runs.jsonl`` under the repo root.
+        n:          Maximum number of runs to show (most recent first, then
+                    printed oldest→newest so the trend reads left-to-right in
+                    time).  If *n* exceeds the number of available rows, all
+                    available rows are shown without error.
+        file:       Output stream.  Defaults to ``sys.stdout``.
+    """
+    out = file if file is not None else sys.stdout
+    path = jsonl_path if jsonl_path is not None else AUDIT_JSONL
+
+    # ── read + filter ─────────────────────────────────────────────────────────
+    rows: list[dict[str, Any]] = []
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue  # skip malformed lines — fail-safe, not fail-silent
+            if record.get("event") == "swebench_run":
+                rows.append(record)
+
+    if not rows:
+        print("(no swebench runs recorded yet)", file=out)
+        return
+
+    # Take the last N rows; display oldest→newest so the trend is readable.
+    tail = rows[-n:] if n < len(rows) else rows
+
+    # ── header ────────────────────────────────────────────────────────────────
+    header = (
+        f"{'Date/Time':<{_TS_COL}}  "
+        f"{'Sample':>{_SAMPLE_COL}}  "
+        f"{'Pass%':>{_RATE_COL}}  "
+        f"{'Cost':>{_COST_COL}}  "
+        f"{'Aborted':>{_ABORT_COL}}"
+    )
+    print(header, file=out)
+    print(_TREND_SEP, file=out)
+
+    # ── rows ──────────────────────────────────────────────────────────────────
+    for row in tail:
+        ts_raw: str = str(row.get("ts", ""))
+        ts_display = ts_raw[:19]  # keep only "YYYY-MM-DDTHH:MM:SS"
+
+        sample: int = int(row.get("sample_size", row.get("total", 0)))
+        score: float = float(row.get("score", 0.0))
+        pass_pct = f"{score * 100:.1f}%"
+
+        cost: float = float(row.get("cost_usd", 0.0))
+        cost_str = f"${cost:.4f}"
+
+        aborted: bool = bool(row.get("aborted", False))
+        abort_str = "yes" if aborted else "no"
+
+        print(
+            f"{ts_display:<{_TS_COL}}  "
+            f"{sample:>{_SAMPLE_COL}}  "
+            f"{pass_pct:>{_RATE_COL}}  "
+            f"{cost_str:>{_COST_COL}}  "
+            f"{abort_str:>{_ABORT_COL}}",
+            file=out,
+        )
+
+    # ── footer note when the log was clipped ─────────────────────────────────
+    total_runs = len(rows)
+    shown = len(tail)
+    if total_runs > shown:
+        print(
+            f"(showing {shown} of {total_runs} runs — pass --trend {total_runs} to see all)",
+            file=out,
+        )
+
+
+# ── CLI entry-point ───────────────────────────────────────────────────────────
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI for replaying / displaying ``audit/swebench_runs.jsonl``.
+
+    Usage::
+
+        python3 scripts/swebench_report.py [--trend N] [--file PATH]
+
+    Args:
+        argv: Argument list (defaults to ``sys.argv[1:]`` when *None*).
+
+    Returns:
+        Exit code: 0 on success, non-zero on error.
+    """
+    parser = argparse.ArgumentParser(
+        prog="swebench_report",
+        description="Display or summarise SWE-bench benchmark runs from the audit JSONL log.",
+    )
+    parser.add_argument(
+        "--trend",
+        metavar="N",
+        type=int,
+        nargs="?",          # allows bare "--trend" without a value
+        const=10,           # default when flag is present but N omitted
+        default=None,
+        help="Print a table of the last N runs (default 10 when flag is given).",
+    )
+    parser.add_argument(
+        "--file",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the JSONL audit file "
+            f"(default: {AUDIT_JSONL.relative_to(_REPO_ROOT)})."
+        ),
+    )
+
+    args = parser.parse_args(argv)
+    jsonl_path: Path | None = args.file
+
+    if args.trend is not None:
+        if args.trend < 1:
+            parser.error("--trend N must be a positive integer")
+        print_trend(jsonl_path=jsonl_path, n=args.trend)
+        return 0
+
+    # No flag given — print a short usage hint rather than doing nothing silently.
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
