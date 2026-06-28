@@ -237,6 +237,53 @@ class ReviewVerdict:
     notes: list[str]        # non-blocking observations for the next iteration
 
 
+# --------------------------------------------------------------------------- #
+# Security Engineer artifact — EU-105
+# --------------------------------------------------------------------------- #
+import re as _re
+
+# Regex that matches any angle-bracket template placeholder such as
+# "<describe secrets here>" or "<§1 fill-in text>".  A field whose entire
+# content (after stripping whitespace) matches this pattern is still a
+# template — the Security Engineer hasn't actually filled it in.
+_PLACEHOLDER_RE = _re.compile(r"^\s*<[^>]+>\s*$")
+
+
+@dataclass
+class SecurityArtifact:
+    """Written by the Security Engineer; consumed by the orchestrator gate.
+
+    Carries the three mandatory sign-off sections (§1 secrets, §2 authz,
+    §3 injection) plus an explicit boolean that the Security Engineer must
+    set to True.  The gate calls ``is_signed()`` — returning True only when
+    all three prose fields have been genuinely filled in and ``signed`` is
+    set — so a half-filled template or a forgotten ``signed=True`` both fail
+    the gate cleanly.
+    """
+    s1_secrets: str    # §1 — secrets / credential findings
+    s2_authz: str      # §2 — authorisation / route-guard findings
+    s3_injection: str  # §3 — injection / parameterisation findings
+    signed: bool = False
+
+    def is_signed(self) -> bool:
+        """Return True only when the artifact is complete and countersigned.
+
+        A field fails the check if it is:
+        - empty / whitespace-only, OR
+        - still a template placeholder (matches the ``<…>`` angle-bracket
+          pattern the builder.md template uses).
+
+        All three fields must pass AND ``signed`` must be True.
+        """
+        for field_value in (self.s1_secrets, self.s2_authz, self.s3_injection):
+            stripped = field_value.strip()
+            if not stripped:
+                return False
+            if _PLACEHOLDER_RE.match(stripped):
+                return False
+        return self.signed
+
+
 @dataclass
 class PerTicketArtifactStore:
     """The shared per-ticket pool. Instantiated once per ticket in _attempt() and threaded through
@@ -245,13 +292,14 @@ class PerTicketArtifactStore:
 
     Each slot is Optional so a downstream officer can tell whether a given artifact has been produced
     yet (None → that stage didn't run / didn't publish) and fall back to the full diff/description.
-    The store is cheap: three small dataclasses, no I/O.
+    The store is cheap: four small dataclasses, no I/O.
     """
     spec: Optional[SpecArtifact] = None
     build: Optional[BuildArtifact] = None
     review: Optional[ReviewVerdict] = None
+    security: Optional[SecurityArtifact] = None
 
-    def put(self, artifact: SpecArtifact | BuildArtifact | ReviewVerdict) -> None:
+    def put(self, artifact: SpecArtifact | BuildArtifact | ReviewVerdict | SecurityArtifact) -> None:
         """Store *artifact* in the correct slot (determined by type).
 
         Raises TypeError for unknown artifact types so callers discover
@@ -263,8 +311,20 @@ class PerTicketArtifactStore:
             self.build = artifact
         elif isinstance(artifact, ReviewVerdict):
             self.review = artifact
+        elif isinstance(artifact, SecurityArtifact):
+            self.security = artifact
         else:
             raise TypeError(f"Unknown artifact type: {type(artifact)!r}")
+
+    def get_security(self) -> Optional[SecurityArtifact]:
+        """Typed getter for the security slot.
+
+        Returns the SecurityArtifact if the Security Engineer has published
+        one, or None if that stage hasn't run yet.  Prefer this over
+        accessing ``.security`` directly so callers get a typed return
+        annotation rather than ``Optional[Any]``.
+        """
+        return self.security
 
 
 @dataclass
