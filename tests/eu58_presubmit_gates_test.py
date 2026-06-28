@@ -1,6 +1,7 @@
-"""EU-58 QA — the Builder officer prompt documents the two hard pre-submit gates (axe-core
-zero-violations + `bun test --coverage`) so they are enforced on every ticket, and frames gate
-failures as the Builder's own remediation work BEFORE the Reviewer sees the diff."""
+"""EU-58 / EU-97 QA — the Builder officer prompt documents the three hard pre-submit gates (axe-core
+zero-violations + `bun test --coverage` + security countersignature) so they are enforced on every
+ticket, and frames gate failures as the Builder's own remediation work BEFORE the Reviewer sees the
+diff. EU-97 adds the security countersignature gate and the reference to officers/builder.md."""
 import sys, types
 
 REPO = "."
@@ -48,9 +49,22 @@ check("do not hand a failing diff to Reviewer",
 check("backend/config tickets exempt from a11y scan",
       "backend/config" in low and "nothing to scan" in low)
 
-# ---- outcome of both gates must be reported (auditable) ----
-check("both gate outcomes reported in the summary",
-      "report the outcome of both gates" in low)
+# ---- outcome of all gates must be reported (auditable) ----
+check("all gate outcomes reported in the summary",
+      "report the outcome of all gates" in low)
+
+# ---- EU-97: security countersignature gate ----
+check("security gate documented in BUILDER_SYSTEM",
+      "§1-secrets" in P and "§2-authz" in P and "§3-injection" in P)
+check("security gate references officers/builder.md section by name",
+      "officers/builder.md" in P and "pre-handoff security countersignature" in low)
+check("security gate has literal field names (verbatim template)",
+      "§1-secrets:" in P and "§2-authz:" in P and "§3-injection:" in P)
+check("officers/builder.md exists and contains the countersignature section",
+      __import__('pathlib').Path("officers/builder.md").exists() and
+      "§1-secrets" in __import__('pathlib').Path("officers/builder.md").read_text())
+check("officers/builder.md has example rows for copy-paste",
+      "example" in __import__('pathlib').Path("officers/builder.md").read_text().lower())
 
 # ---- the section is in the prompt the Builder actually receives ----
 from orchestrator.contracts import BuildRequest, Ticket
@@ -59,7 +73,7 @@ tk = Ticket(id="EU-58", key="EU-58", summary="x", description="d", acceptance_cr
 up = builder._prompt(BuildRequest(ticket=tk, branch="dev", iteration=1))
 check("user prompt still renders the ticket normally", "TICKET EU-58" in up)
 
-print("\n============ EU-58 PRE-SUBMIT GATES QA ============")
+print("\n============ EU-58 / EU-97 PRE-SUBMIT GATES QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
     print(f"  [{'PASS' if ok else 'FAIL'}] {n}" + (f"  ({det})" if det and not ok else ""))
