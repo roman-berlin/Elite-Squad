@@ -228,6 +228,245 @@ check("run_benchmark jsonl_path default is None",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 6.  print_trend() — dated table of last N runs
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_run_records(path: Path, records: list[dict]) -> None:
+    """Write a sequence of swebench_run dicts as JSONL to *path*."""
+    with path.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec) + "\n")
+
+
+def _make_run_record(ts: str, sample: int, score: float, cost: float, aborted: bool) -> dict:
+    return {
+        "ts": ts,
+        "event": "swebench_run",
+        "sample_size": sample,
+        "score": score,
+        "passed": int(sample * score),
+        "total": sample,
+        "cost_usd": cost,
+        "aborted": aborted,
+        "per_task": [],
+    }
+
+
+# --- 6a. empty JSONL (file does not exist) → graceful notice ---
+with tempfile.TemporaryDirectory() as td:
+    missing = Path(td) / "nope.jsonl"
+    buf_empty = io.StringIO()
+    sr.print_trend(jsonl_path=missing, n=5, file=buf_empty)
+    out_empty = buf_empty.getvalue()
+check("print_trend: missing file prints a notice", "no swebench runs" in out_empty.lower(),
+      repr(out_empty))
+
+# --- 6b. empty JSONL (file exists but is empty) → graceful notice ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_empty:
+    tf_empty_path = Path(tf_empty.name)
+try:
+    buf_empty2 = io.StringIO()
+    sr.print_trend(jsonl_path=tf_empty_path, n=5, file=buf_empty2)
+    out_empty2 = buf_empty2.getvalue()
+    check("print_trend: empty file prints a notice", "no swebench runs" in out_empty2.lower(),
+          repr(out_empty2))
+finally:
+    tf_empty_path.unlink(missing_ok=True)
+
+# --- 6c. single entry, N=10 — shows 1 row without crashing ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_single:
+    tf_single_path = Path(tf_single.name)
+try:
+    _write_run_records(tf_single_path, [
+        _make_run_record("2026-06-27T10:30:00+0000", 20, 0.35, 4.21, False),
+    ])
+    buf_single = io.StringIO()
+    sr.print_trend(jsonl_path=tf_single_path, n=10, file=buf_single)
+    out_single = buf_single.getvalue()
+    check("print_trend single entry: header present", "Date/Time" in out_single,
+          repr(out_single[:200]))
+    check("print_trend single entry: ts shown", "2026-06-27T10:30:00" in out_single,
+          repr(out_single))
+    check("print_trend single entry: pass% shown", "35.0%" in out_single,
+          repr(out_single))
+    check("print_trend single entry: cost shown", "4.2100" in out_single,
+          repr(out_single))
+    check("print_trend single entry: aborted=no shown", "no" in out_single.lower(),
+          repr(out_single))
+    # N=10 > 1 available — no clip notice should appear
+    check("print_trend single entry: no clip notice when N > rows",
+          "showing" not in out_single, repr(out_single))
+finally:
+    tf_single_path.unlink(missing_ok=True)
+
+# --- 6d. N > available rows — shows all rows, no IndexError ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_over:
+    tf_over_path = Path(tf_over.name)
+try:
+    _write_run_records(tf_over_path, [
+        _make_run_record("2026-06-25T08:00:00+0000", 20, 0.30, 3.10, False),
+        _make_run_record("2026-06-26T09:00:00+0000", 30, 0.40, 5.50, False),
+    ])
+    buf_over = io.StringIO()
+    sr.print_trend(jsonl_path=tf_over_path, n=100, file=buf_over)
+    out_over = buf_over.getvalue()
+    lines_over = [l for l in out_over.splitlines() if l.strip()
+                  and not l.startswith("─") and "Date/Time" not in l]
+    check("print_trend N>rows: shows all available rows (2)", len(lines_over) == 2,
+          repr(lines_over))
+    check("print_trend N>rows: no clip notice", "showing" not in out_over, repr(out_over))
+finally:
+    tf_over_path.unlink(missing_ok=True)
+
+# --- 6e. N < available rows — shows only last N (most recent), clip notice ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_clip:
+    tf_clip_path = Path(tf_clip.name)
+try:
+    _write_run_records(tf_clip_path, [
+        _make_run_record("2026-06-24T07:00:00+0000", 10, 0.20, 1.00, False),
+        _make_run_record("2026-06-25T08:00:00+0000", 20, 0.30, 2.00, False),
+        _make_run_record("2026-06-26T09:00:00+0000", 30, 0.40, 3.00, False),
+        _make_run_record("2026-06-27T10:00:00+0000", 40, 0.50, 4.00, True),
+    ])
+    buf_clip = io.StringIO()
+    sr.print_trend(jsonl_path=tf_clip_path, n=2, file=buf_clip)
+    out_clip = buf_clip.getvalue()
+    # Should NOT include the oldest entry
+    check("print_trend N=2: excludes oldest entry",
+          "2026-06-24T07:00:00" not in out_clip, repr(out_clip))
+    # Should include the two most recent entries
+    check("print_trend N=2: includes second-to-last entry",
+          "2026-06-26T09:00:00" in out_clip, repr(out_clip))
+    check("print_trend N=2: includes last entry (aborted)",
+          "2026-06-27T10:00:00" in out_clip, repr(out_clip))
+    check("print_trend N=2: aborted=yes shown for aborted row",
+          "yes" in out_clip, repr(out_clip))
+    check("print_trend N=2: clip notice appears when rows trimmed",
+          "showing" in out_clip, repr(out_clip))
+    check("print_trend N=2: clip notice shows correct shown/total counts",
+          "2 of 4" in out_clip, repr(out_clip))
+finally:
+    tf_clip_path.unlink(missing_ok=True)
+
+# --- 6f. non-swebench_run lines are ignored ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_mix:
+    tf_mix_path = Path(tf_mix.name)
+try:
+    with tf_mix_path.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "other_event", "ts": "2026-01-01T00:00:00"}) + "\n")
+        fh.write(json.dumps(_make_run_record("2026-06-28T12:00:00+0000", 25, 0.60, 6.00, False)) + "\n")
+        fh.write("not-json-at-all\n")
+    buf_mix = io.StringIO()
+    sr.print_trend(jsonl_path=tf_mix_path, n=10, file=buf_mix)
+    out_mix = buf_mix.getvalue()
+    lines_mix = [l for l in out_mix.splitlines() if l.strip()
+                 and not l.startswith("─") and "Date/Time" not in l]
+    check("print_trend: non-swebench_run lines skipped", len(lines_mix) == 1,
+          repr(lines_mix))
+    check("print_trend: malformed JSON lines skipped without crash",
+          "2026-06-28T12:00:00" in out_mix, repr(out_mix))
+finally:
+    tf_mix_path.unlink(missing_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7.  main() — CLI argument parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- 7a. --trend flag with explicit N prints a trend table ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_cli:
+    tf_cli_path = Path(tf_cli.name)
+try:
+    _write_run_records(tf_cli_path, [
+        _make_run_record("2026-06-27T10:30:00+0000", 20, 0.35, 4.21, False),
+        _make_run_record("2026-06-28T08:00:00+0000", 50, 0.42, 9.87, True),
+    ])
+    # Capture stdout by temporarily redirecting sys.stdout.
+    import contextlib
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        exit_code = sr.main(["--trend", "5", "--file", str(tf_cli_path)])
+    cli_out = captured.getvalue()
+    check("main --trend 5: exits with 0", exit_code == 0, str(exit_code))
+    check("main --trend 5: prints header", "Date/Time" in cli_out, repr(cli_out[:200]))
+    check("main --trend 5: shows both records", "2026-06-27" in cli_out and "2026-06-28" in cli_out,
+          repr(cli_out))
+finally:
+    tf_cli_path.unlink(missing_ok=True)
+
+# --- 7b. --trend without N uses default of 10 ---
+with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as tf_noN:
+    tf_noN_path = Path(tf_noN.name)
+try:
+    _write_run_records(tf_noN_path, [
+        _make_run_record("2026-06-28T09:00:00+0000", 10, 0.50, 2.00, False),
+    ])
+    captured2 = io.StringIO()
+    with contextlib.redirect_stdout(captured2):
+        exit_code2 = sr.main(["--trend", "--file", str(tf_noN_path)])
+    cli_out2 = captured2.getvalue()
+    check("main --trend (no N): exits with 0", exit_code2 == 0, str(exit_code2))
+    check("main --trend (no N): shows entry", "2026-06-28T09:00:00" in cli_out2, repr(cli_out2))
+finally:
+    tf_noN_path.unlink(missing_ok=True)
+
+# --- 7c. no flags → prints help (exit 0, no crash) ---
+captured3 = io.StringIO()
+with contextlib.redirect_stdout(captured3):
+    exit_code3 = sr.main([])
+cli_out3 = captured3.getvalue()
+check("main no flags: exits with 0", exit_code3 == 0, str(exit_code3))
+check("main no flags: prints something useful", len(cli_out3) > 0, repr(cli_out3[:80]))
+
+# --- 7d. --trend 0 is rejected with a non-zero exit (validation guard) ---
+import subprocess
+_trend0 = subprocess.run(
+    [sys.executable, "scripts/swebench_report.py", "--trend", "0"],
+    capture_output=True,
+    text=True,
+)
+check("main --trend 0: exits non-zero (invalid N rejected)",
+      _trend0.returncode != 0,
+      f"returncode={_trend0.returncode!r} stderr={_trend0.stderr!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  append_run() — zero-division guard when total=0
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression: summary dict from an empty/aborted run can arrive with total=0.
+# append_run() must not divide-by-zero when computing score; it must record
+# score=0.0 and produce a valid JSONL line.
+
+with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf_zero:
+    tmp_zero = Path(tf_zero.name)
+
+try:
+    _zero_summary = {
+        "passed": 0, "failed": 0, "total": 0,
+        "pass_rate": 0.0, "cost_usd": 0.0,
+        "aborted": True, "results": [],
+    }
+    # Must not raise ZeroDivisionError.
+    sr.append_run(_zero_summary, jsonl_path=tmp_zero)
+    _zero_lines = tmp_zero.read_text(encoding="utf-8").strip().splitlines()
+    check("append_run total=0: produces exactly one line without crashing",
+          len(_zero_lines) == 1,
+          str(_zero_lines))
+    _zero_row = json.loads(_zero_lines[0])
+    check("append_run total=0: score is 0.0",
+          _zero_row.get("score") == 0.0,
+          str(_zero_row))
+    check("append_run total=0: sample_size is 0",
+          _zero_row.get("sample_size") == 0,
+          str(_zero_row))
+    check("append_run total=0: event is swebench_run",
+          _zero_row.get("event") == "swebench_run",
+          str(_zero_row))
+finally:
+    tmp_zero.unlink(missing_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 

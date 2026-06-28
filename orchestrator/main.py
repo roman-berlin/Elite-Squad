@@ -126,6 +126,16 @@ def build_parser() -> argparse.ArgumentParser:
     fx.add_argument("--postmortem", default=None, metavar="TICKET",
                     help="write/refresh the post-mortem for a ticket and print it")
 
+    bm = sub.add_parser("benchmark", help="SWE-bench Verified builder benchmark — objective quality number")
+    bm.add_argument("--sample", type=int, default=20,
+                    help="tasks to evaluate (1–50; default 20)")
+    bm.add_argument("--budget", type=float, default=5.0,
+                    help="cost ceiling in USD; aborts when reached (default 5.0)")
+    bm.add_argument("--seed", default=None, metavar="STR",
+                    help="random seed for task sampling (default: current ISO-week seed)")
+    bm.add_argument("--trend", type=int, default=None, metavar="N",
+                    help="also print the last N runs from the audit log after the benchmark")
+
     ob = sub.add_parser("onboard", help="scaffold a new product into config.yaml (SignalDesk, the EAs, …)")
     ob.add_argument("name", help="short app name, e.g. signaldesk")
     ob.add_argument("repo_path", help="path to the product's git repo")
@@ -189,6 +199,57 @@ async def _run_work(cfg: Config, worklist) -> int:
               "Re-run with --live when ready.")
     audit.record("run_end", tickets=len(reports), total_cost_usd=total)
     return 1 if any(r.outcome == Outcome.ERRORED for r in reports) else 0
+
+
+async def _benchmark(args) -> int:
+    """Run the SWE-bench Verified builder benchmark and optionally print trend.
+
+    Wires ``scripts/swebench_builder.run_benchmark`` and
+    ``scripts/swebench_report.report`` into the standard 'general' CLI so the
+    benchmark can be invoked via ``python -m orchestrator.main benchmark`` (or
+    cron) without knowing the script path.
+
+    Flags:
+        --sample N      Tasks to evaluate (default 20, hard-capped at 50).
+        --budget FLOAT  Cost ceiling in USD (default 5.0).
+        --seed STR      Deterministic seed for task sampling.  Defaults to the
+                        current ISO-week seed so weekly cron runs are reproducible.
+        --trend N       After the run, print the last N rows from the audit log.
+
+    Returns:
+        1 when the run was aborted by the budget ceiling, 0 otherwise.
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    # Scripts live at <repo_root>/scripts/; make them importable without a
+    # package install.  Idempotent: we only insert if the path is absent.
+    _scripts_dir = str(_Path(__file__).parent.parent / "scripts")
+    if _scripts_dir not in _sys.path:
+        _sys.path.insert(0, _scripts_dir)
+
+    import swebench_builder  # noqa: PLC0415 (lazy import by design)
+    import swebench_report   # noqa: PLC0415
+
+    # Use the weekly seed when --seed is omitted so the cron run always draws
+    # the same task subset within an ISO week and results are comparable.
+    seed: str = args.seed if args.seed is not None else swebench_report.weekly_seed()
+
+    summary = await swebench_builder.run_benchmark(
+        sample=args.sample,
+        cost_ceiling_usd=args.budget,
+        random_seed=seed,
+        jsonl_path=swebench_report.AUDIT_JSONL,
+    )
+
+    # run_benchmark() already printed the pass/fail summary table and appended the
+    # single JSONL audit record (it calls swebench_report.report internally with the
+    # jsonl_path passed above).  Do NOT call report() again here — a second call
+    # double-printed the summary and appended a duplicate trend row (EU-95 iter-2).
+    if args.trend is not None:
+        swebench_report.print_trend(swebench_report.AUDIT_JSONL, args.trend)
+
+    return 1 if summary.get("aborted") else 0
 
 
 def _consolidate(args) -> int:
@@ -307,6 +368,10 @@ def _branch_exists(repo: str, branch: str) -> bool:
 
 async def _main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.command == "benchmark":
+        return await _benchmark(args)
+
     if args.command == "consolidate":
         return _consolidate(args)
     if args.command == "forensics":
