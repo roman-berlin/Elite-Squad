@@ -60,6 +60,8 @@ class BuildResult:
     num_turns: int = 0
     raw: str = ""                 # final assistant text, for the audit log
     tools: list[str] = field(default_factory=list)   # tool calls made (for the transcript)
+    input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
+    output_tokens: int = 0        # completion tokens this run
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +101,8 @@ class ReviewResult:
     cost_usd: float = 0.0
     raw: str = ""
     parse_failed: bool = False    # reviewer output was unparseable (fail-safe FAIL) -> re-review, don't rebuild
+    input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
+    output_tokens: int = 0        # completion tokens this run
 
     @property
     def blocking_issues(self) -> list[QualityIssue]:
@@ -123,6 +127,8 @@ class TestEngineerResult:
     num_turns: int = 0
     raw: str = ""                 # final assistant text, for the audit log
     tools: list[str] = field(default_factory=list)
+    input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
+    output_tokens: int = 0        # completion tokens this run
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +244,26 @@ class ReviewVerdict:
 
 
 # --------------------------------------------------------------------------- #
+# Test Engineer artifact — EU-96
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class TestEngineerArtifact:
+    """Written by the Test Engineer; consumed by the orchestrator for audit/measurement.
+
+    Carries the machine-readable coverage record so the loop and the audit chain
+    can track what the Test Engineer actually measured — a typed record rather
+    than the free-text COVERAGE: line on TestEngineerResult.  ``files_added`` is
+    left empty by the Test Engineer itself (the loop owns git); ``coverage_pct``
+    is parsed from the COVERAGE: artifact line (None when the runner reports no
+    numeric percentage).  ``ok`` mirrors TestEngineerResult.ok.
+    """
+    files_added: list[str]          # test files added or modified (stamped by the loop, or [])
+    coverage_pct: Optional[float]   # line coverage percentage if parseable, else None
+    ok: bool                        # did the Test Engineer stage complete without error
+
+
+# --------------------------------------------------------------------------- #
 # Security Engineer artifact — EU-105
 # --------------------------------------------------------------------------- #
 import re as _re
@@ -292,14 +318,20 @@ class PerTicketArtifactStore:
 
     Each slot is Optional so a downstream officer can tell whether a given artifact has been produced
     yet (None → that stage didn't run / didn't publish) and fall back to the full diff/description.
-    The store is cheap: four small dataclasses, no I/O.
+    The store is cheap: five small dataclasses + a token-burn dict, no I/O.
+
+    ``token_burn`` holds per-officer usage totals keyed by officer tag (e.g. ``"builder"``,
+    ``"test-engineer"``, ``"reviewer"``) so the measurement layer can track Opus burn per stage
+    without parsing raw ledger files.
     """
     spec: Optional[SpecArtifact] = None
     build: Optional[BuildArtifact] = None
+    test: Optional[TestEngineerArtifact] = None
     review: Optional[ReviewVerdict] = None
     security: Optional[SecurityArtifact] = None
+    token_burn: dict[str, int] = field(default_factory=dict)
 
-    def put(self, artifact: SpecArtifact | BuildArtifact | ReviewVerdict | SecurityArtifact) -> None:
+    def put(self, artifact: SpecArtifact | BuildArtifact | TestEngineerArtifact | ReviewVerdict | SecurityArtifact) -> None:
         """Store *artifact* in the correct slot (determined by type).
 
         Raises TypeError for unknown artifact types so callers discover
@@ -309,6 +341,8 @@ class PerTicketArtifactStore:
             self.spec = artifact
         elif isinstance(artifact, BuildArtifact):
             self.build = artifact
+        elif isinstance(artifact, TestEngineerArtifact):
+            self.test = artifact
         elif isinstance(artifact, ReviewVerdict):
             self.review = artifact
         elif isinstance(artifact, SecurityArtifact):
@@ -337,3 +371,11 @@ class TicketReport:
     branch: Optional[str] = None
     pr_url: Optional[str] = None
     notes: str = ""
+    token_burn: dict[str, int] = field(default_factory=dict)
+    """Per-officer token totals (input + output) for this ticket, keyed by officer tag.
+
+    Populated by the loop from ``PerTicketArtifactStore.token_burn`` after the ticket
+    resolves (EU-96).  Officers: ``"builder"``, ``"test-engineer"``, ``"reviewer"``,
+    ``"provost"`` (when the security gate ran).  Empty dict when no tracking data is
+    available (e.g. tickets resolved before EU-96).
+    """

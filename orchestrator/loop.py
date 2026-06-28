@@ -527,16 +527,41 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     store.put(SpecArtifact(acceptance=list(ticket.acceptance_criteria or []),
                            scope=ticket.summary or "", non_goals=[]))
 
+    def _burn(key: str, result_in: int, result_out: int) -> None:
+        """Accumulate input+output tokens into store.token_burn[key] (EU-96).
+
+        Called after each officer call to aggregate per-officer token spend into the
+        shared store so the final audit event and TicketReport carry the full picture.
+        Idempotent — safe to call multiple times for the same key (e.g. review retry).
+        """
+        store.token_burn[key] = store.token_burn.get(key, 0) + result_in + result_out
+
+    def _resolve(report: TicketReport) -> TicketReport:
+        """Stamp token_burn onto the report and emit the structured audit event (EU-96).
+
+        Called at every return site in _attempt() so the burn report is always emitted
+        regardless of how the ticket resolves (merge, escalate, error, skip, requeue).
+        Best-effort: the audit write uses the existing AuditLog which is already
+        exception-safe; the dataclasses.replace is a pure value copy.
+        """
+        from dataclasses import replace as _dc_replace
+        tb = dict(store.token_burn)  # snapshot — prevents mutation after return
+        if tb:
+            # EU-96: structured per-officer burn event picked up by EU-135 dashboards.
+            audit.record("token_burn_report", ticket_id=ticket.id,
+                         payload=tb, total=sum(tb.values()))
+        return _dc_replace(report, token_burn=tb)
+
     for iteration in range(1, cfg.max_iterations + 1):
         if stop_event is not None and stop_event.is_set():
             audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-build")
             print(f"  ■ {ticket.id}: stopped by Commander — no merge.", flush=True)
-            return TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
-                                notes="stopped by Commander")
+            return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
+                                         notes="stopped by Commander"))
         if budget.exceeded():
             audit.record("budget_exceeded", ticket_id=ticket.id, spent=budget.spent)
-            return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
-                                notes="cost budget exceeded")
+            return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                         notes="cost budget exceeded"))
 
         # 1) BUILD  — effort is sized from the ticket (XS→low … XL→max), then escalates on retry
         eff, eff_reason = builder_mod.effort_plan(cfg, iteration, ticket)
@@ -549,13 +574,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         build = await builder_mod.build(req, app, cfg, audit=audit, store=store, spec=store.spec)
         cost += build.cost_usd
         budget.add(build.cost_usd)
+        _burn("builder", build.input_tokens, build.output_tokens)   # EU-96: accumulate builder burn
         audit.record("build", ticket_id=ticket.id, iteration=iteration, ok=build.ok,
                      cost_usd=build.cost_usd, turns=build.num_turns,
                      effort=eff, effort_reason=eff_reason,
                      tools=build.tools, summary=(build.summary or "")[:1000])
         if not build.ok:
-            return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
-                                notes="builder process errored")
+            return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
+                                         notes="builder process errored"))
         if not git.has_changes():
             report = (build.summary or build.raw or "(no report)").strip()
             deliberate = _is_deliberate_halt(build.summary or build.raw)
@@ -615,11 +641,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                              + f"\n\n{decisions.reply_hint(ticket.id)}")
                 print(f"  🛑 {ticket.id}: parked — escalated to you; the unit moves to the next ticket.",
                       flush=True)
-                return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
-                                    notes="parked — Commander product decision needed")
+                return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                             notes="parked — Commander product decision needed"))
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
-            return TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
-                                notes="builder produced no changes")
+            return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
+                                         notes="builder produced no changes"))
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
         # EU-72: the builder published its BuildArtifact but can't know the changed-file list (the loop
         # owns git) — stamp the authoritative paths onto it so the Test Engineer + Reviewer read an
@@ -669,6 +695,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                                              store=store, build_artifact=store.build)
                 cost += te.cost_usd
                 budget.add(te.cost_usd)
+                _burn("test-engineer", te.input_tokens, te.output_tokens)   # EU-96
                 audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
                              coverage=te.coverage, cost_usd=te.cost_usd, turns=te.num_turns,
                              tools=te.tools, summary=(te.summary or "")[:1000])
@@ -712,6 +739,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                            store=store, build_artifact=store.build)
         cost += review.cost_usd
         budget.add(review.cost_usd)
+        _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
         # Unparseable reviewer output fails closed. Before paying for a full rebuild+review pass,
         # retry JUST the review once — re-running the read-only review is far cheaper than rebuilding
         # (EU-11). EU-52: the retry escalates one tier (iteration+1) so even when the ladder judged
@@ -723,6 +751,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                                store=store, build_artifact=store.build)
             cost += review.cost_usd
             budget.add(review.cost_usd)
+            _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry
         audit.record("review", ticket_id=ticket.id, iteration=iteration,
                      verdict=review.verdict.value, spec_met=review.spec_met,
                      blocking=len(review.blocking_issues), cost_usd=review.cost_usd,
@@ -754,8 +783,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 # decisions.add already parked it to 'Blocked' (EU-61) — just record the open question.
                 backlog.add_comment(ticket, f"Needs a product decision: {review.question}")
             audit.record("needs_human", ticket_id=ticket.id, question=review.question)
-            return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
-                                notes=f"needs decision: {review.question[:140]}")
+            return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                         notes=f"needs decision: {review.question[:140]}"))
 
         # EU-90: PM findings triage — when the Reviewer returns FAIL with quality_issues,
         # classify each finding into: in-scope fixes (Builder retries these unchanged),
@@ -862,8 +891,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             if stop_event is not None and stop_event.is_set():
                 audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-merge")
                 print(f"  ■ {ticket.id}: stopped before merge by Commander — DEV untouched.", flush=True)
-                return TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
-                                    notes="stopped by Commander before merge")
+                return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
+                                             notes="stopped by Commander before merge"))
             security_block = None
             if getattr(cfg, "security_gate", False):
                 _bar(SECURITY, active=SECURITY)
@@ -894,7 +923,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                            review, security_block=security_block, coverage=coverage_artifact)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
-            return result
+            return _resolve(result)
 
         last_changes = review.required_changes or review.spec_gaps or [
             q.detail for q in review.blocking_issues]
@@ -946,8 +975,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 pass
         _notify(cfg, f"🎖️ {ticket.id} — the PM is finishing it (one corrective pass):\n\n{_D.brief(triage['text'])}")
         print(f"  🎖️ {ticket.id}: PM triage → re-queued for one corrective pass.", flush=True)
-        return TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
-                            notes="PM triage — re-queued for one corrective pass")
+        return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
+                                     notes="PM triage — re-queued for one corrective pass"))
 
     if triage and triage["action"] == "SPLIT":
         # Too heavy for one build → the Scrum Master breaks it into small sub-tickets (filed on the
@@ -964,8 +993,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _notify(cfg, f"🧩 {ticket.id} was too heavy — the Scrum Master split it into {kk} (on you) and "
                          "closed the parent. The unit takes the fragments next.")
             print(f"  🧩 {ticket.id}: too heavy → Scrum Master split into {kk}; parent closed.", flush=True)
-            return TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
-                                notes=f"too heavy — Scrum Master split into {kk}")
+            return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
+                                         notes=f"too heavy — Scrum Master split into {kk}"))
         print(f"  · Scrum Master couldn't split ({sp.get('error')}) — escalating instead.", flush=True)
 
     # Escalate — with the PM's brief if it gave one, else the raw required-changes. Record a question so
@@ -984,8 +1013,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")
     audit.record("needs_human", ticket_id=ticket.id, iterations=cfg.max_iterations,
                  reason="max passes — PM escalated", question=esc[:1500])
-    return TicketReport(ticket.id, Outcome.ESCALATED, cfg.max_iterations, cost, app.name, branch,
-                        notes="max_iterations reached without a passing review")
+    return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, cfg.max_iterations, cost, app.name, branch,
+                                 notes="max_iterations reached without a passing review"))
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,

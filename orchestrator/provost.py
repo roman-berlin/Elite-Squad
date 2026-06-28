@@ -193,6 +193,13 @@ async def gate(cfg: Config, app, diff: str, store=None) -> tuple[bool, str]:
             "```diff", diff[:60000], "```", "", "Issue your gate verdict.",
         ])
         run = await run_agent(prompt, options, tag="provost-gate")
+        # EU-96: provost returns a (bool, str) tuple, not a result object; write token burn
+        # directly into the shared store so loop.py can read it from token_burn["provost"].
+        if store is not None:
+            # getattr-guarded: real RunResult carries these (default 0); test stubs / any
+            # bare result object may not — a missing attr must never block the gate (EU-96).
+            burn = getattr(run, "input_tokens", 0) + getattr(run, "output_tokens", 0)
+            store.token_burn["provost"] = store.token_burn.get("provost", 0) + burn
         report = (run.final or run.text or "").strip()
         if not report:
             _publish_artifact(store, "", "", "", signed=False)

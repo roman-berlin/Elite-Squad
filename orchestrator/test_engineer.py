@@ -23,8 +23,8 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import memory, models
 from .agent import run_agent
 from .config import AppConfig, Config, normalize_effort
-from .contracts import (BuildArtifact, PerTicketArtifactStore, TestEngineerResult,
-                       Ticket)
+from .contracts import (BuildArtifact, PerTicketArtifactStore, TestEngineerArtifact,
+                       TestEngineerResult, Ticket)
 
 _OFFICER_FILE = "test-engineer.md"
 
@@ -78,6 +78,33 @@ produces:
 # Pull the COVERAGE: artifact line out of the final message. Tolerant of bold/spacing; the body is
 # whatever the officer reported (numbers, or an honest 'n/a (...)').
 _COVERAGE_RE = re.compile(r"^\s*\**\s*COVERAGE\s*:\s*(.+?)\s*\**\s*$", re.IGNORECASE | re.MULTILINE)
+
+# Match a percentage value in a coverage artifact string, e.g. "lines 82→91%" → 91.0. The LAST
+# percentage is preferred (it's usually the "after" number in an X→Y% before→after pattern).
+_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+# A parenthetical that states the PRIOR coverage — "(was 95%)", "(from 80%)", "(previously 80%)",
+# "(before: 80%)", "(prev 80%)", "(old 80%)" — describes the BEFORE value, not current coverage. Strip
+# it before scanning so a trailing before-% can't be mistaken for the "after" value the last-match
+# heuristic would otherwise pick up: "now n/a (was 95%)" → None, and "91% (was 80%)" → 91.0.
+_BEFORE_PAREN_RE = re.compile(r"\(\s*(?:was|from|before|previously|prev|old)\b[^)]*\)", re.IGNORECASE)
+
+
+def _parse_coverage_pct(coverage_text: str) -> float | None:
+    """Extract the current ("after") coverage percentage from the COVERAGE: line, or None.
+
+    Handles the formats officers actually emit:
+      • plain ``'91%'`` → 91.0
+      • before→after ``'lines 82→91%'`` → the after value, 91.0. X→Y% assumption: when two
+        percentages appear in order, the LAST one is taken as the current coverage.
+      • no numeric percentage, e.g. ``'n/a (pytest counts only)'`` → None
+      • a prior-coverage parenthetical, e.g. ``'now n/a (was 95%)'`` → None, and ``'91% (was 80%)'``
+        → 91.0 — the "(was …%)" clause is the BEFORE value and is stripped first so the last-match
+        heuristic doesn't mistake it for the after value.
+    """
+    text = _BEFORE_PAREN_RE.sub("", coverage_text or "")
+    matches = _PCT_RE.findall(text)
+    return float(matches[-1]) if matches else None
 
 
 def _general_root() -> Path:
@@ -146,10 +173,14 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
     for the PR description. Fail-safe: any process error returns ok=False with an empty artifact —
     the caller keeps moving to review rather than dead-stopping the pipeline.
 
-    EU-72: reads the Builder's BuildArtifact (the loop passes it, or it falls back to ``store.build``)
-    as its primary context — what changed — instead of re-deriving from the diff. The Test Engineer
-    is a CONSUMER stage: it publishes no artifact of its own (there is no TestArtifact in the
-    contracts), so it never calls ``store.put``."""
+    EU-72/96: reads the Builder's BuildArtifact (the loop passes it, or it falls back to
+    ``store.build``) as its primary context — what changed — instead of re-deriving from the
+    diff.  After the coverage pass, a typed :class:`~contracts.TestEngineerArtifact` is published
+    into ``store`` so the audit chain has a machine-readable coverage record (``coverage_pct``)
+    rather than only the free-text COVERAGE: line on TestEngineerResult.  ``files_added`` is left
+    empty here — the loop owns git and stamps it if needed.  Both *store* and *build_artifact*
+    default to None so direct / CLI callers are unaffected.
+    """
     from . import guard
     # EU-72: prefer the explicit handoff arg; fall back to the shared pool's BuildArtifact.
     if build_artifact is None and store is not None:
@@ -173,12 +204,23 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
         effort=eff,
     )
     run = await run_agent(_prompt(ticket, build_artifact), options, tag="test-engineer")
+    coverage_text = extract_coverage(run.final or run.text)
+    # EU-96: publish the typed TestEngineerArtifact into the shared pool so the measurement layer
+    # can track per-officer coverage numerics without parsing free-text COVERAGE: lines.
+    if store is not None:
+        store.put(TestEngineerArtifact(
+            files_added=[],                         # loop stamps authoritative paths via git
+            coverage_pct=_parse_coverage_pct(coverage_text),
+            ok=not run.is_error,
+        ))
     return TestEngineerResult(
         ok=not run.is_error,
-        coverage=extract_coverage(run.final or run.text),
+        coverage=coverage_text,
         summary=run.final,
         cost_usd=run.cost_usd,
         num_turns=run.num_turns,
         raw=run.text,
         tools=run.tools,
+        input_tokens=getattr(run, "input_tokens", 0),   # EU-96: expose for per-officer burn tracking
+        output_tokens=getattr(run, "output_tokens", 0),  # getattr-guarded: stubs may omit these
     )
