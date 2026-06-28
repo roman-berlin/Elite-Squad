@@ -239,7 +239,6 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     merged_today = [t for t in merged if day(t) == today]
     passes = [t["passes"] for t in merged if t.get("passes")]
     avg_passes = round(sum(passes) / len(passes), 1) if passes else 0
-    blocked = _load_blocked(cfg)
     sec_blocks = _scan(cfg.audit_path)["count"].get("security_block", 0)
 
     # EU-76: pre-compute sparkline series for the Merged→DEV and cost/burn KPI cards.
@@ -272,8 +271,6 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
          "tone": "warn" if _needs_count else None, "href": "/needs"},   # EU-93: deep-link to the unified Needs-you inbox
         {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
-        {"label": "Parked", "value": len(blocked), "hint": "auto-skipped — stuck",
-         "tone": "warn" if blocked else None, "href": "/tasks?filter=parked"},
         {"label": "Security blocks", "value": sec_blocks, "hint": "Security Engineer gate (all time)",
          "tone": "bad" if sec_blocks else None, "href": "/forensics?cat=security_block"},
     ]
@@ -823,24 +820,39 @@ def _hero_html(run: Optional[dict], elapsed: Optional[str], mode: Optional[str])
 
 
 def _needs_side_html(ns: dict) -> str:
-    """The Needs-you panel body for the cockpit's side column — a compact preview of the inbox."""
-    if not ns.get("total"):
+    """The Needs-you panel body for the cockpit's side column — a compact preview of the inbox.
+
+    EU-102: iterates the unified ``rows`` list from needs.summary(); each row carries a
+    ``category`` badge (decision | errored | parked | pr | approval | proposal | specialist) and a
+    human ``why`` string.  Gated on ``rows`` — the same list the badge counts — so the panel is never
+    "All clear" while the badge is non-zero, and never non-empty while the badge is zero.
+    """
+    if not ns.get("rows"):
         return ('<a class=needsok href="/needs"><span class=nok>&#10003;</span> '
                 'All clear — nothing needs you</a>')
+    # Map category → dot tone so the visual urgency still matches the kind of item. Unknown
+    # categories fall back to "warn" via .get(cat, "warn") below.
+    _CAT_TONE = {
+        "decision": "warn",
+        "errored": "bad",
+        "parked": "warn",
+        "pr": "warn",
+        "approval": "warn",
+        "proposal": "warn",
+        "specialist": "warn",
+    }
     rows = []
-    for d in ns.get("decisions", [])[:4]:
-        q = _esc(str(d.get("question") or d.get("summary") or "question"))[:64]
-        rows.append(f'<a class=needrow href="/needs"><span class="nd warn"></span>'
-                    f'<div class=ndmain><div class=ndt>{q}</div>'
-                    f'<div class=ndr>question · {_esc(str(d.get("id") or ""))}</div></div></a>')
-    for a in ns.get("approvals", [])[:4]:
-        rows.append(f'<a class=needrow href="/needs"><span class="nd ok"></span>'
-                    f'<div class=ndmain><div class=ndt>{_esc(a.get("label") or "recommendation")}</div>'
-                    f'<div class=ndr>approval</div></div></a>')
-    for t in ns.get("tasks", [])[:4]:
-        rows.append(f'<a class=needrow href="/needs"><span class="nd bad"></span>'
-                    f'<div class=ndmain><div class=ndt>{_esc(str(t.get("ticket_id") or ""))} — '
-                    f'{_esc(str(t.get("outcome") or ""))}</div><div class=ndr>run</div></div></a>')
+    for row in (ns.get("rows") or [])[:8]:
+        cat = str(row.get("category") or "")
+        rid = _esc(str(row.get("ticket_id") or row.get("id") or ""))
+        why = _esc(str(row.get("why") or cat or "needs you"))[:80]
+        tone = _CAT_TONE.get(cat, "warn")
+        meta = f"{rid} &middot; {_esc(cat)}" if rid else _esc(cat)
+        rows.append(
+            f'<a class=needrow href="/needs"><span class="nd {tone}"></span>'
+            f'<div class=ndmain><div class=ndt>{why}</div>'
+            f'<div class=ndr>{meta}</div></div></a>'
+        )
     return "".join(rows) + '<a class=needall href="/needs">Open inbox &#8594;</a>'
 
 
@@ -1071,9 +1083,13 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         from . import needs as _needs
         ns = _needs.summary(cfg)
     except Exception:  # noqa: BLE001
-        ns = {"total": 0, "decisions": [], "approvals": [], "tasks": []}
+        ns = {"total": 0, "rows": [], "decisions": [], "approvals": [], "tasks": []}
     needs_body = _needs_side_html(ns)
-    ncount = f' · {ns["total"]}' if ns.get("total") else ""
+    # Single source of truth for the badge: the side-panel header count, the KPI card (needs.count())
+    # and the /needs inbox all read len(rows). With specialist rosters now folded into rows,
+    # total == count == len(rows), so "count == list" holds on the board (EU-102 iter-3).
+    _nrows = len(ns.get("rows") or [])
+    ncount = f' · {_nrows}' if _nrows else ""
     log_panel = ""
     if log_lines is not None:
         log_panel = (f'<section class=panel><div class=ph>Live feed{_liveness(state, active)}</div>'
