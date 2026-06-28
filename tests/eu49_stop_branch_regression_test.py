@@ -58,7 +58,9 @@ for _ in range(60):
         break
     time.sleep(0.05)
 chk("a single Start launches the loop", len(started_evs) == 1, f"started={len(started_evs)}")
-running_ev = (srv._state.get("autopilot") or {}).get("stop")
+# EU-103: a no-app Start targets the unit-wide None key (== the default _state). The stop Event and
+# the autopilot-on signal now live in the per-app run-state, not the retired _state["autopilot"] dict.
+running_ev = srv.get_state(None).get("stop_event")
 chk("the running loop's stop Event is stored", running_ev is started_evs[0])
 chk("the running loop's stop Event is NOT set yet", running_ev is not None and not running_ev.is_set())
 
@@ -74,9 +76,9 @@ chk("the redundant Start is a harmless no-op (no error banner)",
 chk("the redundant Start did NOT set the running loop's stop Event (no silent stop)",
     not running_ev.is_set())
 chk("the stored stop Event is still the original running one (not orphaned/overwritten)",
-    (srv._state.get("autopilot") or {}).get("stop") is running_ev)
+    srv.get_state(None).get("stop_event") is running_ev)
 chk("autopilot is still marked on after the redundant Start",
-    (srv._state.get("autopilot") or {}).get("on") is True)
+    srv.get_autopilot_status(None)["on"] is True)
 chk("no second loop was launched", len(started_evs) == 1, f"started={len(started_evs)}")
 
 # --- #2: the production resume call shape — _run_bg with the DEFAULT arg — stays exempt. ---
@@ -93,7 +95,7 @@ chk("a resume via the DEFAULT _run_bg call still runs while the guard is held",
     started_default is True, f"returned {started_default!r}")
 
 # --- release & confirm the genuine stop path still works (a real toggle-off DOES set the Event). ---
-real_stop_ev = (srv._state.get("autopilot") or {}).get("stop")
+real_stop_ev = srv.get_state(None).get("stop_event")
 app.test_client().post("/api/autopilot", data={"action": "stop"})
 chk("a genuine stop DOES set the running loop's stop Event", real_stop_ev.is_set())
 release.set()

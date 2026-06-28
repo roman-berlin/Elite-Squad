@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 from . import dashboard as D
-from .cockpit_state import _state
+from .cockpit_state import _state, get_autopilot_status
 from .config import Config
 
 # ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
@@ -197,9 +197,16 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
     projects" entry any more — every tab is pinned to one concrete project."""
     open_projects, active = _workspace_tabs(cfg, current_app)
     open_set = set(open_projects)
+    # EU-103: which open tabs have autopilot (any active run) live right now?
+    try:
+        _ap_live = {p for p in open_projects if get_autopilot_status(p).get("on")}
+    except Exception:  # noqa: BLE001
+        _ap_live = set()
     tabs = "".join(
         f"<a class='ptab{' on' if p == active else ''}' href='/?app={html.escape(p)}' "
-        f"title='Switch to {html.escape(p)}'>{html.escape(p)}</a>"
+        f"title='Switch to {html.escape(p)}'>"
+        + (f'<span class=tabdot title="autopilot running"></span>' if p in _ap_live else "")
+        + f"{html.escape(p)}</a>"
         for p in open_projects)
     # The add-tab picker offers only NOT-already-open projects; the open ones are shown greyed +
     # non-clickable so the "a project lives in at most one tab" rule is visible, not just enforced.
@@ -217,6 +224,7 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 <style>
 .tabstrip{{display:flex;gap:4px;align-items:flex-end;flex-wrap:wrap;padding:8px 26px 0;border-bottom:1px solid var(--line);background:var(--panel)}}
 .tabstrip .ptab{{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line2);border-bottom:none;color:var(--dim);border-radius:var(--r-md) var(--r-md) 0 0;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;position:relative;top:1px;transition:background var(--t-fast),color var(--t-fast)}}
+.tabstrip .tabdot{{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none;animation:pulse2 1.3s infinite}}
 .tabstrip .ptab:hover{{background:var(--line);color:var(--ink)}}
 .tabstrip .ptab.on{{background:var(--bg);color:var(--ink);border-color:var(--line2);border-bottom:1px solid var(--bg)}}
 .tabstrip details.addtab{{position:relative}}
@@ -388,6 +396,79 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
             ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
 
+    # EU-103: per-project autopilot controls — read from the per-app run-state.
+    # State is resolved here (not in the template) so the HTML is a pure string.
+    ap_status: dict = {"on": False, "stopping": False, "mode": None}
+    if app0:
+        try:
+            ap_status = get_autopilot_status(app0)
+        except Exception:  # noqa: BLE001
+            pass
+    ap_on = ap_status.get("on", False)
+    ap_stopping = ap_status.get("stopping", False)
+    ap_appq = html.escape(app0)
+    # Disable start buttons when the system is unhealthy OR no project is selected.
+    ap_dis = "" if (healthy and app0) else "disabled"
+    if ap_stopping:
+        # Drain in progress: show a neutral "finishing…" label, no buttons.
+        ap_html = (
+            '<span class=tbdiv></span>'
+            '<div class="tbap stopping" title="Finishing current ticket, then standing down">'
+            '<span class="apdot-sm stop"></span>'
+            '<span class=tbaplabel>&#9203;&nbsp;Stopping&hellip;</span>'
+            '</div>')
+    elif ap_on:
+        # Autopilot running: offer graceful drain or hard stop.
+        ap_html = (
+            '<span class=tbdiv></span>'
+            '<div class="tbap on">'
+            '<span class="apdot-sm on"></span>'
+            f'<span class=tbaplabel>Autopilot&nbsp;<b>ON</b>&nbsp;&middot;&nbsp;{ap_appq}</span>'
+            f'<form method=post action=/api/autopilot class=tbf>'
+            f'<input type=hidden name=action value=drain>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            '<button class="aptbtn drain" '
+            'title="Let the current ticket finish landing on DEV, then stand down">'
+            'Finish&nbsp;&amp;&nbsp;stop</button></form>'
+            f'<form method=post action=/api/autopilot class=tbf>'
+            f'<input type=hidden name=action value=stop>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            '<button class="aptbtn stop" '
+            'title="Mark autopilot off now — the in-flight build still finishes in the background">'
+            'Stop</button></form>'
+            '</div>')
+    else:
+        # Autopilot off: offer two start modes that genuinely differ (EU-103 iter-2).
+        #  · 'Choose tickets' opens the per-ticket picker (pick specific tickets, then run them).
+        #  · 'Auto-drain' starts the continuous backlog autopilot for this project.
+        _conf_choose = (f"return confirm('Open the ticket picker for "
+                        f"{html.escape(app0 or '')} to choose specific tickets to develop?')")
+        _conf_drain = (f"return confirm('Start Auto-drain for "
+                       f"{html.escape(app0 or '')}? "
+                       f"The unit will work tickets LIVE until the queue is empty or you press Stop.')")
+        ap_html = (
+            '<span class=tbdiv></span>'
+            '<div class="tbap off">'
+            '<span class="apdot-sm off"></span>'
+            '<span class=tbaplabel>Autopilot</span>'
+            f'<form method=post action=/api/autopilot class=tbf '
+            f'onsubmit="{_conf_choose}">'
+            f'<input type=hidden name=action value=start>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            '<input type=hidden name=mode value=choose>'
+            f'<button class="aptbtn start" {ap_dis} '
+            'title="Pick specific tickets to develop (opens the ticket picker)">'
+            '&#127915;&nbsp;Choose tickets</button></form>'
+            f'<form method=post action=/api/autopilot class=tbf '
+            f'onsubmit="{_conf_drain}">'
+            f'<input type=hidden name=action value=start>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            '<input type=hidden name=mode value=drain>'
+            f'<button class="aptbtn start" {ap_dis} '
+            'title="Drain the backlog automatically until empty">'
+            '&#9654;&nbsp;Auto-drain</button></form>'
+            '</div>')
+
     return tab_bar + f"""
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
@@ -426,6 +507,19 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .btn:disabled{{opacity:.5;cursor:not-allowed}}
 .tbar .panel a{{display:flex;align-items:center}}
 .tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:var(--faint);font-size:11px;font-weight:400}}
+/* EU-103 — per-project Autopilot section */
+.tbar .tbap{{display:inline-flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--panel2)}}
+.tbar .tbap.on{{border-color:var(--okline);background:var(--okbg)}}
+.tbar .tbap.stopping{{border-color:var(--warnline);background:var(--warnbg)}}
+.tbar .apdot-sm{{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}}
+.tbar .apdot-sm.on{{background:var(--ok);animation:pulse2 1.3s infinite}}
+.tbar .apdot-sm.stop{{background:var(--warn)}}
+.tbar .tbaplabel{{font-size:12px;color:var(--ink);white-space:nowrap}}
+.tbar .aptbtn{{border:0;border-radius:var(--r-md);padding:5px 11px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}}
+.tbar .aptbtn.start{{background:var(--accent);color:#fff}}.tbar .aptbtn.start:hover{{background:#2f5ce0}}
+.tbar .aptbtn.start:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}
+.tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
+.tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
 .deploybar .dspin{{width:18px;height:18px;border:3px solid var(--accentline);border-top-color:var(--accent);border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
 .deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
@@ -473,6 +567,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <a class="btn" href="/roster-doc" title="Officers, soldiers &amp; duties — the full unit roster">&#128101; Roster</a>
   {promote_html}
   {ship_html}
+  {ap_html}
 
   <details class=menu>
     <summary class=btn>&#128202; Reports</summary>

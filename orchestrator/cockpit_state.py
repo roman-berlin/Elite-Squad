@@ -30,14 +30,15 @@ from dataclasses import asdict, dataclass, field
 # --------------------------------------------------------------------------------------------------
 
 _STATE_KEYS = ("active", "last_msg", "last_result", "drilling", "dry_run",
-               "last_activity", "run_started", "stop_event", "log_seq", "approving")
+               "last_activity", "run_started", "stop_event", "log_seq", "approving",
+               "autopilot_mode", "autopilot_on")
 
 
 def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
     return {"active": False, "last_msg": "", "last_result": "", "drilling": False, "dry_run": None,
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
-            "approving": None}
+            "approving": None, "autopilot_mode": None, "autopilot_on": False}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions
@@ -185,6 +186,37 @@ def bump_log_seq(app: str | None = None) -> int:
 def shared_log_seq() -> int:
     """The current shared log sequence (for global, not-per-app, SSE long-polling)."""
     return _shared_log_seq
+
+
+def get_autopilot_status(app: str | None = None) -> dict:
+    """Per-app autopilot status snapshot: ``{on, stopping, mode}``.
+
+    Derives the snapshot from the per-app run-state rather than the unit-wide ``_state["autopilot"]``
+    sub-dict, so each tab's badge is independent.
+
+    ``on`` is read from the dedicated per-app ``autopilot_on`` flag — set ONLY when an autopilot loop
+    claims this app's run (``server.py`` Start / ``autopilot.autopilot``), never by a plain manual
+    run. This de-conflates the two (EU-103 iter-2): a manual cockpit/answer-box run sets ``active``
+    but NOT ``autopilot_on``, so it is no longer rendered as "Autopilot ON" with dead Stop/Finish
+    buttons. ``active`` alone means "a run is in flight"; ``autopilot_on`` means "that run is the
+    autopilot".
+
+    * ``on``       — True while an AUTOPILOT loop is running for this app (the dedicated flag).
+    * ``stopping`` — True when autopilot is on AND a stop_event has been issued but the loop hasn't
+                     exited yet (a graceful drain is in progress).
+    * ``mode``     — the per-app autopilot mode (``'choose'`` | ``'drain'`` | ``None``).
+
+    The ``ticket`` field (the workspace tab's selected ticket) is NOT included here because
+    cockpit_state has no access to the workspace layer; the caller (``server.py``) overlays it.
+    """
+    st = get_state(app)
+    stop_ev = st.get("stop_event")
+    on = bool(st.get("autopilot_on"))
+    return {
+        "on": on,
+        "stopping": bool(on and stop_ev is not None and stop_ev.is_set()),
+        "mode": st.get("autopilot_mode"),
+    }
 
 
 def reset_run_state() -> None:

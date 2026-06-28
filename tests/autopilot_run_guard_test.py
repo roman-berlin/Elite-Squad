@@ -77,8 +77,14 @@ for _ in range(60):      # let the single accepted loop enter fake_autopilot
 
 chk("a double Start starts EXACTLY one autopilot loop", len(starts) == 1, f"starts={len(starts)}")
 chk("autopilot holds the run-guard (_state['active'])", srv._state["active"] is True)
-stored = (srv._state.get("autopilot") or {}).get("stop")
+# EU-103: autopilot start now routes through the PER-APP run-state (a no-app Start targets the
+# unit-wide None key == the default _state). The stop Event lives in get_state(None)["stop_event"]
+# (claim_run stores it there), and the autopilot-specific signal is get_autopilot_status(None).on —
+# NOT the retired _state["autopilot"] sub-dict.
+stored = srv.get_state(None).get("stop_event")
 chk("the stored stop Event is the RUNNING loop's (not orphaned)", starts and stored is starts[0])
+chk("the per-app autopilot signal is ON (not a bare manual run)",
+    srv.get_autopilot_status(None)["on"] is True)
 _msg = srv._state.get("last_msg") or ""
 chk("the extra Starts are refused with feedback",
     "already running" in _msg or "already in progress" in _msg, _msg)

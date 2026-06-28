@@ -1051,8 +1051,11 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
 def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     """Inner board (everything that updates on the poll)."""
     _ap = state.get("autopilot") or {}
-    # EU-73: treat autopilot as on if either the cockpit flag or the live daemon PID check says so.
-    ap_on = bool(_ap.get("on") or _ap.get("daemon_running", False))
+    # EU-103: a per-project autopilot lights the board via THIS project's own run-state flag
+    # (``state["autopilot_on"]`` — set when its autopilot loop claims the run), so a cockpit-started
+    # per-project autopilot renders as autopilot, not a manual run, and only on its OWN tab.
+    # EU-73: the legacy unit-wide flag + the live daemon PID check still cover the external-daemon case.
+    ap_on = bool(state.get("autopilot_on") or _ap.get("on") or _ap.get("daemon_running", False))
     tasks = D.load_tasks(cfg.audit_path)
     # A run is live if the cockpit started it, autopilot is on, OR there's fresh audit activity with no
     # terminal outcome yet — the last case covers builds started by the answer box / /unblock / another
@@ -1180,51 +1183,28 @@ def health_banner(h: dict) -> str:
 
 
 def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
-    """Render the autopilot ON/OFF toggle in the War Room header.
+    """Header roll-up: active-run count badge across all projects (EU-103).
 
-    EU-73: ``is_on`` is derived from EITHER the in-memory cockpit flag (set when autopilot was
-    started via the cockpit Start button) OR the ``daemon_running`` field (a live PID-file probe
-    injected by ``server._view_state()`` on every render).  This is the single-source-of-truth
-    fix: the badge now reflects reality even after the War Room terminal that launched a detached
-    autopilot daemon has been closed.
+    The per-project start/stop controls now live in the control bar (cockpit_views._control_bar).
+    This header slot shows only a system-wide summary — a pulsing green badge when any project
+    is running, or nothing when all are idle.  The count comes from cockpit_state.active_run_count()
+    (the canonical, lock-protected tally), so the badge stays in sync with the control bar.
+
+    The ``state``, ``app``, and ``healthy`` parameters are kept for call-site compatibility but
+    are no longer used in the output.
     """
-    ap = (state or {}).get("autopilot") or {}
-    # Treat autopilot as ON if either the cockpit in-memory flag is set OR the daemon PID is alive.
-    is_on = ap.get("on") or ap.get("daemon_running", False)
-    if is_on and ap.get("stopping"):
-        return ('<div class="apsw on" title="The current ticket finishes landing on DEV, then the '
-                'autopilot stands down — it takes no new tickets.">'
-                '<span class="apdot on"></span><span class=aplabel>&#9203; Stopping &middot; finishing the '
-                'current ticket, then standing down…</span></div>')
-    if is_on:
-        scope = _esc(ap.get("app") or "all projects")
-        # Only show Stop/Drain buttons when autopilot is cockpit-managed — i.e. the cockpit's own
-        # ``on`` flag is set (server.py sets ``on`` and the ``stop`` Event together when Start is
-        # pressed, so ``on`` is the authoritative cockpit-managed signal). A detached daemon shows up
-        # as ``daemon_running=True`` with ``on=False`` (server._view_state) and can only be stopped
-        # from the terminal — it gets the "external" hint instead of buttons the cockpit can't honour.
-        if ap.get("on"):
-            btns = ('<button class="apbtn drain" name=action value=drain '
-                    'title="Let the current ticket finish landing on DEV, then stand down — takes no new tickets">'
-                    'Finish&nbsp;&amp;&nbsp;stop</button>'
-                    '<button class="apbtn stop" name=action value=stop '
-                    'title="Mark the autopilot off now — the in-flight build still finishes in the background">'
-                    'Stop</button>')
-        else:
-            btns = ('<span style="font-size:11px;color:var(--faint)" '
-                    'title="Autopilot is running as an external daemon — stop it from the terminal">external</span>')
-        return ('<form method=post action=/api/autopilot class="apsw on">'
-                f'<span class="apdot on"></span><span class=aplabel>Autopilot&nbsp;<b>ON</b> · {scope}</span>'
-                f'{btns}</form>')
-    appq = _esc(app if app and app != "*" else "")
-    dis = "" if healthy else "disabled"
-    confirm = ('onsubmit="return confirm(\'Start Autopilot? The unit will work the queue '
-               'LIVE — building and merging to DEV until you press Stop.\')"')
-    return (f'<form method=post action=/api/autopilot class=apsw {confirm}>'
-            '<input type=hidden name=action value=start>'
-            f'<input type=hidden name=app value="{appq}">'
-            f'<span class="apdot off"></span><span class=aplabel>Autopilot&nbsp;<b>off</b></span>'
-            f'<button class="apbtn start" {dis}>Start</button></form>')
+    try:
+        from . import cockpit_state as _cs
+        n = _cs.active_run_count()
+    except Exception:  # noqa: BLE001
+        n = 0
+    if n == 0:
+        return ""
+    proj = "project" if n == 1 else "projects"
+    return (f'<div class="apsw on" title="{n} {proj} running">'
+            f'<span class="apdot on"></span>'
+            f'<span class=aplabel>{n}&nbsp;{html.escape(proj)}&nbsp;running</span>'
+            '</div>')
 
 
 def _host_tag(cfg) -> str:

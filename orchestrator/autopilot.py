@@ -77,6 +77,30 @@ def daemon_running() -> bool:
         return False
 
 
+def _pid_file_holds_our_pid() -> bool:
+    """True when the autopilot PID file records THIS process's PID.
+
+    A cockpit Start runs autopilot in a background thread of the cockpit process, which writes this
+    process's PID via ``_write_pid()``. This lets the per-app Start guard tell its OWN in-process
+    autopilot apart from a detached daemon living in a DIFFERENT process."""
+    try:
+        return _PID_FILE.read_text().strip() == str(os.getpid())
+    except OSError:
+        return False
+
+
+def daemon_is_external() -> bool:
+    """True only when a FOREIGN process holds the autopilot PID file — a detached terminal run or the
+    launchd keepalive — as opposed to this cockpit's own in-process autopilot threads.
+
+    EU-103: the per-app autopilot Start guard uses this INSTEAD of the bare ``daemon_running()`` so a
+    cockpit that has already started one project's autopilot (and therefore written THIS process's PID)
+    can still start a SECOND project's autopilot — the two cockpit-managed loops are tracked per-app
+    and run in parallel. A genuinely detached daemon (different PID) is still refused, since it owns the
+    whole queue and this cockpit can't coordinate with it."""
+    return daemon_running() and not _pid_file_holds_our_pid()
+
+
 # `PARKED` (the outcomes that park a ticket IMMEDIATELY — a human decision / a PR is waiting, no point
 # retrying) is the canonical tuple in contracts.py (EU-56), imported above. ERRORED is handled
 # separately: a transient blip shouldn't sideline a ticket, so we retry it a few times (with a short
@@ -342,6 +366,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # release, so we never clear or clobber someone else's run-state.
         owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
         run_state = cockpit_state.get_state(run_key)
+        # EU-103: flag THIS app's run as an autopilot run (distinct from a manual cockpit/answer-box
+        # run, which sets ``active`` but not ``autopilot_on``). This is the dedicated signal the cockpit
+        # control reads via get_autopilot_status(app), so a manual run never renders as "Autopilot ON".
+        # Set whether or not we own the run-state release (the cockpit Start may already hold the slot);
+        # the loop running IS the autopilot, and the finally clears it again.
+        run_state["autopilot_on"] = True
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
@@ -530,6 +560,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     except KeyboardInterrupt:
         print("\n🛸 Autopilot stood down. Nothing left mid-flight.", flush=True)
     finally:
+        # EU-103: the autopilot loop has stood down — clear THIS app's autopilot signal so the cockpit
+        # control reflects OFF, independent of who owns the run-state release. (Idempotent: the cockpit
+        # Start path's own finally also clears it.)
+        if run_state is not None:
+            run_state["autopilot_on"] = False
         # Release THIS project's run-state if we own it (clears active / run_started / stop_event) and
         # drop the dry/live tag, so the per-project board shows no stale run once autopilot stands down.
         # (run_state may still be None if claim_run() never ran — an early raise during setup.)
