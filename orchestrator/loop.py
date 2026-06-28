@@ -868,7 +868,19 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             if getattr(cfg, "security_gate", False):
                 _bar(SECURITY, active=SECURITY)
                 print("  security · Security Engineer gating the diff…", flush=True)
-                sec_ok, sec_report = await provost_mod.gate(cfg, app, diff)
+                sec_ok, sec_report = await provost_mod.gate(cfg, app, diff, store=store)
+                # Countersignature gate: even when the verdict is PASS, the §1/§2/§3
+                # sign-off artifact must be fully populated and marked signed=True.
+                # An incomplete or missing artifact fails closed — the pipeline never
+                # reaches Land with an unsigned countersignature.
+                if sec_ok:
+                    _sa = store.get_security()
+                    if _sa is None or not _sa.is_signed():
+                        sec_ok = False
+                        sec_report = (
+                            "SECURITY GATE: BLOCK — countersignature artifact is missing or "
+                            "incomplete (§1/§2/§3 sections not fully filled in); failing closed."
+                        )
                 if not sec_ok:
                     _bar(SECURITY, fail=SECURITY)
                     print("  security · Security Engineer BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
