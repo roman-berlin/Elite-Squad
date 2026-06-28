@@ -87,6 +87,39 @@ def test_legacy_names_alias_default_key():
     assert cs._state["active"] is False
 
 
+def test_release_run_clears_liveness_but_preserves_error():
+    """EU-104 (iter-3): release_run clears the liveness fields but PRESERVES last_msg.
+
+    A finished run must never ghost as 'Working' on the cockpit tab, so the terminal release
+    zeroes the run-slot + liveness fields (active, autopilot_on, last_activity).  But it must NOT
+    touch ``last_msg``: the run's _bg writes the failure reason there and release_run runs in the
+    SAME ``finally`` immediately after — clearing it would silently swallow every run error before
+    the operator could read why the run failed.  (Clearing the transient 'stopping…' note on a
+    CLEAN outcome is the _bg's job — see tests/eu104_run_error_survives_test.py.)
+    """
+    cs.claim_run("alpha")
+    st = cs.get_state("alpha")
+    # Simulate in-flight display fields + a run error the operator must still be able to read.
+    st["autopilot_on"] = True
+    st["last_msg"] = "build failed: boom at the gate"
+    import time as _time
+    st["last_activity"] = _time.time()
+
+    cs.release_run("alpha")
+
+    assert not cs.is_active("alpha"), "active must be False after release_run"
+    assert st["autopilot_on"] is False, (
+        "autopilot_on must be zeroed by release_run (EU-104 — ghost autopilot badge)"
+    )
+    assert st["last_activity"] is None, (
+        "last_activity must be cleared by release_run (EU-104 — stale heartbeat timestamp)"
+    )
+    assert st["last_msg"] == "build failed: boom at the gate", (
+        "release_run must NOT clear last_msg — the operator must still see why the run failed "
+        "(EU-104 iter-3: release_run clobbering run errors was the review rejection)"
+    )
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

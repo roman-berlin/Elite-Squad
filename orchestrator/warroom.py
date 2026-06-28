@@ -938,7 +938,15 @@ def _feed_html(items: list[dict]) -> str:
 
 def _liveness(state: dict, active: bool) -> str:
     """A heartbeat chip: green while the unit is printing steps, amber/red if it goes quiet —
-    so you can tell 'working' from 'stuck' at a glance."""
+    so you can tell 'working' from 'stuck' at a glance.
+
+    Reads ``last_activity`` from the passed-in ``state`` snapshot.  EU-104 per-project scoping
+    is the CALLER's responsibility: ``server._view_state(app)`` hands this function the tab's
+    own ``get_state(app)`` snapshot, so ``state['last_activity']`` is already THIS project's
+    heartbeat — never a different concurrent project's.  Reading the argument (rather than
+    reaching into the global run-state) also keeps the chip a pure function of its inputs, the
+    contract the EU-84 regression guard pins.
+    """
     if not active:
         return ""
     la = state.get("last_activity")
@@ -993,6 +1001,46 @@ def _sync_html_uncached(cfg) -> str:
 
 _BACKLOG_CACHE: dict[str, tuple[float, list]] = {}   # scope -> (fetched_ts, [(AppConfig, Ticket)])
 _BACKLOG_TTL = 90.0   # the board re-renders every couple seconds; only hit Jira at most once/90s/scope
+
+# EU-104: TTL cache for the per-ticket Jira status guard.  Each entry is (fetched_ts, status_str|None).
+# The TTL is shorter than the backlog TTL so a ticket that lands in 'Done' is detected within half a
+# minute — without hammering the Jira REST API on every 2s SSE board frame.
+_TICKET_STATUS_CACHE: "dict[tuple, tuple[float, Optional[str]]]" = {}   # (app, key) -> (ts, status)
+_TICKET_STATUS_TTL = 30.0
+
+
+def _ticket_done(cfg, app: Optional[str], ticket_key: Optional[str]) -> bool:
+    """Return True if ``ticket_key`` is in a terminal Done/Closed status in Jira (EU-104 guard).
+
+    TTL-cached per (app, key) so the SSE board renders don't hit Jira on every 2s frame.
+    Best-effort: any error (missing backlog, bad creds, network) returns False so the board
+    never breaks — the active flag + run-loop correctly clear state on normal termination;
+    this guard is the backstop for interrupted/crashed runs whose Jira ticket is already done.
+    Only checks apps with ``backlog_backend: jira``; all other backends return False immediately.
+    """
+    if not app or not ticket_key or ticket_key in ("—", ""):
+        return False
+    cache_key = (app, ticket_key)
+    now = time.time()
+    hit = _TICKET_STATUS_CACHE.get(cache_key)
+    if hit is not None and now - hit[0] < _TICKET_STATUS_TTL:
+        status = hit[1]
+    else:
+        status = None
+        try:
+            app_cfg = cfg.app(app)
+            if getattr(app_cfg, "backlog_backend", None) == "jira":
+                from .backlog.base import make_backlog
+                bl = make_backlog(app_cfg)
+                # JiraAdapter._current_status fetches the Jira issue's status field.
+                # getattr guard keeps us safe if a future adapter omits this private method.
+                fn = getattr(bl, "_current_status", None)
+                if fn is not None:
+                    status = fn(ticket_key)
+        except Exception:  # noqa: BLE001 — never let a Jira probe break the board
+            pass
+        _TICKET_STATUS_CACHE[cache_key] = (now, status)
+    return bool(status and status.lower() in ("done", "closed"))
 
 
 def _backlog_items(cfg, app: Optional[str]) -> tuple[list, Optional[str]]:
@@ -1073,6 +1121,17 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
         elapsed = _fmt_dur(datetime.now().timestamp() - rs)
     manual = bool(state.get("active")) and not ap_on
     run_obj = active_run(cfg, tasks, app, active)
+    # EU-104: re-validate the live ticket against Jira — suppress the ghost 'Working' card if
+    # the ticket is already Done/Closed.  This catches interrupted runs whose in-memory active
+    # flag was never cleared (crash/restart) and the _run_in_flight heuristic still fires.
+    # _ticket_done is TTL-cached (30s) so the SSE poll doesn't hammer the Jira REST API.
+    if run_obj and run_obj.get("live") and _ticket_done(cfg, app, run_obj.get("ticket")):
+        run_obj = dict(run_obj)   # shallow copy — never mutate the cached object
+        run_obj["live"] = False   # fall through to the 'idle · last run' rendering path
+        active = False
+        mode = None
+        elapsed = None
+        manual = False
     k = _kpi_html(kpis(cfg, tasks, app))
     run = _run_html(run_obj, mode, elapsed, manual)
     # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
@@ -1095,6 +1154,8 @@ def render_board(cfg, app: Optional[str], state: dict, log_lines=None) -> str:
     ncount = f' · {_nrows}' if _nrows else ""
     log_panel = ""
     if log_lines is not None:
+        # EU-104: ``state`` is this tab's own per-app snapshot (server._view_state(app)), so the
+        # heartbeat chip reads THIS project's last_activity, not a different concurrent project's.
         log_panel = (f'<section class=panel><div class=ph>Live feed{_liveness(state, active)}</div>'
                      f'{_log_html(log_lines)}</section>')
     return (

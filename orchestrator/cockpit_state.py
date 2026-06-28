@@ -160,12 +160,28 @@ def claim_run(app: str | None = None, *, dry_run: bool | None = None,
 
 
 def release_run(app: str | None = None) -> None:
-    """Release ``app``'s run slot (clears ``active`` + run bookkeeping). Mirror of ``claim_run``."""
+    """Release ``app``'s run slot on any terminal outcome (merged / errored / no_changes /
+    postmortem / stopped).
+
+    Clears the run-slot + liveness fields — ``active``, ``autopilot_on``, ``run_started``,
+    ``stop_event`` and ``last_activity`` — so a finished run never lingers as 'Working' on the
+    cockpit tab.  Mirror of ``claim_run`` (EU-104).
+
+    Deliberately does NOT touch ``last_msg``.  Every run's ``_bg`` writes the failure reason
+    there (``st['last_msg'] = str(exc)``) and ``release_run`` runs in the SAME ``finally``
+    immediately afterwards — so clearing it here would silently swallow every run error before the
+    operator could read why the run failed (the EU-104 iteration-2 review rejection).  Zeroing the
+    transient 'Working / stopping…' control-bar note on a CLEAN terminal outcome is the ``_bg``'s
+    job instead: it alone knows whether the run raised, so it clears the note only when it didn't —
+    see the run/report/autopilot ``_bg`` finally blocks in ``server.py`` (EU-104 iteration-3).
+    """
     with run_lock_for(app):
         st = get_state(app)
         st["active"] = False
+        st["autopilot_on"] = False     # zero the autopilot badge; set externally too, but defensive
         st["run_started"] = None
         st["stop_event"] = None
+        st["last_activity"] = None     # clear heartbeat so stale timestamps never show after release
 
 
 def bump_log_seq(app: str | None = None) -> int:
@@ -234,11 +250,25 @@ def reset_run_state() -> None:
 
 # Ring buffer of the unit's stdout — fed to the War Room's "Live feed" panel so you can watch
 # the implementation steps in the dashboard, not just the terminal.
-_LOG: "_collections.deque[str]" = _collections.deque(maxlen=600)
+# EU-104: each entry is a (line, app_key) tuple so per-tab live-feed panels can filter to
+# their own project's output.  ``app_key`` is the concrete app name (a string) when exactly
+# one project was active at write time, or ``None`` for unattributed / ambiguous output.
+_LOG: "_collections.deque[tuple[str, object]]" = _collections.deque(maxlen=600)
 
 
-def recent_log(n: int = 60) -> list[str]:
-    return list(_LOG)[-n:]
+def recent_log(n: int = 60, app: object = None) -> list[str]:
+    """Return the last ``n`` log lines, optionally scoped to a single project.
+
+    When ``app`` is ``None`` (the default) all entries are returned regardless of their
+    attributed project — preserving the existing "show everything" behaviour used by the
+    global / unscoped view.  When ``app`` is provided only lines whose ``app_key`` matches
+    are included, so each tab's live-feed panel shows only its own project's output (EU-104).
+    """
+    if app is not None:
+        lines = [line for line, key in list(_LOG) if key == app]
+    else:
+        lines = [line for line, _key in list(_LOG)]
+    return lines[-n:]
 
 
 def _sse(event: str, data: str) -> str:
@@ -254,13 +284,20 @@ class _Tee:
 
     def write(self, s: str):
         self._real.write(s)
+        # EU-104: tag each captured line with the currently-active project so per-tab live-feed
+        # panels can filter to their own project's output.  When exactly one project is active we
+        # attribute the line to it; when zero or multiple are active we fall back to None (the
+        # line is unattributed and appears only in the global / unfiltered view).
+        runs = active_runs()
+        app_key = runs[0] if len(runs) == 1 else None
         for line in s.splitlines():
             t = line.rstrip()
             if t and "/api/board" not in t and "GET /api/" not in t:
-                _LOG.append(t)
-                # Heartbeat + wake SSE streamers. stdout isn't per-app attributable, so bump the
-                # shared seq (global streamers) and the default state (legacy + heartbeat).
-                bump_log_seq()
+                _LOG.append((t, app_key))
+                # Heartbeat + wake SSE streamers: bump the shared seq (wakes global streamers)
+                # AND the per-app seq (wakes that project's tab streamer).  Falls back to the
+                # default (None-key) state when no concrete app is active.
+                bump_log_seq(app_key)
 
     def flush(self):
         self._real.flush()
