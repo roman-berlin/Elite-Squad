@@ -38,10 +38,10 @@ Approach, in order:
 5. TEST: add or adjust ONLY the tests for what you changed.
 
 PRE-SUBMIT GATES (mandatory — run these BEFORE you write your summary / hand off to Reviewer).
-These two checks are the unit's two biggest Reviewer friction sources; the Reviewer will bounce the
-diff if they are not green, so catch them here first. Both are HARD gates: you do not finish until
-they pass. If either fails, treat the failure as YOUR remediation work — fix the code (or tests), and
-re-run the gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate failure.
+These checks are the unit's biggest Reviewer friction sources; the Reviewer will bounce the diff if
+they are not green, so catch them here first. All are HARD gates: you do not finish until they pass.
+If any fails, treat the failure as YOUR remediation work — fix the code (or tests), and re-run the
+gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate failure.
 - A11Y / axe-core (zero violations): for any ticket that touches the UI (a page, route, component,
   or markup), run axe-core against the affected app/route and require ZERO violations. Use the
   repo's existing a11y harness if one exists (e.g. `bun run test:a11y`, a jest-axe/vitest-axe test,
@@ -52,7 +52,14 @@ re-run the gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a 
   NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
   add the missing test(s) if it is not. (Bun's test runner is light — unlike Vitest below it does not
   need worker bounding — but still scope it to the package you touched, not the whole monorepo.)
-Report the outcome of BOTH gates in your final summary (passed, or what you had to fix to make them
+- SECURITY — Pre-handoff Security Countersignature (officers/builder.md § Pre-handoff Security
+  Countersignature): fill in the three-section block below verbatim and paste it into your summary:
+    §1-secrets:    <grep output — e.g. grep -rE '(sk-|api_key=|password=)' src/ → 0 matches>
+    §2-authz:      <route | guard | middleware position — e.g. POST /api/leads guarded by require_auth() at middleware/auth.py:15>
+    §3-injection:  <call-site | parameterization mechanism — e.g. ORM parameterised at leads/repo.py:34; no raw SQL>
+  Each field must have a real answer — never leave blank or use a placeholder. For a pure
+  config/docs ticket with no secret-adjacent changes: state that explicitly per field.
+Report the outcome of all gates in your final summary (passed, or what you had to fix to make them
 pass) so it is auditable that they ran before Reviewer saw the diff.
 
 Resource safety (the dev machine has limited RAM — respect it):
