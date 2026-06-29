@@ -25,14 +25,15 @@ sys.path.insert(0, ".")
 
 from orchestrator import autopilot
 from orchestrator.contracts import Outcome, TicketReport
-from orchestrator.config import Config
+from orchestrator.config import Config, AppConfig
 
 results = []
 def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 tmp = Path(tempfile.mkdtemp())
-cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
+APP = AppConfig(name="eu", repo_path=".", base_branch="dev", protected_branch="main", backlog_backend="none")
+cfg = Config(apps=[APP], audit_path=str(tmp / "audit.jsonl"))
 
 # A ticket already parked from an earlier cycle. The Commander will /unblock it WHILE this cycle runs.
 autopilot.save_blocked(cfg, {"EU-OLD"})
@@ -42,7 +43,7 @@ NEW = types.SimpleNamespace(id="EU-NEW")   # escalates this cycle -> about to be
 def _run_cycle():
     autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used": 0, "cap": 1, "pct": 0.0}
     # worklist excludes already-blocked tickets, so only EU-NEW is offered.
-    autopilot.intake.from_drain = lambda c, app, n: [("app", NEW)]
+    autopilot.intake.from_drain = lambda c, app, n: [(APP, NEW)]
 
     async def _run_loop(c, worklist, audit):
         # Simulate the Telegram poller clearing EU-OLD mid-cycle (a real /unblock writes the file now).

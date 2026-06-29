@@ -57,6 +57,103 @@ check("only fetched the image url (1 GET)", len(sess.calls) == 1)
 check("fetch_images=False -> nothing downloaded",
       jira.JiraAdapter._download_images(types.SimpleNamespace(fetch_images=False, session=_Sess()), "K", atts) == [])
 
+# ---- close_ticket: successful close with comment ----
+class _MockAudit:
+    def __init__(s): s.records = []
+    def record(s, event, **fields): s.records.append({"event": event, **fields})
+
+_mock_transitions = {
+    "transitions": [
+        {"id": "71", "to": {"name": "Done", "statusCategory": {"key": "done"}}},
+        {"id": "81", "to": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}}}
+    ]
+}
+
+class _JiraResp:
+    def __init__(s, ok=True, transitions=None): s.ok = ok; s.status_code = 200 if ok else 500; s.transitions = transitions or _mock_transitions
+    def raise_for_status(s):
+        if not s.ok:
+            raise req.RequestException("API error")
+    def json(s): return s.transitions
+
+class _JiraSession:
+    def __init__(s): s.calls = []; s.resp = _JiraResp()
+    def post(s, url, json=None):
+        s.calls.append(("POST", url, json))
+        return s.resp
+    def get(s, url, params=None):
+        s.calls.append(("GET", url, params))
+        return s.resp
+    def put(s, url, json=None):
+        s.calls.append(("PUT", url, json))
+        return s.resp
+
+audit = _MockAudit()
+sess = _JiraSession()
+adapter = types.SimpleNamespace(
+    session=sess, _url=lambda p: f"https://test.atlassian.net/rest/api/3/{p}",
+    ac_field="customfield_10000"
+)
+
+# Test close_ticket
+result = jira.JiraAdapter.close_ticket(adapter, "AUTO-123", "Duplicate of AUTO-42", audit)
+check("close_ticket succeeds", result == True)
+check("close_ticket adds comment", any("comment" in call[1] and "Duplicate" in str(call[2]) for call in sess.calls if call[0] == "POST"))
+check("close_ticket executes transition", any("transitions" in call[1] for call in sess.calls))
+check("close_ticket audits the action", any(r["event"] == "jira_close" and r["ticket_id"] == "AUTO-123" for r in audit.records))
+
+# Test close_ticket failure
+sess_fail = _JiraSession()
+sess_fail.resp = _JiraResp(ok=False)
+audit_fail = _MockAudit()
+adapter_fail = types.SimpleNamespace(session=sess_fail, _url=lambda p: f"https://test.atlassian.net/rest/api/3/{p}")
+result_fail = jira.JiraAdapter.close_ticket(adapter_fail, "AUTO-456", "Bad close", audit_fail)
+check("close_ticket failure returns False", result_fail == False)
+check("close_ticket failure audits failure", any(r["event"] == "jira_close_failed" for r in audit_fail.records))
+
+# ---- transition_ticket: move to another project ----
+sess_proj = _JiraSession()
+sess_proj.resp = _JiraResp(transitions={"values": [{"id": "10000"}]})
+adapter_proj = types.SimpleNamespace(
+    session=sess_proj, _url=lambda p: f"https://test.atlassian.net/rest/api/3/{p}",
+    ac_field="customfield_10000"
+)
+audit_proj = _MockAudit()
+
+proj_result = jira.JiraAdapter.transition_ticket(
+    adapter_proj, "AUTO-789", "NEW", "New AC text here", audit_proj
+)
+
+check("transition_ticket attempts project lookup", any("project" in call[1] and call[2] == {"key": "NEW"} for call in sess_proj.calls if call[0] == "GET"))
+check("transition_ticket audits the action", any(r["event"] == "jira_transition" and r["target_project"] == "NEW" for r in audit_proj.records))
+
+# ---- doctrine lookup helpers ----
+import tempfile, os
+from pathlib import Path
+
+# Test read_claude_md
+test_dir = Path(tempfile.mkdtemp())
+claude_path = test_dir / "CLAUDE.md"
+claude_path.write_text("# Test CLAUDE.md\nThis is test content.", encoding="utf-8")
+
+claude_content = jira.read_claude_md(str(test_dir))
+check("read_claude_md reads file content", claude_content.startswith("# Test CLAUDE.md"))
+
+# Test read_config_yaml
+config_path = test_dir / "config.yaml"
+config_path.write_text("test: value\napp: automatixy", encoding="utf-8")
+
+config_content = jira.read_config_yaml(str(config_path))
+check("read_config_yaml reads file content", "test: value" in config_content)
+
+# Test with missing files
+check("read_claude_md handles missing file", jira.read_claude_md("/nonexistent/path") == "")
+check("read_config_yaml handles missing file", jira.read_config_yaml("/nonexistent/config.yaml") == "")
+
+# Cleanup
+import shutil
+shutil.rmtree(test_dir, ignore_errors=True)
+
 print("\n================ TICKET-CONTEXT QA ================")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

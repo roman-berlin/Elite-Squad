@@ -20,7 +20,7 @@ sys.path.insert(0, ".")
 
 from orchestrator import autopilot
 from orchestrator.contracts import Outcome, TicketReport
-from orchestrator.config import Config
+from orchestrator.config import Config, AppConfig
 
 results = []
 def chk(n, c, d=""):
@@ -34,7 +34,8 @@ chk("retry threshold is a couple of passes", autopilot._MAX_TICKET_ERRORS >= 2)
 
 # --- harness: one autopilot cycle with a scripted outcome for one ticket ---
 tmp = Path(tempfile.mkdtemp())
-cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
+APP = AppConfig(name="eu", repo_path=".", base_branch="dev", protected_branch="main", backlog_backend="none")
+cfg = Config(apps=[APP], audit_path=str(tmp / "audit.jsonl"))
 
 _outcome = {"value": Outcome.ERRORED}    # what run_loop returns this cycle
 TICKET = types.SimpleNamespace(id="EU-9")
@@ -42,7 +43,7 @@ TICKET = types.SimpleNamespace(id="EU-9")
 def _run_cycle():
     """Drive a single autopilot cycle (once=True) with stubbed intake / loop / events."""
     autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used": 0, "cap": 1, "pct": 0.0}
-    autopilot.intake.from_drain = lambda c, app, n: [("app", TICKET)]
+    autopilot.intake.from_drain = lambda c, app, n: [(APP, TICKET)]
     async def _run_loop(c, worklist, audit):
         return [TicketReport(ticket_id=TICKET.id, outcome=_outcome["value"], iterations=1, cost_usd=0.0)]
     autopilot.run_loop = _run_loop

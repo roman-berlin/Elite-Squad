@@ -51,7 +51,7 @@ sys.path.insert(0, ".")
 
 from orchestrator import autopilot  # noqa: E402
 from orchestrator.contracts import Outcome, TicketReport  # noqa: E402
-from orchestrator.config import Config  # noqa: E402
+from orchestrator.config import Config, AppConfig  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,7 +68,8 @@ ns = types.SimpleNamespace
 tmp = Path(tempfile.mkdtemp())
 
 # Need room for 4 tickets; the default cap is 1, so raise it explicitly.
-cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"), max_tickets_per_run=10)
+APP = AppConfig(name="eu", repo_path=".", base_branch="dev", protected_branch="main", backlog_backend="none")
+cfg = Config(apps=[APP], audit_path=str(tmp / "audit.jsonl"), max_tickets_per_run=10)
 
 # ---------------------------------------------------------------------------
 # Tickets (plain namespaces — autopilot uses getattr(..., "status", None)).
@@ -97,7 +98,7 @@ def _run_cycle() -> None:
     # Returns {ticket_id: (app, ticket)} for tickets the Commander replied to on Jira.
     def _resumable_answered(c, app, blocked):  # noqa: ANN001
         """Stub: only EU-87-ANS is treated as answered on Jira."""
-        return {ANS_TICKET.id: ("app", ANS_TICKET)} if ANS_TICKET.id in blocked else {}
+        return {ANS_TICKET.id: (APP, ANS_TICKET)} if ANS_TICKET.id in blocked else {}
 
     autopilot._resumable_answered = _resumable_answered
 
@@ -106,10 +107,10 @@ def _run_cycle() -> None:
     # from_drain is called AFTER _resumable_answered removes ANS_TICKET from blocked, so ANS_TICKET
     # is NOT in the drain — it arrives only via answered_items (Tier-2).
     autopilot.intake.from_drain = lambda c, app, n: [
-        ("app", IP_TICKET),      # Tier-1 candidate
-        ("app", UNANS_TICKET),   # still blocked → filtered out
-        ("app", TODO_RANK1),     # Tier-3, rank 1
-        ("app", TODO_RANK2),     # Tier-3, rank 2
+        (APP, IP_TICKET),      # Tier-1 candidate
+        (APP, UNANS_TICKET),   # still blocked → filtered out
+        (APP, TODO_RANK1),     # Tier-3, rank 1
+        (APP, TODO_RANK2),     # Tier-3, rank 2
     ]
     autopilot.intake.LAST_DRAIN_ERRORS = {}
 

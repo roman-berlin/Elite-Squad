@@ -161,3 +161,130 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
     if failures:
         return GateResult(passed=False, report="\n\n".join(failures))
     return GateResult(passed=True, report="app gates passed: " + ", ".join(passed_apps))
+
+
+# --------------------------------------------------------------------------- #
+# Pre-build gate integration (EU-107)
+# --------------------------------------------------------------------------- #
+
+async def prebuild_gate(cfg, worklist, audit):
+    """Run the pre-build triage gate (Senior PM) before tickets reach the Builder.
+
+    This gate filters tickets that can be resolved without a build:
+    - ANSWER: questions answerable from docs/context → reply and close
+    - CLOSE: invalid/duplicate tickets → close with reason
+    - REFILE: misrouted tickets → re-file as new tickets and close original
+    - CONTINUE: tickets that need a build → pass through to Builder
+
+    The gate also checks worktree locks to skip in-flight tickets.
+
+    Args:
+        cfg: Config object
+        worklist: List of (AppConfig, Ticket) tuples
+        audit: AuditLog object
+
+    Returns:
+        Filtered worklist with only tickets that need a build.
+    """
+    from . import loop, senior_pm
+    from .backlog.base import make_backlog
+
+    filtered_worklist = []
+    triage_results = []
+
+    for app, ticket in worklist:
+        ticket_id = ticket.id or ticket.key or "unknown"
+
+        # Check if worktree is locked (in-flight ticket)
+        worktree_path = loop._worktree_path(app, cfg)
+        if loop.is_worktree_locked(worktree_path):
+            print(f"  · {ticket_id}: skipping — worktree locked (build in progress)", flush=True)
+            audit.record("prebuild_skip", ticket_id=ticket_id, reason="worktree_locked")
+            continue
+
+        # Run Senior PM triage
+        print(f"  · {ticket_id}: running pre-build triage...", flush=True)
+        try:
+            pm_audit = await senior_pm.triage_async(cfg, ticket, auto_mode=True)
+            verdict = pm_audit.verdict
+
+            # Record the triage decision
+            audit.record("prebuild_triage",
+                        ticket_id=ticket_id,
+                        verdict=verdict,
+                        citations=pm_audit.citations,
+                        raw=pm_audit.raw)
+
+            triage_results.append((ticket_id, verdict))
+
+            # Act on the verdict
+            backlog = make_backlog(app)
+
+            if verdict == "ANSWER":
+                # Senior PM answered the question → close ticket
+                print(f"  · {ticket_id}: ANSWER → closing with answer", flush=True)
+                backlog.add_comment(ticket, pm_audit.raw)
+                backlog.set_status(ticket, "Done")
+                audit.record("prebuild_close", ticket_id=ticket_id, reason="answered")
+
+            elif verdict == "CLOSE":
+                # Invalid/duplicate → close with reason
+                print(f"  · {ticket_id}: CLOSE → closing", flush=True)
+                backlog.add_comment(ticket, pm_audit.raw)
+                backlog.set_status(ticket, "Done")
+                audit.record("prebuild_close", ticket_id=ticket_id, reason="invalid")
+
+            elif verdict == "REFILE":
+                # Misrouted → re-file as new tickets and close original
+                print(f"  · {ticket_id}: REFILE → creating {len(pm_audit.refile_targets)} new ticket(s)", flush=True)
+                backlog.add_comment(ticket, pm_audit.raw)
+
+                # Create the new tickets
+                filed_keys = []
+                for new_ticket in pm_audit.refile_targets:
+                    try:
+                        new_key = backlog.create_task(
+                            summary=new_ticket.get("title", ""),
+                            description=new_ticket.get("body", ""),
+                            labels=["autodev", "refiled"],
+                            issue_type=new_ticket.get("type", "Task")
+                        )
+                        if new_key:
+                            filed_keys.append(new_key)
+                            audit.record("prebuild_refile",
+                                       ticket_id=ticket_id,
+                                       new_ticket_key=new_key,
+                                       title=new_ticket.get("title", ""))
+                    except Exception as e:
+                        print(f"  · {ticket_id}: failed to create refile ticket: {e}", flush=True)
+                        audit.record("prebuild_refile_failed",
+                                   ticket_id=ticket_id,
+                                   error=str(e))
+
+                # Close the original ticket with reference to new tickets
+                comment = pm_audit.raw
+                if filed_keys:
+                    comment += f"\n\nRefiled as: {', '.join(filed_keys)}"
+                backlog.add_comment(ticket, comment)
+                backlog.set_status(ticket, "Done")
+
+            else:
+                # CONTINUE or unknown → pass through to Builder
+                print(f"  · {ticket_id}: {verdict} → continuing to build", flush=True)
+                filtered_worklist.append((app, ticket))
+
+        except Exception as e:
+            print(f"  · {ticket_id}: triage failed → continuing to build: {e}", flush=True)
+            audit.record("prebuild_error", ticket_id=ticket_id, error=str(e))
+            # On error, pass through to build rather than dropping the ticket
+            filtered_worklist.append((app, ticket))
+
+    # Log summary
+    if triage_results:
+        answered = sum(1 for _, v in triage_results if v == "ANSWER")
+        closed = sum(1 for _, v in triage_results if v == "CLOSE")
+        refiled = sum(1 for _, v in triage_results if v == "REFILE")
+        continued = sum(1 for _, v in triage_results if v not in ("ANSWER", "CLOSE", "REFILE"))
+        print(f"  · pre-build gate: {answered} answered, {closed} closed, {refiled} refiled, {continued} continuing", flush=True)
+
+    return filtered_worklist

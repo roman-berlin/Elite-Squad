@@ -27,7 +27,7 @@ sys.path.insert(0, ".")
 
 from orchestrator import autopilot
 from orchestrator.contracts import Outcome, TicketReport
-from orchestrator.config import Config
+from orchestrator.config import Config, AppConfig
 
 results = []
 def chk(n, c, d=""):
@@ -35,7 +35,8 @@ def chk(n, c, d=""):
 
 ns = types.SimpleNamespace
 tmp = Path(tempfile.mkdtemp())
-cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
+APP = AppConfig(name="eu", repo_path=".", base_branch="dev", protected_branch="main", backlog_backend="none")
+cfg = Config(apps=[APP], audit_path=str(tmp / "audit.jsonl"))
 
 # AUTO-1 is parked from an earlier cycle; the Commander answered it on Jira, so it should auto-resume.
 # AUTO-2 is a normal new ticket the drain offers this cycle.
@@ -49,8 +50,8 @@ def _run_cycle():
     autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used": 0, "cap": 1, "pct": 0.0}
     # Detection is unit-tested elsewhere — stub it so this harness isolates the consume/prepend wiring.
     autopilot._resumable_answered = lambda c, app, blocked: (
-        {"AUTO-1": ("app", RESUMED)} if "AUTO-1" in blocked else {})
-    autopilot.intake.from_drain = lambda c, app, n: [("app", NEW)]
+        {"AUTO-1": (APP, RESUMED)} if "AUTO-1" in blocked else {})
+    autopilot.intake.from_drain = lambda c, app, n: [(APP, NEW)]
     autopilot.intake.LAST_DRAIN_ERRORS = {}
 
     async def _run_loop(c, worklist, audit):
