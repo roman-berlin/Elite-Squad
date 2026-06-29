@@ -31,7 +31,8 @@ _TOKENS_FALLBACK = (
     "--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;"
     "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
     "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
-    "--info:#6aa9ff;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;"
+    "--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;"
+    "--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;"
     "--mono:ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;"
     "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
     "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
@@ -459,7 +460,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 
     # EU-103: per-project autopilot controls — read from the per-app run-state.
     # State is resolved here (not in the template) so the HTML is a pure string.
-    ap_status: dict = {"on": False, "stopping": False, "mode": None}
+    ap_status: dict = {"on": False, "stopping": False, "mode": None, "external": False}
     if app0:
         try:
             ap_status = get_autopilot_status(app0)
@@ -467,6 +468,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             pass
     ap_on = ap_status.get("on", False)
     ap_stopping = ap_status.get("stopping", False)
+    ap_external = ap_status.get("external", False)
     ap_appq = html.escape(app0)
     # Disable start buttons when the system is unhealthy OR no project is selected.
     ap_dis = "" if (healthy and app0) else "disabled"
@@ -480,11 +482,14 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             '</div>')
     elif ap_on:
         # Autopilot running: offer graceful drain or hard stop.
+        # EU-120: when external daemon is running, mark it as external in the label.
+        ap_label = f'Autopilot&nbsp;<b>ON</b>&nbsp;<span class=ext>(external)</span>&nbsp;&middot;&nbsp;{ap_appq}' if ap_external else f'Autopilot&nbsp;<b>ON</b>&nbsp;&middot;&nbsp;{ap_appq}'
+        ap_class = "tbap on ext" if ap_external else "tbap on"
         ap_html = (
             '<span class=tbdiv></span>'
-            '<div class="tbap on">'
+            f'<div class="{ap_class}">'
             '<span class="apdot-sm on"></span>'
-            f'<span class=tbaplabel>Autopilot&nbsp;<b>ON</b>&nbsp;&middot;&nbsp;{ap_appq}</span>'
+            f'<span class=tbaplabel>{ap_label}</span>'
             f'<form method=post action=/api/autopilot class=tbf>'
             f'<input type=hidden name=action value=drain>'
             f'<input type=hidden name=app value="{ap_appq}">'
@@ -583,11 +588,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 /* EU-103 — per-project Autopilot section */
 .tbar .tbap{{display:inline-flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--panel2)}}
 .tbar .tbap.on{{border-color:var(--okline);background:var(--okbg)}}
+.tbar .tbap.on.ext{{border-color:var(--infoline);background:var(--infobg)}}
 .tbar .tbap.stopping{{border-color:var(--warnline);background:var(--warnbg)}}
 .tbar .apdot-sm{{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}}
 .tbar .apdot-sm.on{{background:var(--ok);animation:pulse2 1.3s infinite}}
 .tbar .apdot-sm.stop{{background:var(--warn)}}
 .tbar .tbaplabel{{font-size:12px;color:var(--ink);white-space:nowrap}}
+.tbar .tbaplabel .ext{{font-size:10px;color:var(--info);font-weight:600;margin-left:4px}}
 .tbar .aptbtn{{border:0;border-radius:var(--r-md);padding:5px 11px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}}
 .tbar .aptbtn.start{{background:var(--accent);color:#fff}}.tbar .aptbtn.start:hover{{background:#2f5ce0}}
 .tbar .aptbtn.start:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}

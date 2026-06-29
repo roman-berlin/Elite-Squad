@@ -1334,7 +1334,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;
 --warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;
 --bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;
---info:#6aa9ff;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;
+--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 /* corner radii */
 --r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;

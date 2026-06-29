@@ -432,6 +432,18 @@ def create_app(cfg: Config):
             ev = st.get("stop_event")
             if ev is not None:
                 ev.set()
+            # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
+            # the launchd service after signaling the stop_event so the current ticket finishes.
+            # This must happen AFTER ev.set() so graceful shutdown happens first.
+            if ap.daemon_is_external():
+                stopped = ap._stop_launchd_daemon()
+                if stopped:
+                    # Success — the daemon will finish its in-flight work and exit
+                    pass
+                else:
+                    # launchctl failed — the stop_event is still set, so graceful shutdown proceeds,
+                    # but KeepAlive may respawn it. Log this but don't block the redirect.
+                    pass
             return redirect(_redir)
 
         if action == "stop" and ap_on:
@@ -441,6 +453,18 @@ def create_app(cfg: Config):
             if ev is not None:
                 ev.set()
             st["autopilot_on"] = False
+            # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
+            # the launchd service. Without launchctl bootout, clicking 'Stop' on an external daemon
+            # doesn't actually stop it—the KeepAlive respawn makes the button a no-op for external runs.
+            if ap.daemon_is_external():
+                stopped = ap._stop_launchd_daemon()
+                if stopped:
+                    # Success — the daemon will finish its in-flight work and exit
+                    pass
+                else:
+                    # launchctl failed — the stop_event is still set, so graceful shutdown proceeds,
+                    # but KeepAlive may respawn it. Log this but don't block the redirect.
+                    pass
             return redirect(_redir)
 
         # toggle / unknown action → no-op (the mode persist above already took effect).
