@@ -93,14 +93,17 @@ class QuietBuilder:
         return BuildResult(ok=True, summary=NO_HALT, cost_usd=0.0, num_turns=1, raw=NO_HALT, tools=[])
 loop.builder_mod = QuietBuilder
 
-# PM consulted but cannot decide (None) -> falls through to ERRORED, having spent one cheap call.
+# PM consulted but cannot decide (None) -> moves to terminal state (EU-116).
+# With no clear sibling keywords, the ticket is parked for verification (ESCALATED),
+# not left stuck in In Progress.
 pm_calls = []
 async def pm_none(c, t, a, au, rep): pm_calls.append(rep); return None
 loop._consult_pm = pm_none
 au = Audit()
 rep3 = asyncio.run(loop._attempt(ticket, app, cfg, Git(), Backlog(), au, loop.Budget(0), "autodev/AUTO-14"))
-chk("no halt language -> PM consulted once before erroring", len(pm_calls) == 1, f"calls={len(pm_calls)}")
-chk("no halt language + PM no-decision -> ERRORED", rep3.outcome == Outcome.ERRORED, str(rep3.outcome))
+chk("no halt language -> PM consulted once before terminal decision", len(pm_calls) == 1, f"calls={len(pm_calls)}")
+# EU-116: no_changes now moves to a terminal state (ESCALATED for verification) instead of ERRORED
+chk("no halt language + PM no-decision -> ESCALATED (verification)", rep3.outcome == Outcome.ESCALATED, str(rep3.outcome))
 chk("no halt language + PM no-decision -> no_changes audited", any(e["event"] == "no_changes" for e in au.ev))
 
 # PM consulted and DECIDES -> rebuilds with the decision injected, even with no halt language.

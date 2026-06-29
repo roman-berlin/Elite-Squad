@@ -717,7 +717,45 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                       flush=True)
                 return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                              notes="parked — Commander product decision needed"))
+            # EU-116: no_changes is terminal — move the ticket off "In Progress" so the drain
+            # doesn't re-pick it every cycle. Close it as Done when the fix was already applied
+            # (likely by a sibling ticket), else park it for verification.
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
+            if not cfg.dry_run and not ticket.ephemeral:
+                try:
+                    # Try to detect if a sibling ticket already fixed this (look for sibling mentions in the summary/description)
+                    sibling_keywords = ["already done", "already fixed", "already implemented", "satisfied", "complete", "exists"]
+                    text_to_check = (ticket.summary or "") + " " + (ticket.description or "")
+                    was_already_done = any(kw in text_to_check.lower() for kw in sibling_keywords)
+
+                    if was_already_done:
+                        # The fix is already in place — close the ticket as Done
+                        backlog.set_status(ticket, "Done")
+                        backlog.add_comment(ticket,
+                            "✅ Closed — Builder found no changes to make.\n"
+                            "• The acceptance criteria were already satisfied (likely fixed by a sibling ticket).\n"
+                            "• No work was needed.")
+                        _notify(cfg, f"✅ {ticket.id} closed — already satisfied (nothing to change).")
+                        print(f"  ✅ {ticket.id}: closed (already satisfied) — no changes needed.", flush=True)
+                        return _resolve(TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
+                                                     notes="no changes — already satisfied, closed as Done"))
+                    else:
+                        # Not clearly done — park for verification rather than silently closing
+                        backlog.set_status(ticket, "Needs Human")
+                        backlog.add_comment(ticket,
+                            "⚠️ Parked — Builder found no changes to make.\n"
+                            "• Verify if the acceptance criteria are already met.\n"
+                            "• If yes, close this ticket; if no, unblock with details on what's missing.")
+                        _notify(cfg, f"⏸️ {ticket.id} parked — verify if already satisfied.")
+                        print(f"  ⏸️ {ticket.id}: parked (verify if already satisfied).", flush=True)
+                        return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                                     notes="no changes — needs verification"))
+                except Exception as exc:  # noqa: BLE001 - a status change must not break the run
+                    print(f"  · status change skipped for {ticket.id}: {exc}", flush=True)
+                    # Fall through to returning ERRORED if we couldn't move the ticket
+                    return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
+                                                 notes="builder produced no changes (status update failed)"))
+            # Dry-run or ephemeral ticket — just return the outcome
             return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                          notes="builder produced no changes"))
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
