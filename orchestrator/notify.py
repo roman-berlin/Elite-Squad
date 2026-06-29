@@ -142,6 +142,62 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list:
         return []
 
 
+# EU-118: plan-limit alert sent flag (one-shot per session to avoid spam)
+_plan_limit_alert_sent = False
+
+
+def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
+    """Send a SEVERE Telegram alert when a Claude plan limit is hit.
+
+    Returns True if sent, False if not configured or failed. Only sends ONCE per
+    session (resets on process restart) to avoid spamming the Commander every
+    autopilot cycle while the limit is active.
+
+    Args:
+        over_limits: List of limit dicts that are hit (from ``usage.plan_limit_hit``)
+        reset_times: List of human-readable reset times like "Mon Jun 30 14:30 UTC"
+    """
+    global _plan_limit_alert_sent
+
+    # Only alert once per session
+    if _plan_limit_alert_sent:
+        return False
+
+    if not configured():
+        return False
+
+    limit_names = []
+    for limit in over_limits:
+        label = limit.get("label") or limit.get("key") or "unknown"
+        limit_names.append(str(label))
+
+    resets_text = ", ".join(reset_times) if reset_times else "unknown time"
+
+    message = (
+        f"⛔ <b>CLAUDE PLAN LIMIT REACHED</b> ⛔\n\n"
+        f"Autopilot has paused because the following Claude plan limit(s) are exhausted:\n"
+        f"• {', '.join(limit_names)}\n\n"
+        f"<b>Resets at:</b> {resets_text}\n\n"
+        f"New builds are held until the limit renews. "
+        f"This prevents API errors and silent churn."
+    )
+
+    sent = send(message)
+    if sent:
+        _plan_limit_alert_sent = True
+
+    return sent
+
+
+def reset_plan_limit_alert() -> None:
+    """Clear the plan-limit alert sent flag — e.g. after the limit resets.
+
+    Allows a new alert to be sent if the limit is hit again in a future billing period.
+    """
+    global _plan_limit_alert_sent
+    _plan_limit_alert_sent = False
+
+
 def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:
     """Extract ``(update_id, text, origin)`` for text messages we accept.
 

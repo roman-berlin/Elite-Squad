@@ -353,6 +353,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         audit.record("autopilot_start", mode=mode, app=app_name, once=once)
         budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
         budget_alerted = False
+        # EU-118: plan-limit pause flag
+        plan_limit_paused = False
         # Last-announced idle REASON, as (bool(unreachable), frozenset(unreachable boards)) — or None
         # when not idling. Keying on the reason (not a bare "already announced" flag) is the EU-50 fix:
         # a board going dark AFTER the queue idled clear is a state change that must push once.
@@ -402,6 +404,60 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 budget_alerted = True
             elif not bs["alert"]:
                 budget_alerted = False
+
+            # EU-118: Plan-limit governor — halt when Claude Max subscription limits (session/weekly/per-model)
+            # are hit. This prevents silent churn where the autopilot spins on rate-limit errors.
+            plan_check = usage.plan_limit_hit(cfg)
+            if plan_check.get("hit"):
+                over_limits = plan_check.get("over_limits", [])
+
+                # Halt autopilot when plan limits are hit (no fallback switch implemented yet)
+                if not plan_limit_paused:
+                    limit_names = [limit.get("label", limit.get("key", "unknown")) for limit in over_limits]
+                    reset_times = list(set(limit.get("resets_in", "unknown") for limit in over_limits))
+
+                    # Send severe Telegram alert (one-shot per session)
+                    notify.plan_limit_alert(over_limits, reset_times)
+
+                    # Also send regular notification for logs
+                    notify.send(f"⛔ Autopilot paused — Claude plan limit(s) reached: {', '.join(limit_names)}. "
+                                f"Resets at: {', '.join(reset_times)}. "
+                                f"Resuming could cause API errors and silent churn.")
+
+                    # Set cockpit state so the banner appears
+                    try:
+                        from . import cockpit_state as _cs
+                        # Find the earliest reset timestamp
+                        reset_at = None
+                        for limit in over_limits:
+                            ts = limit.get("resets_at")
+                            if ts:
+                                epoch = ts if isinstance(ts, (int, float)) else 0
+                                if reset_at is None or epoch < reset_at:
+                                    reset_at = epoch
+                        _cs.set_plan_limit_hit(app_name, hit=True, reset_at=reset_at)
+                    except Exception:  # noqa: BLE001 - state update must never break autopilot
+                        pass
+
+                    audit.record("plan_limit_pause", over_limits=over_limits)
+                    print(f"  · Claude plan limit(s) reached: {', '.join(limit_names)} — holding new tickets "
+                          f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
+                    plan_limit_paused = True
+                if once:
+                    break
+                _sleep(max(30, interval), stop_event)
+                continue
+            # Clear plan-limit state when no longer hit
+            if plan_limit_paused:
+                try:
+                    from . import cockpit_state as _cs
+                    _cs.set_plan_limit_hit(app_name, hit=False, reset_at=None)
+                except Exception:  # noqa: BLE001
+                    pass
+                # Reset the plan-limit alert flag so a new alert can be sent if the limit is hit again
+                # (e.g., in the next billing period or after the session window rolls over)
+                notify.reset_plan_limit_alert()
+            plan_limit_paused = False
 
             # Don't race the Commander's manual git. While he's mid-rebase/merge in a local checkout,
             # stand down for a cycle instead of ff-pushing origin/<base> and turning his pull into a

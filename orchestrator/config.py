@@ -162,6 +162,12 @@ class Config:
     builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
 
+    # --- EU-108/118: multi-provider fallback for plan-limit handling ---
+    # When a provider (e.g., Claude Max plan) hits its limit, autopilot can switch to another
+    # provider/model that still has capacity (utilization < 1.0). This provides graceful degradation.
+    # Empty means disabled; otherwise a list of (model, provider_id) tuples in priority order.
+    fallback_providers: list[tuple[str, str]] = field(default_factory=list)
+
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
     # always-on box stays light against the Max limit and never competes with your own Opus coding.

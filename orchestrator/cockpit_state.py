@@ -31,14 +31,16 @@ from dataclasses import asdict, dataclass, field
 
 _STATE_KEYS = ("active", "last_msg", "last_result", "drilling", "dry_run",
                "last_activity", "run_started", "stop_event", "log_seq", "approving",
-               "autopilot_mode", "autopilot_on", "log_path")
+               "autopilot_mode", "autopilot_on", "log_path",
+               "plan_limit_hit", "plan_limit_reset_at")
 
 
 def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
     return {"active": False, "last_msg": "", "last_result": "", "drilling": False, "dry_run": None,
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
-            "approving": None, "autopilot_mode": None, "autopilot_on": False, "log_path": None}
+            "approving": None, "autopilot_mode": None, "autopilot_on": False, "log_path": None,
+            "plan_limit_hit": False, "plan_limit_reset_at": None}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions
@@ -513,3 +515,29 @@ def reset_workspaces() -> None:
     """Drop every stored workspace — test seam / session-clear hook."""
     with _workspace_lock:
         _workspaces.clear()
+
+
+# --------------------------------------------------------------------------------------------------
+# EU-118 — Plan-limit state tracking
+# --------------------------------------------------------------------------------------------------
+
+def set_plan_limit_hit(app: str | None = None, *, hit: bool = True,
+                       reset_at: float | None = None) -> None:
+    """Set the plan-limit state for ``app`` and optionally when it resets.
+
+    Called by the autopilot when plan limits are hit/cleared. The reset timestamp
+    is when the Claude plan limit renews (typically weekly for Max plans).
+    """
+    st = get_state(app)
+    st["plan_limit_hit"] = hit
+    st["plan_limit_reset_at"] = reset_at
+
+
+def is_plan_limit_hit(app: str | None = None) -> bool:
+    """Whether a plan limit is currently hit for ``app``."""
+    return bool(get_state(app).get("plan_limit_hit"))
+
+
+def plan_limit_reset_at(app: str | None = None) -> float | None:
+    """When the plan limit for ``app`` resets (epoch seconds), or None if unknown."""
+    return get_state(app).get("plan_limit_reset_at")

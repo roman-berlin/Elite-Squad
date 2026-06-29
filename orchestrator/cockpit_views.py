@@ -165,6 +165,58 @@ def _result_banner(state: dict) -> str:
             f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
 
 
+def _plan_limit_banner(state: dict) -> str:
+    """Plan-limit warning banner: shown when a Claude plan limit is hit.
+
+    Prominent red banner that persists until the limit resets (not a one-shot like
+    ``_result_banner``). Displays which limit was hit and when it resets.
+    """
+    from . import cockpit_state as _cs
+    from . import usage as _usg
+
+    # Check if plan limit is hit in the state
+    if not state.get("plan_limit_hit"):
+        return ""
+
+    # Get reset timestamp - if not set, check usage data
+    reset_at = state.get("plan_limit_reset_at")
+    if not reset_at:
+        try:
+            usage_data = _usg.plan_usage(force=True)
+            if usage_data and usage_data.get("limits"):
+                for limit in usage_data.get("limits", []):
+                    if float(limit.get("utilization", 0.0)) >= 1.0:
+                        reset_at = limit.get("resets_at")
+                        if reset_at:
+                            # Store in state for next time
+                            state["plan_limit_reset_at"] = reset_at
+                        break
+        except Exception:  # noqa: BLE001 - banner must never break the cockpit
+            pass
+
+    # Format reset time
+    reset_text = "unknown time"
+    if reset_at:
+        try:
+            import datetime
+            reset_dt = datetime.datetime.fromtimestamp(reset_at, tz=datetime.timezone.utc)
+            # Format like "Mon Jun 30 14:30 UTC"
+            reset_text = reset_dt.strftime("%a %b %d %H:%M %Z")
+        except Exception:  # noqa: BLE001
+            reset_text = "unknown time"
+
+    return (
+        "<div style='background:#2a1417;border-bottom:2px solid #5a1f22;color:#f0676b;"
+        "padding:16px 26px;font-size:14px;font-weight:650;display:flex;align-items:center;gap:11px'>"
+        "<span style='font-size:20px'>&#9888;</span>"
+        "<div>"
+        "<div style='font-size:15px;margin-bottom:4px'>&#9888; Claude plan limit reached &#8212; implementation paused</div>"
+        f"<div style='font-size:13px;color:#e7ebf2;font-weight:400'>Resets at {html.escape(reset_text)}. "
+        "New builds will wait until the limit renews.</div>"
+        "</div></div>"
+    )
+
+
 def _workspace_tabs(cfg: Config, current_app: str | None) -> tuple[list[str], str | None]:
     """The open projects (tab order) + the active project for THIS browser's tabbed workspace.
 
@@ -488,7 +540,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             f'title="Open the run-logs folder in Finder">&#128194; Open logs</a>'
         )
 
-    return tab_bar + f"""
+    # Render plan-limit banner BEFORE the control bar (if active)
+    plan_banner = _plan_limit_banner(_state)
+    return tab_bar + plan_banner + f"""
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
