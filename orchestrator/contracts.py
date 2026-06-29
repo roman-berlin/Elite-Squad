@@ -50,6 +50,7 @@ class BuildRequest:
     branch: str
     prior_issues: list[str] = field(default_factory=list)   # reviewer feedback on retry
     iteration: int = 1
+    adr: Optional[str] = None                                 # Architect's ADR (if produced)
 
 
 @dataclass

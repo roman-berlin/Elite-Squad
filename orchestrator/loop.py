@@ -592,12 +592,57 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes="cost budget exceeded"))
 
+        # 0) ARCHITECT — produce lightweight ADR for feature/large tickets before build
+        # (Only on first iteration; retry passes reuse the ADR from the first pass.)
+        adr: str | None = None
+        if iteration == 1 and getattr(cfg, "architect_enabled", False):
+            from . import architect as _arch
+            if await _arch.should_run_architect(cfg, ticket):
+                print(f"  architect · producing ADR for {ticket.id}…", flush=True)
+                try:
+                    adrex = await _arch.design(cfg, ticket, repo_context="", gated=True, audit=audit)
+                    audit.record("architect_complete", ticket_id=ticket.id,
+                                skipped=adrex.skipped, touch_points=len(adrex.touch_points))
+                    if not adrex.skipped and adrex.raw:
+                        adr = adrex.raw
+                        print(f"  architect · ADR produced ({len(adrex.touch_points)} touch-points)", flush=True)
+                        # Check if oversized — trigger Scrum Master split
+                        if _arch.detect_oversized(adrex):
+                            print(f"  architect · oversized design detected — triggering Scrum Master", flush=True)
+                            from . import scrum as _scrum
+                            recap = f"Architect ADR identified {len(adrex.touch_points)} touch-points"
+                            reason = "too many touch-points/modules for one ticket"
+                            try:
+                                sp = await _scrum.split(cfg, app.name, ticket, recap=recap, reason=reason)
+                                if sp.get("ok") and sp.get("keys"):
+                                    kk = ", ".join(sp["keys"])
+                                    audit.record("scrum_split", ticket_id=ticket.id, reason="architect-oversized",
+                                                into=sp["keys"])
+                                    _notify(cfg, f"🧩 {ticket.id} was too big — Architect triggered Scrum Master "
+                                               f"split into {kk} (on you) and closed the parent.")
+                                    print(f"  🧩 {ticket.id}: Architect detected oversized → Scrum Master split into "
+                                          f"{kk}; parent closed.", flush=True)
+                                    return _resolve(TicketReport(ticket.id, Outcome.REQUEUED,
+                                                              iteration, cost, app.name, branch,
+                                                              notes=f"too big — Architect triggered Scrum Master "
+                                                                    f"split into {kk}"))
+                                else:
+                                    print(f"  · Scrum Master couldn't split ({sp.get('error')}) — continuing with build.",
+                                          flush=True)
+                            except Exception as exc:
+                                print(f"  · Scrum Master split crashed: {exc} — continuing with build", flush=True)
+                    else:
+                        print(f"  architect · skipped (bug/small change)", flush=True)
+                except Exception as exc:
+                    print(f"  · Architect skipped: {exc}", flush=True)
+                    audit.record("architect_error", ticket_id=ticket.id, error=str(exc)[:200])
+
         # 1) BUILD  — effort is sized from the ticket (XS→low … XL→max), then escalates on retry
         eff, eff_reason = builder_mod.effort_plan(cfg, iteration, ticket)
         print(f"  build · pass {iteration}/{cfg.max_iterations} (effort {eff} — {eff_reason}) "
               f"— builder working (can take a few minutes)…", flush=True)
         _bar(BUILD, active=BUILD)
-        req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration)
+        req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration, adr=adr)
         # EU-72: hand the builder the typed SpecArtifact (primary context) + the shared pool it
         # publishes its BuildArtifact into.
         build = await builder_mod.build(req, app, cfg, audit=audit, store=store, spec=store.spec)

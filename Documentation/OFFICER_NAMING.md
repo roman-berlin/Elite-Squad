@@ -30,6 +30,7 @@ mirrors that map for humans; the regression suite (`tests/eu57_officer_naming_te
 | `soldiers`       | soldiers           | **engineers** |
 | `pm`             | Product Manager    | Product Manager *(unchanged)* |
 | `senior_pm`      | *(new — EU-107)*   | **Senior PM** |
+| `architect`      | *(new — EU-109)*   | **Architect** |
 | `devops`         | DevOps             | DevOps *(unchanged)* |
 | `test_engineer`  | Test Engineer      | Test Engineer *(unchanged)* |
 | `liaison`        | *(new — EU-66)*    | **Mayor** |
@@ -37,6 +38,10 @@ mirrors that map for humans; the regression suite (`tests/eu57_officer_naming_te
 The `liaison` officer (EU-66) is new — it has no retired army name. Its internal key is the stable
 `liaison`; its human-facing display name, decided by the Commander, is **Mayor** (the inter-unit
 ambassador / outward voice to the allied unit).
+
+The `architect` officer (EU-109) is new — it produces lightweight ADRs for feature/large tickets
+and triggers Scrum Master splits when designs are oversized. Its internal key is the stable
+`architect`; its human-facing display name is **Architect**.
 
 ## What is intentional and MUST NOT be renamed
 
