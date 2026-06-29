@@ -24,6 +24,10 @@ max_tickets_per_run: 1      # per app; raise once you trust it
 daily_token_budget: 100000000   # tokens/day ceiling (0 = off). Tune to your Max-plan headroom — high
                                 # enough that only a runaway loop hits it; a heavy legit day may pause.
 budget_alert_pct: 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
+budget_bad_threshold: 0.95      # Low-watermark: stop starting new tickets when any provider (Claude/GLM)
+                                # reaches this utilization. Prevents starting a ticket you can't finish.
+glm_quota_tokens: 100000000     # GLM (Z.ai) token quota ceiling; 0 = disabled. Enables dual-provider
+                                # budget monitoring when using GLM as a fallback/alternative.
 
 # --- how passing work lands on dev ---
 merge_to_dev: true          # auto-merge feature -> dev when review passes AND dev stays green

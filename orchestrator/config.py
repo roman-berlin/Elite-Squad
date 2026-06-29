@@ -240,6 +240,8 @@ class Config:
                                             # config.yaml to your own headroom (0 = off; a heavy legit day may pause
                                             # until midnight). Resumes after midnight or when the ceiling is raised.
     budget_alert_pct: float = 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
+    budget_bad_threshold: float = 0.95      # Low-watermark: stop starting new tickets when any provider is at this utilization
+    glm_quota_tokens: int = 100_000_000     # GLM (Z.ai) token quota ceiling; 0 = disabled
 
     # --- autonomy (officers convene themselves between autopilot cycles) ---
     autonomy_enabled: bool = True

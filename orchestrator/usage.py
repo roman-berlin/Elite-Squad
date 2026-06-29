@@ -523,6 +523,170 @@ def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:
     return series
 
 
+# ── EU-122: Dual-provider budget monitor ───────────────────────────────────────────────────────────
+# Track BOTH Claude Max plan usage AND GLM (Z.ai) usage, stopping gracefully before either runs out.
+
+
+def glm_budget_status(cfg: Config) -> dict:
+    """GLM (Z.ai) budget status: read GLM usage from the ledger and calculate utilization.
+
+    Returns::
+        {"on": True/False, "used": <tokens>, "cap": <quota>, "pct": 0-1, "alert": bool, "bad": bool}
+
+    GLM calls are tagged with "glm" in the ledger. If glm_quota_tokens is 0, monitoring is disabled.
+    """
+    quota = int(getattr(cfg, "glm_quota_tokens", 0) or 0)
+    if quota <= 0:
+        return {"on": False, "used": 0, "cap": 0, "pct": 0.0, "alert": False, "bad": False}
+
+    # Read today's GLM usage from the ledger (tag prefix "glm")
+    used = tokens_today_for_tag(cfg, "glm")
+    pct = used / quota if quota else 0.0
+
+    alert_pct = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
+    bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
+
+    return {
+        "on": True,
+        "used": used,
+        "cap": quota,
+        "pct": pct,
+        "alert": pct >= alert_pct,
+        "bad": pct >= bad_threshold,
+    }
+
+
+def dual_provider_budget_status(cfg: Config) -> dict:
+    """Dual-provider budget status: Claude plan usage + GLM usage together.
+
+    Returns::
+        {
+            "claude": {"healthy": bool, "limits": [...], "available": bool, ...},
+            "glm": {"on": bool, "used": int, "cap": int, "pct": float, "alert": bool, "bad": bool},
+            "healthy": bool,  # True if neither provider is in bad state
+            "bad_provider": str | None,  # "claude" | "glm" | None
+        }
+
+    This is the single source of truth for cockpit gauges and pre-flight checks.
+    """
+    claude_data = plan_usage(cfg)
+    glm_data = glm_budget_status(cfg)
+
+    # Determine Claude health: any limit with utilization >= budget_bad_threshold is bad
+    claude_bad = False
+    if claude_data.get("available"):
+        bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
+        for limit in claude_data.get("limits", []):
+            if float(limit.get("utilization", 0.0)) >= bad_threshold:
+                claude_bad = True
+                break
+
+    healthy = not claude_bad and not glm_data.get("bad", False)
+
+    bad_provider = None
+    if claude_bad:
+        bad_provider = "claude"
+    elif glm_data.get("bad", False):
+        bad_provider = "glm"
+
+    return {
+        "claude": {**claude_data, "healthy": not claude_bad},
+        "glm": glm_data,
+        "healthy": healthy,
+        "bad_provider": bad_provider,
+    }
+
+
+def pre_flight_check(cfg: Config, ticket_estimate_pct: float = 0.08) -> dict:
+    """Pre-flight check: should we skip starting a new ticket?
+
+    Returns::
+        {"should_skip": bool, "provider": str | None, "reason": str, "status": dict}
+
+    The check evaluates the ACTIVE provider (the one we'd use for the next ticket).
+    If that provider's remaining budget is below the ticket estimate plus a safety margin,
+    we skip starting the ticket.
+
+    Args:
+        cfg: Config object
+        ticket_estimate_pct: Estimated fraction of provider budget a typical ticket consumes (default 8%)
+    """
+    status = dual_provider_budget_status(cfg)
+    should_skip = False
+    provider = None
+    reason = ""
+
+    # For now, assume Claude is the primary active provider
+    # In the future with EU-121 routing, we'd check the active provider from routing logic
+    claude_available = status["claude"].get("available", False)
+    claude_limits = status["claude"].get("limits", [])
+
+    if claude_available and claude_limits:
+        bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
+        for limit in claude_limits:
+            util = float(limit.get("utilization", 0.0))
+            if util >= bad_threshold - ticket_estimate_pct:
+                should_skip = True
+                provider = "claude"
+                label = limit.get("label", limit.get("key", "limit"))
+                pct_rem = max(0.0, 1.0 - util)
+                reason = f"Claude {label} at {util:.1%} capacity (~{pct_rem:.1%} remaining)"
+                break
+
+    # Also check GLM if enabled
+    if not should_skip and status["glm"].get("on", False):
+        glm_pct = status["glm"].get("pct", 0.0)
+        bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
+        if glm_pct >= bad_threshold - ticket_estimate_pct:
+            should_skip = True
+            provider = "glm"
+            pct_rem = max(0.0, 1.0 - glm_pct)
+            reason = f"GLM quota at {glm_pct:.1%} used (~{pct_rem:.1%} remaining)"
+
+    return {
+        "should_skip": should_skip,
+        "provider": provider,
+        "reason": reason,
+        "status": status,
+    }
+
+
+def graceful_stop_check(cfg: Config) -> dict:
+    """Mid-run check: should we stop/switch after finishing the current ticket?
+
+    Returns::
+        {"should_stop": bool, "critical_provider": str | None, "reason": str, "status": dict}
+
+    Called mid-run to detect if a provider has crossed the low-watermark (budget_bad_threshold).
+    If so, we finish the current ticket cleanly, then stop or switch providers.
+    """
+    status = dual_provider_budget_status(cfg)
+    should_stop = False
+    critical_provider = status.get("bad_provider")
+    reason = ""
+
+    if critical_provider:
+        should_stop = True
+        if critical_provider == "claude":
+            claude_limits = status["claude"].get("limits", [])
+            bad_limits = [l for l in claude_limits if float(l.get("utilization", 0.0)) >= float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)]
+            if bad_limits:
+                limit = bad_limits[0]
+                label = limit.get("label", limit.get("key", "limit"))
+                util = float(limit.get("utilization", 0.0))
+                reason = f"Claude {label} at {util:.1%} capacity"
+        elif critical_provider == "glm":
+            glm_pct = status["glm"].get("pct", 0.0)
+            reason = f"GLM quota at {glm_pct:.1%} used"
+
+    return {
+        "should_stop": should_stop,
+        "critical_provider": critical_provider,
+        "reason": reason,
+        "status": status,
+    }
+
+
 def prune(cfg: Config | None = None, keep_days: int = 35) -> None:
     """Drop ledger lines older than keep_days so the file can't grow without bound."""
     p = _path(cfg)

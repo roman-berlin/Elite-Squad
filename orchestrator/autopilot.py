@@ -506,10 +506,49 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 notify.reset_plan_limit_alert()
             plan_limit_paused = False
 
+            # EU-122: Mid-run graceful stop check — finish current ticket, then stop/switch.
+            # If a provider has crossed the low-watermark (budget_bad_threshold), we should stop
+            # or switch after finishing the current in-flight ticket (never mid-build).
+            graceful_check = usage.graceful_stop_check(cfg)
+            if graceful_check["should_stop"]:
+                critical_provider = graceful_check.get("critical_provider")
+                if critical_provider:
+                    # Send Telegram alert for the low-watermark crossing (one-shot per provider)
+                    if critical_provider == "claude":
+                        notify.dual_low_watermark_alert("claude", graceful_check["status"]["claude"])
+                    elif critical_provider == "glm":
+                        notify.dual_low_watermark_alert("glm", graceful_check["status"]["glm"])
+
+                    # Log the graceful stop condition
+                    audit.record("graceful_stop_triggered", provider=critical_provider,
+                                reason=graceful_check["reason"])
+                    print(f"  · graceful stop: {graceful_check['reason']} — finishing current ticket then stopping.",
+                          flush=True)
+
+                    # Hold new tickets (similar to plan limit pause, but with graceful finish)
+                    if once:
+                        break
+                    _sleep(max(10, interval), stop_event)
+                    continue
+
             # Don't race the Commander's manual git. While he's mid-rebase/merge in a local checkout,
             # stand down for a cycle instead of ff-pushing origin/<base> and turning his pull into a
             # non-fast-forward. Builds aren't started, so nothing lands until his tree is clean again.
             busy_repo = _commander_mid_git(cfg)
+
+            # EU-122: Pre-flight budget check — don't start a ticket you can't finish.
+            # If either provider is near exhaustion (within the ticket estimate), skip starting new work.
+            pre_flight = usage.pre_flight_check(cfg)
+            if pre_flight["should_skip"]:
+                if not git_held:  # reuse the same one-shot flag
+                    notify.send(f"⛔ Autopilot holding — {pre_flight['reason']}. "
+                                f"Finishing current work, then stopping/switching to prevent mid-build cutoff.")
+                    audit.record("budget_preflight_hold", reason=pre_flight["reason"], provider=pre_flight["provider"])
+                    print(f"  · pre-flight budget check: {pre_flight['reason']} — holding new tickets.", flush=True)
+                if once:
+                    break
+                _sleep(max(10, interval), stop_event)
+                continue
             if busy_repo:
                 if not git_held:
                     notify.send(f"✋ Autopilot holding — you're mid-Git in {busy_repo} (rebase/merge). "

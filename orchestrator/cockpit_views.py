@@ -657,6 +657,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
       <a href="/memory">&#128221; Unit memory{fr_mem}</a>
       <a href="/usage">&#128202; Token usage{fr_usage}</a>
+      <a href="/budget">&#128176; Budget monitor</a>
       <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
       <a href="/roster-doc">&#128101; Unit roster</a>
       <a href="/drill">&#127894; Last drill{fr_drill}</a>
@@ -765,3 +766,153 @@ def _group_inner(cfg: Config) -> str:
         out += (f'<div class="msg {side}"><div class=who>{label}</div>'
                 f'<div class=bub>{html.escape(text)}</div></div>')
     return f'<div class=thread>{out}</div>'
+
+
+def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None = None) -> str:
+    """EU-122: Dual-provider budget gauge — shows Claude and GLM side-by-side with % remaining.
+
+    Each provider gets its own card with:
+    - Provider name + brand label
+    - Utilization percentage (visual bar + number)
+    - Low-watermark indicator (green → amber → red based on threshold)
+    - Reset time (if available)
+
+    Pattern mirrors EU-118 plan_limit_banner for consistent alert styling.
+    """
+    from . import usage as _usg
+
+    # Low-watermark thresholds (configurable, with safe defaults)
+    warn_threshold = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
+    bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
+
+    def _gauge_tone(util: float) -> tuple[str, str]:
+        """Returns (tone_class, aria_label) for a utilization value."""
+        if util >= bad_threshold:
+            return "bad", "critical"
+        if util >= warn_threshold:
+            return "warn", "warning"
+        return "ok", "normal"
+
+    def _provider_card(name: str, brand: str, data: dict, is_placeholder: bool = False) -> str:
+        """Render a single provider's budget gauge card."""
+        if is_placeholder or not data:
+            # Placeholder for when GLM isn't configured yet
+            return (
+                '<div class=provcard>'
+                '<div class=phead>'
+                f'<span class=pname>{html.escape(name)}</span>'
+                f'<span class=pbrand>unconfigured</span>'
+                '</div>'
+                '<div class=pnote>This provider isn\'t set up yet. Add it to config.yaml to track its quota.</div>'
+                '</div>'
+            )
+
+        util = float(data.get("utilization", 0.0))
+        pct = int(util * 100)
+        wpct = min(100, max(0, pct))
+        tone, aria_label = _gauge_tone(util)
+        tone_cls = {"ok": "g", "warn": "a", "bad": "r"}.get(tone, "g")
+
+        # Calculate remaining percentage
+        remaining = max(0, 100 - pct)
+
+        # Reset time (if available)
+        reset = data.get("resets_in", "")
+        reset_meta = ""
+        if reset and reset not in ("now", ""):
+            reset_meta = f'<div class=pmeta>resets in {html.escape(reset)}</div>'
+        elif reset == "now":
+            reset_meta = '<div class=pmeta>resetting now</div>'
+
+        # Status indicator (low-watermark)
+        if util >= bad_threshold:
+            status_icon = "&#9888;"  # warning icon
+            status_text = "critical"
+        elif util >= warn_threshold:
+            status_icon = "&#9888;"
+            status_text = "low"
+        else:
+            status_icon = "&#10003;"  # checkmark
+            status_text = "ok"
+
+        aria = f"{html.escape(brand)} {pct}% used, {remaining}% remaining"
+
+        return (
+            '<div class=provcard>'
+            '<div class=phead>'
+            f'<span class=pname>{html.escape(name)}</span>'
+            f'<span class=pbrand>{html.escape(brand)}</span>'
+            '</div>'
+            '<div class=pstatus>'
+            f'<span class="picon {tone}">{status_icon}</span>'
+            f'<span class=pstat>{html.escape(status_text)}</span>'
+            f'<span class=ppct>{pct}% used</span>'
+            '</div>'
+            '<div class=pgauge>'
+            f'<div class=pgbar role=progressbar aria-valuemin=0 aria-valuemax=100 '
+            f'aria-valuenow={wpct} aria-label="{aria}">'
+            f'<span class="pgfill {tone_cls}" style="width:{wpct}%"></span>'
+            '</div>'
+            f'<div class=premain>{remaining}% remaining</div>'
+            '</div>'
+            + reset_meta +
+            '</div>'
+        )
+
+    # Build Claude card from plan_usage data
+    claude_card = ""
+    if claude_usage.get("available"):
+        # Find the most critical limit to display (highest utilization)
+        limits = claude_usage.get("limits", [])
+        if limits:
+            # Sort by utilization descending, pick the worst one
+            worst_limit = max(limits, key=lambda l: float(l.get("utilization", 0.0)))
+            claude_card = _provider_card(
+                "Claude",
+                "Max subscription",
+                worst_limit,
+                is_placeholder=False
+            )
+    else:
+        # Claude data unavailable - show fallback
+        claude_card = _provider_card(
+            "Claude",
+            "Max subscription",
+            {"utilization": 0.0, "resets_in": ""},
+            is_placeholder=False
+        )
+
+    # Build GLM card (placeholder if not configured)
+    glm_card = _provider_card(
+        "GLM",
+        "Secondary provider",
+        glm_usage or {},
+        is_placeholder=(glm_usage is None or not glm_usage)
+    )
+
+    # Combine both cards in a side-by-side layout
+    return (
+        "<style>"
+        ".dualprov{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:6px 0 20px}"
+        ".provcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:16px 18px}"
+        ".phead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}"
+        ".pname{color:#e9ecf1;font-size:15px;font-weight:700}"
+        ".pbrand{color:#6b7480;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
+        ".pstatus{display:flex;align-items:center;gap:8px;margin-bottom:10px}"
+        ".picon{font-size:14px}.picon.ok{color:#3fb950}.picon.warn{color:#d99a2b}.picon.bad{color:#f0676b}"
+        ".pstat{color:#8a929f;font-size:12px;font-weight:500;text-transform:uppercase}"
+        ".ppct{color:#e9ecf1;font-size:13px;font-weight:600;margin-left:auto}"
+        ".pgauge{margin:12px 0}"
+        ".pgbar{height:10px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+        ".pgfill{display:block;height:100%;transition:width .3s ease}"
+        ".pgfill.g{background:#3fb950}.pgfill.a{background:#d99a2b}.pgfill.r{background:#f0676b}"
+        ".premain{color:#6b7480;font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
+        ".pmeta{color:#6b7480;font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
+        ".pnote{color:#8a929f;font-size:12px;margin-top:8px}"
+        "@media(max-width:680px){.dualprov{grid-template-columns:1fr}}"
+        "</style>"
+        '<div class=dualprov>'
+        f'{claude_card}'
+        f'{glm_card}'
+        '</div>'
+    )
