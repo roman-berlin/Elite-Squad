@@ -523,6 +523,31 @@ def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     return False
 
 
+def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
+    """Return the set of ticket IDs that recently had a no_changes outcome (EU-116).
+
+    The drain uses this to skip tickets that already produced no changes — they're
+    in 'Needs Human' awaiting verification/close, and re-running them would waste
+    another full build cycle producing the same result."""
+    try:
+        import json
+        from . import dashboard as _D
+        no_changes_ids = set()
+        for line in _D.audit_lines(cfg.audit_path):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("event") == "no_changes":
+                ticket_id = e.get("ticket_id")
+                if ticket_id:
+                    no_changes_ids.add(ticket_id)
+        return no_changes_ids
+    except Exception:  # noqa: BLE001
+        pass
+    return set()
+
+
 def _changes_sig(changes: list[str]) -> str:
     """A stable fingerprint of a review's required changes, so two passes that get the SAME blocking
     feedback can be detected as 'stuck' (the build isn't addressing it) and escalated instead of burning
@@ -717,9 +742,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                       flush=True)
                 return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                              notes="parked — Commander product decision needed"))
+            # EU-116: a no-changes build leaves the ticket stuck In Progress and the drain re-runs it.
+            # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
+            # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
+            note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
+            if not cfg.dry_run and not ticket.ephemeral:
+                try:
+                    backlog.set_status(ticket, "Needs Human")
+                    backlog.add_comment(ticket, f"⛔ {note}\n\nVerify and close if already satisfied, or re-open with clarification if there's still work to do.")
+                except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                    pass
+            print(f"  🔵 {ticket.id}: no changes — moved to Needs Human for verification.", flush=True)
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
-            return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
-                                         notes="builder produced no changes"))
+            return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                         notes="no changes — already satisfied"))
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
         # EU-72: the builder published its BuildArtifact but can't know the changed-file list (the loop
         # owns git) — stamp the authoritative paths onto it so the Test Engineer + Reviewer read an
