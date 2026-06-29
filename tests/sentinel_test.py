@@ -73,6 +73,24 @@ g4 = FakeGit()
 ok4, _ = sentinel.guard(on, app(["x"]), ns(id="AUTO-4", ephemeral=False), g4, "sha_boom", Audit())
 chk("runner exception -> treated as red, reverts", (not ok4) and g4.reverted == "sha_boom")
 
+# --- guard RED due to misconfigured (missing script) -> no revert, log misconfigured ---
+sentinel.gate.run_commands = lambda a, c: GateResult(passed=False, report="ERROR: No such file or directory: two_tenant_smoke.py")
+g5, au5 = FakeGit(), Audit()
+ok5, note5 = sentinel.guard(on, app(["bun run two_tenant_smoke"]), ns(id="AUTO-5", ephemeral=False), g5, "sha_misconfigured", au5)
+chk("misconfigured (missing script) -> healthy True", ok5)
+chk("misconfigured (missing script) -> NO revert", g5.reverted is None)
+chk("misconfigured (missing script) -> audit contains misconfigured", any("misconfigured" in str(v) for _, ev in au5.events for v in ev.values()))
+chk("misconfigured (missing script) -> note says misconfigured", "misconfigured" in note5.lower())
+
+# --- guard RED due to misconfigured (missing env vars) -> no revert, log misconfigured ---
+sentinel.gate.run_commands = lambda a, c: GateResult(passed=False, report="ERROR: TENANT_A_EMAIL not set. TENANT_B_EMAIL not set.")
+g6, au6 = FakeGit(), Audit()
+ok6, note6 = sentinel.guard(on, app(["bun run two_tenant_smoke"]), ns(id="AUTO-6", ephemeral=False), g6, "sha_env_missing", au6)
+chk("misconfigured (missing env) -> healthy True", ok6)
+chk("misconfigured (missing env) -> NO revert", g6.reverted is None)
+chk("misconfigured (missing env) -> audit contains misconfigured", any("misconfigured" in str(v) for _, ev in au6.events for v in ev.values()))
+chk("misconfigured (missing env) -> note says misconfigured", "misconfigured" in note6.lower())
+
 # --- REAL git: a landed --no-ff merge is reverted forward-only and pushed ---
 tmp = Path(tempfile.mkdtemp())
 def G(cwd, *a): subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True)
