@@ -270,6 +270,98 @@ class JiraAdapter(BacklogAdapter):
             return None
         return None
 
+    # -- Senior PM operations: close & transition -------------------------------- #
+    def close_ticket(self, ticket_id: str, comment: str = "", audit=None) -> bool:
+        """Close a ticket with an optional comment. Returns True on success.
+
+        The Senior PM uses this after a CLOSE verdict to resolve invalid/duplicate tickets.
+        All Jira writes are recorded to the audit log when an audit_log is passed.
+        """
+        try:
+            # Add comment if provided
+            if comment and comment.strip():
+                self.session.post(self._url(f"issue/{ticket_id}/comment"),
+                                  json={"body": _adf("[General] " + comment)}).raise_for_status()
+
+            # Find transition to Done/Closed
+            tr = self.session.get(self._url(f"issue/{ticket_id}/transitions"))
+            tr.raise_for_status()
+            # Prefer "Done" but fall back to any terminal status
+            target = next((t for t in tr.json().get("transitions", [])
+                          if t["to"]["name"].lower() in ("done", "closed")), None)
+            if not target:
+                # Try any status with statusCategory = Done
+                for t in tr.json().get("transitions", []):
+                    if t.get("to", {}).get("statusCategory", {}).get("key") == "done":
+                        target = t
+                        break
+
+            if not target:
+                raise RuntimeError(f"No close transition available for {ticket_id}")
+
+            self.session.post(self._url(f"issue/{ticket_id}/transitions"),
+                              json={"transition": {"id": target["id"]}}).raise_for_status()
+
+            # Audit the close
+            if audit:
+                audit.record("jira_close", ticket_id=ticket_id, comment=comment)
+
+            return True
+        except requests.RequestException as exc:
+            if audit:
+                audit.record("jira_close_failed", ticket_id=ticket_id, error=str(exc))
+            return False
+
+    def transition_ticket(self, ticket_id: str, target_project_key: str,
+                          corrected_acceptance: str, audit=None) -> bool:
+        """Move a ticket to another project (bulk-edit the project field) and update acceptance.
+
+        The Senior PM uses this after a REFILE verdict to route tickets to the correct project.
+        This is a bulk edit because Jira has no native 'move' via REST without admin rights.
+        All Jira writes are recorded to the audit log when an audit_log is passed.
+
+        Args:
+            ticket_id: The ticket key (e.g., AUTO-123).
+            target_project_key: Destination project key (e.g., 'AUTO').
+            corrected_acceptance: New acceptance criteria to set on the ticket.
+            audit: Optional AuditLog instance for recording the action.
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            # Fetch the target project to get its ID
+            proj_resp = self.session.get(self._url("project"), params={"key": target_project_key})
+            proj_resp.raise_for_status()
+            projects = proj_resp.json().get("values", [])
+            if not projects:
+                raise RuntimeError(f"Target project {target_project_key} not found")
+            target_proj_id = projects[0]["id"]
+
+            # Build update payload: change project + set acceptance criteria if field is configured
+            payload: dict[str, Any] = {"fields": {"project": {"id": target_proj_id}}}
+            if self.ac_field and corrected_acceptance:
+                payload["fields"][self.ac_field] = _adf(corrected_acceptance)
+
+            # Apply the update
+            self.session.put(self._url(f"issue/{ticket_id}"), json=payload).raise_for_status()
+
+            # Audit the transition
+            if audit:
+                audit.record(
+                    "jira_transition",
+                    ticket_id=ticket_id,
+                    target_project=target_project_key,
+                    has_acceptance=bool(corrected_acceptance)
+                )
+
+            return True
+        except requests.RequestException as exc:
+            if audit:
+                audit.record("jira_transition_failed", ticket_id=ticket_id,
+                            target_project=target_project_key, error=str(exc))
+            return False
+
     def _download_images(self, key: str, attachments: list[dict[str, Any]]) -> list[str]:
         """Download image attachments to a local cache so the Builder's Read tool can view them.
         Best-effort: any failure (no creds, network, odd mime) is skipped, never raised."""
@@ -395,3 +487,75 @@ def _criteria_from_description(description: str) -> list[str]:
                 continue
             out.append(s.strip(" -*•\t"))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Doctrine lookup helpers — read CLAUDE.md and config.yaml for context
+# --------------------------------------------------------------------------- #
+def read_claude_md(repo_path: str) -> str:
+    """Read the CLAUDE.md file from a repository for doctrine lookup.
+
+    Returns the file content as a string, or empty string if not found.
+    Used by the Senior PM to ground decisions in repo conventions.
+    """
+    from pathlib import Path
+    claude_path = Path(repo_path).expanduser().resolve() / "CLAUDE.md"
+    try:
+        return claude_path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def read_config_yaml(config_path: str | None = None) -> str:
+    """Read the config.yaml file for unit-wide doctrine lookup.
+
+    Args:
+        config_path: Path to config.yaml (default: ./config.yaml relative to cwd).
+
+    Returns the file content as a string, or empty string if not found.
+    Used by the Senior PM to understand project settings and conventions.
+    """
+    from pathlib import Path
+    if config_path is None:
+        config_path = "./config.yaml"
+    try:
+        return Path(config_path).expanduser().resolve().read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def get_doctrine_context(app_name: str, repo_path: str, cfg) -> str:
+    """Build a doctrine context string from CLAUDE.md + config for the Senior PM.
+
+    Combines repo conventions (CLAUDE.md) with unit-wide configuration (config.yaml)
+    so the Senior PM can ground its triage decisions in how the unit actually works.
+
+    Args:
+        app_name: The app name (for selecting relevant config sections).
+        repo_path: Path to the app's repo (to read CLAUDE.md).
+        cfg: The Config object (provides config path resolution).
+
+    Returns:
+        A string with relevant doctrine excerpts, or empty if unavailable.
+    """
+    parts = []
+    claude_content = read_claude_md(repo_path)
+    if claude_content:
+        parts.append(f"CLAUDE.md (conventions for this repo):\n{claude_content[:4000]}")
+
+    # Try to resolve config path from cfg if available
+    config_path = None
+    try:
+        if hasattr(cfg, 'audit_path'):
+            # Derive config path relative to audit.jsonl (same convention as run_logger)
+            config_path = Path(cfg.audit_path).parent.resolve() / "config.yaml"
+        if not config_path or not Path(config_path).exists():
+            config_path = "./config.yaml"
+    except Exception:
+        config_path = "./config.yaml"
+
+    config_content = read_config_yaml(str(config_path))
+    if config_content:
+        parts.append(f"\nconfig.yaml (unit configuration):\n{config_content[:4000]}")
+
+    return "\n\n".join(parts) if parts else ""

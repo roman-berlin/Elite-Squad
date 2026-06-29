@@ -29,6 +29,7 @@ mirrors that map for humans; the regression suite (`tests/eu57_officer_naming_te
 | `scribe`         | Scribe             | **Technical Writer** |
 | `soldiers`       | soldiers           | **engineers** |
 | `pm`             | Product Manager    | Product Manager *(unchanged)* |
+| `senior_pm`      | *(new — EU-107)*   | **Senior PM** |
 | `devops`         | DevOps             | DevOps *(unchanged)* |
 | `test_engineer`  | Test Engineer      | Test Engineer *(unchanged)* |
 | `liaison`        | *(new — EU-66)*    | **Mayor** |

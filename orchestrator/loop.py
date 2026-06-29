@@ -285,6 +285,35 @@ class WorktreeBusy(Exception):
     """Another live run already holds this app's worktree."""
 
 
+def is_worktree_locked(worktree_path: str) -> bool:
+    """Check if a worktree is currently locked by another process without blocking.
+
+    Returns True if the worktree lock is held (meaning a build is in progress),
+    False if the lock is available. This is used by the pre-build gate to skip
+    tickets that are already being worked on.
+    """
+    lock = Path(str(worktree_path) + ".lock")
+    if not lock.exists():
+        return False
+
+    try:
+        f = open(lock, "r")
+        try:
+            # Try to acquire a non-blocking exclusive lock
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # If we got here, the lock was available - release it immediately
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            f.close()
+            return False
+        except OSError:
+            # Lock is held by another process
+            f.close()
+            return True
+    except (OSError, IOError):
+        # Can't open lock file - assume not locked
+        return False
+
+
 @contextmanager
 def _worktree_lock(worktree_path: str):
     """Advisory exclusive lock on an app's shared worktree, so two runs can never ``reset --hard`` /
