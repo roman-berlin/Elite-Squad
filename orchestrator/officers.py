@@ -29,6 +29,7 @@ OFFICER_NAMES: dict[str, str] = {
     "adjutant": "Engineering Manager",
     "pm": "Product Manager",
     "senior_pm": "Senior PM",
+    "architect": "Architect",
     "field_engineer": "Dev Team Lead",
     "inspector": "Code Reviewer",
     "test_engineer": "Test Engineer",

@@ -301,6 +301,13 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
         "ACCEPTANCE CRITERIA:",
         ac,
     ]
+    # EU-109: include the Architect's ADR if produced (provides approach, risk, touch-points, DoD)
+    if req.adr:
+        parts += [
+            "",
+            "ARCHITECT'S ADR (design upfront — follow this approach):",
+            req.adr,
+        ]
     if spec is not None and spec.non_goals:
         parts += ["", "NON-GOALS (explicitly out of scope — do NOT touch):",
                   "\n".join(f"  - {g}" for g in spec.non_goals)]

@@ -205,6 +205,11 @@ class Config:
     delegation_min_ac: int = 3              # Dev Team Lead: delegate if >= this many AC (or size L/XL)
     delegation_max_soldiers: int = 4        # cap engineers per ticket (build) / per inspection (recon)
 
+    # --- Architect officer: produces lightweight ADRs for feature/large tickets before the build
+    #     — decides whether to produce an ADR (feature/large) or skip (bug/small), and triggers
+    #     Scrum Master split when the design exceeds thresholds. ---
+    architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
+
     # --- Product Manager officer: when the Builder halts on a product/IA blocker, consult the PM first
     #     — it either DECIDES (the build resumes with its decision) or ESCALATES one recommendation to
     #     the Commander (parked with a clear comment; the unit moves to the next ticket). ---
