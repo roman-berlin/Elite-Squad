@@ -53,6 +53,7 @@ from .cockpit_views import (  # noqa: F401
     _chat_inner,
     _chat_tabs,
     _control_bar,
+    _dual_provider_gauge,
     _group_inner,
     _result_banner,
     _wrap,
@@ -1625,10 +1626,51 @@ def create_app(cfg: Config):
         # one shows the real plan cap, the other the unit's self-imposed budget. Best-effort probe.
         plan = plan_panel(_usage.plan_usage(cfg))
 
-        body = (style + plan + budget + mixbanner + "<div class=ugrid>"
+        # EU-122: Dual-provider budget gauge — shows Claude + GLM side-by-side with low-watermark indicators
+        # GLM usage data is None for now (placeholder) until backend integration is added
+        dual_gauge = _dual_provider_gauge(cfg, _usage.plan_usage(cfg), glm_usage=None)
+
+        body = (style + dual_gauge + plan + budget + mixbanner + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
+
+    @app.get("/budget")
+    def budget_page():
+        """EU-122: Dedicated budget page — dual-provider budget monitor with Claude + GLM side-by-side.
+
+        Shows a focused view of both providers' budget status with:
+        - Claude Max plan limits (live subscription data)
+        - GLM quota (placeholder until backend integration)
+        - Low-watermark indicators (green → amber → red)
+        - Reset times and remaining percentages
+        """
+        from . import usage as _usage
+
+        style = (
+            "<style>"
+            ".budgetpage{max-width:900px;margin:0 auto;padding:20px 0}"
+            ".bhead{color:#e9ecf1;font-size:22px;font-weight:700;margin-bottom:18px}"
+            ".bsubhead{color:#8a929f;font-size:14px;margin-bottom:24px}"
+            "</style>")
+
+        # Get current usage data for both providers
+        claude_usage = _usage.plan_usage(cfg)
+        glm_usage = None  # Placeholder until GLM backend integration is added
+
+        # Render the dual-provider gauge
+        dual_gauge = _dual_provider_gauge(cfg, claude_usage, glm_usage)
+
+        # Additional explanation text
+        expl = (
+            '<div class=bsubhead>'
+            'Track remaining budget across all configured providers. '
+            'Low-watermark indicators show when a provider is running low (amber) or critical (red).'
+            '</div>'
+        )
+
+        return _wrap("Budget monitor", style + "<div class=budgetpage>"
+                     '<div class=bhead>Dual-provider budget monitor</div>' + expl + dual_gauge + "</div>")
 
     @app.get("/jira")
     def jira_page():

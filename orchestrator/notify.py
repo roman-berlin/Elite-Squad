@@ -198,6 +198,82 @@ def reset_plan_limit_alert() -> None:
     _plan_limit_alert_sent = False
 
 
+# EU-122: dual-provider low-watermark alert sent flag (one-shot per provider per session)
+_dual_low_watermark_alerted: set[str] = set()
+
+
+def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
+    """Send a Telegram alert when a provider crosses the budget bad threshold (low-watermark).
+
+    Args:
+        provider: "claude" or "glm"
+        usage_data: Provider status dict from usage.dual_provider_budget_status()
+
+    Returns True if sent, False if not configured or failed. Only sends ONCE per provider
+    per session (resets on process restart) to avoid spamming.
+    """
+    global _dual_low_watermark_alerted
+
+    # Only alert once per provider per session
+    if provider in _dual_low_watermark_alerted:
+        return False
+
+    if not configured():
+        return False
+
+    if provider == "claude":
+        claude_limits = usage_data.get("limits", [])
+        if not claude_limits:
+            return False
+
+        limit_names = []
+        for limit in claude_limits:
+            label = limit.get("label") or limit.get("key") or "unknown"
+            util = float(limit.get("utilization", 0.0))
+            limit_names.append(f"{label} ({util:.1%})")
+
+        message = (
+            f"⚠️ <b>CLAUDE PLAN LOW-WATERMARK</b> ⚠️\n\n"
+            f"Claude plan limit(s) approaching exhaustion:\n"
+            f"• {', '.join(limit_names)}\n\n"
+            f"Autopilot will finish the current ticket then stop/switch. "
+            f"This prevents mid-build cutoff and API errors."
+        )
+    elif provider == "glm":
+        used = usage_data.get("used", 0)
+        cap = usage_data.get("cap", 0)
+        pct = usage_data.get("pct", 0.0)
+
+        message = (
+            f"⚠️ <b>GLM QUOTA LOW-WATERMARK</b> ⚠️\n\n"
+            f"GLM (Z.ai) quota is {pct:.1%} used ({used:,}/{cap:,} tokens).\n\n"
+            f"Autopilot will finish the current ticket then stop/switch. "
+            f"This prevents mid-build cutoff."
+        )
+    else:
+        return False
+
+    sent = send(message)
+    if sent:
+        _dual_low_watermark_alerted.add(provider)
+
+    return sent
+
+
+def reset_dual_low_watermark_alert(provider: str | None = None) -> None:
+    """Clear the dual-provider low-watermark alert sent flag.
+
+    Args:
+        provider: If "claude" or "glm", clears only that provider's flag.
+                  If None, clears all providers (e.g. at midnight or after quota reset).
+    """
+    global _dual_low_watermark_alerted
+    if provider is None:
+        _dual_low_watermark_alerted.clear()
+    else:
+        _dual_low_watermark_alerted.discard(provider)
+
+
 def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:
     """Extract ``(update_id, text, origin)`` for text messages we accept.
 
