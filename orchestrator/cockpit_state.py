@@ -207,7 +207,7 @@ def shared_log_seq() -> int:
 
 
 def get_autopilot_status(app: str | None = None) -> dict:
-    """Per-app autopilot status snapshot: ``{on, stopping, mode}``.
+    """Per-app autopilot status snapshot: ``{on, stopping, mode, external}``.
 
     Derives the snapshot from the per-app run-state rather than the unit-wide ``_state["autopilot"]``
     sub-dict, so each tab's badge is independent.
@@ -219,21 +219,36 @@ def get_autopilot_status(app: str | None = None) -> dict:
     buttons. ``active`` alone means "a run is in flight"; ``autopilot_on`` means "that run is the
     autopilot".
 
-    * ``on``       — True while an AUTOPILOT loop is running for this app (the dedicated flag).
+    * ``on``       — True while an AUTOPILOT loop is running for this app (the dedicated flag) OR
+                     an external daemon is running (detected via ``autopilot.daemon_running()`` and
+                     ``autopilot.daemon_is_external()``).
     * ``stopping`` — True when autopilot is on AND a stop_event has been issued but the loop hasn't
                      exited yet (a graceful drain is in progress).
     * ``mode``     — the per-app autopilot mode (``'choose'`` | ``'drain'`` | ``None``).
+    * ``external`` — True when a detached daemon (foreign process) is running the autopilot — detected
+                     by checking if the PID file exists and belongs to a different process (EU-120).
 
     The ``ticket`` field (the workspace tab's selected ticket) is NOT included here because
     cockpit_state has no access to the workspace layer; the caller (``server.py``) overlays it.
     """
+    from . import autopilot as _autopilot
+
     st = get_state(app)
     stop_ev = st.get("stop_event")
-    on = bool(st.get("autopilot_on"))
+    internal_on = bool(st.get("autopilot_on"))
+
+    # EU-120: detect external daemon (detached terminal run or launchd keepalive)
+    external_daemon = _autopilot.daemon_is_external() if _autopilot.daemon_running() else False
+
+    # When an external daemon is running, report autopilot as ON even if this cockpit's
+    # per-app ``autopilot_on`` flag is False (the daemon lives in a different process).
+    on = internal_on or external_daemon
+
     return {
         "on": on,
         "stopping": bool(on and stop_ev is not None and stop_ev.is_set()),
         "mode": st.get("autopilot_mode"),
+        "external": external_daemon,
     }
 
 

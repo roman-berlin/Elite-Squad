@@ -32,8 +32,10 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    The NEW keepalive install script (install-mac-autopilot-daemon.sh) legitimately writes the
 #    com.roman.general.autopilot-keepalive plist and calls launchctl — it is explicitly allow-listed
 #    here because it is the CURRENT daemon installer, not a retired scheduler.
+#    EU-120: autopilot.py's _stop_launchd_daemon() legitimately uses launchctl to stop the keepalive
+#    daemon (Finish & stop graceful shutdown). server.py has a comment about launchctl failure.
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
-SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh"}
+SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in list(ROOT.glob("orchestrator/**/*.py")) + list(SCRIPTS.glob("*.sh")):
     rel = p.relative_to(ROOT).as_posix()

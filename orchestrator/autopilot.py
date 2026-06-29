@@ -102,6 +102,53 @@ def daemon_is_external() -> bool:
     return daemon_running() and not _pid_file_holds_our_pid()
 
 
+def _stop_launchd_daemon() -> bool:
+    """Stop the launchd KeepAlive daemon using launchctl.
+
+    Tries launchctl bootout (modern macOS) first, then falls back to launchctl unload (older macOS).
+    This is the ONLY way to durably stop a KeepAlive daemon — a plain 'launchctl stop' is respawned.
+    Returns True on success, False on failure (best-effort: the daemon may already be gone).
+
+    EU-120: cockpit's "Finish & stop" (drain) calls this for external daemons so the stop sticks.
+    The plist path matches scripts/install-mac-autopilot-daemon.sh.
+    """
+    import platform
+    import subprocess
+
+    if platform.system() != "Darwin":
+        return False
+
+    # Path from install-mac-autopilot-daemon.sh
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.romanberlin.general.autopilot.plist"
+
+    if not plist_path.exists():
+        # No plist installed — nothing to unload
+        return False
+
+    try:
+        # Modern macOS (10.10+): use bootout, which removes the service *and* stops it
+        result = subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/com.romanberlin.general.autopilot"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # bootout returns 0 even if the service wasn't running (idempotent)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        # bootout failed or not available — fall back to unload (older macOS)
+        try:
+            result = subprocess.run(
+                ["launchctl", "unload", str(plist_path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+
 # `PARKED` (the outcomes that park a ticket IMMEDIATELY — a human decision / a PR is waiting, no point
 # retrying) is the canonical tuple in contracts.py (EU-56), imported above. ERRORED is handled
 # separately: a transient blip shouldn't sideline a ticket, so we retry it a few times (with a short
