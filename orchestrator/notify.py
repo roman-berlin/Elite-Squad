@@ -1,3 +1,4 @@
+# Telegram notifications — send messages and receive updates from the Commander's ops chat and EU-65 liaison channels.
 """Telegram notifications.
 
 Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment to enable.
