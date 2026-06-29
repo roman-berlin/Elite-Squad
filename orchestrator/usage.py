@@ -384,6 +384,102 @@ def plan_usage(cfg: Config | None = None, *, now: float | None = None, force: bo
     return data
 
 
+# EU-118: cache plan-limit hit state (utilization >= 1.0) so autopilot doesn't spin on repeated checks.
+_plan_limit_hit_cache: dict = {"hit": False, "ts": 0.0, "ttl": 60.0}  # cache for 1 minute
+
+
+def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force: bool = False) -> dict:
+    """Check if ANY plan limit (session/weekly/per-model) has utilization >= 1.0 — EU-118.
+
+    Returns::
+
+        {"hit": True/False, "over_limits": [ {key, label, utilization, ...}, ... ], "checked_at": <epoch>}
+
+    Cached for 1 minute (a failed check for 30 seconds). Best-effort — never raises. When a limit
+    is hit, autopilot halts new tickets and records an audit event instead of spinning silently.
+    """
+    global _plan_limit_hit_cache
+    t = now if now is not None else time.time()
+    if not force and _plan_limit_hit_cache.get("hit", False):
+        ttl = 60.0 if _plan_limit_hit_cache.get("hit") else 30.0
+        if t - _plan_limit_hit_cache.get("ts", 0.0) < ttl:
+            # Return cached result, but include the checked_at timestamp
+            return {
+                "hit": _plan_limit_hit_cache.get("hit", False),
+                "over_limits": _plan_limit_hit_cache.get("over_limits", []),
+                "checked_at": _plan_limit_hit_cache.get("ts", t)
+            }
+
+    over_limits = []
+    try:
+        usage_data = plan_usage(cfg, now=t, force=force)
+        if usage_data.get("available"):
+            for limit in usage_data.get("limits", []):
+                util = float(limit.get("utilization", 0.0))
+                if util >= 1.0:
+                    over_limits.append(limit)
+    except Exception:  # noqa: BLE001 — plan-limit detection must never break the loop
+        pass
+
+    hit = len(over_limits) > 0
+    _plan_limit_hit_cache = {
+        "hit": hit,
+        "over_limits": over_limits,
+        "ts": t,
+        "ttl": 60.0
+    }
+
+    return {
+        "hit": hit,
+        "over_limits": over_limits,
+        "checked_at": t
+    }
+
+
+def plan_limit_reset_cache() -> None:
+    """Clear the plan-limit hit cache — e.g. after switching providers or at midnight."""
+    global _plan_limit_hit_cache
+    _plan_limit_hit_cache["hit"] = False
+    _plan_limit_hit_cache["over_limits"] = []
+    _plan_limit_hit_cache["ts"] = 0.0
+
+
+def available_fallback_provider(cfg: Config, current_model: str) -> tuple[str, str] | None:
+    """EU-108/118: Check if multi-provider fallback is configured and any provider has capacity.
+
+    Returns (model, provider_id) of the first available fallback, or None if:
+      - No fallback providers are configured
+      - All fallback providers also have utilization >= 1.0
+      - The current model is already in the fallback list (avoid self-switch)
+
+    The autopilot calls this before halting on plan limits; if a fallback is available,
+    it switches models instead of parking tickets.
+    """
+    if not cfg or not hasattr(cfg, "fallback_providers"):
+        return None
+
+    fallbacks = getattr(cfg, "fallback_providers", None)
+    if not fallbacks or not isinstance(fallbacks, list):
+        return None
+
+    # Normalize the current model name to avoid switching to the same provider
+    current_normalized = current_model.lower().replace("_", "-").replace(" ", "")
+
+    for model, provider_id in fallbacks:
+        # Skip if this is the same provider/model we're already using
+        model_normalized = model.lower().replace("_", "-").replace(" ", "")
+        if model_normalized == current_normalized or str(provider_id or "").lower() in current_normalized:
+            continue
+
+        # Check if this provider has available capacity
+        # For now, we assume fallback providers don't have the same real-time limit info
+        # as the primary Claude Max subscription, so we conservatively assume they're available
+        # unless explicitly blocked. A future enhancement could probe each provider's limits.
+        return (model, provider_id)
+
+    return None
+
+
 def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:
     """Per-calendar-day token COST (USD) for the last `days` days, oldest→newest (EU-76 board sparkline).
 

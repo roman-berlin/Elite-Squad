@@ -32,6 +32,15 @@ class AgentRun:
     tools: list[str] = field(default_factory=list)   # tool calls made, for the transcript
     input_tokens: int = 0    # prompt + cache tokens this run (for the usage ledger)
     output_tokens: int = 0   # completion tokens this run
+    # EU-118: true when this run hit a Claude plan limit (429 / usage-limit).
+    # The error detection looks for patterns in the Agent SDK's message.error field:
+    #   • "429" — HTTP status code for rate-limit/plan-limit errors
+    #   • "limit reached" — common error message when plan quota is exhausted
+    #   • "usage-limit" / "rate limit" / "plan limit" / "over limit" — alternative error formats
+    # These patterns are based on observed Agent SDK error behavior; the SDK surfaces
+    # Anthropic API errors (HTTP 429 with "rate limit" or "usage limit" details) via
+    # the message.error field when a plan/session/weekly quota is exceeded.
+    is_plan_limit: bool = False
 
 
 def _tool_brief(name: str, inp) -> str:
@@ -56,6 +65,7 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     in_tok = 0
     out_tok = 0
     is_error = False
+    is_plan_limit = False
 
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, AssistantMessage):
@@ -72,8 +82,13 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
             if text:
                 chunks.append(text)
                 final = text
+            # EU-118: detect plan-limit errors in message errors
             if getattr(message, "error", None):
                 is_error = True
+                err = str(getattr(message, "error", "")).lower()
+                # Check for plan-limit error patterns: 429 status, usage-limit mentions
+                if any(pattern in err for pattern in ["429", "limit reached", "usage-limit", "rate limit", "plan limit", "over limit"]):
+                    is_plan_limit = True
         elif isinstance(message, ResultMessage):
             cost = message.total_cost_usd or 0.0
             turns = message.num_turns
@@ -97,4 +112,4 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
 
     return AgentRun(text="\n".join(chunks), final=final, cost_usd=cost,
                     num_turns=turns, is_error=is_error, tools=tools,
-                    input_tokens=in_tok, output_tokens=out_tok)
+                    input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit)
