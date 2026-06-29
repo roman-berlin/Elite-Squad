@@ -87,4 +87,17 @@ def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
         except Exception as exc:  # noqa: BLE001 - one Jira/connection must not abort the others
             LAST_DRAIN_ERRORS[app.name] = str(exc)[:200]
             print(f"  · backlog '{app.name}' UNREACHABLE this cycle: {str(exc)[:160]}", flush=True)
+    # EU-116: drain guard — skip tickets that recently had a no_changes outcome. They're in
+    # 'Needs Human' awaiting verification/close, and re-running them would waste another build.
+    try:
+        from .loop import _recent_no_changes_ticket_ids
+        no_changes_ids = _recent_no_changes_ticket_ids(cfg)
+        if no_changes_ids:
+            items = [(a, t) for (a, t) in items if t.id not in no_changes_ids]
+            if items and len(items) < len(items) + len(no_changes_ids):
+                # Only log if we actually filtered something out
+                skipped = len(no_changes_ids)
+                print(f"  · EU-116 drain guard: skipped {skipped} ticket(s) with recent no_changes outcome", flush=True)
+    except Exception:  # noqa: BLE001 - drain guard must not break the run
+        pass
     return items

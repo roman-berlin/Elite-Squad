@@ -44,8 +44,10 @@ chk("AUDIT_EVENT_OUTCOME round-trips every Outcome",
     str(AUDIT_EVENT_OUTCOME))
 
 # --- sub-cause aliases reconstruct to the right coarse Outcome ---
-chk("alias 'no_changes' reconstructs to ERRORED", AUDIT_EVENT_OUTCOME.get("no_changes") is Outcome.ERRORED)
-chk("alias 'escalated' reconstructs to ESCALATED", AUDIT_EVENT_OUTCOME.get("escalated") is Outcome.ESCALATED)
+chk("alias 'no_changes' reconstructs to ESCALATED (EU-116)",
+    AUDIT_EVENT_OUTCOME.get("no_changes") is Outcome.ESCALATED)
+chk("alias 'escalated' reconstructs to ESCALATED",
+    AUDIT_EVENT_OUTCOME.get("escalated") is Outcome.ESCALATED)
 
 # --- every terminal event the loop actually records must be reconstructable (no orphan vocabulary) ---
 LOOP_TERMINAL_EVENTS = {"merged", "pr_opened", "dryrun_land", "ticket_exception", "no_changes",
