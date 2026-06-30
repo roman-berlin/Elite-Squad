@@ -413,8 +413,194 @@ def feed(cfg, tasks: list[dict], app: Optional[str], limit: int = 16) -> list[di
     return out
 
 
+def _detect_prebuild_triage(cfg, ticket_id: str, has_build: bool) -> Optional[dict]:
+    """Read audit log to detect if ticket is in prebuild triage phase.
+
+    Returns a dict with triage_phase and triage_verdict if in triage, else None.
+    Only returns triage state when NO build has occurred yet (has_build=False).
+    """
+    if has_build:
+        return None
+
+    # Scan audit log for prebuild events for this ticket
+    triage_events = []
+    close_events = []
+    refile_events = []
+
+    for line in D.audit_lines(cfg.audit_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        event = ev.get("event")
+        ev_ticket = ev.get("ticket_id")
+
+        if ev_ticket != ticket_id:
+            continue
+
+        if event == "prebuild_triage":
+            triage_events.append(ev)
+        elif event == "prebuild_close":
+            close_events.append(ev)
+        elif event == "prebuild_refile":
+            refile_events.append(ev)
+        elif event in ("build", "security_block", "merged"):
+            # Any build-phase event means we're past triage
+            return None
+
+    # Determine triage state from events found
+    # Most recent triage determines the verdict
+    if triage_events:
+        latest_triage = triage_events[-1]  # newest
+        verdict = latest_triage.get("verdict", "UNKNOWN")
+
+        # Check if there's a matching close/refile outcome
+        if close_events:
+            return {
+                "triage_phase": "closed",
+                "triage_verdict": verdict,
+                "triage_reason": close_events[-1].get("reason", "closed"),
+            }
+        elif refile_events:
+            latest_refile = refile_events[-1]
+            return {
+                "triage_phase": "refiled",
+                "triage_verdict": verdict,
+                "triage_new_tickets": [
+                    {"key": r.get("new_ticket_key"), "title": r.get("title")}
+                    for r in refile_events
+                ],
+            }
+        else:
+            # In triage but not yet resolved
+            return {
+                "triage_phase": "triaging",
+                "triage_verdict": verdict,
+            }
+
+    return None
+
+
+def _detect_current_triage(cfg, current_ticket_id: Optional[str] = None,
+                           since_ts: Optional[float] = None) -> Optional[dict]:
+    """Read audit log to detect the CURRENT prebuild triage activity.
+
+    EU-130: When autopilot is running and processing tickets through prebuild triage,
+    this function finds the most recent triage event, which represents what the unit
+    is doing RIGHT NOW — not a stale completed pipeline from a previous ticket.
+
+    Args:
+        cfg: Config object
+        current_ticket_id: The ticket_id of the current task (if any). Used to filter
+            out stale triage events from already-completed tickets.
+        since_ts: Only consider events after this timestamp (unix timestamp). Used to
+            filter for recent activity when autopilot is active.
+
+    Returns:
+        A dict with ticket_id, triage_phase, triage_verdict, and optionally
+        triage_reason or triage_new_tickets if current triage activity is found.
+        Returns None if no current triage activity is detected.
+    """
+    # Scan audit log for the most recent prebuild_triage event
+    latest_triage = None
+    latest_triage_ts = 0.0
+    latest_close = None
+    latest_refile = None
+
+    for line in D.audit_lines(cfg.audit_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        event = ev.get("event")
+        ticket_id = ev.get("ticket_id")
+
+        if not ticket_id:
+            continue
+
+        # Parse timestamp
+        ts_str = ev.get("ts", "")
+        try:
+            dt = D._parse_ts(ts_str)
+            if dt:
+                ev_ts = dt.timestamp()
+            else:
+                continue
+        except Exception:
+            continue
+
+        # Filter by timestamp if provided (only recent activity)
+        if since_ts is not None and ev_ts < since_ts:
+            continue
+
+        # Track the most recent triage event
+        if event == "prebuild_triage":
+            if ev_ts > latest_triage_ts:
+                latest_triage_ts = ev_ts
+                latest_triage = ev
+        elif event == "prebuild_close":
+            if ticket_id == (latest_triage or {}).get("ticket_id"):
+                latest_close = ev
+        elif event == "prebuild_refile":
+            if ticket_id == (latest_triage or {}).get("ticket_id"):
+                latest_refile = ev
+        elif event in ("build", "security_block", "merged", "ticket_start"):
+            # If we hit a build event for this ticket, triage is over for this ticket
+            # But we still want to check if there's NEWER triage activity for other tickets
+            ticket_of_build = ticket_id
+            # If this build event is for the latest triage ticket, that triage is stale
+            if latest_triage and ticket_of_build == latest_triage.get("ticket_id"):
+                latest_triage = None
+                latest_triage_ts = 0.0
+
+    # If no recent triage activity, return None
+    if not latest_triage:
+        return None
+
+    triage_ticket_id = latest_triage.get("ticket_id")
+    verdict = latest_triage.get("verdict", "UNKNOWN")
+
+    # If the current task's ticket_id matches the triage ticket, let the normal
+    # _detect_prebuild_triage path handle it (it will be called with the right ticket_id)
+    if current_ticket_id and current_ticket_id == triage_ticket_id:
+        return None
+
+    # Build the triage state result
+    result = {
+        "ticket_id": triage_ticket_id,
+        "triage_phase": "triaging",
+        "triage_verdict": verdict,
+    }
+
+    # Check if there's a matching close/refile outcome
+    if latest_close:
+        result["triage_phase"] = "closed"
+        result["triage_reason"] = latest_close.get("reason", "closed")
+    elif latest_refile:
+        result["triage_phase"] = "refiled"
+        result["triage_new_tickets"] = [
+            {"key": latest_refile.get("new_ticket_key"), "title": latest_refile.get("title")}
+        ]
+
+    return result
+
+
 def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Optional[dict]:
-    """The live run if one is going, else the most recent run as 'last run'."""
+    """The live run if one is going, else the most recent run as 'last run'.
+
+    EU-130: When autopilot is active (active=True) and processing tickets through prebuild
+    triage, this function returns a synthetic run object showing the CURRENT triage activity
+    instead of the last completed pipeline. This prevents the cockpit from showing stale
+    'Working · Land' cards for tickets that already merged hours ago.
+    """
     ts = _scope(tasks, app)
     if not ts:
         return None
@@ -423,10 +609,56 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     # stopped attempt would show as forever-running.
     t = ts[0]                               # newest task (newest-first) = current or last run
     live = bool(active)
+    ticket_id = str(t.get("ticket_id") or "")
+
+    # EU-130: When autopilot is active, check for CURRENT prebuild triage activity first.
+    # This catches the case where autopilot is triaging new tickets (EU-113, EU-114) while
+    # the task list still shows an old completed run (EU-109 that merged at 16:16).
+    # We only do this check when active=True to avoid showing stale triage events in idle mode.
+    if live and ticket_id and ticket_id != "—":
+        # Look for current triage activity (different ticket)
+        # No time filtering - the function uses event ordering to detect current activity
+        current_triage = _detect_current_triage(cfg, ticket_id)
+        if current_triage:
+            # Construct a synthetic run object showing the current triage state
+            triage_ticket_id = current_triage.get("ticket_id") or ticket_id
+            triage_phase = current_triage.get("triage_phase", "triaging")
+            triage_verdict = current_triage.get("triage_verdict", "UNKNOWN")
+
+            # Build a minimal run object that _run_html can render with triage UI
+            # Use live=True so it renders as an active run, not "last run"
+            result = {
+                "live": True,
+                "ticket": triage_ticket_id,
+                "app": str(t.get("app") or ""),  # Use the current app
+                "branch": "",  # No branch yet in triage
+                "passes": 0,
+                "verdict": "",
+                "outcome": None,  # No terminal outcome - triage is in progress
+                "cost": 0.0,
+                "phases": [],  # Empty phases - triage replaces the phase bar
+                "reached": 0,
+                "failed_phase": None,
+                "sparkline": [],  # No sparkline for triage state
+                "triage_phase": triage_phase,
+                "triage_verdict": triage_verdict,
+            }
+            if current_triage.get("triage_reason"):
+                result["triage_reason"] = current_triage["triage_reason"]
+            if current_triage.get("triage_new_tickets"):
+                result["triage_new_tickets"] = current_triage["triage_new_tickets"]
+
+            return result
+
     # Approximate phase from what's been recorded so far.
     has_build = any(d.get("build_summary") or d.get("tools") for d in t.get("passes_list", []))
     has_review = t.get("verdict") is not None
     merged = t.get("outcome") == "merged→dev"
+
+    # EU-130: Detect prebuild triage phase before build events occur (for the current ticket)
+    triage_state = None
+    if ticket_id and ticket_id != "—":
+        triage_state = _detect_prebuild_triage(cfg, ticket_id, has_build)
     # One source of truth, shared with the terminal bar (loop._bar) so the two can't drift (EU-55).
     # `reached` doubles as the count of completed phases AND the index of the current/next phase.
     phases = list(PHASES)
@@ -470,7 +702,7 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     completed = [t2 for t2 in ts if t2.get("outcome")]  # newest-first
     sparkline = [t2.get("passes") or 0 for t2 in reversed(completed[:10])]  # oldest→newest
 
-    return {
+    result = {
         "live": live,
         "ticket": str(t.get("ticket_id") or "—"),
         "app": str(t.get("app") or ""),
@@ -484,6 +716,17 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         "failed_phase": failed_phase,
         "sparkline": sparkline,  # EU-76: list[int] oldest→newest, for trend chart
     }
+
+    # EU-130: Add triage phase fields if detected
+    if triage_state:
+        result["triage_phase"] = triage_state.get("triage_phase")
+        result["triage_verdict"] = triage_state.get("triage_verdict")
+        if triage_state.get("triage_reason"):
+            result["triage_reason"] = triage_state["triage_reason"]
+        if triage_state.get("triage_new_tickets"):
+            result["triage_new_tickets"] = triage_state["triage_new_tickets"]
+
+    return result
 
 
 def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = 150) -> bool:
@@ -760,6 +1003,59 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             f'<div style="display:flex;gap:7px;align-items:center">'
             f'{chip}<span class="b muted">last run</span></div></div>'
         )
+    # EU-130: Render triage state UI when the run is in prebuild triage phase.
+    # This takes precedence over the normal phase bar when triage_phase is set,
+    # ensuring the card shows the live triage verdict (ANSWER/CLOSE/REFILE)
+    # instead of a stale pipeline display.
+    triage_html = ""
+    triage_phase = run.get("triage_phase")
+    if triage_phase:
+        # Build the triage status UI
+        verdict = run.get("triage_verdict", "UNKNOWN")
+        verdict_tone = "warn"  # default amber for in-triage
+        status_label = "Triaging"
+        status_detail = f"verdict: {_esc(verdict)}"
+
+        if triage_phase == "closed":
+            verdict_tone = "ok" if verdict == "ANSWER" else "muted"
+            status_label = "Closed"
+            reason = run.get("triage_reason", "")
+            if reason:
+                # Show both verdict and reason
+                status_detail = f"{_esc(verdict)} &mdash; {_esc(reason)}"
+            else:
+                status_detail = f"{_esc(verdict)}"
+        elif triage_phase == "refiled":
+            verdict_tone = "info"
+            status_label = "Refiled"
+            new_tickets = run.get("triage_new_tickets", [])
+            if new_tickets:
+                ticket_list = ", ".join(_esc(t.get("key", "")) for t in new_tickets[:3])
+                status_detail = f"new tickets: {ticket_list}"
+                if len(new_tickets) > 3:
+                    status_detail += f" +{len(new_tickets) - 3}"
+        elif triage_phase == "triaging":
+            verdict_tone = "warn"
+            status_label = "Triaging"
+            status_detail = f"verdict: {_esc(verdict)}"
+
+        triage_html = (
+            f'<div class="phasebar triage-bar">'
+            f'<div class="ph triage-done"><span></span>Prebuild</div>'
+            f'<div class="ph triage-now"><span></span>{_esc(status_label)}</div>'
+            f'</div>'
+            f'<div class=runmeta>'
+            f'<span class="meta triage-meta" style="color:var(--{verdict_tone})">'
+            f'<b>{_esc(status_label)}</b> &mdash; {status_detail}'
+            f'</span></div>'
+        )
+        # When in triage, don't show the normal phase bar or metadata
+        # (prevents showing stale 'Working · Land' for already-merged tickets)
+        bar = []
+        verdict = ""
+        extra = ""
+        spark_html = ""
+
     # EU-106: per-run 'open log' link — shown only when log_path is set by the BE subtask.
     # Rendered as a small anchor right after the phase bar so it's near the run context.
     log_link = ""
@@ -770,14 +1066,21 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
             f'title="Open run log in Finder">&#128194; open log</a></div>'
         )
+
+    # Build the phase bar and metadata based on whether we're in triage or normal run
+    if triage_html:
+        phasebar_content = triage_html
+        runmeta_content = ""
+    else:
+        phasebar_content = f'<div class="phasebar{"" if run["live"] else " idle"}">{"".join(bar)}</div>'
+        runmeta_content = f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>{verdict}{extra}<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>'
+
     return (
         f'{now_css}'
         f'{runhead}'
-        f'<div class="phasebar{"" if run["live"] else " idle"}">{"".join(bar)}</div>'
+        f'{phasebar_content}'
         f'{log_link}'
-        f'<div class=runmeta><span class=meta>pass <b>{_esc(run["passes"])}</b></span>'
-        f'{verdict}{extra}'
-        f'<span class=meta>branch <span class=mono>{_esc(run["branch"] or "—")}</span></span></div>'
+        f'{runmeta_content}'
         f'{spark_html}')
 
 
@@ -1480,6 +1783,14 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .stopbtn{background:var(--badbg);color:var(--bad);border:1px solid var(--badline);border-radius:var(--r-sm);
 padding:4px 11px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:background var(--t-fast)}
 .stopbtn:hover{background:#3a181b}
+/* EU-130: triage state bar */
+.triage-bar{margin-top:12px}
+.triage-bar .ph.triage-done{color:var(--ok)}
+.triage-bar .ph.triage-done span{background:var(--ok);border-color:var(--ok);box-shadow:0 0 8px rgba(52,211,153,.5)}
+.triage-bar .ph.triage-done::after{background:var(--ok)}
+.triage-bar .ph.triage-now{color:var(--warn)}
+.triage-bar .ph.triage-now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
+.triage-meta{font-size:12.5px;font-weight:600}
 /* roster */
 .roster{padding:6px 0}
 .offrow{display:flex;align-items:center;gap:12px;padding:10px 18px;border-left:2px solid transparent;transition:background var(--t-fast),border-left-color var(--t-fast)}
