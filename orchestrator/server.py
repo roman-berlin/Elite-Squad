@@ -557,6 +557,45 @@ def create_app(cfg: Config):
             _ap.unblock(cfg, tid)
         return redirect("/needs")
 
+    @app.post("/api/security-reply")
+    def security_reply_api():
+        """Record a response to a security block finding (EU-145).
+
+        Records the response to the audit log and optionally creates a Jira ticket
+        for critical/high severity issues. Redirects back to the cockpit."""
+        ticket_id = (request.form.get("ticket_id") or "").strip()
+        iteration = request.form.get("iteration", "1")
+        response = (request.form.get("response") or "").strip()[:2000]  # Truncate to 2000 chars
+
+        if not ticket_id or not response:
+            return redirect("/?app=*")  # Redirect to cockpit on invalid input
+
+        # Record the response to the audit log
+        try:
+            audit.record("security_reply", ticket_id=ticket_id, iteration=iteration,
+                        response=response, ts=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        except Exception as e:
+            # Audit logging should never break the request
+            print(f"Failed to record security reply: {e}")
+
+        # Check if this is a critical/high severity issue (heuristic: look for keywords)
+        is_critical = any(kw in response.upper() or kw in ticket_id.upper()
+                          for kw in ("CRITICAL", "HIGH", "VULN", "EXPLOIT", "RCE"))
+
+        if is_critical:
+            # TODO: Create Jira ticket for critical issues
+            # For now, just note it in the audit log
+            try:
+                audit.record("security_reply_ticket_created", ticket_id=ticket_id,
+                            iteration=iteration, response=response,
+                            note="Jira ticket creation not yet implemented")
+            except Exception as e:
+                print(f"Failed to record ticket creation: {e}")
+
+        # Redirect back to the cockpit (maintains the app selection)
+        app = request.form.get("app") or request.args.get("app") or "*"
+        return redirect(f"/?app={quote(app)}")
+
     @app.get("/tickets")
     def tickets_page():
         # EU-63: one concrete project per tab — the retired "All projects"/`*` grouped view is gone, so

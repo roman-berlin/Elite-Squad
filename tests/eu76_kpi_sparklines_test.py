@@ -267,7 +267,7 @@ def test_kpi_html_warn_tone_uses_amber_stroke():
 def test_kpi_html_bad_tone_uses_red_stroke():
     """Cards with tone='bad' get a red (--bad) sparkline stroke."""
     card = {
-        "label": "Security blocks",
+        "label": "Failed runs",
         "value": 3,
         "hint": "all time",
         "tone": "bad",

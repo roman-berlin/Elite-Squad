@@ -1,4 +1,4 @@
-"""EU-75 QA: 'Tokens today' KPI card — gauge, paused state, hint content, and href."""
+"""EU-75 QA: 'Tokens' KPI card (merged today + week per EU-145) — gauge, paused state, hint content, and href."""
 import sys, types, tempfile
 from pathlib import Path
 
@@ -27,9 +27,9 @@ def _cfg(**kw):
     return Config(apps=[], audit_path=str(audit), **kw)
 
 def _tok_card(cfg):
-    """Return the 'Tokens today' card dict from warroom.kpis(), or None if absent."""
+    """Return the 'Tokens' card dict from warroom.kpis(), or None if absent (EU-145: merged today + week)."""
     cards = warroom.kpis(cfg, [], None)
-    return next((c for c in cards if c.get("label") == "Tokens today"), None)
+    return next((c for c in cards if c.get("label") == "Tokens"), None)
 
 # ── (a) normal state: hint contains 'resets at local midnight' + pct string ─
 
@@ -41,8 +41,9 @@ card = _tok_card(cfg_normal)
 chk("normal: card is present", card is not None)
 hint = (card or {}).get("hint", "")
 chk("normal: hint contains 'resets at local midnight'", "resets at local midnight" in hint, repr(hint))
-# pct should be ~6 % of 10 000 → "6%"
-chk("normal: hint contains a pct string (e.g. '6%')", "%" in hint, repr(hint))
+# pct should be ~6 % of 10 000 → "6%" (in the value field, not hint)
+value = (card or {}).get("value", "")
+chk("normal: value contains a pct string (e.g. '6%')", "%" in value, repr(value))
 
 # ── (b) over-budget state: card value is '⛔ paused — budget hit' ────────────
 
@@ -98,7 +99,7 @@ ledger_alert.write_text(
 usage.configure(str(audit_alert))
 cfg_alert = Config(apps=[], audit_path=str(audit_alert), daily_token_budget=100_000, budget_alert_pct=0.8)
 card_alert = next(
-    (c for c in warroom.kpis(cfg_alert, [], None) if c.get("label") == "Tokens today"), None
+    (c for c in warroom.kpis(cfg_alert, [], None) if c.get("label") == "Tokens"), None
 )
 # Restore the original ledger for subsequent tests
 usage.configure(str(audit))
@@ -120,16 +121,20 @@ chk("budget-off: hint says 'no daily cap'",
     "no daily cap" in (card_off or {}).get("hint", "").lower(),
     repr((card_off or {}).get("hint", "")))
 
-# ── (g) 'Tokens this week' card always present ────────────────────────────
+# ── (g) EU-145: 'Tokens this week' merged into 'Tokens' card ────────────────────
 
-week_card_normal = next(
-    (c for c in warroom.kpis(cfg_normal, [], None) if c.get("label") == "Tokens this week"), None
-)
-chk("week-card: present alongside 'Tokens today'", week_card_normal is not None)
-chk("week-card: href is '/usage'", (week_card_normal or {}).get("href") == "/usage")
-chk("week-card: hint mentions '7-day rolling'",
-    "7-day" in (week_card_normal or {}).get("hint", ""),
-    repr((week_card_normal or {}).get("hint", "")))
+# Verify the merged card includes weekly data in its hint
+hint = (card or {}).get("hint", "")
+chk("merged Tokens card: hint mentions weekly ('this week')", "this week" in hint.lower(), repr(hint))
+# Also check for '7-day' or 'week' in hint as alternative weekly indicator
+weekly_keywords = ["this week", "week", "7-day"]
+has_weekly = any(kw in hint.lower() for kw in weekly_keywords)
+chk("merged Tokens card: hint mentions weekly data (week/7-day)", has_weekly, repr(hint))
+chk("merged Tokens card: href is '/usage'", (card or {}).get("href") == "/usage")
+# Ensure the old separate cards are gone
+all_labels = {c.get("label") for c in warroom.kpis(cfg_normal, [], None)}
+chk("old 'Tokens today' card is gone", "Tokens today" not in all_labels)
+chk("old 'Tokens this week' card is gone", "Tokens this week" not in all_labels)
 
 # ── (h) _fmt_tokens helper: compact human-readable formatting ───────────────
 
@@ -149,7 +154,7 @@ chk("_kpi_html: no gauge-bar when gauge=None", "height:3px" not in html_no_gauge
 
 # gauge=0.5, tone absent → bar uses --ok colour
 html_half = warroom._kpi_html(
-    [{"label": "Tokens today", "value": "5k · 50%", "hint": "cap 10k", "gauge": 0.5}]
+    [{"label": "Tokens", "value": "5k · 50%", "hint": "cap 10k", "gauge": 0.5}]
 )
 chk("_kpi_html: gauge bar emitted when gauge=0.5", "height:3px" in html_half)
 chk("_kpi_html: fill width is 50.0%", "width:50.0%" in html_half, html_half[:400])
@@ -157,13 +162,13 @@ chk("_kpi_html: neutral tone → --ok colour", "var(--ok)" in html_half)
 
 # warn tone → --warn colour
 html_warn = warroom._kpi_html(
-    [{"label": "Tokens today", "value": "85k · 85%", "hint": "cap 100k", "gauge": 0.85, "tone": "warn"}]
+    [{"label": "Tokens", "value": "85k · 85%", "hint": "cap 100k", "gauge": 0.85, "tone": "warn"}]
 )
 chk("_kpi_html: warn tone → --warn gauge colour", "var(--warn)" in html_warn)
 
 # bad tone → --bad colour
 html_bad = warroom._kpi_html(
-    [{"label": "Tokens today", "value": "⛔ paused", "hint": "cap hit", "gauge": 1.0, "tone": "bad"}]
+    [{"label": "Tokens", "value": "⛔ paused", "hint": "cap hit", "gauge": 1.0, "tone": "bad"}]
 )
 chk("_kpi_html: bad tone → --bad gauge colour", "var(--bad)" in html_bad)
 
@@ -177,8 +182,8 @@ chk("_kpi_html: gauge < 0 clamped to 0%", "width:0.0%" in html_clamp_lo, html_cl
 
 try:
     board_html = warroom.render_board(cfg_normal, None, {"active": False})
-    chk("render_board: 'Tokens today' label in full board HTML",
-        "Tokens today" in board_html)
+    chk("render_board: 'Tokens' label in full board HTML (EU-145: merged)",
+        "Tokens" in board_html)
     chk("render_board: gauge bar emitted in board HTML",
         "height:3px" in board_html)
     chk("render_board: /usage deeplink wired through in board",

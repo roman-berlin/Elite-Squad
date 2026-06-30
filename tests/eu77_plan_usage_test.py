@@ -108,8 +108,8 @@ usage._probe_plan_limits = _boom                    # if the board probes, this 
 board_cfg = Config(apps=[], audit_path=str(audit), daily_token_budget=10_000)
 cards = warroom.kpis(board_cfg, [], None)
 labels = {c.get("label") for c in cards}
-chk("board renders 'Tokens today' from the ledger (no probe)", "Tokens today" in labels, str(labels))
-chk("board renders 'Tokens this week' from the ledger (no probe)", "Tokens this week" in labels)
+# EU-145: tokens merged into single "Tokens" card with today + week data
+chk("board renders 'Tokens' card (merged today+week per EU-145)", "Tokens" in labels, str(labels))
 
 # ── (g) /usage route — available: brand panel with gauges, %s, resets, a11y progressbar ─────────
 repo = tmp / "app"; repo.mkdir()
