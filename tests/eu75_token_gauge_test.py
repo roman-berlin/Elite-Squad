@@ -31,7 +31,7 @@ def _tok_card(cfg):
     cards = warroom.kpis(cfg, [], None)
     return next((c for c in cards if c.get("label") == "Tokens"), None)
 
-# ── (a) normal state: hint contains 'resets at local midnight' + pct string ─
+# ── (a) normal state: hint is concise (no verbose 'resets at local midnight') + pct string ─
 
 usage.configure(str(audit))
 usage.record("claude-sonnet-4-6", 500, 100, 0.0, "builder")   # 600 tokens today
@@ -40,7 +40,8 @@ cfg_normal = _cfg(daily_token_budget=10_000)
 card = _tok_card(cfg_normal)
 chk("normal: card is present", card is not None)
 hint = (card or {}).get("hint", "")
-chk("normal: hint contains 'resets at local midnight'", "resets at local midnight" in hint, repr(hint))
+chk("normal: hint does NOT contain verbose 'resets at local midnight'", "resets at local midnight" not in hint, repr(hint))
+chk("normal: hint does NOT contain verbose '7-day rolling'", "7-day rolling" not in hint, repr(hint))
 # pct should be ~6 % of 10 000 → "6%" (in the value field, not hint)
 value = (card or {}).get("value", "")
 chk("normal: value contains a pct string (e.g. '6%')", "%" in value, repr(value))
@@ -53,6 +54,9 @@ chk("over-budget: card is present", card_over is not None)
 val = (card_over or {}).get("value", "")
 chk("over-budget: value is '⛔ paused — budget hit'",
     val == "⛔ paused — budget hit", repr(val))
+hint_over = (card_over or {}).get("hint", "")
+chk("over-budget: hint is concise (no verbose 'resets at local midnight')",
+    "resets at local midnight" not in hint_over, repr(hint_over))
 
 # ── (c) gauge field is a 0-1 float when budget is on ────────────────────────
 
@@ -110,15 +114,15 @@ chk("alert-state: gauge ≥ 0.8",
     (card_alert or {}).get("gauge") is not None and (card_alert or {}).get("gauge", 0) >= 0.8,
     str((card_alert or {}).get("gauge")))
 
-# ── (f) budget OFF (cap=0): no gauge, no tone, hint says 'no daily cap' ────
+# ── (f) budget OFF (cap=0): no gauge, no tone, hint is clean ────
 
 cfg_off = _cfg(daily_token_budget=0)
 card_off = _tok_card(cfg_off)
 chk("budget-off: card is present", card_off is not None)
 chk("budget-off: gauge is None (no bar)", (card_off or {}).get("gauge") is None)
 chk("budget-off: tone is None", (card_off or {}).get("tone") is None)
-chk("budget-off: hint says 'no daily cap'",
-    "no daily cap" in (card_off or {}).get("hint", "").lower(),
+chk("budget-off: hint does NOT mention 'no daily cap' (cleaner)",
+    "no daily cap" not in (card_off or {}).get("hint", "").lower(),
     repr((card_off or {}).get("hint", "")))
 
 # ── (g) EU-145: 'Tokens this week' merged into 'Tokens' card ────────────────────

@@ -317,15 +317,15 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         if bs["on"] and bs.get("over"):
             # Budget exhausted — show paused state
             tok_value = "⛔ paused — budget hit"
-            tok_hint = "daily cap reached · resets at local midnight"
+            tok_hint = "daily cap reached · resets midnight"
         elif bs["on"]:
             # Cap configured and not yet hit — show % consumed
             pct_str = f"{round(bs['pct'] * 100)}%"
             tok_value = f"{_fmt_tokens(sess_total)} today · {pct_str}"
-            tok_hint = f"{_fmt_tokens(week_total)} this week · {week_calls} calls · 7-day rolling · cap {_fmt_tokens(bs['cap'])} · resets at local midnight"
+            tok_hint = f"{_fmt_tokens(week_total)} this week · {week_calls} calls · cap {_fmt_tokens(bs['cap'])}"
         else:
             tok_value = f"{_fmt_tokens(sess_total)} today"
-            tok_hint = f"{_fmt_tokens(week_total)} this week · {sess_calls + week_calls} calls total · no daily cap set"
+            tok_hint = f"{_fmt_tokens(week_total)} this week · {sess_calls + week_calls} calls total"
         cards.append({
             "label": "Tokens",
             "value": tok_value,
