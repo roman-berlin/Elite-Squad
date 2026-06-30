@@ -2360,9 +2360,10 @@ def create_app(cfg: Config):
                         if appcfg and getattr(appcfg, "backlog_backend", "") == "jira":
                             from .backlog.base import make_backlog
                             from .contracts import Ticket
-                            make_backlog(appcfg).add_comment(
-                                Ticket(id=tid, key=tid, summary=tid, description="", app=app_name),
-                                ans)
+                            bl = make_backlog(appcfg)
+                            t_obj = Ticket(id=tid, key=tid, summary=tid, description="", app=app_name)
+                            bl.add_comment(t_obj, ans)
+                            bl.set_status(t_obj, "To Do")
                     except Exception:  # noqa: BLE001 - a comment failure must not block the unblock
                         pass
                     try:
@@ -2370,12 +2371,23 @@ def create_app(cfg: Config):
                         _ap.unblock(cfg, tid)
                     except Exception:  # noqa: BLE001
                         pass
+                else:
+                    # handle_reply succeeded - ticket is being re-run, transition to To Do
+                    try:
+                        if appcfg and getattr(appcfg, "backlog_backend", "") == "jira":
+                            from .backlog.base import make_backlog
+                            from .contracts import Ticket
+                            bl = make_backlog(appcfg)
+                            t_obj = Ticket(id=tid, key=tid, summary=tid, description="", app=app_name)
+                            bl.set_status(t_obj, "To Do")
+                    except Exception:  # noqa: BLE001 - status transition must not block the re-run
+                        pass
             except Exception as exc:  # noqa: BLE001 - the re-run must never break the cockpit
                 _state["last_msg"] = f"answer to {tid} failed: {exc}"
 
         threading.Thread(target=_bg_clarify, daemon=True).start()
-        _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; the unit is "
-                              "re-running it with your decision.")
+        _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; ticket moved to To Do "
+                              "and the unit is re-running it with your decision.")
         return redirect("/needs")
 
     @app.post("/needs/resolve")
