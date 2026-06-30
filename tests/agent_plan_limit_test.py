@@ -9,6 +9,28 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import types
+
+# SDK stub for CI environments where claude-agent-sdk is not installed
+_sdk = types.ModuleType("claude_agent_sdk")
+
+class _Dummy:
+    def __init__(self, *a, **k):
+        # Store keyword args as attributes so they can be read later
+        for key, value in k.items():
+            setattr(self, key, value)
+    def __call__(self, *a, **k): return self
+_sdk.__getattr__ = lambda n: _Dummy
+sys.modules["claude_agent_sdk"] = _sdk
+
+# Add SDK classes that orchestrator modules import
+_sdk.ClaudeAgentOptions = _Dummy
+_sdk.AssistantMessage = _Dummy
+_sdk.ToolUseBlock = _Dummy
+_sdk.HookMatcher = _Dummy
+_sdk.ResultMessage = _Dummy
+_sdk.TextBlock = _Dummy
+_sdk.query = _Dummy()
 
 # Add parent directory to path for imports
 sys.path.insert(0, ".")

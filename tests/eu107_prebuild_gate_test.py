@@ -1,11 +1,25 @@
 """EU-107: Pre-build gate integration tests."""
 import sys, types, asyncio
+
+# SDK stub for CI environments where claude-agent-sdk is not installed
 sdk = types.ModuleType("claude_agent_sdk")
 class _D:
-    def __init__(s, *a, **k): pass
+    def __init__(s, *a, **k):
+        # Store keyword args as attributes so they can be read later
+        for key, value in k.items():
+            setattr(s, key, value)
     def __call__(s, *a, **k): return s
 sdk.__getattr__ = lambda n: _D
 sys.modules["claude_agent_sdk"] = sdk
+
+# Add SDK classes that orchestrator modules import
+sdk.ClaudeAgentOptions = _D
+sdk.AssistantMessage = _D
+sdk.ToolUseBlock = _D
+sdk.HookMatcher = _D
+sdk.ResultMessage = _D
+sdk.TextBlock = _D
+sdk.query = _D()
 sys.path.insert(0, ".")
 
 from orchestrator import gate, senior_pm, loop
