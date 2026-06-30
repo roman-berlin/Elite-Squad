@@ -194,6 +194,7 @@ class Config:
                                             # so arming it costs nothing until an app opts a command in.
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
+    prebuild_gate_enabled: bool = False     # EU-134: ARMED by default (when False, gate is skipped; flip True only after conservative logic is verified)
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
     postmortem_after: int = 3               # auto-write a post-mortem once a ticket has failed this many times (0 = off); see forensics.py
 

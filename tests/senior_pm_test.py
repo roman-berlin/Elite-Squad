@@ -41,8 +41,8 @@ _refile = senior_pm.parse_verdict(_refile_text)
 chk("REFILE parsed", _refile["verdict"] == "REFILE")
 chk("REFILE extracts tickets", len(_refile.get("tickets", [])) == 1, str(_refile.get("tickets")))
 chk("REFILE ticket title", _refile["tickets"][0]["title"] == "Fix billing performance", str(_refile["tickets"]))
-# Unclear reply → REFILE fail-safe
-chk("unclear -> REFILE (fail-safe: refile for review)", senior_pm.parse_verdict("hmm, not sure")["verdict"] == "REFILE")
+# Unclear reply → CONTINUE fail-safe (EU-134: conservative bias to build)
+chk("unclear -> CONTINUE (fail-safe: build)", senior_pm.parse_verdict("hmm, not sure")["verdict"] == "CONTINUE")
 # Body excludes verdict line
 d = senior_pm.parse_verdict("Answer: use the Observe pattern.\nSENIOR_PM VERDICT: ANSWER")
 chk("body excludes the verdict line", "SENIOR_PM VERDICT" not in d["body"] and "Observe" in d["body"])

@@ -186,6 +186,11 @@ async def prebuild_gate(cfg, worklist, audit):
     Returns:
         Filtered worklist with only tickets that need a build.
     """
+    # EU-134: Check if gate is enabled; if not, pass all tickets through
+    if not cfg.prebuild_gate_enabled:
+        print("  · pre-build gate: disabled (prebuild_gate_enabled=False) — passing all tickets to Builder", flush=True)
+        return worklist
+
     from . import loop, senior_pm
     from .backlog.base import make_backlog
 
@@ -205,7 +210,7 @@ async def prebuild_gate(cfg, worklist, audit):
         # Run Senior PM triage
         print(f"  · {ticket_id}: running pre-build triage...", flush=True)
         try:
-            pm_audit = await senior_pm.triage_async(cfg, ticket, auto_mode=True)
+            pm_audit = await senior_pm.triage_async(cfg, ticket, auto_mode=cfg.auto_mode)
             verdict = pm_audit.verdict
 
             # Record the triage decision
@@ -217,56 +222,84 @@ async def prebuild_gate(cfg, worklist, audit):
 
             triage_results.append((ticket_id, verdict))
 
+            # EU-134: Conservative post-triage check — override to CONTINUE for tickets that need a build
+            # Tickets with acceptance criteria ALWAYS continue (never ANSWER/CLOSE/REFILE them).
+            # [Feature] or [Bug] labeled tickets ALWAYS continue (they require implementation).
+            if ticket.acceptance_criteria or any(label in ["Feature", "Bug"] for label in (ticket.labels or [])):
+                if verdict != "CONTINUE":
+                    print(f"  · {ticket_id}: overriding {verdict} → CONTINUE (ticket has AC or [Feature]/[Bug] tag)", flush=True)
+                    audit.record("prebuild_override", ticket_id=ticket_id, from_verdict=verdict, to_verdict="CONTINUE",
+                               reason="conservative: ticket with AC or Feature/Bug tag always continues")
+                    verdict = "CONTINUE"
+
             # Act on the verdict
             backlog = make_backlog(app)
 
             if verdict == "ANSWER":
-                # Senior PM answered the question → close ticket
-                print(f"  · {ticket_id}: ANSWER → closing with answer", flush=True)
-                backlog.add_comment(ticket, pm_audit.raw)
-                backlog.set_status(ticket, "Done")
-                audit.record("prebuild_close", ticket_id=ticket_id, reason="answered")
+                # Senior PM answered the question → close ticket (if auto_mode is on, else Needs-you)
+                if cfg.auto_mode:
+                    print(f"  · {ticket_id}: ANSWER → closing with answer", flush=True)
+                    backlog.add_comment(ticket, pm_audit.raw)
+                    backlog.set_status(ticket, "Done")
+                    audit.record("prebuild_close", ticket_id=ticket_id, reason="answered")
+                else:
+                    print(f"  · {ticket_id}: ANSWER → Needs-you (auto_mode off)", flush=True)
+                    backlog.add_comment(ticket, pm_audit.raw)
+                    backlog.set_status(ticket, "Needs you")
+                    audit.record("prebuild_needs_you", ticket_id=ticket_id, reason="answered_but_auto_mode_off")
 
             elif verdict == "CLOSE":
-                # Invalid/duplicate → close with reason
-                print(f"  · {ticket_id}: CLOSE → closing", flush=True)
-                backlog.add_comment(ticket, pm_audit.raw)
-                backlog.set_status(ticket, "Done")
-                audit.record("prebuild_close", ticket_id=ticket_id, reason="invalid")
+                # Invalid/duplicate → close with reason (if auto_mode is on, else Needs-you)
+                if cfg.auto_mode:
+                    print(f"  · {ticket_id}: CLOSE → closing", flush=True)
+                    backlog.add_comment(ticket, pm_audit.raw)
+                    backlog.set_status(ticket, "Done")
+                    audit.record("prebuild_close", ticket_id=ticket_id, reason="invalid")
+                else:
+                    print(f"  · {ticket_id}: CLOSE → Needs-you (auto_mode off)", flush=True)
+                    backlog.add_comment(ticket, pm_audit.raw)
+                    backlog.set_status(ticket, "Needs you")
+                    audit.record("prebuild_needs_you", ticket_id=ticket_id, reason="close_but_auto_mode_off")
 
             elif verdict == "REFILE":
-                # Misrouted → re-file as new tickets and close original
-                print(f"  · {ticket_id}: REFILE → creating {len(pm_audit.refile_targets)} new ticket(s)", flush=True)
-                backlog.add_comment(ticket, pm_audit.raw)
+                # Misrouted → re-file as new tickets and close original (if auto_mode is on, else Needs-you)
+                if cfg.auto_mode:
+                    print(f"  · {ticket_id}: REFILE → creating {len(pm_audit.refile_targets)} new ticket(s)", flush=True)
+                    backlog.add_comment(ticket, pm_audit.raw)
 
-                # Create the new tickets
-                filed_keys = []
-                for new_ticket in pm_audit.refile_targets:
-                    try:
-                        new_key = backlog.create_task(
-                            summary=new_ticket.get("title", ""),
-                            description=new_ticket.get("body", ""),
-                            labels=["autodev", "refiled"],
-                            issue_type=new_ticket.get("type", "Task")
-                        )
-                        if new_key:
-                            filed_keys.append(new_key)
-                            audit.record("prebuild_refile",
+                    # Create the new tickets
+                    filed_keys = []
+                    for new_ticket in pm_audit.refile_targets:
+                        try:
+                            new_key = backlog.create_task(
+                                summary=new_ticket.get("title", ""),
+                                description=new_ticket.get("body", ""),
+                                labels=["autodev", "refiled"],
+                                issue_type=new_ticket.get("type", "Task")
+                            )
+                            if new_key:
+                                filed_keys.append(new_key)
+                                audit.record("prebuild_refile",
+                                           ticket_id=ticket_id,
+                                           new_ticket_key=new_key,
+                                           title=new_ticket.get("title", ""))
+                        except Exception as e:
+                            print(f"  · {ticket_id}: failed to create refile ticket: {e}", flush=True)
+                            audit.record("prebuild_refile_failed",
                                        ticket_id=ticket_id,
-                                       new_ticket_key=new_key,
-                                       title=new_ticket.get("title", ""))
-                    except Exception as e:
-                        print(f"  · {ticket_id}: failed to create refile ticket: {e}", flush=True)
-                        audit.record("prebuild_refile_failed",
-                                   ticket_id=ticket_id,
-                                   error=str(e))
+                                       error=str(e))
 
-                # Close the original ticket with reference to new tickets
-                comment = pm_audit.raw
-                if filed_keys:
-                    comment += f"\n\nRefiled as: {', '.join(filed_keys)}"
-                backlog.add_comment(ticket, comment)
-                backlog.set_status(ticket, "Done")
+                    # Close the original ticket with reference to new tickets
+                    comment = pm_audit.raw
+                    if filed_keys:
+                        comment += f"\n\nRefiled as: {', '.join(filed_keys)}"
+                    backlog.add_comment(ticket, comment)
+                    backlog.set_status(ticket, "Done")
+                else:
+                    print(f"  · {ticket_id}: REFILE → Needs-you (auto_mode off)", flush=True)
+                    backlog.add_comment(ticket, pm_audit.raw)
+                    backlog.set_status(ticket, "Needs you")
+                    audit.record("prebuild_needs_you", ticket_id=ticket_id, reason="refile_but_auto_mode_off")
 
             else:
                 # CONTINUE or unknown → pass through to Builder
