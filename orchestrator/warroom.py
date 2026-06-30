@@ -1520,10 +1520,19 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     if active:
         mode = "live" if (ap_on or dry is False or inflight) else ("dry" if dry is True else None)
     # Elapsed on the live run; Stop only for a manual run (Autopilot stops from the header).
+    # EU-147: Use task-specific start time, not project-level run_started, so elapsed time
+    # reflects only the current task's duration.
     elapsed = None
-    rs = state.get("run_started")
-    if active and rs:
-        elapsed = _fmt_dur(datetime.now().timestamp() - rs)
+    ts = _scope(tasks, app)
+    if active and ts and ts[0].get("started"):
+        started_dt = ts[0]["started"]
+        if isinstance(started_dt, datetime):
+            elapsed = _fmt_dur(datetime.now().timestamp() - started_dt.timestamp())
+        elif isinstance(started_dt, str):
+            # Parse string timestamp if needed
+            parsed_ts = D._parse_ts(started_dt)
+            if parsed_ts:
+                elapsed = _fmt_dur(datetime.now().timestamp() - parsed_ts.timestamp())
     manual = bool(state.get("active")) and not ap_on
     run_obj = active_run(cfg, tasks, app, active)
     # EU-104: re-validate the live ticket against Jira — suppress the ghost 'Working' card if
