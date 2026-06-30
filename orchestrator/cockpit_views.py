@@ -272,7 +272,9 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
         for n in (a.name for a in cfg.apps) if n in open_set)
     if not openable:
         rows = "<span class=allopen>Every project is already open in a tab.</span>"
-    picker = (f"<div class=tabpick><div class=ph>Open a project in a new tab</div>{rows}"
+    # EU-143: add "New product" entry to the tab picker instead of a separate button
+    new_product = "<a href='/onboard' class=newprod>&#10133; New product</a>"
+    picker = (f"<div class=tabpick><div class=ph>Open a project in a new tab</div>{new_product}{rows}"
               + (f"<div class=sep></div>{taken}" if taken else "") + "</div>")
     return f"""
 <style>
@@ -290,6 +292,8 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 .tabstrip .tabpick{{position:absolute;top:calc(100% + 6px);left:0;z-index:30;min-width:212px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r-lg);padding:6px;display:flex;flex-direction:column;gap:2px;box-shadow:var(--shadow-3)}}
 .tabstrip .tabpick a{{display:flex;align-items:center;color:var(--ink);border-radius:var(--r-md);padding:9px 11px;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}}
 .tabstrip .tabpick a:hover{{background:var(--line)}}
+.tabstrip .tabpick a.newprod{{color:var(--accent);font-weight:700}}
+.tabstrip .tabpick a.newprod:hover{{background:var(--accentbg);border:1px solid var(--accentline)}}
 .tabstrip .tabpick .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);padding:6px 11px 3px}}
 .tabstrip .tabpick .sep{{height:1px;background:var(--line);margin:5px 4px}}
 .tabstrip .tabpick .taken,.tabstrip .tabpick .allopen{{display:flex;align-items:center;color:var(--faint);padding:9px 11px;font-size:13px;font-weight:500;cursor:not-allowed;white-space:nowrap}}
@@ -642,7 +646,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
-  <a class="btn" href="/onboard" title="Scaffold a new product into the unit (config + Jira)">&#10133; Product</a>
   <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
   <a class="btn" href="/roster-doc" title="Officers, soldiers &amp; duties — the full unit roster">&#128101; Roster</a>
   {promote_html}
