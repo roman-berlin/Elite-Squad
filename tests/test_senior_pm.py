@@ -287,6 +287,9 @@ async def test_locked_ticket_skip():
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
     try:
+        # Enable the prebuild gate for this test (EU-134)
+        cfg.prebuild_gate_enabled = True
+
         # Mock _worktree_path to return our locked path
         with patch('orchestrator.loop._worktree_path', return_value=locked_path):
             # Mock backlog functions
@@ -432,6 +435,9 @@ async def test_prebuild_gate_calls_senior_pm():
     mock_backlog.add_comment = MagicMock()
     mock_backlog.set_status = MagicMock()
 
+    # Enable the prebuild gate for this test (EU-134)
+    cfg.prebuild_gate_enabled = True
+
     with patch('orchestrator.senior_pm.triage_async', side_effect=mock_triage):
         with patch('orchestrator.backlog.base.make_backlog', return_value=mock_backlog):
             worklist = [(cfg.apps[0], ticket)]
@@ -496,12 +502,155 @@ def test_missing_citation_warning():
 test_missing_citation_warning()
 
 def test_no_verdict_line():
-    """Test that unclear reply defaults to REFILE (fail-safe)."""
+    """Test that unclear reply defaults to CONTINUE (fail-safe to build)."""
     text = "Hmm, I'm not sure what to do here."
     parsed = senior_pm.parse_verdict(text)
-    chk("unclear reply defaults to REFILE", parsed["verdict"] == "REFILE")
+    chk("unclear reply defaults to CONTINUE", parsed["verdict"] == "CONTINUE")
 
 test_no_verdict_line()
+
+# ---- (f) EU-134: Conservative behavior tests ----
+print("\n==== Testing Conservative Behavior (EU-134) ====")
+
+def test_continue_verdict_parsing():
+    """Test that CONTINUE verdict is properly parsed."""
+    text = "Ticket needs a build: feature with acceptance criteria\nSENIOR_PM VERDICT: CONTINUE"
+    parsed = senior_pm.parse_verdict(text)
+    chk("CONTINUE verdict is parsed", parsed["verdict"] == "CONTINUE")
+    chk("CONTINUE body is preserved", "Ticket needs a build" in parsed["body"])
+
+test_continue_verdict_parsing()
+
+async def test_feature_with_ac_continues():
+    """Test that a [Feature] ticket with acceptance criteria ALWAYS CONTINUES."""
+    ticket = Ticket(
+        id="EU-118",
+        key="EU-118",
+        summary="Add Finish&stop button to cockpit",
+        description="Add a button to the cockpit UI",
+        acceptance_criteria=[
+            "Button appears in the cockpit UI",
+            "Button stops the current autopilot run",
+            "Button moves ticket to Done"
+        ],
+        labels=["Feature"],
+        app="elite-unit"
+    )
+
+    async def fake_run_officer(**kw):
+        return (
+            "Ticket needs a build: [Feature] with acceptance criteria requires implementation\n"
+            "SENIOR_PM VERDICT: CONTINUE"
+        )
+
+    with patch('orchestrator.recon.run_officer', side_effect=fake_run_officer):
+        audit = await senior_pm.triage_async(cfg, ticket, repo_context="")
+
+    chk("[Feature]+AC returns CONTINUE verdict", audit.verdict == "CONTINUE")
+    chk("[Feature]+AC is not closed/answered", audit.verdict not in ("ANSWER", "CLOSE", "REFILE"))
+
+asyncio.run(test_feature_with_ac_continues())
+
+async def test_exact_duplicate_close_with_citation():
+    """Test that exact duplicate tickets CLOSE with proper citation."""
+    ticket = Ticket(
+        id="AUTO-200",
+        key="AUTO-200",
+        summary="Add billing parent route",
+        description="Add a parent route for billing",
+        app="automatixy"
+    )
+
+    async def fake_run_officer(**kw):
+        return (
+            "CITATION: AUTO-42 - identical billing parent route request\n"
+            "This is a duplicate of AUTO-42.\n"
+            "SENIOR_PM VERDICT: CLOSE"
+        )
+
+    with patch('orchestrator.recon.run_officer', side_effect=fake_run_officer):
+        audit = await senior_pm.triage_async(cfg, ticket)
+
+    chk("exact duplicate returns CLOSE verdict", audit.verdict == "CLOSE")
+    chk("exact duplicate includes citation to original", len(audit.citations) == 1)
+    chk("exact duplicate cites original ticket ID", "AUTO-42" in audit.citations[0]["source"])
+
+asyncio.run(test_exact_duplicate_close_with_citation())
+
+async def test_bare_question_answered():
+    """Test that a bare question with no AC gets ANSWERED."""
+    ticket = Ticket(
+        id="AUTO-201",
+        key="AUTO-201",
+        summary="Where is the config file?",
+        description="What file contains the tenant isolation config?",
+        app="automatixy"
+    )
+
+    async def fake_run_officer(**kw):
+        return (
+            "CITATION: .claude/rules/tenant-isolation.md - tenant isolation rules\n"
+            "Answer: Use the tenant-isolation.md rules.\n"
+            "SENIOR_PM VERDICT: ANSWER"
+        )
+
+    with patch('orchestrator.recon.run_officer', side_effect=fake_run_officer):
+        audit = await senior_pm.triage_async(cfg, ticket, repo_context="")
+
+    chk("bare question returns ANSWER verdict", audit.verdict == "ANSWER")
+    chk("bare question includes citation", len(audit.citations) == 1)
+    chk("bare question provides answer", "tenant-isolation.md" in audit.answer)
+
+asyncio.run(test_bare_question_answered())
+
+async def test_ambiguous_ticket_continues():
+    """Test that ambiguous/uncertain tickets CONTINUE (safe default)."""
+    ticket = Ticket(
+        id="AUTO-202",
+        key="AUTO-202",
+        summary="Improve performance",
+        description="The app feels slow",
+        app="automatixy"
+    )
+
+    async def fake_run_officer(**kw):
+        return (
+            "Ticket needs a build: vague performance request may need profiling/code changes\n"
+            "SENIOR_PM VERDICT: CONTINUE"
+        )
+
+    with patch('orchestrator.recon.run_officer', side_effect=fake_run_officer):
+        audit = await senior_pm.triage_async(cfg, ticket)
+
+    chk("ambiguous ticket returns CONTINUE verdict", audit.verdict == "CONTINUE")
+    chk("ambiguous ticket is not closed/refiled", audit.verdict not in ("CLOSE", "REFILE", "ANSWER"))
+
+asyncio.run(test_ambiguous_ticket_continues())
+
+async def test_bug_ticket_continues():
+    """Test that [Bug] tickets ALWAYS CONTINUE (never ANSWER/CLOSE)."""
+    ticket = Ticket(
+        id="EU-116",
+        key="EU-116",
+        summary="Fix memory leak in autopilot",
+        description="The autopilot loop has a memory leak",
+        labels=["Bug"],
+        app="elite-unit"
+    )
+
+    async def fake_run_officer(**kw):
+        return (
+            "Ticket needs a build: [Bug] requires investigation and fix\n"
+            "SENIOR_PM VERDICT: CONTINUE"
+        )
+
+    with patch('orchestrator.recon.run_officer', side_effect=fake_run_officer):
+        audit = await senior_pm.triage_async(cfg, ticket)
+
+    chk("[Bug] ticket returns CONTINUE verdict", audit.verdict == "CONTINUE")
+    chk("[Bug] ticket is not answered/closed", audit.verdict not in ("ANSWER", "CLOSE"))
+
+asyncio.run(test_bug_ticket_continues())
 
 # ---- Print results ----
 print("\n============ SENIOR PM COMPREHENSIVE TESTS ============")
