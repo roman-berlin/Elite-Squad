@@ -282,7 +282,7 @@ class _ClarifBL:
         clarif_bl_calls["create_task"] = True
         return None
     def set_status(s, t, st):
-        clarif_bl_calls["set_status"] = True
+        clarif_bl_calls["set_status"] = st
     def add_comment(s, t, b): pass
     def find_open_by_summary(s, summ): return None
 
@@ -292,7 +292,7 @@ client.post("/api/answer", data={"ticket": "AUTO-14", "app": "automatixy", "text
 chk("clarification: handle_reply called with TICKET: answer",
     clarif_calls.get("text") == "AUTO-14: use the 8/5 IA")
 chk("clarification: create_task NOT called on clarification", "create_task" not in clarif_bl_calls)
-chk("clarification: set_status NOT called on clarification", "set_status" not in clarif_bl_calls)
+chk("clarification: ticket transitioned to To Do", clarif_bl_calls.get("set_status") == "To Do")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,7 +307,8 @@ class _FallbackBL:
         fallback_posted["key"] = ticket.key
         fallback_posted["body"] = body
     def create_task(s, *a, **k): return None
-    def set_status(s, t, st): pass
+    def set_status(s, t, st):
+        fallback_posted["status"] = st
     def find_open_by_summary(s, summ): return None
 
 backlog_base.make_backlog = lambda app: _FallbackBL()
@@ -317,6 +318,7 @@ client.post("/api/answer", data={"ticket": "AUTO-9", "app": "automatixy", "text"
 chk("clarif fallback: answer posted as comment",
     fallback_posted.get("key") == "AUTO-9" and fallback_posted.get("body") == "go with option A")
 chk("clarif fallback: ticket unblocked", fallback_unblocked.get("tid") == "AUTO-9")
+chk("clarif fallback: ticket transitioned to To Do", fallback_posted.get("status") == "To Do")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

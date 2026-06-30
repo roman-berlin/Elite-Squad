@@ -41,24 +41,36 @@ client = server.create_app(cfg).test_client()
 
 # --- Case 1: a pending decision -> handle_reply (resolve + re-run with the answer) ---
 calls = {}
+status_set = {}
 decisions.handle_reply = lambda c, a, text: (calls.__setitem__("reply", text) or True)
+class _FakeBL_Status:
+    def set_status(s, ticket, status):
+        status_set["ticket"] = ticket.key
+        status_set["status"] = status
+backlog_base.make_backlog = lambda app: _FakeBL_Status()
 client.post("/api/answer", data={"ticket": "AUTO-14", "app": "automatixy", "text": "use the 8/5 IA"})
 chk("answer -> handle_reply called as 'TICKET: answer'", calls.get("reply") == "AUTO-14: use the 8/5 IA")
 chk("answer -> success message", "re-running" in server._state.get("last_msg", ""))
+chk("answer -> ticket transitioned to To Do", status_set.get("ticket") == "AUTO-14" and status_set.get("status") == "To Do")
 
 # --- Case 2: NO pending decision -> record as a ticket comment + unblock ---
 decisions.handle_reply = lambda c, a, t: False
 posted = {}
+status_set = {}
 class _FakeBL:
     def add_comment(s, ticket, body):
         posted["key"] = ticket.key
         posted["body"] = body
+    def set_status(s, ticket, status):
+        status_set["ticket"] = ticket.key
+        status_set["status"] = status
 backlog_base.make_backlog = lambda app: _FakeBL()
 unblocked = {}
 autopilot.unblock = lambda c, tid: (unblocked.__setitem__("tid", tid) or "unblocked")
 client.post("/api/answer", data={"ticket": "AUTO-9", "app": "automatixy", "text": "go with option A"})
 chk("no decision -> answer posted as a ticket comment", posted.get("key") == "AUTO-9" and posted.get("body") == "go with option A")
 chk("no decision -> ticket unblocked for retry", unblocked.get("tid") == "AUTO-9")
+chk("no decision -> ticket transitioned to To Do", status_set.get("ticket") == "AUTO-9" and status_set.get("status") == "To Do")
 chk("no decision -> message says sent + cleared + re-running",
     "cleared from Needs-you" in server._state.get("last_msg", "")
     and "re-running" in server._state.get("last_msg", ""))
