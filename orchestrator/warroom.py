@@ -227,6 +227,32 @@ def _last_council(cfg) -> Optional[datetime]:
 # --------------------------------------------------------------------------- #
 # Data (JSON-safe primitives)
 
+def _load_security_blocks(cfg) -> list[dict]:
+    """Load all security_block events from the audit log, newest first.
+
+    Each dict includes: ticket_id, reason, ts (timestamp), app (if available).
+    """
+    blocks = []
+    for line in D.audit_lines(cfg.audit_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") == "security_block":
+            blocks.append({
+                "ticket_id": ev.get("ticket_id", ""),
+                "reason": ev.get("reason", "")[:2500],  # Match loop.py truncation
+                "ts": ev.get("ts", ""),
+                "iteration": ev.get("iteration", 1),
+            })
+    # Sort newest first
+    blocks.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return blocks
+
+
 def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     ts = _scope(tasks, app)
     today = datetime.now().strftime("%Y-%m-%d")
@@ -237,9 +263,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    passes = [t["passes"] for t in merged if t.get("passes")]
-    avg_passes = round(sum(passes) / len(passes), 1) if passes else 0
-    sec_blocks = _scan(cfg.audit_path)["count"].get("security_block", 0)
+    sec_blocks = _load_security_blocks(cfg)
+    sec_block_count = len(sec_blocks)
 
     # EU-76: pre-compute sparkline series for the Merged→DEV and cost/burn KPI cards.
     # Both helpers are best-effort: an empty audit or absent ledger yields all-zeros, which
@@ -270,9 +295,9 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "sparkline": merges_series},  # EU-76: 14-day daily merge trend
         {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
          "tone": "warn" if _needs_count else None, "href": "/needs"},   # EU-93: deep-link to the unified Needs-you inbox
-        {"label": "Avg passes / ticket", "value": avg_passes, "hint": "lower is cleaner"},
-        {"label": "Security blocks", "value": sec_blocks, "hint": "Security Engineer gate (all time)",
-         "tone": "bad" if sec_blocks else None, "href": "/forensics?cat=security_block"},
+        {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate (all time)",
+         "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
+         "security_block_findings": sec_blocks},  # EU-145: pass actual findings for interactive card
     ]
 
     # EU-75 — token-burn KPI cards, wired straight from the local ledger.
@@ -287,21 +312,22 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         w = _usage.windows(cfg)
         sess_total, sess_calls = w["today"]["total"], w["today"]["calls"]
         week_total, week_calls = w["week"]["total"], w["week"]["calls"]
+        tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
+        # Merge today and week tokens into a single card
         if bs["on"] and bs.get("over"):
-            # Budget exhausted — pause state trumps everything else.
+            # Budget exhausted — show paused state
             tok_value = "⛔ paused — budget hit"
             tok_hint = "daily cap reached · resets at local midnight"
         elif bs["on"]:
-            # Cap configured and not yet hit — show % consumed in both value and hint.
+            # Cap configured and not yet hit — show % consumed
             pct_str = f"{round(bs['pct'] * 100)}%"
-            tok_value = f"{_fmt_tokens(sess_total)} · {pct_str}"
-            tok_hint = f"cap {_fmt_tokens(bs['cap'])} · {pct_str} · resets at local midnight"
+            tok_value = f"{_fmt_tokens(sess_total)} today · {pct_str}"
+            tok_hint = f"{_fmt_tokens(week_total)} this week · {week_calls} calls · 7-day rolling · cap {_fmt_tokens(bs['cap'])} · resets at local midnight"
         else:
-            tok_value = _fmt_tokens(sess_total)
-            tok_hint = f"{sess_calls} calls · no daily cap set"
-        tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
+            tok_value = f"{_fmt_tokens(sess_total)} today"
+            tok_hint = f"{_fmt_tokens(week_total)} this week · {sess_calls + week_calls} calls total · no daily cap set"
         cards.append({
-            "label": "Tokens today",
+            "label": "Tokens",
             "value": tok_value,
             "hint": tok_hint,
             "tone": tok_tone,
@@ -309,12 +335,6 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
             "gauge": bs["pct"] if bs["on"] else None,
             "href": "/usage",
             "sparkline": burn_series,  # EU-76: 14-day daily token-burn trend
-        })
-        cards.append({
-            "label": "Tokens this week",
-            "value": _fmt_tokens(week_total),
-            "hint": f'{week_calls} calls · 7-day rolling',
-            "href": "/usage",
         })
     except Exception:  # noqa: BLE001 — never let usage metering break the board
         pass
@@ -777,11 +797,71 @@ def _esc(s: Any) -> str:
     return html.escape(str(s))
 
 
+def _security_issues_html(findings: list[dict]) -> str:
+    """Render the interactive security issues list with reply forms (EU-145).
+
+    Each issue shows:
+    - Ticket ID (link to /tasks?filter=<ticket_id>)
+    - The security finding text (truncated for readability)
+    - Timestamp
+    - A reply form to record a response to the audit log
+    """
+    if not findings:
+        return '<div class=secempty>No security blocks recorded yet.</div>'
+
+    out = []
+    for i, finding in enumerate(findings[:10]):  # Show at most 10 issues
+        ticket_id = _esc(finding.get("ticket_id", ""))
+        reason = _esc(finding.get("reason", "")[:480])  # Truncate for display
+        ts_str = finding.get("ts", "")
+        ts = _parse(ts_str)
+        ago = _rel(ts) if ts else "—"
+        iteration = finding.get("iteration", 1)
+
+        # Build the issue HTML with reply form
+        out.append(f'''
+<div class=secissue>
+  <div class=sechead>
+    <span class=secticket><a href="/tasks?filter={quote(ticket_id)}">{ticket_id}</a></span>
+    <span class=secmeta>iteration {iteration} · {ago}</span>
+  </div>
+  <div class=secbody>{reason}</div>
+  <form method=post action=/api/security-reply class=secreply>
+    <input type=hidden name=ticket_id value="{_esc(ticket_id)}">
+    <input type=hidden name=iteration value="{iteration}">
+    <textarea name=response placeholder="Add your response (creates Jira ticket for CRITICAL/HIGH issues)…"
+              rows=2 maxlength=2000 required></textarea>
+    <button type=submit class=secbtn>Record response</button>
+  </form>
+</div>''')
+
+    if len(findings) > 10:
+        out.append(f'<div class=secmore>{len(findings) - 10} more — view all in <a href="/forensics?cat=security_block">forensics</a></div>')
+
+    return "\n".join(out)
+
+
 def _kpi_html(cards: list[dict]) -> str:
     out = []
     for c in cards:
         tone = c.get("tone") or ""
         href = c.get("href")
+        label = _esc(c.get("label", ""))
+        # EU-145: Security blocks card is interactive with expandable details
+        is_security_card = label == "Security blocks"
+        findings = c.get("security_block_findings") or []
+        if is_security_card:
+            # Always render interactive card, even when empty
+            issues_html = _security_issues_html(findings) if findings else '<div class=secempty>No security blocks recorded yet.</div>'
+            out.append(
+                f'<details class="kpi {tone}" open>'
+                f'<summary class=kpisum><div class=kv>{_esc(c["value"])}</div>'
+                f'<div class=kl>{_esc(c["label"])}</div>'
+                f'<div class=kh>{_esc(c["hint"])}</div></summary>'
+                f'{issues_html}'
+                f'</details>')
+            continue
+
         tag, attr, link = ("a", f' href="{href}"', " link") if href else ("div", "", "")
         # Optional inline gauge bar (EU-75 tokens-today/cap card). Rendered via inline
         # style so the existing CSS block is untouched; bar colour tracks the card tone.
@@ -1718,7 +1798,7 @@ font-size:12px;font-weight:600;cursor:pointer}
 .tag{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
 .tag.bad{background:var(--badbg);color:var(--bad)}.tag.warn{background:var(--warnbg);color:var(--warn)}
 /* kpis */
-.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;padding:22px 24px 8px}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:22px 24px 8px}
 .kpi{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:16px 17px;
 overflow:hidden;box-shadow:var(--shadow-1);transition:border-color var(--t-fast),transform var(--t-fast),box-shadow var(--t-fast)}
 .kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--line2)}
@@ -1731,6 +1811,30 @@ a.kpi:hover{border-color:var(--accent)}
 .kpi.ok::before{background:var(--ok)}.kpi.ok .kv{color:var(--ok)}
 .kpi.warn::before{background:var(--warn)}.kpi.warn .kv{color:var(--warn)}
 .kpi.bad::before{background:var(--bad)}.kpi.bad .kv{color:var(--bad)}
+/* EU-145: Security blocks interactive card */
+.kpi{overflow:visible}
+.kpi summary{list-style:none;cursor:pointer}
+.kpi summary::-webkit-details-marker{display:none}
+.kpi summary.kpisum{padding:16px 17px}
+.kpi[open] summary.kpisum{padding-bottom:8px}
+.secissue{border-top:1px solid var(--line);padding:12px 17px}
+.sechead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.secticket{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--info);text-decoration:none}
+.secticket:hover{text-decoration:underline}
+.secmeta{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
+.secbody{font-size:12px;color:var(--dim);line-height:1.5;margin-bottom:10px;white-space:pre-wrap}
+.secreply{margin-top:8px}
+.secreply textarea{width:100%;background:#0d1119;border:1px solid var(--line2);color:var(--ink);
+  border-radius:var(--r-sm);padding:8px 10px;font:inherit;font-size:11px;resize:vertical;min-height:50px;
+  margin-bottom:8px}
+.secreply textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
+.secbtn{background:var(--accent);color:#fff;border:0;border-radius:var(--r-sm);padding:6px 12px;
+  font-size:11px;font-weight:600;cursor:pointer;transition:background var(--t-fast)}
+.secbtn:hover{background:#3b5ecc}
+.secempty{padding:12px 17px;color:var(--faint);font-size:12px;font-style:italic}
+.secmore{padding:8px 17px;font-size:11px;color:var(--dim);border-top:1px solid var(--line2)}
+.secmore a{color:var(--info);text-decoration:none}
+.secmore a:hover{text-decoration:underline}
 /* layout */
 .cols{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:14px 26px 40px}
 .col-main{display:flex;flex-direction:column;gap:16px;min-width:0}
