@@ -365,6 +365,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
 
     audit = AuditLog(cfg.audit_path)
     from . import cockpit_state
+    from .git_ops import clear_parked_repos
     run_key = app_name or None
     owns_run_state = False    # set True only once claim_run succeeds; gates release in the finally
     run_state = None
@@ -378,8 +379,15 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             _orig_sigterm = signal.getsignal(signal.SIGTERM)
             signal.signal(signal.SIGTERM, _handle_sigterm)
 
+        # EU-128: Clear parked repos ONCE per autopilot run (not every cycle) so notifications
+        # fire once per run, not once per cycle. A misconfigured app parks and alerts once;
+        # subsequent cycles silently skip it without spamming.
+        clear_parked_repos()
+
         blocked = load_blocked(cfg)
         error_counts = load_error_counts(cfg)   # per-ticket consecutive-ERROR tally (retry-before-park)
+        # EU-128: Track tickets previewed in dry-run mode to prevent re-picking them in continuous mode
+        previewed_tickets: set[str] = set()
         cap = max(1, cfg.max_tickets_per_run)
         mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
 
@@ -391,11 +399,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         scope = app_name or "all backlog apps"
         notify.send(f"🛸 Autopilot {mode} online — working {scope}")
         print(f"🛸 Autopilot {mode} — {scope}. Ctrl-C to stop.", flush=True)
-        if not cfg.dry_run and not once:
-            pass
-        elif cfg.dry_run and not once:
-            print("  ⚠ continuous + dry-run would re-pick the same ticket forever; use --live for "
-                  "continuous, or keep --once for a dry test.", flush=True)
+        if cfg.dry_run and not once:
+            print("  · continuous + dry-run: previewing tickets once, then idling (won't re-pick). "
+                  "Use --live for continuous processing, or --once for a single dry test.", flush=True)
 
         audit.record("autopilot_start", mode=mode, app=app_name, once=once)
         budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
@@ -607,6 +613,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # drawn work above; answered resumes are intentionally additive (see note above).
             worklist = in_progress + answered_items + to_do
 
+            # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed
+            # to prevent re-picking the same ticket forever. Track previewed tickets so they're
+            # skipped in subsequent cycles, but valid apps still drain.
+            if cfg.dry_run and not once and previewed_tickets:
+                worklist = [(a, t) for (a, t) in worklist if t.id not in previewed_tickets]
+                if worklist:
+                    print(f"  · skipping {len(previewed_tickets)} previewed ticket(s) (dry-run mode)", flush=True)
+                else:
+                    print(f"  · all tickets previewed — idling (dry-run mode)", flush=True)
+
             if not worklist:
                 # An empty worklist is NOT necessarily a clear queue: a board that failed to drain
                 # (bad/expired token, network, renamed project) yields zero items too. Surface that as
@@ -710,6 +726,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                             + "\nReply /unblock <id> once handled and I'll retry it.")
             _learn_from_cycle(cfg, reports, audit)   # fold this cycle's lessons into memory (free)
             await events.after_cycle(cfg, reports, audit, blocked)   # the unit may convene itself
+
+            # EU-128: In dry-run mode, track processed tickets so they're not re-picked in
+            # subsequent cycles. This prevents continuous+dry-run from re-processing the same
+            # tickets forever while still allowing valid apps to drain.
+            if cfg.dry_run:
+                processed_ids = {r.ticket_id for r in reports}
+                previewed_tickets.update(processed_ids)
+
             if once:
                 break
             # A transient error gets a short backoff before the next look; otherwise a brief breath.

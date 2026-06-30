@@ -2,14 +2,29 @@
 keeps `dev` green and is hard-blocked from touching the protected branch (main)."""
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 
 class GitError(RuntimeError):
     pass
+
+
+# Class-level set to track repos that have failed validation and should be parked
+# for the rest of the run. Once a repo fails git validation, we skip it to avoid
+# repeated crash-loops and error spam (EU-128).
+_PARKED_REPOS: set[str] = set()
+
+
+def clear_parked_repos() -> None:
+    """Clear the parked repos set at the start of a new run.
+    This ensures parking doesn't carry over between different autopilot cycles or runs."""
+    _PARKED_REPOS.clear()
 
 
 class Git:
@@ -32,6 +47,54 @@ class Git:
     def workdir(self) -> str:
         """Directory the officers + gate should run in (the worktree when isolated)."""
         return str(self.repo)
+
+    # -- preflight checks -------------------------------------------------- #
+    @staticmethod
+    def is_git_repo(path: Path | str) -> bool:
+        """Check if a path is a valid git repository."""
+        repo_path = Path(path).expanduser().resolve()
+        git_dir = repo_path / ".git"
+        # Check for either a .git directory (regular checkout) or .git file (worktree)
+        return git_dir.is_dir() or git_dir.is_file()
+
+    def _is_parked(self) -> bool:
+        """Check if this repo is already parked due to prior validation failure."""
+        return str(self.repo) in _PARKED_REPOS or str(self.main) in _PARKED_REPOS
+
+    def _park_repo(self, reason: str) -> None:
+        """Park this repo for the rest of the run and log the failure."""
+        _PARKED_REPOS.add(str(self.repo))
+        if self.isolated and str(self.repo) != str(self.main):
+            _PARKED_REPOS.add(str(self.main))
+        logger.warning(f"Git repo parked: {self.repo} - {reason}")
+        print(f"  · skipping {self.main} — repo validation failed: {reason}", flush=True)
+
+    def _validate_repo(self) -> bool:
+        """Preflight check: verify repo exists and base_branch resolves.
+        Returns False if validation fails (repo is then parked)."""
+        # Check if already parked from a prior failure
+        if self._is_parked():
+            return False
+
+        # Check if main repo path is a valid git repository
+        if not self.is_git_repo(self.main):
+            self._park_repo("not a git repository")
+            return False
+
+        # For isolated mode, also check the worktree path
+        if self.isolated and not self.is_git_repo(self.repo):
+            self._park_repo("worktree not a git repository")
+            return False
+
+        # Validate that base_branch resolves (especially important for isolated mode
+        # which uses origin/<base> as the integration point)
+        try:
+            self._git(self.main, "rev-parse", "--verify", self.base_ref, check=True)
+        except GitError as exc:
+            self._park_repo(f"base branch '{self.base_ref}' does not resolve")
+            return False
+
+        return True
 
     # -- low level -------------------------------------------------------- #
     def _git(self, cwd: Path, *args: str, check: bool = True) -> str:
@@ -66,12 +129,18 @@ class Git:
         Fetch is intentionally performed BEFORE resolving or creating the worktree so
         that the worktree always starts from the latest remote state — never a stale
         local ref — regardless of how long the previous run took."""
+        # Preflight validation - check if repo is valid before attempting setup
+        if not self.is_git_repo(self.main):
+            self._park_repo("not a git repository")
+            raise GitError(f"cannot setup worktree: '{self.main}' is not a git repository")
+
         if not self.isolated:
             return False
         self._git(self.main, "fetch", "origin", self.base, check=False)
         check = subprocess.run(["git", "rev-parse", "--verify", "--quiet", self.base_ref],
                                cwd=self.main, capture_output=True, text=True)
         if check.returncode != 0:
+            self._park_repo(f"base branch '{self.base_ref}' does not resolve")
             raise GitError(f"cannot isolate: '{self.base_ref}' does not resolve "
                            f"(no origin remote, or branch '{self.base}' was never pushed)")
         self._git(self.main, "worktree", "prune", check=False)
@@ -89,16 +158,46 @@ class Git:
 
     # -- state ------------------------------------------------------------ #
     def ensure_clean(self) -> None:
-        if self._run("status", "--porcelain"):
-            raise GitError("working tree is dirty; commit or stash before running")
+        """Check if working tree is clean. Raises GitError if dirty.
+        Safe-failing: if repo validation fails, parks the app and raises."""
+        # Preflight validation - will park if this fails
+        if not self._validate_repo():
+            raise GitError(f"repo validation failed for {self.main}")
+
+        try:
+            status_output = self._run("status", "--porcelain", check=True)
+            if status_output:
+                raise GitError("working tree is dirty; commit or stash before running")
+        except (GitError, OSError) as exc:
+            # Git command failed - park the repo and raise
+            if not isinstance(exc, GitError) or "working tree is dirty" not in str(exc):
+                self._park_repo(f"git status failed")
+            if not isinstance(exc, GitError):
+                raise GitError(f"git status failed for {self.main}") from exc
+            raise
 
     def current_sha(self) -> str:
-        return self._run("rev-parse", "HEAD")
+        """Get current HEAD sha. Safe-failing: returns empty string on error."""
+        try:
+            return self._run("rev-parse", "HEAD", check=False)
+        except (subprocess.SubprocessError, OSError):
+            return ""
 
     def has_changes(self) -> bool:
-        return bool(self._run("status", "--porcelain")) or bool(
-            self._run("rev-list", f"{self.base_ref}..HEAD", check=False)
-        )
+        """Check if there are uncommitted changes or commits ahead of base.
+        Safe-failing: returns False if git validation fails."""
+        # Preflight validation - will park if this fails
+        if not self._validate_repo():
+            return False
+
+        try:
+            status_output = self._run("status", "--porcelain", check=True)
+            revlist_output = self._run("rev-list", f"{self.base_ref}..HEAD", check=True)
+            return bool(status_output) or bool(revlist_output)
+        except (GitError, OSError) as exc:
+            # Git command failed - park the repo and return False (safe default)
+            self._park_repo(f"git check failed")
+            return False
 
     # -- branch / diff ---------------------------------------------------- #
     def checkout_feature(self, branch: str) -> None:
