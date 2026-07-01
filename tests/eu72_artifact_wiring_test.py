@@ -76,10 +76,12 @@ tk = Ticket(id="AUTO-72", key="AUTO-72", summary="structured handoffs",
 
 # -- builder.build: reads the spec, publishes a BuildArtifact -------------------------------- #
 b_prompt = {}
-async def fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
+async def fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     b_prompt["p"] = prompt
     return AgentRun(text=_summary, final=_summary, cost_usd=0.1, num_turns=2, is_error=False, tools=[])
+# EU-108: stub run_agent_with_fallback so builder tests don't hit real async iteration
 builder.run_agent = fake_build_agent
+builder.run_agent_with_fallback = fake_build_agent
 cfg.delegation_enabled = False           # force the solo path (no squad), so build() publishes directly
 from orchestrator.contracts import BuildRequest
 store_b = PerTicketArtifactStore()
@@ -98,7 +100,7 @@ chk("build() with store=None does not raise (back-compat)",
 ba = BuildArtifact(files_changed=["orchestrator/zzz.py"], diff_digest="DIGEST_TOKEN",
                    decisions=[], open_questions=["OQ_TOKEN"])
 te_prompt = {}
-async def fake_te_agent(prompt, options, tag=""):
+async def fake_te_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     te_prompt["p"] = prompt
     return AgentRun(text="COVERAGE: lines 80→90", final="COVERAGE: lines 80→90",
                     cost_usd=0.1, num_turns=1, is_error=False, tools=[])
@@ -118,7 +120,7 @@ chk("TestEngineerArtifact.ok matches run success", store_te.test.ok is True)
 chk("TestEngineerArtifact.coverage_pct is None when no % in COVERAGE line",
     store_te.test.coverage_pct is None)
 # A COVERAGE line with a percentage parses correctly.
-async def fake_te_pct(prompt, options, tag=""):
+async def fake_te_pct(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     return AgentRun(text="COVERAGE: lines 82→91%", final="COVERAGE: lines 82→91%",
                     cost_usd=0.0, num_turns=1, is_error=False, tools=[])
 test_engineer.run_agent = fake_te_pct
@@ -136,7 +138,7 @@ chk("ensure_coverage falls back to store.build when build_artifact arg omitted",
 
 # -- reviewer.review: consumes the BuildArtifact, publishes a typed ReviewVerdict ------------ #
 r_prompt = {}
-async def fake_review_agent(prompt, options, tag=""):
+async def fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     r_prompt["p"] = prompt
     return AgentRun(text="", final='```json\n{"verdict":"PASS","spec_conformance":{"met":true,"gaps":[]},'
                     '"quality":{"issues":[]},"required_changes":[],"summary":"ok"}\n```',

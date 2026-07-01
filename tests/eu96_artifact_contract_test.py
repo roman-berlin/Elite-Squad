@@ -130,7 +130,7 @@ chk("ensure_coverage accepts 'build_artifact' keyword arg",
 b_prompt_cap: dict[str, str] = {}
 
 
-async def _fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
+async def _fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     """Stub run_agent for the builder: captures the prompt, returns a fake AgentRun."""
     b_prompt_cap["p"] = prompt
     return AgentRun(
@@ -146,6 +146,8 @@ async def _fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number
 
 
 builder.run_agent = _fake_build_agent
+# EU-108: stub run_agent_with_fallback so builder tests don't hit real async iteration
+builder.run_agent_with_fallback = _fake_build_agent
 cfg.delegation_enabled = False  # force solo path so build() publishes directly
 
 store_b = PerTicketArtifactStore()
@@ -196,7 +198,7 @@ ba = BuildArtifact(
 r_prompt_cap: dict[str, str] = {}
 
 
-async def _fake_review_agent(prompt, options, tag=""):
+async def _fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     """Stub run_agent for the reviewer: captures the prompt, returns a PASS verdict."""
     r_prompt_cap["p"] = prompt
     return AgentRun(
@@ -243,7 +245,7 @@ chk("ReviewVerdict.blocking field is a list",
 te_prompt_cap: dict[str, str] = {}
 
 
-async def _fake_te_agent(prompt, options, tag=""):
+async def _fake_te_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     """Stub run_agent for the test engineer: captures the prompt, returns a coverage line."""
     te_prompt_cap["p"] = prompt
     return AgentRun(
