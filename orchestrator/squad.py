@@ -193,6 +193,10 @@ async def _run_gate(gate_cmd: str | None, cwd: str) -> tuple[str, str]:
     other Bash call before execution. The subprocess is capped at 120 s so a runaway compile or test
     suite can't stall the build loop (a timeout is reported as 'manual', not 'fail').
 
+    EU-146: Uses process group cleanup to prevent orphaned child processes (e.g. vitest worker
+    forks). On Unix, the process leader is created in a new session via setsid, ensuring all
+    children can be terminated together via os.killpg.
+
     Args:
         gate_cmd: The ``domain_gate`` string from the specialist charter — a shell command or a prose
             description. A prose gate runs as a shell line whose first word isn't a command, so it exits
@@ -208,16 +212,28 @@ async def _run_gate(gate_cmd: str | None, cwd: str) -> tuple[str, str]:
     if blocked:
         return "manual", f"⚠️  domain_gate BLOCKED by the hard guardrail — {reason}; manual QA required."
 
+    proc = None
     try:
+        # EU-146: Create a process group/leader to ensure all children (e.g. vitest workers)
+        # can be terminated together. On Unix, start_new_session=True creates a new session.
         proc = await asyncio.create_subprocess_shell(
             gate_cmd, cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,  # Creates new session/group on Unix; ignored on Windows
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
         except asyncio.TimeoutError:
-            proc.kill()
+            # EU-146: Kill entire process group to prevent orphaned children
+            try:
+                # On Unix, kill the process group; on Windows, fall back to proc.kill()
+                import os
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+            except (ProcessLookupError, OSError):
+                # Process already exited or not a process group leader
+                proc.kill()
+            # Reap the zombie
             await proc.communicate()
             return "manual", f"⚠️  domain_gate timed out (120 s) — manual QA required: {gate_cmd[:80]}"
         output = stdout.decode("utf-8", errors="replace").strip()
@@ -236,6 +252,21 @@ async def _run_gate(gate_cmd: str | None, cwd: str) -> tuple[str, str]:
         # Command not found, cwd missing, permission error, or unparseable prose — surface as a
         # manual QA note rather than a hard crash, so the BuildResult carries the warning.
         return "manual", f"⚠️  domain_gate could not run ({exc!r}): {gate_cmd[:80]} — manual QA required."
+    finally:
+        # EU-146: Final cleanup to ensure no orphaned processes remain
+        if proc and proc.returncode is None:
+            try:
+                import os
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL the group
+            except (ProcessLookupError, OSError):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
 
 
 async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg: Config):

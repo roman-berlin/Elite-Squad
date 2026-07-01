@@ -81,8 +81,21 @@ def _wrap(title: str, inner: str) -> str:
             "button{background:var(--accent);border:0;color:#fff;border-radius:var(--r-md);padding:9px 16px;"
             "font-weight:650;cursor:pointer}"
             "a:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible,"
-            "input:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
-            f"<p><a href='{_back_home()}'>&larr; cockpit</a></p><h2>{html.escape(title)}</h2>{inner}")
+            "input:focus-visible{outline:none;box-shadow:var(--ring)}"
+            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
+            "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+            "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;"
+            "transition:all var(--t-fast);margin-bottom:16px;box-shadow:var(--shadow-1)}"
+            ".backbtn svg{width:18px;height:18px;transition:transform var(--t-fast);flex:none}"
+            ".backbtn:hover{background:var(--line);border-color:var(--accent);color:var(--accent);"
+            "transform:translateX(-3px);box-shadow:var(--shadow-2)}"
+            ".backbtn:hover svg{transform:translateX(-2px)}"
+            ".backbtn:active{transform:translateX(-1px)}"
+            ".backbtn:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
+            f"<a class='backbtn' href='{_back_home()}' aria-label='Back to cockpit'>"
+            f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
+            f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a> "
+            f"<h2>{html.escape(title)}</h2>{inner}")
 
 
 def _working(msg: str, secs: int = 5) -> str:

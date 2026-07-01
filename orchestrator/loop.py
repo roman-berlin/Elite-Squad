@@ -26,9 +26,14 @@ from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
 from .gate import run_gate
+from . import jira_adapter as jira_commenter
 from .git_ops import Git, GitError
 from .officers import display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW, SECURITY, TESTS
+
+# Get the module reference for explicit subprocess access
+import sys as _sys
+_loop_module = _sys.modules[__name__]
 
 
 def _notify(cfg: Config, text: str) -> None:
@@ -216,7 +221,7 @@ def _make_git(cfg: Config, app: AppConfig) -> Git:
                 setup_cmd = _worktree_setup_command(app, cfg, git.workdir)
                 if setup_cmd:
                     print(f"  · worktree created — setup: {setup_cmd}", flush=True)
-                    subprocess.run(setup_cmd, shell=True, cwd=git.workdir, check=False)
+                    _loop_module.subprocess.run(setup_cmd, shell=True, cwd=git.workdir, check=False)
             print(f"  · isolated worktree → {git.workdir}", flush=True)
             return git
         except GitError as exc:
@@ -251,7 +256,7 @@ def _repin_worktree_deps(cfg: Config, app: AppConfig, git: Git) -> None:
         return
     base_ref = getattr(git, "base_ref", f"origin/{app.base_branch}")
     # 1) restore DEV's lockfile into the worktree (undoes any prior-ticket drift).
-    restored = subprocess.run(
+    restored = _loop_module.subprocess.run(
         ["git", "checkout", base_ref, "--", "bun.lock"],
         cwd=str(workdir), capture_output=True, text=True,
     )
@@ -260,7 +265,7 @@ def _repin_worktree_deps(cfg: Config, app: AppConfig, git: Git) -> None:
         print(f"  · dep isolation: bun.lock not restored from {base_ref} ({why})", flush=True)
     # 2) reinstall frozen so the install can't drift off the pinned lock.
     print("  · dep isolation — bun install --frozen-lockfile", flush=True)
-    proc = subprocess.run(
+    proc = _loop_module.subprocess.run(
         ["bun", "install", "--frozen-lockfile"],
         cwd=str(workdir), capture_output=True, text=True,
     )
@@ -412,6 +417,13 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
     branch = ticket.branch_name(app.branch_prefix)
     audit.record("ticket_start", ticket_id=ticket.id, app=app.name, branch=branch,
                  dry_run=cfg.dry_run, ephemeral=ticket.ephemeral)
+
+    # EU-153: Initialize ticket commenter for gate events
+    commenter = jira_commenter.TicketCommenter(
+        cfg,
+        dry_run=cfg.dry_run,
+        no_comment=getattr(cfg, "no_comments", False)  # Opt-out flag
+    )
 
     # Readiness gate: an under-specified ticket (no acceptance criteria + a thin description) is handed
     # back BEFORE any build effort — the Builder would only guess and halt. Opt-in (`readiness_gate`).
@@ -679,6 +691,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                      effort=eff, effort_reason=eff_reason,
                      tools=build.tools, summary=(build.summary or "")[:1000])
         if not build.ok:
+            # EU-153: Post build error comment
+            build_comment = commenter.summarize_gate_event(
+                "Build", "ERRORED",
+                (build.summary or build.raw or "Builder process error")[:2000],
+                ticket.id
+            )
+            if build_comment and backlog and not ticket.ephemeral:
+                commenter.post_comment(backlog, ticket.key, build_comment)
             return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
                                          notes="builder process errored"))
         if not git.has_changes():
@@ -745,7 +765,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # EU-116: a no-changes build leaves the ticket stuck In Progress and the drain re-runs it.
             # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
             # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
-            note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
+            # EU-153: Post no-changes comment
+            no_change_comment = commenter.summarize_gate_event(
+                "Build", "NO_CHANGES",
+                note,
+                ticket.id
+            )
+            if no_change_comment and backlog and not ticket.ephemeral:
+                commenter.post_comment(backlog, ticket.key, no_change_comment)
             if not cfg.dry_run and not ticket.ephemeral:
                 try:
                     backlog.set_status(ticket, "Needs Human")
@@ -777,6 +804,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                      report=("" if gate.passed else (gate.report or "")[:2500]))
         if not gate.passed:
             print("  gate · FAILED → sending fixes back to builder", flush=True)
+            # EU-153: Post gate failure comment
+            gate_comment = commenter.summarize_gate_event(
+                "Gate", "FAILED",
+                (gate.report or "Verification gate failed")[:2000],
+                ticket.id
+            )
+            if gate_comment and backlog and not ticket.ephemeral:
+                commenter.post_comment(backlog, ticket.key, gate_comment)
             _bar(GATE, fail=GATE)
             last_changes = [f"Verification failed; fix these:\n{gate.report}"]
             continue
@@ -1023,6 +1058,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 if not sec_ok:
                     _bar(SECURITY, fail=SECURITY)
                     print("  security · Security Engineer BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
+                    # EU-153: Post security block comment
+                    sec_comment = commenter.summarize_gate_event(
+                        "Security", "BLOCKED",
+                        (sec_report or "Security gate failed - CRITICAL/HIGH finding")[:2000],
+                        ticket.id
+                    )
+                    if sec_comment and backlog and not ticket.ephemeral:
+                        commenter.post_comment(backlog, ticket.key, sec_comment)
                     _notify(cfg, f"🛡️ {ticket.id} — Security Engineer blocked the merge (security).\n\n{sec_report[:1200]}")
                     audit.record("security_block", ticket_id=ticket.id, iteration=iteration,
                                  reason=(sec_report or "")[:2500])
@@ -1192,6 +1235,14 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         # QA hand-off: a brief, BULLETED 'what was done' + the DEV test link — NOT the reviewer's full
         # essay (EU-79). The officers lead their summary with bullets; bullets() keeps ≤3 tight ones and
         # the test link drops onto its own line below, so the comment is scannable, never a prose wall.
+        # EU-153: Post merge success comment
+        merge_comment = commenter.summarize_gate_event(
+            "Land", "PASSED",
+            f"Merged to {app.base_branch}{test_line}",
+            ticket.id
+        )
+        if merge_comment and backlog and not ticket.ephemeral:
+            commenter.post_comment(backlog, ticket.key, merge_comment)
         if not ticket.ephemeral:
             from . import dashboard as _D
             whatdone = _D.bullets(review.summary or build.summary, limit=3, width=200)

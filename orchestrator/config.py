@@ -217,6 +217,12 @@ class Config:
     #     Scrum Master split when the design exceeds thresholds. ---
     architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
 
+    # --- Senior PM pre-build triage gate (EU-107). OFF by default (2026-06-29): the gate was over-eager
+    #     — it closed [Feature] tickets (EU-118/EU-120) as "answered" instead of building them. Re-enable
+    #     only once the triage is conservative (CONTINUE by default; CLOSE only exact dupes; never an
+    #     acceptance-criteria ticket) — see the prebuild-gate best-practice fix ticket. ---
+    prebuild_gate_enabled: bool = False
+
     # --- Product Manager officer: when the Builder halts on a product/IA blocker, consult the PM first
     #     — it either DECIDES (the build resumes with its decision) or ESCALATES one recommendation to
     #     the Commander (parked with a clear comment; the unit moves to the next ticket). ---
@@ -243,6 +249,19 @@ class Config:
     budget_alert_pct: float = 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
     budget_bad_threshold: float = 0.95      # Low-watermark: stop starting new tickets when any provider is at this utilization
     glm_quota_tokens: int = 100_000_000     # GLM (Z.ai) token quota ceiling; 0 = disabled
+
+    # --- EU-122: dual-provider budget monitor (Claude + GLM) ---
+    # GLM daily token ceiling (default: 1B tokens). GLM doesn't have a Max-like subscription,
+    # so we estimate from ledger using this ceiling. Set based on your GLM API plan.
+    glm_daily_token_budget: int = 1_000_000_000
+    # Claude low-watermark: stop picking tickets when remaining falls below this.
+    # Can be specified as tokens (absolute) or percentage (of daily_token_budget).
+    # If both are set, tokens takes precedence. Default: ~5% or 100k tokens, whichever is larger.
+    claude_low_watermark_tokens: Optional[int] = None      # e.g. 100_000 for ~1 ticket
+    claude_low_watermark_pct: Optional[float] = None         # e.g. 0.05 for 5%
+    # GLM low-watermark: same semantics as Claude, but for GLM.
+    glm_low_watermark_tokens: Optional[int] = None          # e.g. 100_000 for ~1 ticket
+    glm_low_watermark_pct: Optional[float] = None           # e.g. 0.05 for 5%
 
     # --- autonomy (officers convene themselves between autopilot cycles) ---
     autonomy_enabled: bool = True

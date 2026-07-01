@@ -4,7 +4,7 @@ Covers:
   - _merges_per_day(): counts 'merged' events per calendar day from audit.jsonl.
   - _daily_token_burn(): sums ledger cost per calendar day from usage_ledger.jsonl.
   - _kpi_sparkline_svg(): produces a valid SVG polyline string.
-  - kpis(): attaches sparkline lists to the 'Merged total' and 'Tokens today' cards.
+  - kpis(): attaches sparkline lists to the 'Merged total' and 'Tokens' cards (EU-145: merged today+week).
   - _kpi_html(): embeds the sparkline SVG inside the rendered KPI card HTML.
 """
 import sys
@@ -193,27 +193,27 @@ def test_kpi_sparkline_svg_flat_series():
 # ---------------------------------------------------------------------------
 # Tests: kpis() and _kpi_html() integration
 
-def test_kpis_merged_total_card_has_sparkline():
-    """The 'Merged total' KPI card carries a 'sparkline' list."""
+def test_kpis_merged_today_card_has_sparkline():
+    """The 'Merged → DEV today' KPI card (EU-150: retired Merged total) carries a 'sparkline' list."""
     with tempfile.TemporaryDirectory() as d:
         cfg = _make_cfg(Path(d))
         cards = warroom.kpis(cfg, [], None)
-    merged_card = next((c for c in cards if c["label"] == "Merged total"), None)
-    assert merged_card is not None, "Merged total card must exist"
-    assert "sparkline" in merged_card, "Merged total card must have 'sparkline' key"
+    merged_card = next((c for c in cards if c["label"] == "Merged → DEV today"), None)
+    assert merged_card is not None, "Merged → DEV today card must exist"
+    assert "sparkline" in merged_card, "Merged → DEV today card must have 'sparkline' key"
     assert isinstance(merged_card["sparkline"], list), "sparkline must be a list"
     assert len(merged_card["sparkline"]) == 14, "sparkline must cover 14 days"
 
 
-def test_kpis_tokens_today_card_has_sparkline():
-    """The 'Tokens today' card carries a 'sparkline' list when the usage module works."""
+def test_kpis_tokens_card_has_sparkline():
+    """The 'Tokens' card (EU-145: merged today+week) carries a 'sparkline' list when the usage module works."""
     with tempfile.TemporaryDirectory() as d:
         cfg = _make_cfg(Path(d))
         cards = warroom.kpis(cfg, [], None)
-    tok_card = next((c for c in cards if c["label"] == "Tokens today"), None)
+    tok_card = next((c for c in cards if c["label"] == "Tokens"), None)
     if tok_card is None:
         return  # usage module may not be present in this env — skip silently
-    assert "sparkline" in tok_card, "Tokens today card must have 'sparkline' key"
+    assert "sparkline" in tok_card, "Tokens card must have 'sparkline' key"
     assert len(tok_card["sparkline"]) == 14
 
 
@@ -241,9 +241,9 @@ def test_kpi_html_no_svg_without_sparkline():
 def test_kpi_html_ok_tone_uses_green_stroke():
     """Cards with tone='ok' get a green (--ok) sparkline stroke."""
     card = {
-        "label": "Merged total",
-        "value": 3,
-        "hint": "all time",
+        "label": "Tokens",
+        "value": "120k · 12%",
+        "hint": "some cap",
         "tone": "ok",
         "sparkline": [1, 2, 3],
     }
@@ -414,8 +414,8 @@ if __name__ == "__main__":
         test_kpi_sparkline_svg_respects_dimensions,
         test_kpi_sparkline_svg_custom_stroke,
         test_kpi_sparkline_svg_flat_series,
-        test_kpis_merged_total_card_has_sparkline,
-        test_kpis_tokens_today_card_has_sparkline,
+        test_kpis_merged_today_card_has_sparkline,
+        test_kpis_tokens_card_has_sparkline,
         test_kpi_html_embeds_sparkline_svg,
         test_kpi_html_no_svg_without_sparkline,
         test_kpi_html_ok_tone_uses_green_stroke,

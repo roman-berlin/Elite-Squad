@@ -428,7 +428,20 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # Set whether or not we own the run-state release (the cockpit Start may already hold the slot);
         # the loop running IS the autopilot, and the finally clears it again.
         run_state["autopilot_on"] = True
+
+        # EU-128: Preflight validate all git repos before the main loop. This populates
+        # MISSING_REPO_ERRORS early so the first cycle can announce missing repos immediately.
+        for app in cfg.apps:
+            if app.backlog_backend != "none":
+                intake._validate_git_repo(app)
+
+        # EU-128: track missing repo announcement state (app names announced) — dedupe so each app
+        # emits exactly one alert per run, not one per cycle. Start empty so the first cycle
+        # announces repos detected as missing during preflight.
+        repos_announced: frozenset[str] = frozenset()
+
         while True:
+            print("  DEBUG: Loop iteration started", flush=True)
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
@@ -568,6 +581,26 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 _sleep(max(10, interval), stop_event)
                 continue
             git_held = False
+
+            # EU-128: Check for missing/invalid git repos and announce once per run (not every cycle).
+            # Apps with missing repos are already skipped by from_drain, so they don't appear in the worklist.
+            # We only announce apps that haven't been announced yet in this run.
+            missing_repos = dict(intake.MISSING_REPO_ERRORS)
+            print(f"  DEBUG: missing_repos={missing_repos}, repos_announced={repos_announced}", flush=True)
+            if missing_repos:
+                newly_missing = frozenset(missing_repos.keys()) - repos_announced
+                print(f"  DEBUG: newly_missing={newly_missing}", flush=True)
+                if newly_missing:
+                    repos = sorted(newly_missing)
+                    msgs = [f"{name} — {missing_repos[name]}" for name in repos]
+                    print(f"  ⚠ skipping {len(repos)} app(s) with missing/invalid git repos:", flush=True)
+                    for msg in msgs:
+                        print(f"    · {msg}", flush=True)
+                    notify.send(f"⚠️ Autopilot skipping {len(repos)} app(s) — git repos missing/invalid:\n" + "\n".join(msgs))
+                    audit.record("missing_repos", apps=msgs)
+                    # Track that we've announced these repos so we don't spam every cycle
+                    repos_announced = frozenset(set(repos_announced) | set(repos))
+
 
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
             # EU-78: auto-clear ghost-parked tickets whose latest audit run already succeeded

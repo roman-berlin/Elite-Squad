@@ -16,23 +16,56 @@ from .contracts import GateResult
 
 def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) -> GateResult:
     """Run a list of shell commands in the app's worktree; fail on the first non-zero exit.
-    Shared by the pre-review gate and the post-merge SRE."""
+    Shared by the pre-review gate and the post-merge SRE.
+
+    EU-146: Uses process groups to prevent orphaned child processes (e.g. vitest worker forks).
+    On Unix, processes are created in a new session via start_new_session=True, ensuring
+    all children can be terminated together via os.killpg on timeout."""
     if not commands:
         return GateResult(passed=True, report="(no commands configured)")
     where = cwd or app.workdir or app.repo_path
     failures: list[str] = []
     for cmd in commands:
+        proc = None
         try:
-            proc = subprocess.run(
+            # EU-146: Use Popen with process group support for proper cleanup
+            proc = subprocess.Popen(
                 cmd, shell=True, cwd=where,
-                capture_output=True, text=True, timeout=app.gate_timeout_sec,
-                env={**os.environ, **app.gate_env},   # e.g. cap node heap / vitest workers
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, **app.gate_env},
+                start_new_session=True,  # Creates new session/group on Unix; ignored on Windows
             )
-        except subprocess.TimeoutExpired:
-            failures.append(f"$ {cmd}\n(timed out after {app.gate_timeout_sec}s)")
+            try:
+                stdout, stderr = proc.communicate(timeout=app.gate_timeout_sec)
+            except subprocess.TimeoutExpired:
+                # EU-146: Kill entire process group to prevent orphaned children
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+                except (ProcessLookupError, OSError):
+                    proc.kill()
+                # Reap the zombie and get partial output
+                stdout, stderr = proc.communicate()
+                failures.append(f"$ {cmd}\n(timed out after {app.gate_timeout_sec}s)")
+                continue
+        except Exception as exc:
+            failures.append(f"$ {cmd}\n({exc!r})")
             continue
+        finally:
+            # EU-146: Final cleanup to ensure no orphaned processes remain
+            if proc and proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)
+                except (ProcessLookupError, OSError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.communicate(timeout=1)
+                except Exception:
+                    pass
         if proc.returncode != 0:
-            tail = (proc.stdout + "\n" + proc.stderr).strip()[-4000:]
+            tail = (stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")).strip()[-4000:]
             failures.append(f"$ {cmd}\n(exit {proc.returncode})\n{tail}")
     if failures:
         return GateResult(passed=False, report="\n\n".join(failures))
@@ -190,7 +223,6 @@ async def prebuild_gate(cfg, worklist, audit):
     if not cfg.prebuild_gate_enabled:
         print("  · pre-build gate: disabled (prebuild_gate_enabled=False) — passing all tickets to Builder", flush=True)
         return worklist
-
     from . import loop, senior_pm
     from .backlog.base import make_backlog
 

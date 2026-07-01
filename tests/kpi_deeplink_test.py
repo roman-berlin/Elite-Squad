@@ -52,8 +52,10 @@ scfg.detected_auth = lambda: "test"
 cards = {c["label"]: c.get("href") for c in warroom.kpis(scfg, warroom.D.load_tasks(str(audit)), None)}
 # EU-102: the standalone Parked card is retired — parked items fold into Needs-you.
 chk("Parked card is gone (retired by EU-102)", "Parked" not in cards, str(list(cards.keys())))
+# EU-150: the standalone Merged total card is retired — use "Merged → DEV today" which links to /tasks?filter=merged
+chk("Merged total card is gone (retired by EU-150)", "Merged total" not in cards, str(list(cards.keys())))
+chk("Merged → DEV today card -> /tasks?filter=merged", cards.get("Merged → DEV today") == "/tasks?filter=merged", str(cards.get("Merged → DEV today")))
 chk("Needs you card -> /needs (unified inbox)", cards.get("Needs you") == "/needs", str(cards.get("Needs you")))
-chk("Merged total card -> /tasks?filter=merged", cards.get("Merged total") == "/tasks?filter=merged", str(cards.get("Merged total")))
 chk("Security blocks card -> security-scoped forensics",
     cards.get("Security blocks") == "/forensics?cat=security_block", str(cards.get("Security blocks")))
 chk("Security blocks no longer points at /council", cards.get("Security blocks") != "/council")

@@ -108,8 +108,11 @@ usage._probe_plan_limits = _boom                    # if the board probes, this 
 board_cfg = Config(apps=[], audit_path=str(audit), daily_token_budget=10_000)
 cards = warroom.kpis(board_cfg, [], None)
 labels = {c.get("label") for c in cards}
-# EU-145: tokens merged into single "Tokens" card with today + week data
-chk("board renders 'Tokens' card (merged today+week per EU-145)", "Tokens" in labels, str(labels))
+# EU-145: merged "Tokens today" + "Tokens this week" into a single "Tokens" card
+chk("board renders 'Tokens' card (merged today + week)", "Tokens" in labels, str(labels))
+# These are now expected to FAIL because we merged the cards
+chk("board does NOT render separate 'Tokens today' card (EU-145 merged)", "Tokens today" not in labels, str(labels))
+chk("board does NOT render separate 'Tokens this week' card (EU-145 merged)", "Tokens this week" not in labels, str(labels))
 
 # ── (g) /usage route — available: brand panel with gauges, %s, resets, a11y progressbar ─────────
 repo = tmp / "app"; repo.mkdir()

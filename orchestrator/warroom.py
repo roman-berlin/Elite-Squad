@@ -287,12 +287,11 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     # Each card deep-links to a view scoped to the count it shows: the /tasks log auto-applies the
     # ?filter= (merged / needs / parked) so the destination honors the click, and Security blocks
     # opens the forensics view scoped to the security-block findings that produced the number.
+    # EU-150: "Merged total" card is retired — use "Merged → DEV today" which links to /tasks?filter=merged
+    # showing all merged tasks with statistics (today, this week, month, all time available in the view).
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
-         "href": "/tasks?filter=merged"},
-        {"label": "Merged total", "value": len(merged), "hint": "all time", "tone": "ok",
-         "href": "/tasks?filter=merged",
-         "sparkline": merges_series},  # EU-76: 14-day daily merge trend
+         "href": "/tasks?filter=merged", "sparkline": merges_series},  # EU-76: 14-day daily merge trend
         {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
          "tone": "warn" if _needs_count else None, "href": "/needs"},   # EU-93: deep-link to the unified Needs-you inbox
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate (all time)",
@@ -300,12 +299,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "security_block_findings": sec_blocks},  # EU-145: pass actual findings for interactive card
     ]
 
-    # EU-75 — token-burn KPI cards, wired straight from the local ledger.
-    #   budget_status() → today's burn vs. the daily cap (the EU-75 gauge).
-    #   windows()       → today + 7-day rolling totals/calls for the two cards below.
-    # The board re-renders on every SSE frame, so it stays ledger-only on purpose: the EU-77 live
-    # subscription-limit probe (usage.plan_usage) fires ONLY from the /usage page, never here, so an
-    # idle cockpit burns no quota. Best-effort: if the ledger is absent the block silently skips.
+    # EU-145 — merged token KPI card (today + week in one, UX best practice).
+    # Shows today prominently with weekly in the hint, plus the daily-cap gauge and trend sparkline.
     try:
         from . import usage as _usage
         bs = _usage.budget_status(cfg)
@@ -1263,6 +1258,21 @@ _TALK_HTML = (
     '</div>')
 
 
+_TERMINAL_HTML = (
+    '<div class=term>'
+    '<div class=termout id=termout><div class=term-out>Welcome to the terminal. Commands execute in the orchestrator\'s working directory.</div><div class=term-out>Type a command below and press Enter to execute.</div></div>'
+    '<div class=tbox>'
+    '<span class=tbox-prompt>$</span>'
+    '<input type=text id=terminput placeholder="Enter command..." autocomplete=off>'
+    '</div>'
+    '</div>')
+
+
+def _terminal_html() -> str:
+    """Return the terminal panel HTML."""
+    return _TERMINAL_HTML
+
+
 def _md_to_html(text: str) -> str:
     """Convert light markdown in officer text to HTML.
 
@@ -1584,6 +1594,9 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<section class=panel>'
         f'<div class=ph>Active run{proj_tag}{liveness}</div>'
         f'<div class=run>{run}</div></section>'
+        f'<section class=panel>'
+        f'<div class=ph>&#128190; Terminal</div>'
+        f'<div class=term>{_terminal_html()}</div></section>'
         '</div>'
         f'<div class=col-side>'
         f'<section class="panel needspanel"><div class=ph>Needs you{ncount}</div>'
@@ -1988,6 +2001,19 @@ background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));pos
 background:#0d1119;text-decoration:none;color:inherit;transition:border-color var(--t-fast),background var(--t-fast)}
 .talkbtn:hover{border-color:var(--accent);background:var(--panel2)}
 .tki{font-size:20px}.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
+/* terminal panel */
+.term{display:flex;flex-direction:column;height:100%;min-height:280px;background:#070a0e;border-radius:0 0 var(--r-xl) var(--r-xl)}
+.termout{flex:1;font-family:var(--mono);font-size:12px;line-height:1.5;color:#b9c2cf;padding:12px 16px;
+overflow:auto;white-space:pre-wrap;word-break:break-word;min-height:200px}
+.termout .term-prompt{color:#4d7cff;font-weight:600}
+.termout .term-cmd{color:#e7ebf2}
+.termout .term-out{color:#9be7bd}
+.termout .term-err{color:#f0676b}
+.tbox{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--line2);background:var(--panel)}
+.tbox-prompt{font-family:var(--mono);font-size:13px;color:#4d7cff;font-weight:600;white-space:nowrap}
+.tbox input{flex:1;background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);
+padding:8px 12px;font-family:var(--mono);font-size:13px}
+.tbox input:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
 @media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
 @media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
@@ -2017,8 +2043,8 @@ document.addEventListener("click",function(e){
 function saveUi(){try{
   ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
     if(p)localStorage.setItem("ui.open."+id,p.open?"1":"0");});
-  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
-    if(el&&el.style.height)localStorage.setItem("ui.h."+id,el.style.height);});
+  ["logbox","blbox","actbox","termout"].forEach(function(id){var el=document.getElementById(id);
+    if(el)localStorage.setItem("ui.scroll."+id,el.scrollTop);});
 }catch(e){}}
 function applyUi(){try{
   ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
@@ -2038,11 +2064,11 @@ function applyBoard(html){
   // if you were at the bottom (following live output) we keep you pinned there; otherwise we restore
   // your exact scroll position instead of jumping to the top/bottom.
   var keep={};
-  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+  ["logbox","blbox","actbox","termout"].forEach(function(id){var el=document.getElementById(id);
     if(el)keep[id]={top:el.scrollTop,bottom:_atBottom(el)};});
   b.innerHTML=html;
   applyUi();
-  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
+  ["logbox","blbox","actbox","termout"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
     if(el&&k)el.scrollTop=k.bottom?el.scrollHeight:k.top;
     else if(el&&id==="logbox")el.scrollTop=el.scrollHeight;});
 }
@@ -2068,5 +2094,56 @@ function startStream(){
 applyUi();
 scrollLog();
 startStream();
+// Terminal functionality
+(function(){
+  var input=document.getElementById("terminput");
+  var output=document.getElementById("termout");
+  if(!input||!output)return;
+
+  input.addEventListener("keydown",async function(e){
+    if(e.key==="Enter"){
+      e.preventDefault();
+      var cmd=input.value.trim();
+      if(!cmd)return;
+
+      // Echo the command
+      var cmdLine=document.createElement("div");
+      cmdLine.innerHTML='<span class=term-prompt>$</span> <span class=term-cmd>'+cmd.replace(/</g,"&lt;")+'</span>';
+      output.appendChild(cmdLine);
+
+      // Send to backend
+      try{
+        var formData=new FormData();
+        formData.append("cmd",cmd);
+        var res=await fetch("/api/terminal",{method:"POST",body:formData});
+        var data=await res.json();
+
+        // Display output or error
+        var outLine=document.createElement("div");
+        if(data.error){
+          outLine.innerHTML='<span class=term-err>Error: '+data.error.replace(/</g,"&lt;")+'</span>';
+        }else if(data.output){
+          outLine.innerHTML='<span class=term-out>'+data.output.replace(/</g,"&lt;").replace(/\n/g,"<br>")+'</span>';
+        }else{
+          outLine.innerHTML='<span class=term-out>(no output)</span>';
+        }
+        output.appendChild(outLine);
+      }catch(err){
+        var errLine=document.createElement("div");
+        errLine.innerHTML='<span class=term-err>Error: '+err.message+'</span>';
+        output.appendChild(errLine);
+      }
+
+      // Clear input and scroll to bottom
+      input.value="";
+      output.scrollTop=output.scrollHeight;
+    }
+  });
+
+  // Auto-focus input when clicking anywhere in the terminal
+  document.querySelector(".term").addEventListener("click",function(){
+    input.focus();
+  });
+})();
 </script>
 </body></html>"""

@@ -291,6 +291,54 @@ def create_app(cfg: Config):
         subprocess.Popen(["open", str(requested)], close_fds=True)   # noqa: S603,S607
         return jsonify({"ok": True, "path": str(requested)})
 
+    @app.post("/api/terminal")
+    def terminal_api():
+        """Execute a command in the terminal panel and return the output.
+
+        EU-149: Integrated terminal in the cockpit — executes shell commands and returns
+        the combined stdout/stderr. Commands run in the orchestrator's working directory
+        with a 10-second timeout.
+
+        Security:
+        * Commands are executed in a subprocess with a timeout.
+        * No interactive shells — each command is a one-shot execution.
+        * Output is capped at 64KB to prevent memory issues.
+
+        Returns JSON ``{"output": "<combined stdout/stderr>", "error": "<error message or null>"}``.
+        """
+        from flask import jsonify
+        import subprocess
+        import shlex
+
+        cmd = (request.form.get("cmd") or "").strip()
+        if not cmd:
+            return jsonify({"output": "", "error": "No command provided"}), 400
+
+        # Basic command validation - reject obvious shell escapes
+        if any(c in cmd for c in ["\x00", "\n", "\r"]):
+            return jsonify({"output": "", "error": "Invalid characters in command"}), 400
+
+        try:
+            # Execute command with timeout, capture both stdout and stderr
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(Path(cfg.config_path).parent) if hasattr(cfg, "config_path") else None,
+                env=dict(os.environ)
+            )
+            output = result.stdout + result.stderr
+            # Cap output at 64KB
+            if len(output) > 65536:
+                output = output[:65536] + "\n... (output truncated)"
+            return jsonify({"output": output, "error": None})
+        except subprocess.TimeoutExpired:
+            return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
+        except Exception as e:
+            return jsonify({"output": "", "error": str(e)}), 500
+
     @app.get("/api/autopilot")
     def autopilot_status_api():
         """Live autopilot state: PID-based daemon check + in-memory cockpit flags.
@@ -531,8 +579,20 @@ def create_app(cfg: Config):
         # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
         _appq = _board_project(request.args.get("app"))
         _home = f"/?app={html.escape(_appq)}" if _appq else "/"
-        back = (f"<p style='margin:14px 30px 4px'><a href='{_home}' style='color:#6aa9ff'>"
-                "&larr; cockpit</a></p>")
+        back = (f"<style>"
+                ".backbtn{{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
+                "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+                "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;"
+                "transition:all var(--t-fast);margin:14px 0 16px;box-shadow:var(--shadow-1)}}"
+                ".backbtn svg{{width:18px;height:18px;transition:transform var(--t-fast);flex:none}}"
+                ".backbtn:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
+                "transform:translateX(-3px);box-shadow:var(--shadow-2)}}"
+                ".backbtn:hover svg{{transform:translateX(-2px)}}"
+                ".backbtn:active{{transform:translateX(-1px)}}"
+                ".backbtn:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
+                f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
+                f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
+                f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>")
         return page.replace("</header>", "</header>" + back + _control_bar(cfg, _board_project(request.args.get("app"))), 1)
 
     @app.post("/api/dismiss")
@@ -1973,7 +2033,18 @@ def create_app(cfg: Config):
         if not r["ok"]:
             return _wrap("Onboard a product",
                          f"<p style='color:#f0676b'>&#10007; {esc(r['error'])}</p>"
-                         "<p><a href='/onboard'>&larr; back</a></p>")
+                         "<style>.backlnk{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
+                         "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"
+                         "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+                         "transition:all var(--t-fast);margin:8px 0}}"
+                         ".backlnk:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
+                         "transform:translateX(-2px)}}"
+                         ".backlnk svg{{width:16px;height:16px;flex:none;transition:transform var(--t-fast)}}"
+                         ".backlnk:hover svg{{transform:translateX(-2px)}}"
+                         ".backlnk:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
+                         "<a class='backlnk' href='/onboard' aria-label='Go back to onboarding'>"
+                         "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
+                         "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>back</a>")
         warn = "".join(f"<li>&#9888; {esc(w)}</li>" for w in r["warnings"])
         warnhtml = f"<ul style='color:#d99a2b'>{warn}</ul>" if warn else ""
         return _wrap("Onboard a product",
@@ -1981,7 +2052,21 @@ def create_app(cfg: Config):
                      f"{esc(r['base'])} &rarr; protected {esc(r['protected'])}. Backed up config.yaml; "
                      f"<b>restart the cockpit / autopilot</b> to load it.</p>{warnhtml}"
                      f"<pre class=rep>{esc(r['block'])}</pre>"
-                     "<p><a href='/onboard'>&larr; onboard another</a> &middot; <a href='/'>cockpit</a></p>")
+                     "<style>.navbtns{{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:8px 0}}"
+                     ".navbtn{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
+                     "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"
+                     "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+                     "transition:all var(--t-fast)}}"
+                     ".navbtn:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
+                     "transform:translateX(-2px)}}"
+                     ".navbtn svg{{width:16px;height:16px;flex:none;transition:transform var(--t-fast)}}"
+                     ".navbtn:hover svg{{transform:translateX(-2px)}}"
+                     ".navbtn:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
+                     "<div class=navbtns>"
+                     "<a class='navbtn' href='/onboard' aria-label='Onboard another product'>"
+                     "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
+                     "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>onboard another</a> "
+                     "<a class='navbtn' href='/'>cockpit</a></div>")
 
     @app.get("/forensics")
     def forensics_page():
@@ -1993,7 +2078,18 @@ def create_app(cfg: Config):
             label = _fx._LABELS.get(cat, cat)
             runs = [r for r in _fx.scan(cfg) if r.get("category") == cat]
             action = _fx._ACTIONS.get(cat, "")
-            head = (f"<p><a href='/forensics'>&larr; forensics</a></p>"
+            head = ("<style>.backlnk{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
+                    "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"
+                    "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+                    "transition:all var(--t-fast);margin:8px 0}}"
+                    ".backlnk:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
+                    "transform:translateX(-2px)}}"
+                    ".backlnk svg{{width:16px;height:16px;flex:none;transition:transform var(--t-fast)}}"
+                    ".backlnk:hover svg{{transform:translateX(-2px)}}"
+                    ".backlnk:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
+                    f"<p><a class='backlnk' href='/forensics' aria-label='Back to forensics'>"
+                    f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
+                    f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>forensics</a></p>"
                     f"<h2 style='font-size:16px;margin:4px 0 2px'>{esc(label)}</h2>"
                     f"<p style='color:#8a929f'>{len(runs)} matching run(s)."
                     + (f" &#8594; {esc(action)}" if action else "") + "</p>")
@@ -2020,7 +2116,18 @@ def create_app(cfg: Config):
                 md = _fx.postmortem_path(cfg, pm).read_text(encoding="utf-8")
             except OSError:
                 md = ""
-            inner = (f"<p><a href='/forensics'>&larr; forensics</a></p>"
+            inner = ("<style>.backlnk{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
+                     "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"
+                     "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+                     "transition:all var(--t-fast);margin:8px 0}}"
+                     ".backlnk:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
+                     "transform:translateX(-2px)}}"
+                     ".backlnk svg{{width:16px;height:16px;flex:none;transition:transform var(--t-fast)}}"
+                     ".backlnk:hover svg{{transform:translateX(-2px)}}"
+                     ".backlnk:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
+                     f"<p><a class='backlnk' href='/forensics' aria-label='Back to forensics'>"
+                     f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
+                     f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>forensics</a></p>"
                      + (f"<pre class=rep>{esc(md)}</pre>" if md
                         else f"<p>No post-mortem on file for {esc(pm)}.</p>"))
             return _wrap(f"Post-mortem — {pm}", inner)
@@ -2094,8 +2201,16 @@ def create_app(cfg: Config):
             ".shcard li .sha{color:#7aa2ff;font-family:var(--mono);white-space:nowrap}"
             ".shbar{display:flex;gap:10px;align-items:center;margin:20px 0 8px}"
             ".shgo{background:#7c3aed;border:0;color:#fff;border-radius:var(--r-md);padding:11px 18px;font-weight:700;cursor:pointer;font:inherit}"
-            ".shgo:hover{background:#6d28d9}.shgo:focus-visible,.shcancel:focus-visible{outline:none;box-shadow:var(--ring)}"
-            ".shcancel{color:var(--dim);text-decoration:none;padding:11px 6px}"
+            ".shgo:hover{background:#6d28d9}.shgo:focus-visible{outline:none;box-shadow:var(--ring)}}"
+            ".shcancel{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
+            "font-size:13px;font-weight:600;text-decoration:none;padding:10px 16px;"
+            "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
+            "transition:all var(--t-fast);box-shadow:var(--shadow-1)}}"
+            ".shcancel:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
+            "transform:translateX(-2px);box-shadow:var(--shadow-2)}}"
+            ".shcancel svg{{width:16px;height:16px;flex:none;transition:transform var(--t-fast)}}"
+            ".shcancel:hover svg{{transform:translateX(-2px)}}"
+            ".shcancel:focus-visible{{outline:none;box-shadow:var(--ring)}}"
             ".shempty{color:var(--ok);padding:30px;text-align:center;font-size:15px}</style>")
         if not appq:
             return _wrap("Ship to production", style + "<div class=shempty>No app selected.</div>")
@@ -2107,7 +2222,7 @@ def create_app(cfg: Config):
             return _wrap("Ship to production",
                          f"<p>Couldn't read {html.escape(appq)}: {html.escape(str(e)[:200])}</p>")
         base, prot, ahead = st.get("base", "DEV"), st.get("prot", "MAIN"), st.get("ahead", 0)
-        back = f'<a class=shcancel href="/?app={html.escape(appq)}">&larr; back to cockpit</a>'
+        back = f'<a class=shcancel href="/?app={html.escape(appq)}" aria-label="Back to cockpit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>back to cockpit</a>'
         if not ahead:
             return _wrap("Ship to production", style + f'<div class=shp><div class=shempty>&#10003; '
                          f'{html.escape(appq)} — {html.escape(base)} and {html.escape(prot)} are in sync. '

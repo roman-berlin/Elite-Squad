@@ -71,6 +71,12 @@ _BUN_MUTATING_SUBCMD = {
 }
 _BUN_FROZEN_FLAG = re.compile(r"(?<![\w-])--frozen-lockfile(?![\w-])")
 
+# EU-146: vitest must run in single-run mode to prevent orphaned processes.
+# `vitest run` or `vitest --run` ensures the process exits after tests complete.
+# Watch mode (`vitest` or `vitest watch`) leaves processes running indefinitely.
+_VITEST_CMD = re.compile(r"(?<![\w-])(?:npx\s+)?vitest(?![\w-])", re.IGNORECASE)
+_VITEST_RUN_FLAG = re.compile(r"(?<![\w-])(?:run\b|--run(?!\w))", re.IGNORECASE)
+
 
 def _bun_lockfile_write(cmd: str) -> str:
     """Return the offending bun subcommand when ``cmd`` runs a non-frozen ``bun install``/``add``/
@@ -94,6 +100,23 @@ def _bun_lockfile_write(cmd: str) -> str:
                 break  # the one allowed form: frozen install installs the pinned tree, never rewrites it
             return sub
     return ""
+
+
+def _vitest_watch_mode(cmd: str) -> bool:
+    """Return True when ``cmd`` runs vitest without --run flag (i.e. in watch mode).
+
+    EU-146: Vitest in watch mode leaves orphaned node processes that accumulate and cause memory leaks.
+    Only `vitest run` or `vitest --run` is allowed — these run once and exit cleanly.
+    Splits on shell separators so a chained ``cmd && vitest`` is still caught."""
+    for segment in re.split(r"(?:&&|\|\||[|;&\n])", cmd):
+        if not _VITEST_CMD.search(segment):
+            continue
+        # Found vitest — check if --run flag is present
+        if _VITEST_RUN_FLAG.search(segment):
+            return False  # --run flag present, safe
+        # No --run flag found — this is watch mode (default)
+        return True
+    return False
 
 
 # Outbound network tools that can ship bytes off the box.
@@ -179,6 +202,11 @@ def is_dangerous(tool_name: str, tool_input: dict | None) -> tuple[bool, str]:
         if bun_sub:
             return True, (f"non-frozen lockfile mutation — `bun {bun_sub}` can rewrite bun.lock and "
                           "drift deps off DEV's pin; use `bun install --frozen-lockfile`")
+        # EU-146: vitest without --run runs in watch mode and leaves orphaned node processes.
+        # Only `vitest run` or `vitest --run` is allowed — these run once and exit cleanly.
+        if _vitest_watch_mode(cmd):
+            return True, ("vitest watch mode — orphaned processes accumulate and leak memory; "
+                          "use `vitest run` or add `--run` flag to exit after tests complete")
         # (a) shell read/exfil of a real secret path (cat .env, curl --data @/x/.env, nc < secrets.yaml)
         hit = _shell_secret_ref(cmd)
         if hit:

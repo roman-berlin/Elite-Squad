@@ -102,6 +102,10 @@ def record(model: str, input_tokens: int, output_tokens: int,
             "c": round(float(cost_usd or 0.0), 6),
             "g": tag or "",
         }
+        # EU-122: Add provider field for dual-provider tracking. Backward-compatible: old rows
+        # without this field are treated as Claude (the default). For GLM models, store provider="glm".
+        if model and "glm" in model.lower():
+            row["provider"] = "glm"
         if ticket_id:
             row["k"] = str(ticket_id)
         if pass_number is not None:
@@ -708,3 +712,296 @@ def _safe_t(line: str) -> float:
         return float(json.loads(line).get("t", 0))
     except (json.JSONDecodeError, TypeError, ValueError):
         return 0.0
+
+
+# ── EU-122: Dual-provider budget monitor (Claude + GLM) ─────────────────────────────────
+# Track remaining usage for both providers, prevent starting tickets we can't finish,
+# and gracefully stop when crossing low-watermarks during execution.
+
+# Provider identifiers
+PROVIDER_CLAUDE = "claude"
+PROVIDER_GLM = "glm"
+
+# Default safety margins: ~one ticket's worth (~100k tokens) or 5% of ceiling, whichever is larger
+_DEFAULT_SAFETY_MARGIN_TOKENS = 100_000
+_DEFAULT_SAFETY_MARGIN_PCT = 0.05
+
+# GLM detection: since GLM doesn't have a Max-like subscription API, we estimate from ledger
+# using a known ceiling (configured per deployment) or a reasonable default.
+_GLM_DEFAULT_CEILING = 1_000_000_000  # Default GLM daily token ceiling (adjust per deployment)
+
+
+def _glm_daily_ceiling(cfg: Config | None) -> int:
+    """Get the GLM daily token ceiling from config or use default."""
+    if cfg is not None:
+        ceiling = getattr(cfg, "glm_daily_token_budget", None)
+        if ceiling and isinstance(ceiling, (int, float)) and ceiling > 0:
+            return int(ceiling)
+    return _GLM_DEFAULT_CEILING
+
+
+def _glm_low_watermark_tokens(cfg: Config | None) -> int:
+    """Get the GLM low-watermark in tokens from config or compute from percentage."""
+    if cfg is not None:
+        # Explicit token watermark takes precedence
+        tokens = getattr(cfg, "glm_low_watermark_tokens", None)
+        if tokens and isinstance(tokens, (int, float)) and tokens > 0:
+            return int(tokens)
+        # Percentage-based watermark
+        pct = getattr(cfg, "glm_low_watermark_pct", None)
+        if pct and isinstance(pct, (int, float)) and pct > 0:
+            ceiling = _glm_daily_ceiling(cfg)
+            return int(ceiling * max(0.01, min(pct, 1.0)))
+    # Default: ~5% or one ticket's worth, whichever is larger
+    ceiling = _glm_daily_ceiling(cfg)
+    return max(_DEFAULT_SAFETY_MARGIN_TOKENS, int(ceiling * _DEFAULT_SAFETY_MARGIN_PCT))
+
+
+def _claude_low_watermark_tokens(cfg: Config | None) -> int:
+    """Get the Claude low-watermark in tokens from config or compute from percentage."""
+    if cfg is not None:
+        # Explicit token watermark takes precedence
+        tokens = getattr(cfg, "claude_low_watermark_tokens", None)
+        if tokens and isinstance(tokens, (int, float)) and tokens > 0:
+            return int(tokens)
+        # Percentage-based watermark
+        pct = getattr(cfg, "claude_low_watermark_pct", None)
+        if pct and isinstance(pct, (int, float)) and pct > 0:
+            cap = int(getattr(cfg, "daily_token_budget", 0) or 0)
+            if cap > 0:
+                return int(cap * max(0.01, min(pct, 1.0)))
+    # Default: ~5% or one ticket's worth of the daily budget
+    cap = int(getattr(cfg, "daily_token_budget", 0) or 0) if cfg else 0
+    if cap > 0:
+        return max(_DEFAULT_SAFETY_MARGIN_TOKENS, int(cap * _DEFAULT_SAFETY_MARGIN_PCT))
+    return _DEFAULT_SAFETY_MARGIN_TOKENS
+
+
+def _glm_tokens_today(cfg: Config | None = None) -> int:
+    """Today's GLM token usage (input + output) from the ledger.
+
+    Uses the provider field when available (EU-122), otherwise falls back to checking the model
+    field for numeric values (GLM models like glm-4 store as "4" in the ledger).
+    """
+    if not cfg:
+        return 0
+    def is_glm_row(r: dict) -> bool:
+        # EU-122: Check provider field first (most reliable)
+        if r.get("provider") == "glm":
+            return True
+        # Fallback for legacy rows: GLM models store as numeric strings (e.g., "4" for glm-4)
+        # Claude models store as names (opus, sonnet, haiku)
+        m = str(r.get("m", ""))
+        # If purely numeric, likely GLM
+        return m.isdigit() if m else False
+
+    return sum(int(r.get("i", 0)) + int(r.get("o", 0))
+               for r in _rows(cfg, _day_start())
+               if is_glm_row(r))
+
+
+def _claude_tokens_today(cfg: Config | None = None) -> int:
+    """Today's Claude token usage (input + output) from the ledger (excludes GLM).
+
+    Uses the provider field when available (EU-122), otherwise includes all non-GLM rows.
+    """
+    if not cfg:
+        return 0
+    def is_claude_row(r: dict) -> bool:
+        # EU-122: If provider is explicitly "glm", exclude it
+        if r.get("provider") == "glm":
+            return False
+        # Fallback for legacy rows: exclude purely numeric model names (likely GLM)
+        m = str(r.get("m", ""))
+        if m.isdigit():
+            return False
+        return True
+
+    return sum(int(r.get("i", 0)) + int(r.get("o", 0))
+               for r in _rows(cfg, _day_start())
+               if is_claude_row(r))
+
+
+def glm_budget_status(cfg: Config | None = None) -> dict:
+    """Today's GLM token burn against the GLM daily ceiling.
+
+    Returns:
+        {"on": bool, "used": int, "cap": int, "remaining": int, "pct": float,
+         "low": bool, "over": bool}
+    """
+    cap = _glm_daily_ceiling(cfg)
+    used = _glm_tokens_today(cfg)
+    remaining = max(0, cap - used)
+    pct = used / cap if cap else 0.0
+    low_watermark = _glm_low_watermark_tokens(cfg)
+    low = remaining <= low_watermark
+
+    return {
+        "on": True,  # GLM budget monitoring is always on (unlike Claude which can be disabled)
+        "used": used,
+        "cap": cap,
+        "remaining": remaining,
+        "pct": pct,
+        "low": low,
+        "over": used >= cap,
+    }
+
+
+def claude_budget_status_detailed(cfg: Config | None = None) -> dict:
+    """Today's Claude token burn against the daily ceiling, with remaining and low-watermark.
+
+    Similar to budget_status() but adds 'remaining' and 'low' fields for dual-provider
+    consistency. Returns {"on": bool, "used": int, "cap": int, "remaining": int,
+    "pct": float, "low": bool, "over": bool, "alert": bool}.
+    """
+    if not cfg:
+        return {"on": False, "used": 0, "cap": 0, "remaining": 0, "pct": 0.0,
+                "low": False, "over": False, "alert": False}
+
+    cap = int(getattr(cfg, "daily_token_budget", 0) or 0)
+    used = _claude_tokens_today(cfg)
+    remaining = max(0, cap - used) if cap > 0 else 0
+    pct = used / cap if cap else 0.0
+    low_watermark = _claude_low_watermark_tokens(cfg)
+    low = cap > 0 and remaining <= low_watermark
+
+    alert_pct = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
+    return {
+        "on": cap > 0,
+        "used": used,
+        "cap": cap,
+        "remaining": remaining,
+        "pct": pct,
+        "low": low,
+        "over": used >= cap,
+        "alert": pct >= alert_pct,
+    }
+
+
+def dual_provider_budget_status(cfg: Config | None = None) -> dict:
+    """Budget status for both Claude and GLM providers.
+
+    Returns:
+        {
+            "claude": {...claude status...},
+            "glm": {...glm status...},
+            "active_provider": str,  # "claude" or "glm"
+            "can_pick_ticket": bool,  # whether active provider has enough for one more ticket
+        }
+    """
+    claude_stat = claude_budget_status_detailed(cfg)
+    glm_stat = glm_budget_status(cfg)
+
+    # Determine active provider (default to Claude, will be overridden by EU-121 fallback logic)
+    active_provider = PROVIDER_CLAUDE
+
+    # Check if active provider can pick up a ticket (above low-watermark)
+    active_stat = claude_stat if active_provider == PROVIDER_CLAUDE else glm_stat
+    can_pick = not active_stat.get("low", False) and not active_stat.get("over", False)
+
+    return {
+        "claude": claude_stat,
+        "glm": glm_stat,
+        "active_provider": active_provider,
+        "can_pick_ticket": can_pick,
+    }
+
+
+def pre_flight_check(cfg: Config | None = None, *, safety_margin_tokens: int | None = None) -> dict:
+    """Check before ticket pickup: returns False if active provider is below safety margin.
+
+    This is called by the autopilot BEFORE picking up a new ticket to ensure we don't
+    start a ticket we can't finish.
+
+    Args:
+        cfg: The Config object
+        safety_margin_tokens: Optional override for the safety margin (defaults to ~100k)
+
+    Returns:
+        {"go": bool, "reason": str, "provider": str, "remaining": int, "margin": int}
+    """
+    if cfg is None:
+        return {"go": True, "reason": "no config - allow", "provider": "unknown", "remaining": -1, "margin": 0}
+
+    status = dual_provider_budget_status(cfg)
+    active = status["active_provider"]
+    provider_stat = status["claude"] if active == PROVIDER_CLAUDE else status["glm"]
+
+    # Use configured safety margin or override
+    margin = safety_margin_tokens or (
+        _claude_low_watermark_tokens(cfg) if active == PROVIDER_CLAUDE
+        else _glm_low_watermark_tokens(cfg)
+    )
+
+    remaining = provider_stat.get("remaining", 0)
+    go = remaining >= margin and not provider_stat.get("over", False)
+
+    if not go:
+        if provider_stat.get("over", False):
+            reason = f"{active.capitalize()} budget exhausted (used {provider_stat.get('used', 0):,} / {provider_stat.get('cap', 0):,})"
+        else:
+            reason = f"{active.capitalize()} budget below safety margin (remaining {remaining:,} < margin {margin:,})"
+
+    return {
+        "go": go,
+        "reason": reason if not go else f"{active.capitalize()} has {remaining:,} tokens remaining",
+        "provider": active,
+        "remaining": remaining,
+        "margin": margin,
+    }
+
+
+def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | None = None) -> dict:
+    """Check during execution: trigger finish-then-stop when crossing low-watermark.
+
+    This is called periodically during ticket execution. If we've crossed from
+    above the low-watermark to below it, we should finish the current ticket/operation
+    cleanly and then stop to prevent running out mid-ticket.
+
+    Args:
+        cfg: The Config object
+        prior_remaining: Optional prior remaining token count to detect crossing
+
+    Returns:
+        {"should_stop": bool, "reason": str, "provider": str, "remaining": int,
+         "low_watermark": int, "crossed": bool}
+    """
+    if cfg is None:
+        return {"should_stop": False, "reason": "no config", "provider": "unknown",
+                "remaining": -1, "low_watermark": 0, "crossed": False}
+
+    status = dual_provider_budget_status(cfg)
+    active = status["active_provider"]
+    provider_stat = status["claude"] if active == PROVIDER_CLAUDE else status["glm"]
+
+    remaining = provider_stat.get("remaining", 0)
+    low_watermark = (_claude_low_watermark_tokens(cfg) if active == PROVIDER_CLAUDE
+                     else _glm_low_watermark_tokens(cfg))
+
+    # Check if we're at or below low-watermark
+    at_low_watermark = remaining <= low_watermark
+
+    # Check if we crossed from above to below (prior state was above, now at/below)
+    crossed = False
+    if prior_remaining is not None:
+        crossed = prior_remaining > low_watermark and at_low_watermark
+
+    # Should stop if we're at low watermark or just crossed it
+    should_stop = at_low_watermark
+
+    if should_stop:
+        if crossed:
+            reason = (f"Crossed {active.capitalize()} low-watermark during execution "
+                     f"(remaining {remaining:,} ≤ watermark {low_watermark:,}) - finish current ticket then stop")
+        else:
+            reason = (f"At {active.capitalize()} low-watermark (remaining {remaining:,} ≤ watermark {low_watermark:,}) "
+                     f"- finish current ticket then stop")
+
+    return {
+        "should_stop": should_stop,
+        "reason": reason if should_stop else f"{active.capitalize()} budget healthy ({remaining:,} remaining)",
+        "provider": active,
+        "remaining": remaining,
+        "low_watermark": low_watermark,
+        "crossed": crossed,
+    }
