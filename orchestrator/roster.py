@@ -15,6 +15,7 @@ import time
 
 from .config import Config
 from .officers import display
+from . import scrum
 
 # (internal officers key, role, duty, which configured model attribute it runs on — None = deterministic).
 # The human-facing display NAME for each key is NOT stored here: it's resolved from officers.OFFICER_NAMES
@@ -27,6 +28,7 @@ _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
      "capability gap appears (you approve and apply).", "reviewer_model"),
     ("pm", "S-5 · Product", "Makes the product / IA / scope calls the Builder can't make "
      "alone, so the unit keeps shipping; escalates only the critical, irreversible ones.", "reviewer_model"),
+    ("scrum", "S-6 · Scrum Master", scrum.__doc__.split("\n\n")[0].strip(), "reviewer_model"),
     ("field_engineer", "Builder", "Implements each ticket on an isolated worktree; for a big ticket, "
      "splits the work across its squad of engineers.", "builder_model"),
     ("inspector", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
@@ -75,7 +77,7 @@ def mermaid_chart() -> str:
     lines = ["```mermaid", "flowchart TD",
              f"  C([Commander · Roman]) --> G[{display('general')} · orchestrator]"]
     # node ids are keyed by the STABLE internal key (not the display name) so a rename can't break the chart
-    short = {"general": "G", "adjutant": "ADJ", "pm": "PM", "field_engineer": "FE",
+    short = {"general": "G", "adjutant": "ADJ", "pm": "PM", "scrum": "SM", "field_engineer": "FE",
              "inspector": "IG", "test_engineer": "TE", "scout": "SC", "provost": "PR",
              "quartermaster": "QM", "sentinel": "SN", "drillmaster": "DM", "liaison": "LN"}
     for key, role, _d, _m in _OFFICER_ROWS:

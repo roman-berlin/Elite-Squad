@@ -33,6 +33,7 @@ mirrors that map for humans; the regression suite (`tests/eu57_officer_naming_te
 | `architect`      | *(new — EU-109)*   | **Architect** |
 | `devops`         | DevOps             | DevOps *(unchanged)* |
 | `test_engineer`  | Test Engineer      | Test Engineer *(unchanged)* |
+| `scrum`          | *(new — EU-110)*   | **Scrum Master** |
 | `liaison`        | *(new — EU-66)*    | **Mayor** |
 
 The `liaison` officer (EU-66) is new — it has no retired army name. Its internal key is the stable
