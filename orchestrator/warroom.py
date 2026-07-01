@@ -856,8 +856,7 @@ def _kpi_html(cards: list[dict]) -> str:
             out.append(
                 f'<details class="kpi {tone}" open>'
                 f'<summary class=kpisum><div class=kv>{_esc(c["value"])}</div>'
-                f'<div class=kl>{_esc(c["label"])}</div>'
-                f'<div class=kh>{_esc(c["hint"])}</div></summary>'
+                f'<div class=kl>{_esc(c["label"])}</div></summary>'
                 f'{issues_html}'
                 f'</details>')
             continue
@@ -877,7 +876,7 @@ def _kpi_html(cards: list[dict]) -> str:
                 'border-radius:3px;overflow:hidden">'
                 f'<div style="height:100%;width:{pct:.1f}%;background:{gcol};'
                 'border-radius:3px;transition:width .4s ease"></div></div>')
-        # EU-76: optional inline sparkline SVG beneath the hint/gauge.
+        # EU-76: optional inline sparkline SVG beneath the gauge.
         # Colour tracks the card tone: ok→green, warn→amber, bad→red, else info-blue.
         spark_html = ""
         sp = c.get("sparkline")
@@ -892,7 +891,7 @@ def _kpi_html(cards: list[dict]) -> str:
         out.append(
             f'<{tag} class="kpi {tone}{link}"{attr}><div class=kv>{_esc(c["value"])}</div>'
             f'<div class=kl>{_esc(c["label"])}</div>'
-            f'<div class=kh>{_esc(c["hint"])}</div>{gauge_html}{spark_html}</{tag}>')
+            f'{gauge_html}{spark_html}</{tag}>')
     return "".join(out)
 
 
