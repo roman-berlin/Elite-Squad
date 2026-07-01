@@ -383,6 +383,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # fire once per run, not once per cycle. A misconfigured app parks and alerts once;
         # subsequent cycles silently skip it without spamming.
         clear_parked_repos()
+        
+        # Reap stale/merged git worktrees from dead sessions (EU-117)
+        from .git_ops import reap_stale_worktrees
+        reap_stale_worktrees(cfg)
 
         blocked = load_blocked(cfg)
         error_counts = load_error_counts(cfg)   # per-ticket consecutive-ERROR tally (retry-before-park)
