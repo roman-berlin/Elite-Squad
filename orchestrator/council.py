@@ -353,6 +353,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
+    chair_provider, chair_model = chair.provider, chair.model_version
     briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
     from . import governor
     governor.note_call(cfg, len(said) + 1)
@@ -374,8 +375,8 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
                     + "\n\nReply here and I'll log it as standing guidance.")
     if audit is not None:
-        audit.record("council", topic=topic or "daily", officers=[r for r, _, _ in COUNCIL],
-                     questions=len(questions), transcript=saved.name)
+        audit.record("council", topic=topic or "daily", provider=chair_provider, model=chair_model,
+                     officers=[r for r, _, _ in COUNCIL], questions=len(questions), transcript=saved.name)
     # The Technical Writer folds this council's lessons into Unit Memory (best-effort — never break the muster).
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
@@ -477,6 +478,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision_raw = (chair.final or chair.text or "(no decision)").strip()
+    chair_provider, chair_model = chair.provider, chair.model_version
     decision_clean, spawn_note = _autospawn_tickets(cfg, decision_raw, audit,
                                                     source=f"meeting: {topic}", officer_label="meeting")
     decision = decision_clean + spawn_note
@@ -488,8 +490,8 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
                     + "\n\nReply here and I'll log it as standing guidance.")
     if audit is not None:
-        audit.record("meeting", topic=topic, officers=[o[0] for o in roster],
-                     questions=len(questions), transcript=saved.name)
+        audit.record("meeting", topic=topic, provider=chair_provider, model=chair_model,
+                     officers=[o[0] for o in roster], questions=len(questions), transcript=saved.name)
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
     except Exception as exc:  # noqa: BLE001

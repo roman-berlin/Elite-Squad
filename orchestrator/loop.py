@@ -689,7 +689,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         audit.record("build", ticket_id=ticket.id, iteration=iteration, ok=build.ok,
                      cost_usd=build.cost_usd, turns=build.num_turns,
                      effort=eff, effort_reason=eff_reason,
-                     tools=build.tools, summary=(build.summary or "")[:1000])
+                     tools=build.tools, summary=(build.summary or "")[:1000],
+                     provider=build.provider, model=build.model_version)
         if not build.ok:
             # EU-153: Post build error comment
             build_comment = commenter.summarize_gate_event(
@@ -843,7 +844,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 _burn("test-engineer", te.input_tokens, te.output_tokens)   # EU-96
                 audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
                              coverage=te.coverage, cost_usd=te.cost_usd, turns=te.num_turns,
-                             tools=te.tools, summary=(te.summary or "")[:1000])
+                             tools=te.tools, summary=(te.summary or "")[:1000],
+                             provider=te.provider, model=te.model_version)
                 if te.coverage:
                     coverage_artifact = te.coverage
                     print(f"  tests · coverage {te.coverage}", flush=True)
@@ -904,7 +906,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                      summary=(review.summary or "")[:1000],
                      required_changes=review.required_changes,
                      issues=[{"severity": q.severity, "area": q.area, "detail": q.detail}
-                             for q in review.quality_issues])
+                             for q in review.quality_issues],
+                     provider=review.provider, model=review.model_version)
         print(f"  review · verdict {review.verdict.value}"
               + (f" — {len(review.blocking_issues)} blocking issue(s)" if review.blocking_issues else ""),
               flush=True)

@@ -27,7 +27,7 @@ PLAN = ('Here is the split:\n```json\n'
         '{"role":"ordnance-be","title":"endpoint","detail":"POST /exports uses the table","size":"L"},'
         '{"role":"frontend","title":"button","detail":"Export button on /leads","size":"S"}]\n```')
 _mode = {"plan": PLAN, "raise_plan": False}
-async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
+async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     if tag == "squad-lead":
         if _mode["raise_plan"]:
             raise RuntimeError("planner exploded")
@@ -44,6 +44,8 @@ async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=No
                     is_error=False, tools=["Edit"])
 squad.run_agent = fake_run_agent
 builder.run_agent = fake_run_agent
+# EU-108: stub run_agent_with_fallback so squad tests don't hit real async iteration
+builder.run_agent_with_fallback = fake_run_agent
 
 # EU-69 lifecycle: build_delegated() records domain use + may propose promotion after a SUCCESSFUL
 # synthesis. Stub all three HR entry points to NON-BLOCKING trackers up front. The earlier iteration

@@ -37,7 +37,7 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 
 ## 2. Cockpit basics
 **2.1 KPIs** — top strip.
-- Expect: Merged today / Merged total / Needs you / Avg passes / Parked / Security blocks, each a number.
+- Expect: Merged today / Merged total / Needs you / Parked / Security blocks, each a number.
 
 **2.2 Roster** — right column, 8 officers.
 - Expect: The General, Adjutant, Field Engineer, Inspector General, Scout, Provost Marshal, Quartermaster, Drillmaster, each with a status dot + "last seen".

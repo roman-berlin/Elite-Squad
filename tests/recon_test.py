@@ -30,6 +30,7 @@ chk("empty-detail slice dropped", recon.parse_slices('[{"area":"a","detail":""}]
 class FakeRun:
     def __init__(s, final, is_error=False):
         s.final = final; s.text = final; s.num_turns = 1; s.cost_usd = 0.0; s.tools = []; s.is_error = is_error
+        s.provider = "Anthropic"; s.model_version = "claude-sonnet-4-6"
 calls = []
 plan = {"reply": "SOLO"}
 async def fake_run_agent(prompt, options, tag=""):

@@ -55,9 +55,10 @@ cfg.app = _guard_app
 
 # --- 1) _control_bar normalizes "*" -> a concrete app; no "*" leaks into any URL ---
 bar = srv._control_bar(cfg, "*", True)
-# EU-63: "All projects" retired — the NAV link now uses a concrete app, never the "*" sentinel.
-chk("Choose-a-ticket NAV link uses a concrete app, not the retired '*' sentinel (EU-63)",
-    "/tickets?app=automatixy" in bar and "/tickets?app=*" not in bar, bar[:200])
+# EU-63 + EU-115: "All projects" retired — the Autopilot's "Choose tickets" button is now the single
+# entry point, and uses a concrete app, never the "*" sentinel.
+chk("Autopilot 'Choose tickets' button uses a concrete app, not the retired '*' sentinel (EU-63 + EU-115)",
+    "Choose tickets" in bar and "app=*" not in bar, bar[:200])
 chk("single-app ACTION buttons emit no app value=\"*\" hidden field", 'value="*"' not in bar)
 chk("action buttons fall back to the first concrete app", "automatixy" in bar)
 chk("cfg.app() was never called with '*' while rendering (the crash invariant)", not star_calls, str(star_calls))

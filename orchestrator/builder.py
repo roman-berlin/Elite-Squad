@@ -6,7 +6,7 @@ import re
 from claude_agent_sdk import ClaudeAgentOptions
 
 from . import memory
-from .agent import run_agent
+from .agent import run_agent, run_agent_with_fallback
 from .config import (AppConfig, Config, EFFORT_LADDER, effort_step_index,
                      normalize_effort)
 from .contracts import (BuildArtifact, BuildRequest, BuildResult,
@@ -371,7 +371,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     # Reviewer + the gate validate before any merge, and MAIN is never touched. Repo conventions
     # still apply — BUILDER_SYSTEM tells it to read CLAUDE.md + .claude/rules and follow them.
     eff = effort_for(cfg, req.iteration, req.ticket)
-    from . import models, guard
+    from . import models, guard, provider as _provider
     guard.warn_if_absent("builder")   # EU-2 F7: loud one-liner if bypassPermissions runs with no guard
     model, mreason = models.for_builder(cfg, req.ticket, eff, req.iteration)
     if getattr(cfg, "auto_model", False):
@@ -389,8 +389,13 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     )
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
-    run = await run_agent(_prompt(req, cfg, spec), options, tag="builder",
-                          ticket_id=req.ticket.id, pass_number=req.iteration)
+    # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    run = await run_agent_with_fallback(_prompt(req, cfg, spec), options, tag="builder",
+                                        ticket_id=req.ticket.id, pass_number=req.iteration, cfg=cfg)
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · builder · {display}", flush=True)
     return BuildResult(
         ok=not run.is_error,
         summary=run.final,
@@ -400,4 +405,6 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         tools=run.tools,
         input_tokens=getattr(run, "input_tokens", 0),   # EU-96: expose for per-officer burn tracking
         output_tokens=getattr(run, "output_tokens", 0),  # getattr-guarded: stubs may omit these
+        provider=getattr(run, "provider", ""),         # EU-123: which provider served this run
+        model_version=getattr(run, "model_version", ""), # EU-123: clean model identifier
     )

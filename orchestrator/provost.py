@@ -171,6 +171,7 @@ async def gate(cfg: Config, app, diff: str, store=None) -> tuple[bool, str]:
         guard.warn_if_absent("provost-gate")   # EU-47: loud one-liner if the gate runs under bypass with no guard
         # EU-52: the merge-blocking security gate runs through the ladder at high effort — it normally
         # holds the reviewer ceiling (Opus) for a strong gate, conserving only when the budget is tight.
+        from . import provider as _provider
         gate_model, gmreason = models.for_officer(cfg, effort="high")
         if getattr(cfg, "auto_model", False):
             print(f"  · provost-gate model: {gmreason}", flush=True)
@@ -193,6 +194,10 @@ async def gate(cfg: Config, app, diff: str, store=None) -> tuple[bool, str]:
             "```diff", diff[:60000], "```", "", "Issue your gate verdict.",
         ])
         run = await run_agent(prompt, options, tag="provost-gate")
+        # EU-123: show actual provider+model in the live feed
+        if getattr(cfg, "auto_model", False):
+            display = _provider.format_provider_model(run.provider, run.model_version)
+            print(f"  · provost-gate · {display}", flush=True)
         # EU-96: provost returns a (bool, str) tuple, not a result object; write token burn
         # directly into the shared store so loop.py can read it from token_burn["provost"].
         if store is not None:
