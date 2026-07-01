@@ -1,7 +1,7 @@
 #!/bin/bash
 # Elite Unit — install (or uninstall) the Mac launchd keepalive daemon for autopilot.
 #
-# This agent is ALWAYS-ON. Because KeepAlive=true, `launchctl load` (run at the end of install)
+# This agent is ALWAYS-ON. Because KeepAlive=true, `launchctl bootstrap` (run at the end of install)
 # STARTS LIVE autopilot immediately and launchd then restarts it whenever it exits — so installing
 # the agent starts a live `./general --live autopilot <app>` worker right away, and there is NO
 # separate manual start step. (RunAtLoad=true is set to agree with that; with KeepAlive=true the job
@@ -9,10 +9,10 @@
 # viewer, so closing the War Room terminal can no longer stop development.
 #
 # Stopping it: because KeepAlive=true, a plain `launchctl stop` is IMMEDIATELY respawned by
-# launchd, so it does NOT durably stop the daemon. To make it stay down, UNLOAD the agent
-# (`launchctl unload "$PLIST"`) or run the `uninstall` action below (which unloads + removes it),
+# launchd, so it does NOT durably stop the daemon. To make it stay down, BOOTOUT the agent
+# (`launchctl bootout gui/$(id -u)/"$LABEL"`) or run the `uninstall` action below (which bootouts + removes it),
 # then re-run this installer to bring it back. The autopilot still stops gracefully on the SIGTERM
-# that unload sends — it finishes the in-flight ticket, removes its PID file, and exits cleanly
+# that bootout sends — it finishes the in-flight ticket, removes its PID file, and exits cleanly
 # (see the SIGTERM handler in orchestrator/autopilot.py).
 #
 # Usage:
@@ -44,7 +44,9 @@ GENERAL_BIN="$HERE/general"
 # ── Uninstall path ──────────────────────────────────────────────────────────
 if [[ "$ACTION" == "uninstall" ]]; then
   if [[ -f "$PLIST" ]]; then
-    # Unload first (ignore errors — agent may not be loaded yet).
+    # Bootout the agent using modern launchd domain commands (tolerate "not loaded").
+    launchctl bootout gui/$(id -u)/"$LABEL" 2>/dev/null || true
+    # Fallback to legacy unload for very old macOS.
     launchctl unload "$PLIST" 2>/dev/null || true
     rm -f "$PLIST"
     echo "Removed $PLIST"
@@ -59,8 +61,10 @@ fi
 # ── Install path ────────────────────────────────────────────────────────────
 mkdir -p "$PLIST_DIR" "$LOG_DIR"
 
-# Unload an existing copy first so launchctl sees the refreshed plist.
+# Bootout an existing copy first so launchctl sees the refreshed plist.
 if [[ -f "$PLIST" ]]; then
+  launchctl bootout gui/$(id -u)/"$LABEL" 2>/dev/null || true
+  # Fallback to legacy unload for very old macOS.
   launchctl unload "$PLIST" 2>/dev/null || true
 fi
 
@@ -75,17 +79,17 @@ cat > "$PLIST" <<PLIST_EOF
     <string>${LABEL}</string>
 
     <!-- Keep autopilot alive. KeepAlive=true makes this an ALWAYS-ON job: launchd starts it at
-         load and restarts it whenever it exits. So loading the agent (launchctl load, below) starts
-         LIVE autopilot immediately. A plain 'launchctl stop' is respawned, so UNLOAD the agent to
+         load and restarts it whenever it exits. So bootstrapping the agent (launchctl bootstrap, below) starts
+         LIVE autopilot immediately. A plain 'launchctl stop' is respawned, so BOOTOUT the agent to
          stop it durably. -->
     <key>KeepAlive</key>
     <true/>
 
     <!-- RunAtLoad=true agrees with KeepAlive=true (which already forces a start at load), so both
-         keys point the same way and there is no separate manual first start: the 'launchctl load'
+         keys point the same way and there is no separate manual first start: the 'launchctl bootstrap'
          below launches LIVE autopilot right away.
-         Stop durably with:  launchctl unload "${PLIST}"   (KeepAlive=true respawns the job after a
-         plain 'launchctl stop', so UNLOAD it to make the stop stick; re-run this installer to bring
+         Stop durably with:  launchctl bootout gui/$(id -u)/${LABEL}   (KeepAlive=true respawns the job after a
+         plain 'launchctl stop', so BOOTOUT it to make the stop stick; re-run this installer to bring
          it back). -->
     <key>RunAtLoad</key>
     <true/>
@@ -110,20 +114,24 @@ cat > "$PLIST" <<PLIST_EOF
 </plist>
 PLIST_EOF
 
-# Load the agent. Because KeepAlive=true (and RunAtLoad=true), this STARTS LIVE autopilot immediately
+# Bootstrap the agent. Because KeepAlive=true (and RunAtLoad=true), this STARTS LIVE autopilot immediately
 # and launchd keeps it alive (restarting it whenever it exits). There is no separate manual start.
-launchctl load "$PLIST"
+launchctl bootstrap gui/$(id -u) "$PLIST"
+# Fallback to legacy load for very old macOS.
+if ! launchctl list "$LABEL" &>/dev/null; then
+  launchctl load "$PLIST" 2>/dev/null || true
+fi
 
 echo ""
 echo "✅ Installed & STARTED: $LABEL"
-echo "   (KeepAlive=true: 'launchctl load' just started LIVE autopilot; launchd restarts it on exit.)"
+echo "   (KeepAlive=true: 'launchctl bootstrap' just started LIVE autopilot; launchd restarts it on exit.)"
 echo "   Plist :  $PLIST"
 echo "   Log   :  $LOG_FILE"
 echo "   App   :  $APP"
 echo ""
 echo "   Status   →  cat /tmp/general-autopilot.pid   (PID of the live autopilot worker)"
-echo "   Stop     →  launchctl unload $PLIST   (KeepAlive respawns it after a plain 'launchctl stop')"
-echo "   Restart  →  bash scripts/install-mac-autopilot-daemon.sh $APP   (reload = unload + reload)"
+echo "   Stop     →  launchctl bootout gui/$(id -u)/$LABEL   (KeepAlive respawns it after a plain 'launchctl stop')"
+echo "   Restart  →  bash scripts/install-mac-autopilot-daemon.sh $APP   (reload = bootout + bootstrap)"
 echo "   Logs     →  tail -f $LOG_FILE"
 echo ""
 echo "   Uninstall  →  bash scripts/install-mac-autopilot-daemon.sh $APP uninstall"
