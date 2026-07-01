@@ -135,6 +135,22 @@ def create_app(cfg: Config):
                             httponly=True, samesite="Lax")
         return resp
 
+    def _ensure_tabs(ws):
+        """Ensure every configured app has a tab, and restore last-active on first load."""
+        if getattr(cfg, "apps", None):
+            was_empty = not ws.tabs
+            for a in cfg.apps:
+                if not ws.get_tab(a.name):
+                    ws.add_tab(a.name, activate=False)
+            if was_empty:
+                try:
+                    from . import projects
+                    recents = projects.recents(cfg)
+                    if recents and recents[0] in _app_names:
+                        ws.set_active(recents[0])
+                except Exception:
+                    pass
+
     def _scope(raw) -> str:
         """Resolve a request's project param to ONE concrete project for this session's active tab.
 
@@ -143,6 +159,7 @@ def create_app(cfg: Config):
         tab is already active, else the first configured app. Returns "" only when no apps exist.
         """
         ws = cockpit_state.workspace_for(_session_id())
+        _ensure_tabs(ws)
         name = (raw or "").strip()
         if name and name != cockpit_state.ALL_PROJECTS_SENTINEL and name in _app_names:
             ws.add_tab(name)        # open or focus that project's tab, and make it active
@@ -156,6 +173,7 @@ def create_app(cfg: Config):
         tab is active — otherwise every tab's background poll would fight over the active tab. Falls
         back to the active tab, then the first app, and never honours the retired ``*`` sentinel."""
         ws = cockpit_state.workspace_for(_session_id())
+        _ensure_tabs(ws)
         name = (raw or "").strip()
         if name and name != cockpit_state.ALL_PROJECTS_SENTINEL and name in _app_names:
             return name

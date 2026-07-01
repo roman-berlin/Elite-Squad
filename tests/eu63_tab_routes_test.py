@@ -52,12 +52,20 @@ def _guard_app(name):
     return _real_app(name)
 cfg.app = _guard_app
 
+from orchestrator import projects
+projects.recents = lambda c: ["Elite-Unit"]
+
 client = srv.create_app(cfg).test_client()
 
-# --- 1) a session cookie is minted on first contact (so the active tab survives reloads) ---
+# --- 1) a session cookie is minted on first contact, and ALL configured apps are pre-opened ---
 r = client.get("/")
 set_cookie = r.headers.get("Set-Cookie") or ""
 chk("first request mints the per-browser session cookie", "eu_cockpit_sid=" in set_cookie, set_cookie[:80])
+
+html_text = r.get_data(as_text=True)
+chk("rendered tab list contains automatixy", ">automatixy</a>" in html_text)
+chk("rendered tab list contains Elite-Unit", ">Elite-Unit</a>" in html_text)
+chk("last-active tab from recents is restored as active", "class='ptab on' href='/?app=Elite-Unit'" in html_text)
 
 # --- 2) focusing a concrete tab, then an app-less action scopes to that ACTIVE tab ---
 swept = []
