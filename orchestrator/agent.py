@@ -205,7 +205,7 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     # Opus succeeded — it was a Sonnet sub-limit hit!
     # Activate the fallback state (stay on Opus until weekly reset)
     reset_at = _get_next_friday_0900_utc()
-    activate_sonnet_fallback(reset_at)
+    activate_sonnet_fallback(reset_at, cfg=cfg)
 
     # Send one-time notification if not already sent
     if not sonnet_fallback_notification_sent() and cfg:
@@ -214,7 +214,7 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
             reset_str = fallback_reset_time_str()
             message = f"⚠️ Sonnet weekly cap hit → Opus fallback active (resets {reset_str})"
             notify.send(message)
-            mark_sonnet_fallback_notified()
+            mark_sonnet_fallback_notified(cfg=cfg)
 
             # Also log to cockpit
             print(f"  · {message}", flush=True)
