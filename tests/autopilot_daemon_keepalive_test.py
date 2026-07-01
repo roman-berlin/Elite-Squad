@@ -335,10 +335,118 @@ check(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# (f) EU-119 — modern launchctl commands (bootstrap/bootout) replace legacy verbs
+#
+# On current macOS, launchctl load/unload fail with I/O errors. The fix:
+#   * install → launchctl bootstrap gui/$(id -u) "$PLIST" (replaces load)
+#   * stop/uninstall → launchctl bootout gui/$(id -u)/"$LABEL" (replaces unload)
+#   * legacy verbs remain only as fallbacks for very old macOS
+#   * all user-facing help text shows the modern commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+# f-1: Install path uses modern 'launchctl bootstrap', NOT legacy 'load' as primary
+_uses_bootstrap = bool(re.search(r"^\s*launchctl\s+bootstrap\s+gui/\$\(id\s+-u\)\s+\"\$PLIST\"", _SCRIPT_TEXT, re.MULTILINE))
+check(
+    "install path uses modern 'launchctl bootstrap gui/$(id -u) \"$PLIST\"' (not legacy load)",
+    _uses_bootstrap,
+    "expected 'launchctl bootstrap gui/$(id -u) \"$PLIST\"' in install path",
+)
+
+# f-2: Uninstall path uses modern 'launchctl bootout', NOT legacy 'unload' as primary
+_uses_bootout_uninstall = bool(re.search(
+    r"# Bootout the agent using modern launchd domain commands[^\n]*\n\s*launchctl\s+bootout\s+gui/\$\(id\s+-u\)/\"\$LABEL\"",
+    _SCRIPT_TEXT,
+    re.DOTALL,
+))
+check(
+    "uninstall path uses modern 'launchctl bootout gui/$(id -u)/\"$LABEL\"' (not legacy unload)",
+    _uses_bootout_uninstall,
+    "expected 'launchctl bootout' in uninstall path with modern-domain comment",
+)
+
+# f-3: Pre-install refresh also uses modern 'bootout' (line 66: bootout existing copy first)
+_uses_bootout_refresh = bool(re.search(
+    r"# Bootout an existing copy first",
+    _SCRIPT_TEXT,
+)) and bool(re.search(
+    r"if \[\[ -f \"\$PLIST\" \]\]; then\s+launchctl\s+bootout\s+gui/\$\(id\s+-u\)/\"\$LABEL\"",
+    _SCRIPT_TEXT,
+    re.DOTALL,
+))
+check(
+    "pre-install refresh uses modern 'bootout' to remove existing copy (before installing fresh)",
+    _uses_bootout_refresh,
+    "expected '# Bootout an existing copy first' comment followed by 'launchctl bootout'",
+)
+
+# f-4: Legacy verbs exist ONLY as fallbacks, not as primary commands
+# (check that 'launchctl load' appears AFTER a fallback comment, not as the main load command)
+_legacy_load_is_fallback = bool(re.search(
+    r"# Fallback to legacy (?:load|unload) for very old macOS[^\n]*\n\s*launchctl\s+(?:load|unload)",
+    _SCRIPT_TEXT,
+    re.DOTALL,
+))
+check(
+    "legacy 'launchctl load/unload' verbs exist only as fallbacks for very old macOS (not primary)",
+    _legacy_load_is_fallback,
+    "expected 'launchctl load/unload' after '# Fallback to legacy ... for very old macOS' comment",
+)
+
+# f-5: Help text shows modern 'bootout' command in the 'Stop →' line
+_help_stop_modern = bool(re.search(
+    r"Stop\s+→\s+launchctl\s+bootout\s+gui/\$\(id\s+-u\)/\$LABEL",
+    _SCRIPT_TEXT,
+))
+check(
+    "printed help shows modern 'Stop → launchctl bootout gui/$(id -u)/$LABEL' (not legacy unload)",
+    _help_stop_modern,
+    "expected 'Stop → launchctl bootout gui/$(id -u)/$LABEL' in help text",
+)
+
+# f-6: Help text documents 'reload = bootout + bootstrap' (not unload + load)
+_help_reload_modern = bool(re.search(
+    r"reload\s*=\s*bootout\s*\+\s*bootstrap",
+    _SCRIPT_TEXT,
+))
+check(
+    "printed help documents 'reload = bootout + bootstrap' (modern verbs, not unload + load)",
+    _help_reload_modern,
+    "expected 'reload = bootout + bootstrap' in help text",
+)
+
+# f-7: Installation echo mentions 'launchctl bootstrap' (not load)
+_echo_uses_bootstrap = bool(re.search(
+    r"KeepAlive=true:\s*'launchctl\s+bootstrap'\s+just\s+started",
+    _SCRIPT_TEXT,
+    re.IGNORECASE,
+))
+check(
+    "installation echo mentions 'launchctl bootstrap' started LIVE autopilot (not legacy load)",
+    _echo_uses_bootstrap,
+    "expected \"KeepAlive=true: 'launchctl bootstrap' just started\" in echo",
+)
+
+# f-8: Comments in plist XML reference modern verbs (bootstrap/bootout), not legacy load/unload
+_plist_comment_modern = bool(re.search(
+    r"bootstrapping.*launchctl\s+bootstrap",
+    _SCRIPT_TEXT,
+    re.IGNORECASE,
+)) and bool(re.search(
+    r"BOOTOUT",
+    _SCRIPT_TEXT,
+))
+check(
+    "plist XML comments reference modern verbs 'bootstrap' and 'BOOTOUT' (not legacy load/unload)",
+    _plist_comment_modern,
+    "expected 'bootstrapping...launchctl bootstrap' and 'BOOTOUT' in plist comments",
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # result summary
 # ─────────────────────────────────────────────────────────────────────────────
 passed_n = sum(1 for _, ok, _ in results if ok)
-print(f"\n========= EU-73 autopilot daemon keepalive tests =========")
+print(f"\n========= EU-73/EU-119 autopilot daemon keepalive tests =========")
 for name, ok, det in results:
     label = "PASS" if ok else "FAIL"
     extra = f"  ({det})" if det and not ok else ""
