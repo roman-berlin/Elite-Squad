@@ -5,6 +5,8 @@ interaction with other parts of the system (config, loop integration, etc.). Pur
 function tests (parse_adr, detect_oversized, to_dict, etc.) are in architect_test.py.
 """
 import sys, types, asyncio
+from unittest.mock import AsyncMock, patch
+
 sdk = types.ModuleType("claude_agent_sdk")
 class _D:
     def __init__(s, *a, **k): pass
@@ -14,6 +16,7 @@ sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
 from orchestrator.contracts import Ticket
+from orchestrator.config import Config
 
 results = []
 def chk(n, c, d=""):
@@ -22,8 +25,6 @@ def chk(n, c, d=""):
 # Integration test: verify architect_enabled config flag works
 def test_architect_enabled_config():
     """Test that architect_enabled config flag controls Architect execution."""
-    from orchestrator.config import Config
-
     # Test 1: architect_enabled defaults to False
     cfg = Config(apps=[])
     chk("architect_enabled defaults to False",
@@ -44,74 +45,60 @@ def test_architect_no_split_trigger():
     This verifies the separation of concerns: Architect produces the ADR, and loop.py
     is responsible for detecting oversized designs and triggering the Scrum Master.
     """
-    from orchestrator.architect import parse_adr, design, ADRExtraction
+    from orchestrator.architect import ADRExtraction
 
-    # Verify parse_adr handles oversized ADR correctly
-    oversized_adr_text = """
-## APPROACH
-Large migration across multiple modules.
-
-## RISK + ALTERNATIVE
-Complexity risk. Alternative: incremental migration (rejected for timeline).
-
-## TOUCH-POINTS
-src/auth/middleware.py
-src/auth/jwt_helper.py
-src/db/users.py
-src/api/users.py
-src/frontend/Users.tsx
-src/frontend/UserForm.tsx
-
-## DEFINITION-OF-DONE
-Tests: migration tests
-A11y: user pages scans
-Security: API gateway authz
-
-ADR_COMPLETE
-"""
-    parsed = parse_adr(oversized_adr_text)
-    chk("Oversized ADR parsed correctly", parsed.skipped is False)
-    chk("Oversized ADR has 6 touch-points", len(parsed.touch_points) == 6)
-
-    # Verify that ADRExtraction itself doesn't have split logic
-    # The design() function returns ADRExtraction; loop.py calls detect_oversized separately
-    chk("ADRExtraction is a pure data structure",
-        hasattr(ADRExtraction, "to_dict") and not hasattr(ADRExtraction, "split"))
-    chk("ADRExtraction has no 'split' method",
-        not hasattr(ADRExtraction, "trigger_split"))
+    # Verify that ADRExtraction itself doesn't have split/split-triggering logic
+    chk("ADRExtraction has no 'split' method", not hasattr(ADRExtraction, "split"))
+    chk("ADRExtraction has no 'trigger_split' method", not hasattr(ADRExtraction, "trigger_split"))
 
 test_architect_no_split_trigger()
 
-# Integration test: verify Architect integrates with Config model selection
-def test_architect_model_selection():
-    """Test that Architect uses high-effort model selection for design reasoning."""
-    from orchestrator.architect import should_run_architect
-    from orchestrator.config import Config
+# Integration test: verify Architect integrates with Config model selection and runs correctly
+def test_architect_model_selection_and_run():
+    """Test that Architect uses configured models and correctly threads config."""
+    from orchestrator.architect import should_run_architect, design
+    from orchestrator.config import Config, AppConfig
 
-    # Verify should_run_architect works with Config
-    cfg = Config(apps=[])
+    app_cfg = AppConfig(name="test-app", repo_path="/fake/repo")
+    cfg = Config(apps=[app_cfg])
+    cfg.auto_model = False
+    cfg.reviewer_model = "test-custom-reviewer-model"
 
-    class TestApp:
-        repo_path = "/fake/repo"
-    cfg.apps = [TestApp()]
-
-    # Test with feature ticket (should run Architect)
     feature_ticket = Ticket(
         id="FEAT-1",
         key="FEAT-1",
         summary="Add feature",
-        description="Add feature",
+        description="Add feature description",
         issue_type="Story",
-        acceptance_criteria=["AC1", "AC2", "AC3", "AC4", "AC5"]
+        acceptance_criteria=["AC1", "AC2", "AC3", "AC4", "AC5"],
+        app="test-app"
     )
 
     async def run_test():
+        # Verify should_run_architect integrates with Config
         result = await should_run_architect(cfg, feature_ticket)
         chk("should_run_architect integrates with Config", result is True)
 
+        # Mock run_officer to verify how design() invokes it
+        with patch("orchestrator.recon.run_officer", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = "SKIP_ADR"
+            
+            adrex = await design(cfg, feature_ticket, repo_context="test-ctx", gated=True)
+            
+            chk("design returns ADRExtraction", adrex.skipped is True)
+            chk("run_officer called once", mock_run.call_count == 1)
+            
+            # Verify passed arguments to run_officer
+            call_kwargs = mock_run.call_args[1]
+            chk("run_officer gets correct officer", call_kwargs.get("officer") == "architect")
+            chk("run_officer gets correct cfg", call_kwargs.get("cfg") is cfg)
+            chk("run_officer gets correct cwd", call_kwargs.get("cwd") == "/fake/repo")
+            chk("run_officer uses reviewer model as ceiling", call_kwargs.get("model") == "test-custom-reviewer-model")
+            chk("run_officer gets high effort", call_kwargs.get("effort") == "high")
+
     asyncio.run(run_test())
 
-test_architect_model_selection()
+test_architect_model_selection_and_run()
 
 # Result tally
 print(f"{sum(1 for _, ok, _ in results if ok)}/{len(results)} passed")
