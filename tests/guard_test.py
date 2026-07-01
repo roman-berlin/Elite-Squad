@@ -66,6 +66,21 @@ for c in ["bun install --frozen-lockfile", "bun i --frozen-lockfile",
           "bun x prettier", "bunx tsc --noEmit", "bun pm ls"]:
     chk(f"allow bun: {c[:32]}", not blocked("Bash", command=c), c)
 
+# --- EU-146: MUST BLOCK vitest without --run (watch mode causes orphaned node processes) ---
+for c in ["npx vitest", "vitest", "vitest watch", "npx vitest watch",
+          "cd apps/web && npx vitest",          # chained — vitest segment has no --run
+          "npx vitest --reporter=verbose",      # extra flags but still watch mode
+          "vitest --coverage",                  # coverage flag doesn't imply run
+          "npx vitest --coverage --reporter dot"]:
+    chk(f"BLOCK vitest watch: {c[:48]}", blocked("Bash", command=c), c)
+
+# --- EU-146: MUST ALLOW vitest run / --run (exits after tests complete) ---
+for c in ["npx vitest run", "vitest run", "npx vitest run src/foo.test.ts",
+          "npx vitest run --pool=forks --poolOptions.forks.maxForks=2",
+          "vitest --run", "npx vitest --run", "npx vitest --run --coverage",
+          "cd apps/web && npx vitest run src/auth.test.ts --pool=forks"]:
+    chk(f"allow vitest run: {c[:48]}", not blocked("Bash", command=c), c)
+
 # --- MUST BLOCK: secret READS (Read tool) — EU-2 F1(a) ---
 for p in [".env", "/Users/roman/project/.env", "apps/web/.env.local", ".env.production",
           "backend/secrets.yaml", "deploy/id_rsa", "certs/server.pem", "certs/tls.key",
