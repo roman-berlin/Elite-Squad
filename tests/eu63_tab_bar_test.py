@@ -41,7 +41,7 @@ chk("renders the tab strip", "class=tabstrip" in bar, bar[:60])
 chk("active project shows a highlighted tab", "class='ptab on'" in bar)
 chk("tab links to its per-tab route", "/?app=automatixy" in bar)
 chk("no '*' all-projects nav link remains", "app=*" not in bar and "app=%2A" not in bar)
-chk("'Choose a ticket' targets the concrete project", "/tickets?app=automatixy" in bar)
+chk("Autopilot 'Choose tickets' button is the single ticket entry point", "Choose tickets" in bar)
 # the only-open project is automatixy, so the picker must OFFER Elite-Unit (a new-tab link)...
 chk("add-tab picker offers a not-open project", "/?app=Elite-Unit" in bar)
 # ...and must NOT offer the already-open project as an openable picker link.
