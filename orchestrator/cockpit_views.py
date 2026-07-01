@@ -357,13 +357,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     def busy(k):
         return "disabled" if _state.get(k) else ""
 
-    try:
-        from . import needs
-        _nneeds = needs.count(cfg)
-    except Exception:  # noqa: BLE001
-        _nneeds = 0
-    needs_badge = f'<span class=cbadge>{_nneeds}</span>' if _nneeds else ""
-
     # ── Two DIFFERENT repos, two DIFFERENT promotions — kept visually distinct so they can't be
     # confused. (A) "Update unit": THE CTO'S OWN code (this tool) dev->main -> the 24/7 VPS
     # self-updates. (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production.
@@ -657,7 +650,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
-  <a class="btn chatbtn" href="/needs">&#128276; Needs you{needs_badge}</a>
   <a class="btn" href="/roster-doc" title="Officers, soldiers &amp; duties — the full unit roster">&#128101; Roster</a>
   {promote_html}
   {ship_html}

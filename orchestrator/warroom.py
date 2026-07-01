@@ -292,8 +292,6 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
          "href": "/tasks?filter=merged", "sparkline": merges_series},  # EU-76: 14-day daily merge trend
-        {"label": "Needs you", "value": _needs_count, "hint": "decisions · approvals · tasks",
-         "tone": "warn" if _needs_count else None, "href": "/needs"},   # EU-93: deep-link to the unified Needs-you inbox
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate (all time)",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
          "security_block_findings": sec_blocks},  # EU-145: pass actual findings for interactive card
@@ -1565,17 +1563,6 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     # sparkline, and it renders in BOTH the live and idle (last-run) states, so the hero was pure
     # duplication. Keep the single panel; `_hero_html` stays a public helper (unit-tested directly)
     # but is no longer emitted here.
-    try:
-        from . import needs as _needs
-        ns = _needs.summary(cfg)
-    except Exception:  # noqa: BLE001
-        ns = {"total": 0, "rows": [], "decisions": [], "approvals": [], "tasks": []}
-    needs_body = _needs_side_html(ns)
-    # Single source of truth for the badge: the side-panel header count, the KPI card (needs.count())
-    # and the /needs inbox all read len(rows). With specialist rosters now folded into rows,
-    # total == count == len(rows), so "count == list" holds on the board (EU-102 iter-3).
-    _nrows = len(ns.get("rows") or [])
-    ncount = f' · {_nrows}' if _nrows else ""
     # EU-106: _liveness chip moves from the retired Live Feed header into the Active Run header
     # so the heartbeat stays visible.  EU-84 contract is preserved: _liveness reads THIS tab's
     # own per-app snapshot (passed as `state`), never a different project's heartbeat.
@@ -1599,8 +1586,6 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<div class=term>{_terminal_html()}</div></section>'
         '</div>'
         f'<div class=col-side>'
-        f'<section class="panel needspanel"><div class=ph>Needs you{ncount}</div>'
-        f'<div class=needs>{needs_body}</div></section>'
         f'<section class=panel><div class=ph>Talk to the unit</div>{_TALK_HTML}</section>'
         '</div>'
         '</div>')
