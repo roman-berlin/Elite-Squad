@@ -6,7 +6,7 @@ import re
 from claude_agent_sdk import ClaudeAgentOptions
 
 from . import memory
-from .agent import run_agent
+from .agent import run_agent, run_agent_with_fallback
 from .config import (AppConfig, Config, EFFORT_LADDER, effort_step_index,
                      normalize_effort)
 from .contracts import (BuildArtifact, BuildRequest, BuildResult,
@@ -389,8 +389,9 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     )
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
-    run = await run_agent(_prompt(req, cfg, spec), options, tag="builder",
-                          ticket_id=req.ticket.id, pass_number=req.iteration)
+    # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    run = await run_agent_with_fallback(_prompt(req, cfg, spec), options, tag="builder",
+                                        ticket_id=req.ticket.id, pass_number=req.iteration, cfg=cfg)
     return BuildResult(
         ok=not run.is_error,
         summary=run.final,

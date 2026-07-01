@@ -52,7 +52,7 @@ check("regression: builder's run_agent call binds to the real signature", bind_o
 # Drives the real _solo_build with run_agent + heavy deps stubbed to capture the call.
 # ============================================================================
 captured = {}
-async def capture_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
+async def capture_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
     captured.update(prompt=prompt, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
     return AgentRun(text="ok", final="built", cost_usd=0.1, num_turns=3, is_error=False, tools=["Edit"])
 
@@ -64,8 +64,24 @@ class _FakeGuard:
 class _FakeModels:
     @staticmethod
     def for_builder(cfg, ticket, eff, it): return ("sonnet", "test-pin")
+    # EU-108: stub the new fallback exports so run_agent_with_fallback can import them
+    SONNET = "claude-sonnet-4-6"
+    OPUS = "claude-opus-4-8"
+    @staticmethod
+    def activate_sonnet_fallback(until_epoch): pass
+    @staticmethod
+    def _get_next_friday_0900_utc(): return 0
+    @staticmethod
+    def sonnet_fallback_notification_sent(): return False
+    @staticmethod
+    def mark_sonnet_fallback_notified(): pass
+    @staticmethod
+    def fallback_reset_time_str(): return ""
+    @staticmethod
+    def sonnet_fallback_active(cfg): return False
 
-builder.run_agent = capture_run_agent
+# EU-108: patch run_agent_with_fallback in builder to avoid real async iteration
+builder.run_agent_with_fallback = capture_run_agent
 sys.modules["orchestrator.guard"] = _FakeGuard          # `from . import guard` -> our fake
 sys.modules["orchestrator.models"] = _FakeModels        # `from . import models`
 _orig_preamble = builder.memory.preamble
