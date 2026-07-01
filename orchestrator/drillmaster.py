@@ -126,6 +126,7 @@ async def drill(cfg: Config) -> str:
     cwd = str(Path(__file__).resolve().parent.parent)   # the CTO's repo root
     # EU-52: honor auto_model — the drill pass sizes off effort and conserves under a tight budget
     # instead of pinning Opus; auto_model off keeps the configured model.
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort="high")
     if getattr(cfg, "auto_model", False):
         print(f"  · drillmaster model: {mreason}", flush=True)
@@ -141,6 +142,10 @@ async def drill(cfg: Config) -> str:
         effort="high",
     )
     run = await run_agent(_prompt(sig, cfg), options, tag="drillmaster")
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · drillmaster · {display}", flush=True)
     return run.final or "(Engineering Coach produced no report.)"
 
 
@@ -180,6 +185,7 @@ async def apply(cfg: Config) -> str:
     backup = snapshot_doctrine(cfg)
     # EU-52: route the apply pass through the ladder too (high effort: ceiling normally, conserve under
     # budget pressure, configured model when auto_model is off).
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort="high")
     if getattr(cfg, "auto_model", False):
         print(f"  · drillmaster model: {mreason}", flush=True)
@@ -203,4 +209,8 @@ async def apply(cfg: Config) -> str:
         "Back-ups are already taken; make the edits and summarize the before -> after.",
     ])
     run = await run_agent(prompt, options, tag="drillmaster-apply")
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · drillmaster-apply · {display}", flush=True)
     return f"Applied. Originals backed up at: {backup}\n\n" + (run.final or "(no summary)")

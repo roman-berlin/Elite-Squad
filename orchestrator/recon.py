@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import guard, memory
+from . import guard, memory, provider as _provider
 from .agent import run_agent
 from .config import Config
 
@@ -104,8 +104,15 @@ def _opts(system: str, cwd: str, model: str, tools: list[str], turns: int, effor
     )
 
 
-async def _solo(system, task, cwd, model, tools, turns, effort, empty, tag):
+async def _solo(system, task, cwd, model, tools, turns, effort, empty, tag, cfg=None, audit=None):
     run = await run_agent(task, _opts(system, cwd, model, tools, turns, effort), tag=tag)
+    if audit is not None:
+        audit.record("officer_recon", officer=tag, provider=run.provider, model=run.model_version,
+                     ok=not run.is_error, cost_usd=run.cost_usd, turns=run.num_turns)
+    # EU-123: show actual provider+model in the live feed (when auto_model is on)
+    if cfg is not None and getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · {tag} · {display}", flush=True)
     return run.final or run.text or empty
 
 
@@ -116,7 +123,7 @@ async def run_officer(*, officer: str, label: str, system: str, task: str, cfg: 
     Always returns the report string (same contract as a solo run)."""
     guard.warn_if_absent(officer)   # EU-47: loud one-liner if this read-only officer runs under bypass with no guard
     if not getattr(cfg, "delegation_enabled", False):
-        return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer)
+        return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer, cfg=cfg, audit=audit)
 
     cap = max(2, int(getattr(cfg, "delegation_max_soldiers", 4)))
     # 1) PLAN — the officer decides SOLO vs a split (read-only, cheap model/effort).
@@ -129,12 +136,17 @@ async def run_officer(*, officer: str, label: str, system: str, task: str, cfg: 
     except Exception:  # noqa: BLE001 - planning hiccup => solo
         slices = []
     if len(slices) < 2:
-        return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer)
+        return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer, cfg=cfg)
 
     print(f"  {officer} · squad of {len(slices)}: " + ", ".join(s.area for s in slices), flush=True)
+    # EU-123: provider/model come from the planning run
     if audit is not None:
-        audit.record("recon_delegation", officer=officer, slices=len(slices),
-                     areas=[s.area for s in slices])
+        audit.record("recon_delegation", officer=officer, provider=plan.provider, model=plan.model_version,
+                     slices=len(slices), areas=[s.area for s in slices])
+    # EU-123: show actual provider+model for the planning run
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(plan.provider, plan.model_version)
+        print(f"  · {officer}-lead · {display}", flush=True)
 
     # 2) SOLDIERS — read-only, sequential, one slice each.
     findings: list[str] = []
@@ -145,7 +157,12 @@ async def run_officer(*, officer: str, label: str, system: str, task: str, cfg: 
                                 tag=f"soldier·{officer}{i}")
             findings.append(f"[Soldier {i} — {sl.area}]\n{(r.final or r.text or '(no findings)').strip()}")
             if audit is not None:
-                audit.record("soldier_recon", officer=officer, area=sl.area, ok=not r.is_error)
+                audit.record("soldier_recon", officer=officer, provider=r.provider, model=r.model_version,
+                             area=sl.area, ok=not r.is_error, cost_usd=r.cost_usd, turns=r.num_turns)
+            # EU-123: show actual provider+model for each soldier
+            if getattr(cfg, "auto_model", False):
+                display = _provider.format_provider_model(r.provider, r.model_version)
+                print(f"  · soldier·{officer}{i} · {display}", flush=True)
         except Exception as e:  # noqa: BLE001 - a soldier failing must not abort the squad
             findings.append(f"[Soldier {i} — {sl.area}] inspection failed: {e}")
 
@@ -155,6 +172,13 @@ async def run_officer(*, officer: str, label: str, system: str, task: str, cfg: 
             task + _SYNTH.format(findings="\n\n".join(findings)),
             _opts(system, cwd, model, soldier_tools, max_turns, effort),
             tag=f"{officer}-synth")
+        if audit is not None:
+            audit.record("recon_synthesis", officer=officer, provider=syn.provider, model=syn.model_version,
+                         ok=not syn.is_error, cost_usd=syn.cost_usd, turns=syn.num_turns)
+        # EU-123: show actual provider+model for synthesis
+        if getattr(cfg, "auto_model", False):
+            display = _provider.format_provider_model(syn.provider, syn.model_version)
+            print(f"  · {officer}-synth · {display}", flush=True)
         return syn.final or syn.text or empty
     except Exception:  # noqa: BLE001 - fail-safe: hand back raw findings rather than nothing
         return f"{label} squad findings (synthesis unavailable):\n\n" + "\n\n".join(findings)

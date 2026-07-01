@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import guard, memory, models
+from . import guard, memory, models, provider
 from .agent import run_agent
 from .config import AppConfig, Config
 from .contracts import BuildRequest, BuildResult
@@ -396,6 +396,8 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
     in_tok = out_tok = 0   # EU-96: per-officer burn tracking — sum specialist soldier token usage
     ok = True
     manual_notes: list[str] = []   # gates that couldn't run AS a verification (prose / missing / blocked / timeout)
+    # EU-123: track provider/model from the first specialist (primary indicator for synthesis)
+    primary_provider, primary_model = "", ""
 
     print(
         f"  squad · ephemeral delegation — {len(subtasks)} specialist(s): "
@@ -411,6 +413,10 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
             flush=True,
         )
         run, _ = await _soldier(st, req, app, cfg, i, len(subtasks), specialists=specialists)
+        # EU-123: capture provider/model from the first specialist as the primary indicator
+        if i == 1:
+            primary_provider = getattr(run, "provider", "")
+            primary_model = getattr(run, "model_version", "")
         cost += run.cost_usd
         turns += run.num_turns
         tools += run.tools
@@ -469,7 +475,8 @@ async def _run_synthesis(gap_domain: str, req: BuildRequest, app: AppConfig, cfg
 
     return BuildResult(ok=ok, summary=summary, cost_usd=cost, num_turns=turns,
                        raw=summary, tools=tools,
-                       input_tokens=in_tok, output_tokens=out_tok)
+                       input_tokens=in_tok, output_tokens=out_tok,
+                       provider=primary_provider, model_version=primary_model)
 
 
 _PLANNER_SYSTEM = """\
@@ -591,7 +598,7 @@ def _soldier_prompt(st: Subtask, req: BuildRequest, idx: int, total: int,
 
 
 async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
-    """Read-only planning pass. Returns (subtasks, cost, turns, tools, in_tok, out_tok, gap_domain).
+    """Read-only planning pass. Returns (subtasks, cost, turns, tools, in_tok, out_tok, gap_domain, provider, model).
 
     ``gap_domain`` is ``None`` for tickets that fit the fixed squad lanes, or a short domain
     label (e.g. ``'mql5'``) when ``detect_domain_gap`` finds no covering lane.  When a gap is
@@ -607,11 +614,12 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
     gap, gap_domain = await detect_domain_gap(ticket_text, SQUAD)
     if gap:
         # On a gap the planner LLM call is skipped, so there is no 'squad-lead' burn to report (0/0).
-        return [], 0.0, 0, [], 0, 0, gap_domain
+        return [], 0.0, 0, [], 0, 0, gap_domain, "", ""
 
     cwd = app.workdir or app.repo_path
     # EU-52: the read-only squad-planning pass runs through the ladder under the Builder's ceiling — a
     # medium-effort plan sizes down a tier and conserves under a tight budget; auto_model off = ceiling.
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort="medium", ceiling_model=cfg.builder_model)
     if getattr(cfg, "auto_model", False):
         print(f"  · squad-plan model: {mreason}", flush=True)
@@ -623,12 +631,18 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
         disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit"],
         setting_sources=[], max_turns=14, effort="medium")
     run = await run_agent(_planner_prompt(req), options, tag="squad-lead")
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · squad-lead · {display}", flush=True)
     # EU-96: also surface the planner's own token burn so build_delegated can seed the delegated
     # BuildResult's input/output tokens from it — the 'squad-lead' pass is a real (often Opus-tier)
     # call, and its cost/turns are already threaded back via run.cost_usd/run.num_turns, so its tokens
     # must be too or the delegated build's burn is under-reported.
+    # EU-123: also surface provider/model information for audit logging
     return (parse_subtasks(run.final or run.text), run.cost_usd, run.num_turns, run.tools,
-            getattr(run, "input_tokens", 0), getattr(run, "output_tokens", 0), None)
+            getattr(run, "input_tokens", 0), getattr(run, "output_tokens", 0), None,
+            run.provider, run.model_version)
 
 
 async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, idx: int, total: int,
@@ -680,6 +694,7 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
     # Builder) rather than for_officer's size-once approach. Pass the current iteration so that a
     # rejected cheap pass automatically escalates to a stronger model on retry. Floor = Sonnet;
     # ceiling = cfg.builder_model.
+    from . import provider as _provider
     model, mreason = models.for_soldier_build(cfg, effort=st.effort(), iteration=iteration)
     if getattr(cfg, "auto_model", False):
         print(f"  · soldier·{st.role} model: {mreason}", flush=True)
@@ -694,6 +709,10 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
         _soldier_prompt(st, req, idx, total, specialists=specialists),
         options, tag=f"soldier·{st.role}",
     )
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · soldier·{st.role} · {display}", flush=True)
     return run, mreason
 
 
@@ -725,7 +744,7 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
     Returns (None, 0) when the plan has <2 subtasks, signalling the caller to do a solo build.
     Returns (None, 0) when a domain gap is detected but HR provisioned no usable specialist.
     """
-    subtasks, p_cost, p_turns, p_tools, p_in_tok, p_out_tok, gap_domain = await _plan(req, app, cfg)
+    subtasks, p_cost, p_turns, p_tools, p_in_tok, p_out_tok, gap_domain, p_provider, p_model = await _plan(req, app, cfg)
 
     # EU-69: a detected domain gap skips the soldier loop entirely and hands off to synthesis.
     if gap_domain is not None:
@@ -752,8 +771,8 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
     print("  squad · split into " + str(len(subtasks)) + ": "
           + ", ".join(f"{SQUAD[s.role][0]}({s.size})" for s in subtasks), flush=True)
     if audit is not None:
-        audit.record("delegation", ticket_id=req.ticket.id, subtasks=len(subtasks),
-                     roles=[s.role for s in subtasks])
+        audit.record("delegation", ticket_id=req.ticket.id, provider=p_provider, model=p_model,
+                     subtasks=len(subtasks), roles=[s.role for s in subtasks])
 
     cost, turns, tools, summaries, ok = p_cost, p_turns, list(p_tools), [], True
     # EU-96: seed token burn from the planner's 'squad-lead' run (mirroring how cost/turns start from
@@ -773,11 +792,14 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
         if run.is_error:
             ok = False
         if audit is not None:
-            audit.record("soldier_build", ticket_id=req.ticket.id, role=st.role, size=st.size,
-                         effort=st.effort(), ok=not run.is_error, cost_usd=run.cost_usd,
-                         turns=run.num_turns, tools=run.tools, mreason=mreason)
+            audit.record("soldier_build", ticket_id=req.ticket.id, provider=run.provider, model=run.model_version,
+                         role=st.role, size=st.size, effort=st.effort(), ok=not run.is_error,
+                         cost_usd=run.cost_usd, turns=run.num_turns, tools=run.tools, mreason=mreason)
 
     summary = (f"Squad delegation — {len(subtasks)} subtasks dispatched:\n\n" + "\n\n".join(summaries))
+    # For squad delegation, use the planner's provider/model as the primary indicator
+    # since the planner is the orchestrating agent for the squad
     return BuildResult(ok=ok, summary=summary, cost_usd=cost, num_turns=turns,
                        raw=summary, tools=tools,
-                       input_tokens=in_tok, output_tokens=out_tok), len(subtasks)
+                       input_tokens=in_tok, output_tokens=out_tok,
+                       provider=p_provider, model_version=p_model), len(subtasks)

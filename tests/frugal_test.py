@@ -18,7 +18,7 @@ from orchestrator import council, governor, memory
 from orchestrator.config import Config, AppConfig
 
 class RR:
-    def __init__(s, t): s.final, s.text = t, t
+    def __init__(s, t): s.final, s.text, s.provider, s.model_version = t, t, "Anthropic", "claude-sonnet-4-6"
 
 captured = []
 async def fake(prompt, options, tag=""):

@@ -63,6 +63,8 @@ class BuildResult:
     tools: list[str] = field(default_factory=list)   # tool calls made (for the transcript)
     input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
     output_tokens: int = 0        # completion tokens this run
+    provider: str = ""            # EU-123: which provider served this run ("Anthropic" or "GLM")
+    model_version: str = ""       # EU-123: clean model identifier (e.g., "claude-opus-4-8", "glm-4")
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +106,8 @@ class ReviewResult:
     parse_failed: bool = False    # reviewer output was unparseable (fail-safe FAIL) -> re-review, don't rebuild
     input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
     output_tokens: int = 0        # completion tokens this run
+    provider: str = ""            # EU-123: which provider served this run ("Anthropic" or "GLM")
+    model_version: str = ""       # EU-123: clean model identifier (e.g., "claude-opus-4-8", "glm-4")
 
     @property
     def blocking_issues(self) -> list[QualityIssue]:
@@ -130,6 +134,8 @@ class TestEngineerResult:
     tools: list[str] = field(default_factory=list)
     input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
     output_tokens: int = 0        # completion tokens this run
+    provider: str = ""            # EU-123: which provider served this run ("Anthropic" or "GLM")
+    model_version: str = ""       # EU-123: clean model identifier (e.g., "claude-opus-4-8", "glm-4")
 
 
 # --------------------------------------------------------------------------- #

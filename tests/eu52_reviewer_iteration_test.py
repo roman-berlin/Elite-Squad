@@ -37,7 +37,7 @@ def chk(n, c, d=""):
 
 # ============ UNIT: reviewer.review forwards `iteration` into the ladder ============ #
 class RR:
-    def __init__(s, t): s.final, s.text, s.is_error, s.cost_usd, s.num_turns, s.tools = t, t, False, 0.0, 1, []
+    def __init__(s, t): s.final, s.text, s.is_error, s.cost_usd, s.num_turns, s.tools, s.provider, s.model_version = t, t, False, 0.0, 1, [], "Anthropic", "claude-sonnet-4-6"
 
 seen = {}
 def fake_for_reviewer(cfg, diff="", iteration=1):

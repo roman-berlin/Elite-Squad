@@ -108,7 +108,7 @@ def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = No
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1,
                  *, store: PerTicketArtifactStore | None = None,
                  build_artifact: BuildArtifact | None = None) -> ReviewResult:
-    from . import models
+    from . import models, provider as _provider
     # EU-72: read the Builder's BuildArtifact (passed by the loop, or from the shared pool) as the
     # primary handoff; the full diff is still under review below. After parsing, publish a typed
     # ReviewVerdict into the pool for the next iteration / audit. Both default None so direct callers
@@ -139,6 +139,12 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking
     result.output_tokens = getattr(run, "output_tokens", 0)  # getattr-guarded: stubs may omit these
+    result.provider = getattr(run, "provider", "")         # EU-123: which provider served this run
+    result.model_version = getattr(run, "model_version", "") # EU-123: clean model identifier
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · reviewer · {display}", flush=True)
     # EU-72: publish the typed ReviewVerdict into the shared pool — a small, auditable record of the
     # verdict + blockers the next iteration reads (the rich ReviewResult keeps its own enum/parser
     # surface for the loop's decision logic).

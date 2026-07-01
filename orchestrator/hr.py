@@ -258,6 +258,7 @@ async def synthesize_specialists(domain: str, ticket_text: str, cfg, *, approver
     # Pin Sonnet per the EU-69 spec: HR is a synthesis task, not code — route through the model ladder
     # with a Sonnet CEILING so auto_model can still conserve under a tight budget but never escalate to
     # Opus. With auto_model off this returns exactly Sonnet.
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort="medium", ceiling_model=models.SONNET)
     if getattr(cfg, "auto_model", False):
         print(f"  · hr model: {mreason}", flush=True)
@@ -275,6 +276,11 @@ async def synthesize_specialists(domain: str, ticket_text: str, cfg, *, approver
     if not charters:
         print("  HR returned no usable specialist charters.", flush=True)
         return []
+
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · hr · {display}", flush=True)
 
     if bool(getattr(cfg, "auto_mode", False)):
         print(f"  HR (automode): provisioning {len(charters)} ephemeral specialist(s) — "

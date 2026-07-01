@@ -47,6 +47,9 @@ class AgentRun:
     # Anthropic API errors (HTTP 429 with "rate limit" or "usage limit" details) via
     # the message.error field when a plan/session/weekly quota is exceeded.
     is_plan_limit: bool = False
+    # EU-123: provider information for this run — which provider + model was used
+    provider: str = ""          # "Anthropic" or "GLM" (z.ai)
+    model_version: str = ""     # Clean model identifier (e.g., "claude-opus-4-8", "glm-4")
 
 
 def _tool_brief(name: str, inp) -> str:
@@ -72,6 +75,11 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     out_tok = 0
     is_error = False
     is_plan_limit = False
+
+    # EU-123: capture provider info from the model configuration
+    from . import provider as _provider
+    model = getattr(options, "model", "") or ""
+    provider, model_version = _provider.get_provider_info(model)
 
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, AssistantMessage):
@@ -112,13 +120,14 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     try:
         from . import usage as _usage
         _usage.record(getattr(options, "model", "") or "", in_tok, out_tok, cost, tag,
-                      ticket_id=ticket_id, pass_number=pass_number)
+                      ticket_id=ticket_id, pass_number=pass_number, provider=provider)
     except Exception:  # noqa: BLE001 — metering must never break a run
         pass
 
     return AgentRun(text="\n".join(chunks), final=final, cost_usd=cost,
                     num_turns=turns, is_error=is_error, tools=tools,
-                    input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit)
+                    input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit,
+                    provider=provider, model_version=model_version)
 
 
 # ── EU-108: Sonnet-cap fallback detection ────────────────────────────────────────────────────────────
@@ -212,5 +221,6 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
         except Exception:  # noqa: BLE001 — notification must never break a run
             pass
 
-    # Return Opus result (successful)
+    # Return Opus result (successful) with Opus provider info
+    # The opus_result already has provider="Anthropic" and model_version from run_agent
     return opus_result

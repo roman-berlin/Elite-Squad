@@ -114,7 +114,7 @@ chair_calls = []
 
 async def _fake_run_agent(prompt, options, tag=""):
     chair_calls.append((tag, options))
-    return ns(final=DECISION, text="")
+    return ns(final=DECISION, text="", provider="Anthropic", model_version="claude-sonnet-4-6")
 
 async def _fake_discuss(*a, **k):
     return [("Dev Team Lead", "We should harden the deploy.")]
