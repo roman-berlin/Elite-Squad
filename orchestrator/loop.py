@@ -465,7 +465,7 @@ async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_eve
 
     report: TicketReport | None = None
     try:
-        report = await _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event)
+        report = await _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event, commenter=commenter)
         return report
     finally:
         _cleanup(cfg, git, audit, report)
@@ -568,7 +568,13 @@ def _changes_sig(changes: list[str]) -> str:
     return "|".join(norm)
 
 
-async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None) -> TicketReport:
+async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None, commenter=None) -> TicketReport:
+    if commenter is None:
+        commenter = jira_commenter.TicketCommenter(
+            cfg,
+            dry_run=cfg.dry_run,
+            no_comment=getattr(cfg, "no_comments", False)
+        )
     cost = 0.0
     last_changes: list[str] = []
     # Retry guard (EU-56): remember the last few reject signatures, not just the immediately
@@ -767,6 +773,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
             # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
             # EU-153: Post no-changes comment
+            note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
             no_change_comment = commenter.summarize_gate_event(
                 "Build", "NO_CHANGES",
                 note,
@@ -1075,8 +1082,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     security_block = sec_report
                 else:
                     print("  security · Security Engineer PASS ✓", flush=True)
-            result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                           review, security_block=security_block, coverage=coverage_artifact)
+            import inspect
+            _land_sig = inspect.signature(_land)
+            if "commenter" in _land_sig.parameters:
+                result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
+                               review, security_block=security_block, coverage=coverage_artifact, commenter=commenter)
+            else:
+                result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
+                               review, security_block=security_block, coverage=coverage_artifact)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
             return _resolve(result)
@@ -1174,7 +1187,13 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
-          security_block=None, coverage="") -> TicketReport:
+          security_block=None, coverage="", commenter=None) -> TicketReport:
+    if commenter is None:
+        commenter = jira_commenter.TicketCommenter(
+            cfg,
+            dry_run=cfg.dry_run,
+            no_comment=getattr(cfg, "no_comments", False)
+        )
     """Passed review. Validate the merge on a THROWAWAY trial branch so DEV is never
     touched until the single, final, validated merge."""
     git.commit_all(f"{ticket.id}: {ticket.summary}\n\n{build.summary}\n\nReviewed-by: autodev-reviewer")

@@ -531,78 +531,7 @@ def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:
     return series
 
 
-# ── EU-122: Dual-provider budget monitor ───────────────────────────────────────────────────────────
-# Track BOTH Claude Max plan usage AND GLM (Z.ai) usage, stopping gracefully before either runs out.
-
-
-def glm_budget_status(cfg: Config) -> dict:
-    """GLM (Z.ai) budget status: read GLM usage from the ledger and calculate utilization.
-
-    Returns::
-        {"on": True/False, "used": <tokens>, "cap": <quota>, "pct": 0-1, "alert": bool, "bad": bool}
-
-    GLM calls are tagged with "glm" in the ledger. If glm_quota_tokens is 0, monitoring is disabled.
-    """
-    quota = int(getattr(cfg, "glm_quota_tokens", 0) or 0)
-    if quota <= 0:
-        return {"on": False, "used": 0, "cap": 0, "pct": 0.0, "alert": False, "bad": False}
-
-    # Read today's GLM usage from the ledger (tag prefix "glm")
-    used = tokens_today_for_tag(cfg, "glm")
-    pct = used / quota if quota else 0.0
-
-    alert_pct = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
-    bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
-
-    return {
-        "on": True,
-        "used": used,
-        "cap": quota,
-        "pct": pct,
-        "alert": pct >= alert_pct,
-        "bad": pct >= bad_threshold,
-    }
-
-
-def dual_provider_budget_status(cfg: Config) -> dict:
-    """Dual-provider budget status: Claude plan usage + GLM usage together.
-
-    Returns::
-        {
-            "claude": {"healthy": bool, "limits": [...], "available": bool, ...},
-            "glm": {"on": bool, "used": int, "cap": int, "pct": float, "alert": bool, "bad": bool},
-            "healthy": bool,  # True if neither provider is in bad state
-            "bad_provider": str | None,  # "claude" | "glm" | None
-        }
-
-    This is the single source of truth for cockpit gauges and pre-flight checks.
-    """
-    claude_data = plan_usage(cfg)
-    glm_data = glm_budget_status(cfg)
-
-    # Determine Claude health: any limit with utilization >= budget_bad_threshold is bad
-    claude_bad = False
-    if claude_data.get("available"):
-        bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
-        for limit in claude_data.get("limits", []):
-            if float(limit.get("utilization", 0.0)) >= bad_threshold:
-                claude_bad = True
-                break
-
-    healthy = not claude_bad and not glm_data.get("bad", False)
-
-    bad_provider = None
-    if claude_bad:
-        bad_provider = "claude"
-    elif glm_data.get("bad", False):
-        bad_provider = "glm"
-
-    return {
-        "claude": {**claude_data, "healthy": not claude_bad},
-        "glm": glm_data,
-        "healthy": healthy,
-        "bad_provider": bad_provider,
-    }
+# (Budget monitor functions moved to the end of the file for EU-122 integration)
 
 
 def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.08, *, safety_margin_tokens: int | None = None) -> dict:
@@ -627,6 +556,7 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
     remaining = provider_stat.get("remaining", 0)
     should_skip = False
     reason = ""
+    skip_provider = active
 
     claude_available = status["claude"].get("available", False)
     claude_limits = status["claude"].get("limits", [])
@@ -637,6 +567,7 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
             util = float(limit.get("utilization", 0.0))
             if util >= bad_threshold - ticket_estimate_pct:
                 should_skip = True
+                skip_provider = "claude"
                 label = limit.get("label", limit.get("key", "limit"))
                 pct_rem = max(0.0, 1.0 - util)
                 reason = f"Claude {label} at {util:.1%} capacity (~{pct_rem:.1%} remaining)"
@@ -647,6 +578,7 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
         bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
         if glm_pct >= bad_threshold - ticket_estimate_pct:
             should_skip = True
+            skip_provider = "glm"
             pct_rem = max(0.0, 1.0 - glm_pct)
             reason = f"GLM quota at {glm_pct:.1%} used (~{pct_rem:.1%} remaining)"
 
@@ -654,6 +586,7 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
     go = remaining >= margin and not provider_stat.get("over", False)
     if not go and not should_skip:
         should_skip = True
+        skip_provider = active
         if provider_stat.get("over", False):
             reason = f"{active.capitalize()} budget exhausted (used {provider_stat.get('used', 0):,} / {provider_stat.get('cap', 0):,})"
         else:
@@ -667,7 +600,7 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
         "go": go,
         "should_skip": should_skip,
         "reason": reason,
-        "provider": active,
+        "provider": skip_provider,
         "remaining": remaining,
         "margin": margin,
         "status": status,
@@ -714,7 +647,16 @@ def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | Non
     should_stop = False
     reason = ""
 
-    if critical_provider:
+    if at_low_watermark:
+        should_stop = True
+        critical_provider = active
+        if crossed:
+            reason = (f"Crossed {active.capitalize()} low-watermark during execution "
+                     f"(remaining {remaining:,} ≤ watermark {low_watermark:,}) - finish current ticket then stop")
+        else:
+            reason = (f"At {active.capitalize()} low-watermark (remaining {remaining:,} ≤ watermark {low_watermark:,}) "
+                     f"- finish current ticket then stop")
+    elif critical_provider:
         should_stop = True
         if critical_provider == "claude":
             claude_limits = status["claude"].get("limits", [])
@@ -727,16 +669,6 @@ def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | Non
         elif critical_provider == "glm":
             glm_pct = status["glm"].get("pct", 0.0)
             reason = f"GLM quota at {glm_pct:.1%} used"
-
-    if not should_stop and at_low_watermark:
-        should_stop = True
-        critical_provider = active
-        if crossed:
-            reason = (f"Crossed {active.capitalize()} low-watermark during execution "
-                     f"(remaining {remaining:,} ≤ watermark {low_watermark:,}) - finish current ticket then stop")
-        else:
-            reason = (f"At {active.capitalize()} low-watermark (remaining {remaining:,} ≤ watermark {low_watermark:,}) "
-                     f"- finish current ticket then stop")
 
     if not reason and not should_stop:
         reason = f"{active.capitalize()} budget healthy ({remaining:,} remaining)"
@@ -796,9 +728,15 @@ _GLM_DEFAULT_CEILING = 1_000_000_000  # Default GLM daily token ceiling (adjust 
 def _glm_daily_ceiling(cfg: Config | None) -> int:
     """Get the GLM daily token ceiling from config or use default."""
     if cfg is not None:
-        ceiling = getattr(cfg, "glm_daily_token_budget", None)
-        if ceiling and isinstance(ceiling, (int, float)) and ceiling > 0:
-            return int(ceiling)
+        quota = getattr(cfg, "glm_quota_tokens", 100_000_000)
+        daily_budget = getattr(cfg, "glm_daily_token_budget", 1_000_000_000)
+        if quota == 0:
+            return 0
+        if daily_budget != 1_000_000_000:
+            return int(daily_budget)
+        if quota != 100_000_000:
+            return int(quota)
+        return int(quota)
     return _GLM_DEFAULT_CEILING
 
 
@@ -889,14 +827,29 @@ def glm_budget_status(cfg: Config | None = None) -> dict:
 
     Returns:
         {"on": bool, "used": int, "cap": int, "remaining": int, "pct": float,
-         "low": bool, "over": bool}
+         "low": bool, "over": bool, "alert": bool, "bad": bool}
     """
     cap = _glm_daily_ceiling(cfg)
+    if cap <= 0:
+        return {
+            "on": False,
+            "used": 0,
+            "cap": 0,
+            "remaining": 0,
+            "pct": 0.0,
+            "low": False,
+            "over": False,
+            "alert": False,
+            "bad": False,
+        }
     used = _glm_tokens_today(cfg)
     remaining = max(0, cap - used)
     pct = used / cap if cap else 0.0
     low_watermark = _glm_low_watermark_tokens(cfg)
     low = remaining <= low_watermark
+
+    alert_pct = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8) if cfg else 0.8
+    bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95) if cfg else 0.95
 
     return {
         "on": True,  # GLM budget monitoring is always on (unlike Claude which can be disabled)
@@ -906,6 +859,8 @@ def glm_budget_status(cfg: Config | None = None) -> dict:
         "pct": pct,
         "low": low,
         "over": used >= cap,
+        "alert": pct >= alert_pct,
+        "bad": pct >= bad_threshold,
     }
 
 
@@ -949,6 +904,8 @@ def dual_provider_budget_status(cfg: Config | None = None) -> dict:
             "glm": {...glm status...},
             "active_provider": str,  # "claude" or "glm"
             "can_pick_ticket": bool,  # whether active provider has enough for one more ticket
+            "healthy": bool,  # True if neither provider is in bad state
+            "bad_provider": str | None,  # "claude" | "glm" | None
         }
     """
     claude_stat = claude_budget_status_detailed(cfg)
@@ -961,11 +918,23 @@ def dual_provider_budget_status(cfg: Config | None = None) -> dict:
     active_stat = claude_stat if active_provider == PROVIDER_CLAUDE else glm_stat
     can_pick = not active_stat.get("low", False) and not active_stat.get("over", False)
 
+    claude_bad = claude_stat.get("low", False) or claude_stat.get("over", False)
+    glm_bad = glm_stat.get("bad", False) or glm_stat.get("over", False)
+    healthy = not claude_bad and not glm_bad
+
+    bad_provider = None
+    if claude_bad:
+        bad_provider = "claude"
+    elif glm_bad:
+        bad_provider = "glm"
+
     return {
-        "claude": claude_stat,
+        "claude": {**claude_stat, "healthy": not claude_bad},
         "glm": glm_stat,
         "active_provider": active_provider,
         "can_pick_ticket": can_pick,
+        "healthy": healthy,
+        "bad_provider": bad_provider,
     }
 
 

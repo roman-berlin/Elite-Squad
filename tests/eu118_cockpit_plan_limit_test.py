@@ -124,6 +124,21 @@ class TestPlanLimitTelegramAlert:
     def setup_method(self):
         """Reset alert state before each test."""
         reset_plan_limit_alert()
+        self.old_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        self.old_chat = os.environ.get("TELEGRAM_CHAT_ID")
+        os.environ["TELEGRAM_BOT_TOKEN"] = "mock_token"
+        os.environ["TELEGRAM_CHAT_ID"] = "mock_chat_id"
+
+    def teardown_method(self):
+        """Restore environment variables."""
+        if self.old_token is not None:
+            os.environ["TELEGRAM_BOT_TOKEN"] = self.old_token
+        else:
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        if self.old_chat is not None:
+            os.environ["TELEGRAM_CHAT_ID"] = self.old_chat
+        else:
+            os.environ.pop("TELEGRAM_CHAT_ID", None)
 
     def test_alert_sends_once_per_session(self):
         """Alert sends only once per session even if called multiple times."""

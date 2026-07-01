@@ -37,6 +37,7 @@ adjutant-report.md
 scout-report.md
 provost-report.md
 quartermaster-report.md
+EU-144_TPM_REPORT.md
 council/*.log
 council/*.md
 council/index.jsonl
@@ -67,3 +68,5 @@ ROSTER.md
 # macOS
 .DS_Store
 cockpit.log
+# Runtime logs
+logs/

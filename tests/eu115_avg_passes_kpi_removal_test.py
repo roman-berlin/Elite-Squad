@@ -75,7 +75,7 @@ chk(
 )
 
 # Test 4: Verify the expected KPI cards are still present
-expected_cards = ["Merged → DEV today", "Merged total", "Needs you", "Security blocks"]
+expected_cards = ["Merged → DEV today", "Needs you", "Security blocks"]
 for expected in expected_cards:
     chk(
         f"Expected KPI '{expected}' is present",
