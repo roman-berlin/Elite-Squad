@@ -605,27 +605,29 @@ def dual_provider_budget_status(cfg: Config) -> dict:
     }
 
 
-def pre_flight_check(cfg: Config, ticket_estimate_pct: float = 0.08) -> dict:
+def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.08, *, safety_margin_tokens: int | None = None) -> dict:
     """Pre-flight check: should we skip starting a new ticket?
 
     Returns::
-        {"should_skip": bool, "provider": str | None, "reason": str, "status": dict}
-
-    The check evaluates the ACTIVE provider (the one we'd use for the next ticket).
-    If that provider's remaining budget is below the ticket estimate plus a safety margin,
-    we skip starting the ticket.
-
-    Args:
-        cfg: Config object
-        ticket_estimate_pct: Estimated fraction of provider budget a typical ticket consumes (default 8%)
+        {"go": bool, "should_skip": bool, "provider": str | None, "reason": str, "status": dict, "remaining": int, "margin": int}
     """
+    if cfg is None:
+        return {"go": True, "should_skip": False, "reason": "no config - allow", "provider": "unknown", "remaining": -1, "margin": 0, "status": {}}
+
     status = dual_provider_budget_status(cfg)
+    active = status["active_provider"]
+    provider_stat = status["claude"] if active == PROVIDER_CLAUDE else status["glm"]
+
+    # Use configured safety margin or override
+    margin = safety_margin_tokens or (
+        _claude_low_watermark_tokens(cfg) if active == PROVIDER_CLAUDE
+        else _glm_low_watermark_tokens(cfg)
+    )
+
+    remaining = provider_stat.get("remaining", 0)
     should_skip = False
-    provider = None
     reason = ""
 
-    # For now, assume Claude is the primary active provider
-    # In the future with EU-121 routing, we'd check the active provider from routing logic
     claude_available = status["claude"].get("available", False)
     claude_limits = status["claude"].get("limits", [])
 
@@ -635,42 +637,81 @@ def pre_flight_check(cfg: Config, ticket_estimate_pct: float = 0.08) -> dict:
             util = float(limit.get("utilization", 0.0))
             if util >= bad_threshold - ticket_estimate_pct:
                 should_skip = True
-                provider = "claude"
                 label = limit.get("label", limit.get("key", "limit"))
                 pct_rem = max(0.0, 1.0 - util)
                 reason = f"Claude {label} at {util:.1%} capacity (~{pct_rem:.1%} remaining)"
                 break
 
-    # Also check GLM if enabled
     if not should_skip and status["glm"].get("on", False):
         glm_pct = status["glm"].get("pct", 0.0)
         bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
         if glm_pct >= bad_threshold - ticket_estimate_pct:
             should_skip = True
-            provider = "glm"
             pct_rem = max(0.0, 1.0 - glm_pct)
             reason = f"GLM quota at {glm_pct:.1%} used (~{pct_rem:.1%} remaining)"
 
+    # Also check watermark / safety margins
+    go = remaining >= margin and not provider_stat.get("over", False)
+    if not go and not should_skip:
+        should_skip = True
+        if provider_stat.get("over", False):
+            reason = f"{active.capitalize()} budget exhausted (used {provider_stat.get('used', 0):,} / {provider_stat.get('cap', 0):,})"
+        else:
+            reason = f"{active.capitalize()} budget below safety margin (remaining {remaining:,} < margin {margin:,})"
+
+    go = not should_skip
+    if not reason and go:
+        reason = f"{active.capitalize()} has {remaining:,} tokens remaining"
+
     return {
+        "go": go,
         "should_skip": should_skip,
-        "provider": provider,
         "reason": reason,
+        "provider": active,
+        "remaining": remaining,
+        "margin": margin,
         "status": status,
     }
 
 
-def graceful_stop_check(cfg: Config) -> dict:
+def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | None = None) -> dict:
     """Mid-run check: should we stop/switch after finishing the current ticket?
 
     Returns::
-        {"should_stop": bool, "critical_provider": str | None, "reason": str, "status": dict}
-
-    Called mid-run to detect if a provider has crossed the low-watermark (budget_bad_threshold).
-    If so, we finish the current ticket cleanly, then stop or switch providers.
+        {"should_stop": bool, "critical_provider": str | None, "reason": str, "status": dict,
+         "provider": str, "remaining": int, "low_watermark": int, "crossed": bool}
     """
+    if cfg is None:
+        return {
+            "should_stop": False,
+            "critical_provider": None,
+            "reason": "no config",
+            "provider": "unknown",
+            "remaining": -1,
+            "low_watermark": 0,
+            "crossed": False,
+            "status": {},
+        }
+
     status = dual_provider_budget_status(cfg)
-    should_stop = False
     critical_provider = status.get("bad_provider")
+    
+    active = status["active_provider"]
+    provider_stat = status["claude"] if active == PROVIDER_CLAUDE else status["glm"]
+
+    remaining = provider_stat.get("remaining", 0)
+    low_watermark = (_claude_low_watermark_tokens(cfg) if active == PROVIDER_CLAUDE
+                     else _glm_low_watermark_tokens(cfg))
+
+    # Check if we're at or below low-watermark
+    at_low_watermark = remaining <= low_watermark
+
+    # Check if we crossed from above to below
+    crossed = False
+    if prior_remaining is not None:
+        crossed = prior_remaining > low_watermark and at_low_watermark
+
+    should_stop = False
     reason = ""
 
     if critical_provider:
@@ -687,11 +728,28 @@ def graceful_stop_check(cfg: Config) -> dict:
             glm_pct = status["glm"].get("pct", 0.0)
             reason = f"GLM quota at {glm_pct:.1%} used"
 
+    if not should_stop and at_low_watermark:
+        should_stop = True
+        critical_provider = active
+        if crossed:
+            reason = (f"Crossed {active.capitalize()} low-watermark during execution "
+                     f"(remaining {remaining:,} ≤ watermark {low_watermark:,}) - finish current ticket then stop")
+        else:
+            reason = (f"At {active.capitalize()} low-watermark (remaining {remaining:,} ≤ watermark {low_watermark:,}) "
+                     f"- finish current ticket then stop")
+
+    if not reason and not should_stop:
+        reason = f"{active.capitalize()} budget healthy ({remaining:,} remaining)"
+
     return {
         "should_stop": should_stop,
         "critical_provider": critical_provider,
         "reason": reason,
         "status": status,
+        "provider": active,
+        "remaining": remaining,
+        "low_watermark": low_watermark,
+        "crossed": crossed,
     }
 
 
@@ -911,101 +969,4 @@ def dual_provider_budget_status(cfg: Config | None = None) -> dict:
     }
 
 
-def pre_flight_check(cfg: Config | None = None, *, safety_margin_tokens: int | None = None) -> dict:
-    """Check before ticket pickup: returns False if active provider is below safety margin.
 
-    This is called by the autopilot BEFORE picking up a new ticket to ensure we don't
-    start a ticket we can't finish.
-
-    Args:
-        cfg: The Config object
-        safety_margin_tokens: Optional override for the safety margin (defaults to ~100k)
-
-    Returns:
-        {"go": bool, "reason": str, "provider": str, "remaining": int, "margin": int}
-    """
-    if cfg is None:
-        return {"go": True, "reason": "no config - allow", "provider": "unknown", "remaining": -1, "margin": 0}
-
-    status = dual_provider_budget_status(cfg)
-    active = status["active_provider"]
-    provider_stat = status["claude"] if active == PROVIDER_CLAUDE else status["glm"]
-
-    # Use configured safety margin or override
-    margin = safety_margin_tokens or (
-        _claude_low_watermark_tokens(cfg) if active == PROVIDER_CLAUDE
-        else _glm_low_watermark_tokens(cfg)
-    )
-
-    remaining = provider_stat.get("remaining", 0)
-    go = remaining >= margin and not provider_stat.get("over", False)
-
-    if not go:
-        if provider_stat.get("over", False):
-            reason = f"{active.capitalize()} budget exhausted (used {provider_stat.get('used', 0):,} / {provider_stat.get('cap', 0):,})"
-        else:
-            reason = f"{active.capitalize()} budget below safety margin (remaining {remaining:,} < margin {margin:,})"
-
-    return {
-        "go": go,
-        "reason": reason if not go else f"{active.capitalize()} has {remaining:,} tokens remaining",
-        "provider": active,
-        "remaining": remaining,
-        "margin": margin,
-    }
-
-
-def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | None = None) -> dict:
-    """Check during execution: trigger finish-then-stop when crossing low-watermark.
-
-    This is called periodically during ticket execution. If we've crossed from
-    above the low-watermark to below it, we should finish the current ticket/operation
-    cleanly and then stop to prevent running out mid-ticket.
-
-    Args:
-        cfg: The Config object
-        prior_remaining: Optional prior remaining token count to detect crossing
-
-    Returns:
-        {"should_stop": bool, "reason": str, "provider": str, "remaining": int,
-         "low_watermark": int, "crossed": bool}
-    """
-    if cfg is None:
-        return {"should_stop": False, "reason": "no config", "provider": "unknown",
-                "remaining": -1, "low_watermark": 0, "crossed": False}
-
-    status = dual_provider_budget_status(cfg)
-    active = status["active_provider"]
-    provider_stat = status["claude"] if active == PROVIDER_CLAUDE else status["glm"]
-
-    remaining = provider_stat.get("remaining", 0)
-    low_watermark = (_claude_low_watermark_tokens(cfg) if active == PROVIDER_CLAUDE
-                     else _glm_low_watermark_tokens(cfg))
-
-    # Check if we're at or below low-watermark
-    at_low_watermark = remaining <= low_watermark
-
-    # Check if we crossed from above to below (prior state was above, now at/below)
-    crossed = False
-    if prior_remaining is not None:
-        crossed = prior_remaining > low_watermark and at_low_watermark
-
-    # Should stop if we're at low watermark or just crossed it
-    should_stop = at_low_watermark
-
-    if should_stop:
-        if crossed:
-            reason = (f"Crossed {active.capitalize()} low-watermark during execution "
-                     f"(remaining {remaining:,} ≤ watermark {low_watermark:,}) - finish current ticket then stop")
-        else:
-            reason = (f"At {active.capitalize()} low-watermark (remaining {remaining:,} ≤ watermark {low_watermark:,}) "
-                     f"- finish current ticket then stop")
-
-    return {
-        "should_stop": should_stop,
-        "reason": reason if should_stop else f"{active.capitalize()} budget healthy ({remaining:,} remaining)",
-        "provider": active,
-        "remaining": remaining,
-        "low_watermark": low_watermark,
-        "crossed": crossed,
-    }
