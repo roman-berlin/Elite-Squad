@@ -41,14 +41,13 @@ always unit-wide — your officers serve every project.)
 
 ---
 
-## KPI strip (the six numbers)
+## KPI strip (the five numbers)
 
 | Card | What it means |
 |------|---------------|
 | **Merged → DEV today** | Tickets the unit shipped to DEV (moved to QA) today. |
 | **Merged total** | All-time merges to DEV (for the selected scope). |
 | **Needs you** | Tickets parked for you: a PR was opened, an escalation, or an error. Amber when > 0. |
-| **Avg passes / ticket** | Mean build→review passes per merged ticket. Lower = cleaner first-time work. |
 | **Parked** | Tickets the autopilot auto-skipped because they're stuck. Amber when > 0. |
 | **Security blocks** | Times the Provost Marshal blocked a merge on a CRITICAL/HIGH finding. Red when > 0. |
 

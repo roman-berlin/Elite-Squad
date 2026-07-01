@@ -60,7 +60,7 @@ server._state.pop("last_msg", None)
 # --- no result -> no banner, page renders fine ---
 server._state.pop("last_result", None)
 hn = client.get("/").get_data(as_text=True)
-chk("no result -> page renders without the banner", "Choose a ticket" in hn)
+chk("no result -> page renders without the banner", "New task" in hn)
 
 # --- deploy-status reports the dedicated result line ---
 server._state["last_result"] = "Deployed 2 commit(s) DEV → main — the server self-updates within ~15 min."

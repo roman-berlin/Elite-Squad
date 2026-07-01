@@ -620,8 +620,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 }}
 </style>
 <div class=tbar>
-  <a class="btn primary" href="/tickets{('?app=' + html.escape(nav_app)) if nav_app else ''}">&#127915; Choose a ticket</a>
-
   <details class=menu>
     <summary class=btn>&#43; New task</summary>
     <div class="panel form">
