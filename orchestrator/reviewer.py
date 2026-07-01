@@ -12,7 +12,7 @@ import re
 from claude_agent_sdk import ClaudeAgentOptions
 
 from . import filing, memory
-from .agent import run_agent
+from .agent import run_agent, run_agent_with_fallback
 from .config import AppConfig, Config, normalize_effort
 from .contracts import (BuildArtifact, PerTicketArtifactStore, QualityIssue,
                        ReviewResult, ReviewVerdict, Ticket, Verdict)
@@ -133,7 +133,9 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
         max_turns=30,
         effort=normalize_effort(cfg.reviewer_effort),
     )
-    run = await run_agent(_prompt(diff, ticket, build_artifact), options, tag="reviewer")
+    # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer", cfg=cfg)
+
     result = _parse(run.final or run.text)
     result.cost_usd = run.cost_usd
     result.raw = run.final

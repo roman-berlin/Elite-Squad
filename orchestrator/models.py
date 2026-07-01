@@ -17,6 +17,8 @@ EU-108 Sonnet-cap fallback:
 """
 from __future__ import annotations
 
+import time
+
 # canonical model strings, cheapest → dearest
 HAIKU = "claude-haiku-4-5-20251001"
 SONNET = "claude-sonnet-4-6"
@@ -24,6 +26,83 @@ OPUS = "claude-opus-4-8"
 LADDER = [HAIKU, SONNET, OPUS]
 
 _TOP = len(LADDER) - 1
+
+# EU-108: Sonnet→Opus fallback state (tracked globally so all code paths share the same decision)
+_sonnet_fallback_active = False
+_sonnet_fallback_reset_time: float | None = None  # Unix timestamp when weekly Sonnet cap resets
+
+# Persistent notification flag to prevent duplicates across process restarts
+_FALLBACK_NOTIFIED_FILE = "/tmp/sonnet_fallback_notified"
+
+
+def _is_sonnet_fallback_active() -> bool:
+    """Check if Sonnet→Opus fallback is currently active (Sonnet weekly cap hit)."""
+    global _sonnet_fallback_active, _sonnet_fallback_reset_time
+
+    # Auto-reset after the weekly window (Sonnet caps reset every Friday 09:00 UTC)
+    # We use a 7-day window from when fallback was triggered
+    if _sonnet_fallback_active and _sonnet_fallback_reset_time is not None:
+        if time.time() >= _sonnet_fallback_reset_time:
+            # Weekly reset passed — clear the fallback state
+            _sonnet_fallback_active = False
+            _sonnet_fallback_reset_time = None
+            # Also clear the persistent notification flag
+            try:
+                from pathlib import Path
+                Path(_FALLBACK_NOTIFIED_FILE).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return _sonnet_fallback_active
+
+
+def _trigger_sonnet_fallback() -> None:
+    """Activate Sonnet→Opus fallback (called when Sonnet weekly cap is hit)."""
+    global _sonnet_fallback_active, _sonnet_fallback_reset_time
+
+    _sonnet_fallback_active = True
+    # Estimate next Friday 09:00 UTC (roughly 7 days from now)
+    # Claude Max weekly limits reset on Fridays at 09:00 UTC
+    _sonnet_fallback_reset_time = time.time() + (7 * 24 * 60 * 60)
+
+
+def _reset_sonnet_fallback() -> None:
+    """Clear Sonnet→Opus fallback state (for testing or manual reset)."""
+    global _sonnet_fallback_active, _sonnet_fallback_reset_time
+    _sonnet_fallback_active = False
+    _sonnet_fallback_reset_time = None
+    # Also clear the persistent notification flag
+    try:
+        from pathlib import Path
+        Path(_FALLBACK_NOTIFIED_FILE).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _get_fallback_reset_time() -> str | None:
+    """Get a human-readable reset time for the Sonnet cap (e.g., 'Fri 09:00 UTC')."""
+    if _sonnet_fallback_reset_time is None:
+        return None
+    # Day of week: 0=Mon, 1=Tue, ..., 4=Fri, 5=Sat, 6=Sun
+    # Claude Max weekly limits reset on Fridays at 09:00 UTC
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    # Approximate — just show "Fri 09:00 UTC" as the pattern
+    return "Fri 09:00 UTC"
+
+
+def _was_sonnet_fallback_notified() -> bool:
+    """Check if we already sent the Sonnet fallback notification."""
+    import os
+    return os.path.exists(_FALLBACK_NOTIFIED_FILE)
+
+
+def _mark_sonnet_fallback_notified() -> None:
+    """Mark that we sent the Sonnet fallback notification (prevents spam)."""
+    try:
+        from pathlib import Path
+        Path(_FALLBACK_NOTIFIED_FILE).touch(exist_ok=True)
+    except Exception:
+        pass  # Notification must never break the run
 
 
 def tier_of(model: str) -> int:
@@ -124,7 +203,10 @@ def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]
     ticket — including auto-sized 'high' effort — attempts Sonnet first and escalates to Opus only
     if that pass is rejected. Only an *explicit* top-end pin ('max'/'maximum'/'ultra' effort) starts
     on Opus from pass one. Floor = Sonnet (never Haiku for code). A tight budget pins it to Sonnet to
-    keep shipping rather than hard-pausing."""
+    keep shipping rather than hard-pausing.
+
+    EU-108: When Sonnet weekly cap is hit and opus_fallback_on_sonnet_cap is enabled, Sonnet
+    calls automatically redirect to Opus for the rest of the weekly window."""
     ceiling = getattr(cfg, "builder_model", OPUS)
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
