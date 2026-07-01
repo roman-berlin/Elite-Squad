@@ -189,6 +189,7 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
     eff = normalize_effort(getattr(cfg, "test_engineer_effort", "medium"))
     # EU-52: the Test Engineer writes test code under the Builder's ceiling — route it through the ladder
     # sized off its effort (floor stays Sonnet for code), conserving under budget; ceiling when auto off.
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort=eff, ceiling_model=cfg.builder_model)
     if getattr(cfg, "auto_model", False):
         print(f"  · test-engineer model: {mreason}", flush=True)
@@ -204,6 +205,10 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
         effort=eff,
     )
     run = await run_agent(_prompt(ticket, build_artifact), options, tag="test-engineer")
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · test-engineer · {display}", flush=True)
     coverage_text = extract_coverage(run.final or run.text)
     # EU-96: publish the typed TestEngineerArtifact into the shared pool so the measurement layer
     # can track per-officer coverage numerics without parsing free-text COVERAGE: lines.
@@ -223,4 +228,6 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
         tools=run.tools,
         input_tokens=getattr(run, "input_tokens", 0),   # EU-96: expose for per-officer burn tracking
         output_tokens=getattr(run, "output_tokens", 0),  # getattr-guarded: stubs may omit these
+        provider=getattr(run, "provider", ""),         # EU-123: which provider served this run
+        model_version=getattr(run, "model_version", ""), # EU-123: clean model identifier
     )

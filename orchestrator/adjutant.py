@@ -209,6 +209,7 @@ async def propose(cfg: Config, *, ticket_text: str | None = None) -> str:
     cwd = str(Path(__file__).resolve().parent.parent)   # the CTO's repo root
     # EU-52: honor auto_model — the personnel-review pass sizes off effort and conserves under a tight
     # budget rather than always pinning Opus; with auto_model off the configured model is unchanged.
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort="high")
     if getattr(cfg, "auto_model", False):
         print(f"  · adjutant model: {mreason}", flush=True)
@@ -235,6 +236,10 @@ async def propose(cfg: Config, *, ticket_text: str | None = None) -> str:
         "Propose only; the Commander approves.",
     ])
     run = await run_agent(prompt, options, tag="adjutant")
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · adjutant · {display}", flush=True)
     return run.final or "(Engineering Manager produced no report.)"
 
 
@@ -258,6 +263,7 @@ async def apply(cfg: Config) -> str:
     backup = snapshot_doctrine(cfg)
     # EU-52: route the apply pass through the ladder too (high effort: holds the ceiling normally,
     # conserves under budget pressure, configured model when auto_model is off).
+    from . import provider as _provider
     model, mreason = models.for_officer(cfg, effort="high")
     if getattr(cfg, "auto_model", False):
         print(f"  · adjutant model: {mreason}", flush=True)
@@ -280,4 +286,8 @@ async def apply(cfg: Config) -> str:
         "Back-ups are taken. Do the one approved action and report exactly what changed.",
     ])
     run = await run_agent(prompt, options, tag="adjutant-apply")
+    # EU-123: show actual provider+model in the live feed
+    if getattr(cfg, "auto_model", False):
+        display = _provider.format_provider_model(run.provider, run.model_version)
+        print(f"  · adjutant-apply · {display}", flush=True)
     return f"Applied. Originals backed up at: {backup}\n\n" + (run.final or "(no summary)")
