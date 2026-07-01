@@ -1,5 +1,6 @@
 {
   "git.ignoredRepositories": [
-    ".unit-state"
+    "/Users/romanberlin/Projects/General/.unit-state",
+    "/Users/romanberlin/Projects/.general-worktrees/Elite-Unit"
   ]
 }
