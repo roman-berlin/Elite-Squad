@@ -247,13 +247,17 @@ def test_run_agent_fallback_sonnet_limit():
     from orchestrator.agent import run_agent_with_fallback, AgentRun
     from claude_agent_sdk import ClaudeAgentOptions
 
-    # Track which models were called
+    # Track which models were called + the full options object per call (2026-07-05 audit §6
+    # defect 1: the Opus probe's rebuilt options silently dropped cwd/hooks/disallowed_tools —
+    # capturing the object lets the fidelity assertions below pin the copy-based clone).
     calls = []
+    captured_options = []
 
     # Mock run_agent to simulate Sonnet 429 then Opus success
     async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, routing_tier=None):
         model = getattr(options, "model", "")
         calls.append(model)
+        captured_options.append(options)
 
         # First call (Sonnet) - simulate plan-limit error
         if "sonnet" in model.lower():
@@ -300,10 +304,21 @@ def test_run_agent_fallback_sonnet_limit():
         reset_sonnet_fallback()
         reset_sonnet_fallback_notification()
 
-        # Create options for Sonnet
+        # Create options for Sonnet — with every safety-relevant field set, so the fidelity
+        # assertions below can prove the Opus probe preserves them (worktree cwd, guard hooks,
+        # tool denylist — the exact fields the pre-fix clone dropped).
+        guard_hooks = {"PreToolUse": ["guard-denylist"]}
         options = ClaudeAgentOptions(
             model=SONNET,
             system_prompt="Test",
+            cwd="/work/some-ticket-worktree",
+            permission_mode="bypassPermissions",
+            allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            disallowed_tools=["NotebookEdit"],
+            hooks=guard_hooks,
+            setting_sources=[],
+            max_turns=40,
+            effort="high",
         )
 
         # Mock config with fallback enabled
@@ -330,7 +345,29 @@ def test_run_agent_fallback_sonnet_limit():
         # The one-shot alert must go through the (stubbed) notify.send, never a real channel
         assert any("Sonnet weekly cap" in m for m in sent), f"alert should be captured by the stub, got {sent}"
 
-        print("  ✓ Sonnet limit → Opus retry → fallback activated (alert captured, not sent)")
+        # ── Option fidelity on the Opus probe (2026-07-05 audit §6 defect 1) ──
+        # The probe's options must carry EVERY field of the original — cwd (worktree isolation),
+        # hooks (guard denylist) and disallowed_tools were silently dropped by the old rebuild,
+        # so the probe ran unguarded in the process CWD under bypassPermissions.
+        opus_opts = captured_options[1]
+        assert opus_opts is not options, "Opus probe must run on a copy, not mutate the original"
+        assert getattr(opus_opts, "cwd", None) == "/work/some-ticket-worktree", \
+            f"probe dropped cwd: {getattr(opus_opts, 'cwd', None)!r}"
+        assert getattr(opus_opts, "hooks", None) == guard_hooks, \
+            f"probe dropped the guard hooks: {getattr(opus_opts, 'hooks', None)!r}"
+        assert getattr(opus_opts, "disallowed_tools", None) == ["NotebookEdit"], \
+            f"probe dropped disallowed_tools: {getattr(opus_opts, 'disallowed_tools', None)!r}"
+        assert getattr(opus_opts, "permission_mode", None) == "bypassPermissions"
+        assert getattr(opus_opts, "allowed_tools", None) == ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        assert getattr(opus_opts, "setting_sources", None) == []
+        assert getattr(opus_opts, "max_turns", None) == 40
+        assert getattr(opus_opts, "effort", None) == "high"
+        assert getattr(opus_opts, "system_prompt", None) == "Test"
+        # The original options must be untouched (still Sonnet) — the copy owns the model swap.
+        assert getattr(options, "model", None) == SONNET, \
+            f"original options mutated by the probe: {getattr(options, 'model', None)!r}"
+
+        print("  ✓ Sonnet limit → Opus retry → fallback activated (alert captured; probe options faithful)")
     finally:
         # Restore original
         agent_module.run_agent = original_run_agent

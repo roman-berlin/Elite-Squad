@@ -110,41 +110,61 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     # input tokens are sliceable by ticket (the real cost lever). Optional + keyword-defaulted, so
     # every existing caller (officers/chat that pass only `tag`) is unaffected.
 
-    # EU-174: Hybrid routing - handle tier-based endpoint switching
+    # EU-174: hybrid routing — tier-based endpoint switching. The mutations are process-global
+    # (env base URL/key) plus options.model, so they are scoped with try/finally and restored
+    # with unset-aware semantics. The 2026-07-05 audit (§6 defect 2) found the old restore was
+    # skipped entirely when ANTHROPIC_BASE_URL was originally unset — one LOCAL-tier call
+    # permanently pointed the whole process at Ollama — and no exception path restored anything.
+    if not routing_tier:
+        return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
+                                         pass_number=pass_number)
+
     import os as _os
-    _original_base_url = None
-    _original_api_key = None
-    _original_model = None
+    from . import routing as _routing
+    tier = _routing.RoutingTier(routing_tier)
 
-    if routing_tier:
-        from . import routing as _routing
-        tier = _routing.RoutingTier(routing_tier)
+    _original_base_url = _os.environ.get("ANTHROPIC_BASE_URL")
+    _original_api_key = _os.environ.get("ANTHROPIC_API_KEY")
+    _original_model = getattr(options, "model", None)
 
-        # Save original environment values
-        _original_base_url = _os.environ.get("ANTHROPIC_BASE_URL")
-        _original_api_key = _os.environ.get("ANTHROPIC_API_KEY")
-        _original_model = getattr(options, "model", None)
+    if tier == _routing.RoutingTier.LOCAL:
+        # Route to local Ollama
+        base_url = _routing.get_base_url_for_tier(tier)
+        api_key = _routing.get_api_key_for_tier(tier)
+        model = _routing.get_model_for_tier(tier)
+        if base_url:
+            _os.environ["ANTHROPIC_BASE_URL"] = base_url
+        if api_key:
+            _os.environ["ANTHROPIC_API_KEY"] = api_key
+        if hasattr(options, "model"):
+            options.model = model
+    else:
+        # Route to cloud - use defaults or explicit cloud settings
+        cloud_model = _routing.get_model_for_tier(tier)
+        if cloud_model and hasattr(options, "model"):
+            options.model = cloud_model
 
-        # Set tier-specific values
-        if tier == _routing.RoutingTier.LOCAL:
-            # Route to local Ollama
-            base_url = _routing.get_base_url_for_tier(tier)
-            api_key = _routing.get_api_key_for_tier(tier)
-            model = _routing.get_model_for_tier(tier)
-
-            if base_url:
-                _os.environ["ANTHROPIC_BASE_URL"] = base_url
-            if api_key:
-                _os.environ["ANTHROPIC_API_KEY"] = api_key
-            # Update the model in options
-            if hasattr(options, "model"):
-                options.model = model
+    try:
+        # The ledger/audit records inside see the ROUTED model — deliberate: the row must say
+        # what was actually served. Restore runs after them, exception or not.
+        return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
+                                         pass_number=pass_number)
+    finally:
+        if _original_base_url is not None:
+            _os.environ["ANTHROPIC_BASE_URL"] = _original_base_url
         else:
-            # Route to cloud - use defaults or explicit cloud settings
-            cloud_model = _routing.get_model_for_tier(tier)
-            if cloud_model and hasattr(options, "model"):
-                options.model = cloud_model
+            _os.environ.pop("ANTHROPIC_BASE_URL", None)
+        if _original_api_key is not None:
+            _os.environ["ANTHROPIC_API_KEY"] = _original_api_key
+        else:
+            _os.environ.pop("ANTHROPIC_API_KEY", None)
+        if hasattr(options, "model"):
+            options.model = _original_model
 
+
+async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str = "",
+                              ticket_id: str | None = None,
+                              pass_number: int | None = None) -> AgentRun:
     chunks: list[str] = []
     tools: list[str] = []
     final = ""
@@ -229,21 +249,6 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
         except Exception:  # noqa: BLE001 — instrumentation must never break a run
             pass
 
-    # EU-174: Restore original environment variables after routing
-    if routing_tier and _original_base_url is not None:
-        if _original_base_url is not None:
-            _os.environ["ANTHROPIC_BASE_URL"] = _original_base_url
-        elif "ANTHROPIC_BASE_URL" in _os.environ:
-            del _os.environ["ANTHROPIC_BASE_URL"]
-
-        if _original_api_key is not None:
-            _os.environ["ANTHROPIC_API_KEY"] = _original_api_key
-        elif "ANTHROPIC_API_KEY" in _os.environ:
-            del _os.environ["ANTHROPIC_API_KEY"]
-
-        if _original_model is not None and hasattr(options, "model"):
-            options.model = _original_model
-
     return AgentRun(text="\n".join(chunks), final=final, cost_usd=cost,
                     num_turns=turns, is_error=is_error, tools=tools,
                     input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit,
@@ -326,18 +331,14 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
         return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id,
                                pass_number=pass_number, routing_tier=routing_tier)
 
-    # Sonnet hit a cap-classified plan-limit error — try Opus once to distinguish the limit type
-    # Clone options and switch to Opus
-    from claude_agent_sdk import ClaudeAgentOptions
-    opus_options = ClaudeAgentOptions(
-        model=OPUS,
-        system_prompt=getattr(options, "system_prompt", ""),
-        permission_mode=getattr(options, "permission_mode", None),
-        allowed_tools=getattr(options, "allowed_tools", None),
-        setting_sources=getattr(options, "setting_sources", None),
-        max_turns=getattr(options, "max_turns", None),
-        effort=getattr(options, "effort", None),
-    )
+    # Sonnet hit a cap-classified plan-limit error — try Opus once to distinguish the limit type.
+    # 2026-07-05 audit §6 defect 1: the old manual rebuild here dropped cwd, hooks (the guard
+    # denylist) and disallowed_tools — the Opus probe ran in the orchestrator's own CWD with no
+    # guard under the inherited bypassPermissions, and its output was used as the build result.
+    # A shallow copy preserves every field by construction; the model is the only difference.
+    import copy
+    opus_options = copy.copy(options)
+    opus_options.model = OPUS
 
     # Try Opus once
     opus_result = await run_agent(prompt, opus_options, tag=tag, ticket_id=ticket_id, pass_number=pass_number, routing_tier=routing_tier)
