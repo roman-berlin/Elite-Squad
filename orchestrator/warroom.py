@@ -272,18 +272,6 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     merges_series = _merges_per_day(cfg, days=14)   # list[int], oldest→newest
     burn_series = _daily_token_burn(cfg, days=14)    # list[float] USD, oldest→newest
 
-    # Single-source needs count: pull from needs.count() so the KPI card matches the side-panel
-    # badge and the /needs inbox (decisions + approvals + proposals + tasks), not tasks alone.
-    try:
-        from . import needs as _needs_mod
-        _needs_count = _needs_mod.count(cfg)
-    except Exception:  # noqa: BLE001
-        # Defensive fallback: task-only count so the card never breaks the board.
-        _dismissed = D.load_dismissed(cfg.audit_path)
-        _needs_count = len([t for t in ts
-                            if t.get("outcome") in D._NEEDS_YOU
-                            and not D._is_dismissed(t, _dismissed)])
-
     # Each card deep-links to a view scoped to the count it shows: the /tasks log auto-applies the
     # ?filter= (merged / needs / parked) so the destination honors the click, and Security blocks
     # opens the forensics view scoped to the security-block findings that produced the number.

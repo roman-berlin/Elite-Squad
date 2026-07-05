@@ -59,16 +59,14 @@ all_items = (s.get("decisions", []) + s.get("approvals", []) + s.get("proposals"
 check("EU-93: count() == len(panel items)", needs.count(cfg) == len(all_items),
       f"count={needs.count(cfg)} items={len(all_items)}")
 
-# The KPI card must deep-link to /needs (not /tasks?filter=needs) so every need type is visible.
+# The 'Needs you' KPI card was deliberately removed from the board in 5a882a6 ("refactor: remove
+# Needs you dashboard and UI components", 2026-07-01) — the /needs inbox and the side panel remain
+# the surfaces for needs. Pin the removal so the card doesn't half-return without a decision.
 from orchestrator import dashboard as _dash
 kpi_cards = warroom.kpis(cfg, _dash.load_tasks(cfg.audit_path), None)
 needs_card = next((c for c in kpi_cards if c["label"] == "Needs you"), None)
-check("EU-93: KPI 'Needs you' card exists", needs_card is not None)
-check("EU-93: KPI 'Needs you' href -> /needs", needs_card and needs_card.get("href") == "/needs",
-      str(needs_card.get("href") if needs_card else "missing"))
-check("EU-93: KPI count matches needs.count()",
-      needs_card and needs_card["value"] == needs.count(cfg),
-      f"kpi={needs_card['value'] if needs_card else 'n/a'} count={needs.count(cfg)}")
+check("KPI 'Needs you' card stays removed (5a882a6); /needs inbox is the surface",
+      needs_card is None, str(needs_card))
 
 # --- hero (live run headline) ---
 run = {"live": True, "ticket": "AUTO-7", "app": "automatixy", "passes": 2, "cost": 0, "verdict": "",
