@@ -137,6 +137,9 @@ chk("Ticket.status defaults to None", t_no_status.status is None)
 # Integration: run one full autopilot cycle and assert the order seen by the loop
 # --------------------------------------------------------------------------- #
 tmp = Path(tempfile.mkdtemp())
+# The real autopilot() run below writes its PID file. Keep it off the machine-global
+# /tmp/general-autopilot.pid, which is shared with a live daemon and every other checkout's suite.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 cfg = Config(
     apps=[AppConfig(name="automatixy", repo_path=str(tmp), base_branch="DEV",
                     protected_branch="MAIN", backlog_backend="jira",

@@ -35,6 +35,9 @@ def chk(n, c, d=""):
 
 ns = types.SimpleNamespace
 tmp = Path(tempfile.mkdtemp())
+# The real autopilot() run below writes its PID file. Keep it off the machine-global
+# /tmp/general-autopilot.pid, which is shared with a live daemon and every other checkout's suite.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 APP = AppConfig(name="eu", repo_path=".", base_branch="dev", protected_branch="main", backlog_backend="none")
 cfg = Config(apps=[APP], audit_path=str(tmp / "audit.jsonl"))
 

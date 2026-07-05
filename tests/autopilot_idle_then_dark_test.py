@@ -30,6 +30,9 @@ def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 tmp = Path(tempfile.mkdtemp())
+# The real autopilot() run below writes its PID file. Keep it off the machine-global
+# /tmp/general-autopilot.pid, which is shared with a live daemon and every other checkout's suite.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
 
 AUTH_MSG = ("Jira auth failed for app 'Elite-Unit' (X-Seraph-LoginReason=AUTHENTICATED_FAILED) - the "

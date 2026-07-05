@@ -32,6 +32,12 @@ import orchestrator.autopilot as ap_mod
 import orchestrator.decisions as decisions
 from orchestrator.config import Config, AppConfig
 
+# The Start handler refuses when daemon_is_external() sees a live PID in the machine-global
+# /tmp/general-autopilot.pid (a real daemon, or another checkout's suite running the real
+# autopilot()) — then no loop ever starts and this harness dies on started_evs[0]
+# (the 2026-07-06 flake). Probe a per-harness path instead.
+ap_mod._PID_FILE = Path(tempfile.mkdtemp()) / "general-autopilot.pid"
+
 results = []
 def chk(n, c, d=""):
     results.append((n, bool(c), d))
@@ -46,14 +52,16 @@ release = threading.Event()
 started_evs = []
 async def fake_autopilot(cfg, app_name=None, once=False, interval=60, stop_event=None):
     started_evs.append(stop_event)
-    release.wait(3)
+    # Hang-guard only — the loop ends when the test sets `release`, and the thread is daemonic.
+    # The old 3s cap could expire under full-suite load, dropping the run-guard mid-assertions.
+    release.wait(60)
 ap_mod.autopilot = fake_autopilot
 
 app = srv.create_app(cfg)
 
 # --- Start ONE autopilot loop and let it enter the (held-open) fake loop. ---
 app.test_client().post("/api/autopilot", data={"action": "start"})
-for _ in range(60):
+for _ in range(600):    # up to 30s under suite load; exits in ms normally
     if started_evs:
         break
     time.sleep(0.05)
@@ -99,7 +107,7 @@ real_stop_ev = srv.get_state(None).get("stop_event")
 app.test_client().post("/api/autopilot", data={"action": "stop"})
 chk("a genuine stop DOES set the running loop's stop Event", real_stop_ev.is_set())
 release.set()
-for _ in range(60):
+for _ in range(600):    # up to 30s under suite load; exits in ms normally
     if srv._state["active"] is False:
         break
     time.sleep(0.05)

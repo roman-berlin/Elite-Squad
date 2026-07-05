@@ -29,7 +29,14 @@ sys.path.insert(0, ".")
 
 import orchestrator.server as srv
 from orchestrator import sync, patrol as patrol_mod
+from orchestrator import autopilot as _ap_mod
 from orchestrator.config import Config, AppConfig
+
+# _control_bar() renders its Autopilot section from get_autopilot_status(), whose "on" ORs in a
+# liveness probe of the machine-global /tmp/general-autopilot.pid. A live daemon — or another
+# checkout's suite running the real autopilot() — makes the bar render "Autopilot ON" instead of
+# the Choose-tickets controls (the 2026-07-06 flake). Probe a per-harness path instead.
+_ap_mod._PID_FILE = Path(tempfile.mkdtemp()) / "general-autopilot.pid"
 
 results = []
 def chk(n, c, d=""):
