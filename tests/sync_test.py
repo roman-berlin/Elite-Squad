@@ -51,6 +51,17 @@ mac = tmp / "mac"
     '{"event":"merged","ticket_id":"AUTO-1","ts":"2026-06-18T10:05:00"}\n')
 os.environ["GENERAL_HOST_ID"] = "mac"
 cfg_mac = mkcfg(mac)
+
+# SANDBOX GUARD (2026-07-05): this harness runs the REAL git_sync — fetch, publish, commit, PUSH.
+# A brief _repo_root regression that day resolved every cfg to the ACTUAL repo root, so a failing
+# run of this test overwrote and pushed fixture data over the real shared .unit-state channel.
+# Abort loudly BEFORE any sync if the state dir would land outside our tmp sandbox — a broken
+# path derivation must fail this harness, never touch the live channel.
+_resolved_sd = sync.state_dir(cfg_mac).resolve()
+assert str(_resolved_sd).startswith(str(tmp.resolve())), (
+    f"REFUSING TO SYNC: state_dir resolves OUTSIDE the tmp sandbox ({_resolved_sd}) — "
+    "a _repo_root/state_dir regression would corrupt the real .unit-state channel.")
+
 r1 = sync.git_sync(cfg_mac)
 check("mac sync bootstraps state clone + pushes", r1["pushed"] and (mac / ".unit-state/.git").exists(), str(r1))
 check("mac published shared/mac.jsonl", (mac / ".unit-state/shared/mac.jsonl").exists())
