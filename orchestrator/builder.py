@@ -390,8 +390,30 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
     # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    # EU-174: determine routing tier based on task characteristics
+    routing_tier = None
+    try:
+        from . import routing as _routing
+        if _routing.is_routing_enabled():
+            ticket_desc = req.ticket.description or ""
+            ticket_size = req.ticket.size or ""
+            tier = _routing.classify_task(
+                ticket_description=ticket_desc,
+                task_type="build",
+                effort=eff,
+                size=ticket_size,
+            )
+            routing_tier = tier.value
+            if routing_tier == "local":
+                print(f"      · routing → Tier 1 (Local Ollama)", flush=True)
+            else:
+                print(f"      · routing → Tier 2 (Cloud)", flush=True)
+    except Exception:  # noqa: BLE001 — routing failure must not break the build
+        routing_tier = None
+
     run = await run_agent_with_fallback(_prompt(req, cfg, spec), options, tag="builder",
-                                        ticket_id=req.ticket.id, pass_number=req.iteration, cfg=cfg)
+                                        ticket_id=req.ticket.id, pass_number=req.iteration, cfg=cfg,
+                                        routing_tier=routing_tier)
     # EU-123: show actual provider+model in the live feed
     if getattr(cfg, "auto_model", False):
         display = _provider.format_provider_model(run.provider, run.model_version)

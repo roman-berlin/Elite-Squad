@@ -134,7 +134,29 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
         effort=normalize_effort(cfg.reviewer_effort),
     )
     # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
-    run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer", cfg=cfg)
+    # EU-174: determine routing tier based on task characteristics
+    routing_tier = None
+    try:
+        from . import routing as _routing
+        if _routing.is_routing_enabled():
+            ticket_desc = ticket.description or ""
+            ticket_size = ticket.size or ""
+            effort = normalize_effort(cfg.reviewer_effort)
+            tier = _routing.classify_task(
+                ticket_description=ticket_desc,
+                task_type="review",
+                effort=effort,
+                size=ticket_size,
+            )
+            routing_tier = tier.value
+            if routing_tier == "local":
+                print(f"      · routing → Tier 1 (Local Ollama)", flush=True)
+            else:
+                print(f"      · routing → Tier 2 (Cloud)", flush=True)
+    except Exception:  # noqa: BLE001 — routing failure must not break the review
+        routing_tier = None
+
+    run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer", cfg=cfg, routing_tier=routing_tier)
 
     result = _parse(run.final or run.text)
     result.cost_usd = run.cost_usd

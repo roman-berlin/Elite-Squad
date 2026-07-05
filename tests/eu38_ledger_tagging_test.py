@@ -40,6 +40,8 @@ check("regression: real run_agent accepts ticket_id",
       "ticket_id" in params or has_var_kw, str(list(params)))
 check("regression: real run_agent accepts pass_number",
       "pass_number" in params or has_var_kw, str(list(params)))
+check("regression: real run_agent accepts routing_tier",
+      "routing_tier" in params or has_var_kw, str(list(params)))
 try:
     sig.bind("prompt", "options", tag="builder", ticket_id="EU-38", pass_number=4)
     bind_ok, bind_err = True, ""
@@ -52,7 +54,7 @@ check("regression: builder's run_agent call binds to the real signature", bind_o
 # Drives the real _solo_build with run_agent + heavy deps stubbed to capture the call.
 # ============================================================================
 captured = {}
-async def capture_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
+async def capture_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None, routing_tier=None):
     captured.update(prompt=prompt, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
     return AgentRun(text="ok", final="built", cost_usd=0.1, num_turns=3, is_error=False, tools=["Edit"])
 

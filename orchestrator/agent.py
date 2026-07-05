@@ -62,10 +62,47 @@ def _tool_brief(name: str, inp) -> str:
 
 
 async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
-                    ticket_id: str | None = None, pass_number: int | None = None) -> AgentRun:
+                    ticket_id: str | None = None, pass_number: int | None = None,
+                    routing_tier: str | None = None) -> AgentRun:
     # EU-38: `ticket_id` + `pass_number` let a build/soldier pass tag its ledger line so per-pass
     # input tokens are sliceable by ticket (the real cost lever). Optional + keyword-defaulted, so
     # every existing caller (officers/chat that pass only `tag`) is unaffected.
+
+    # EU-174: Hybrid routing - handle tier-based endpoint switching
+    import os as _os
+    _original_base_url = None
+    _original_api_key = None
+    _original_model = None
+
+    if routing_tier:
+        from . import routing as _routing
+        tier = _routing.RoutingTier(routing_tier)
+
+        # Save original environment values
+        _original_base_url = _os.environ.get("ANTHROPIC_BASE_URL")
+        _original_api_key = _os.environ.get("ANTHROPIC_API_KEY")
+        _original_model = getattr(options, "model", None)
+
+        # Set tier-specific values
+        if tier == _routing.RoutingTier.LOCAL:
+            # Route to local Ollama
+            base_url = _routing.get_base_url_for_tier(tier)
+            api_key = _routing.get_api_key_for_tier(tier)
+            model = _routing.get_model_for_tier(tier)
+
+            if base_url:
+                _os.environ["ANTHROPIC_BASE_URL"] = base_url
+            if api_key:
+                _os.environ["ANTHROPIC_API_KEY"] = api_key
+            # Update the model in options
+            if hasattr(options, "model"):
+                options.model = model
+        else:
+            # Route to cloud - use defaults or explicit cloud settings
+            cloud_model = _routing.get_model_for_tier(tier)
+            if cloud_model and hasattr(options, "model"):
+                options.model = cloud_model
+
     chunks: list[str] = []
     tools: list[str] = []
     final = ""
@@ -124,6 +161,21 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     except Exception:  # noqa: BLE001 — metering must never break a run
         pass
 
+    # EU-174: Restore original environment variables after routing
+    if routing_tier and _original_base_url is not None:
+        if _original_base_url is not None:
+            _os.environ["ANTHROPIC_BASE_URL"] = _original_base_url
+        elif "ANTHROPIC_BASE_URL" in _os.environ:
+            del _os.environ["ANTHROPIC_BASE_URL"]
+
+        if _original_api_key is not None:
+            _os.environ["ANTHROPIC_API_KEY"] = _original_api_key
+        elif "ANTHROPIC_API_KEY" in _os.environ:
+            del _os.environ["ANTHROPIC_API_KEY"]
+
+        if _original_model is not None and hasattr(options, "model"):
+            options.model = _original_model
+
     return AgentRun(text="\n".join(chunks), final=final, cost_usd=cost,
                     num_turns=turns, is_error=is_error, tools=tools,
                     input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit,
@@ -138,7 +190,7 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
 
 async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag: str = "",
                                    ticket_id: str | None = None, pass_number: int | None = None,
-                                   cfg=None) -> AgentRun:
+                                   cfg=None, routing_tier: str | None = None) -> AgentRun:
     """Run an agent with Sonnet→Opus fallback on plan-limit errors.
 
     When a Sonnet call hits a 429/usage-limit error AND the config flag is enabled:
@@ -172,10 +224,10 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
 
     if not is_sonnet or not fallback_enabled:
         # Not Sonnet or fallback disabled — run normally
-        return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
+        return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id, pass_number=pass_number, routing_tier=routing_tier)
 
     # Try Sonnet first
-    result = await run_agent(prompt, options, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
+    result = await run_agent(prompt, options, tag=tag, ticket_id=ticket_id, pass_number=pass_number, routing_tier=routing_tier)
 
     # If Sonnet succeeded or hit a non-plan-limit error, return as-is
     if not result.is_plan_limit:
@@ -195,7 +247,7 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     )
 
     # Try Opus once
-    opus_result = await run_agent(prompt, opus_options, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
+    opus_result = await run_agent(prompt, opus_options, tag=tag, ticket_id=ticket_id, pass_number=pass_number, routing_tier=routing_tier)
 
     if opus_result.is_plan_limit:
         # Opus also hit a limit — this is the All-models cap, not just Sonnet

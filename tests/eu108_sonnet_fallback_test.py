@@ -234,7 +234,7 @@ def test_run_agent_fallback_sonnet_limit():
     calls = []
 
     # Mock run_agent to simulate Sonnet 429 then Opus success
-    async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
+    async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, routing_tier=None):
         model = getattr(options, "model", "")
         calls.append(model)
 
@@ -317,7 +317,7 @@ def test_run_agent_fallback_all_models_cap():
     calls = []
 
     # Mock run_agent to simulate both Sonnet and Opus hitting plan limits
-    async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None):
+    async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, routing_tier=None):
         model = getattr(options, "model", "")
         calls.append(model)
 
