@@ -282,6 +282,15 @@ def test_run_agent_fallback_sonnet_limit():
     original_run_agent = agent_module.run_agent
     agent_module.run_agent = mock_run_agent
 
+    # EU-139 gate incident (2026-07-05): this path fires the one-shot "Sonnet weekly cap" Telegram
+    # alert, and with only the SDK stubbed the harness sent a REAL message to the ops chat when the
+    # gate ran the suite inside the credential-loaded orchestrator. Stub notify.send so this harness
+    # can never page the Commander — and capture the message so the alert behaviour stays pinned.
+    from orchestrator import notify as notify_module
+    sent: list[str] = []
+    original_send = notify_module.send
+    notify_module.send = lambda text, chat_id=None: (sent.append(text), True)[1]
+
     try:
         # Reset fallback state
         reset_sonnet_fallback()
@@ -314,10 +323,14 @@ def test_run_agent_fallback_sonnet_limit():
         # Fallback should be activated
         assert sonnet_fallback_active(cfg) is True, "Fallback should be active after Sonnet limit → Opus success"
 
-        print("  ✓ Sonnet limit → Opus retry → fallback activated")
+        # The one-shot alert must go through the (stubbed) notify.send, never a real channel
+        assert any("Sonnet weekly cap" in m for m in sent), f"alert should be captured by the stub, got {sent}"
+
+        print("  ✓ Sonnet limit → Opus retry → fallback activated (alert captured, not sent)")
     finally:
         # Restore original
         agent_module.run_agent = original_run_agent
+        notify_module.send = original_send
         reset_sonnet_fallback()
 
 
@@ -352,6 +365,13 @@ def test_run_agent_fallback_all_models_cap():
     original_run_agent = agent_module.run_agent
     agent_module.run_agent = mock_run_agent
 
+    # EU-139 gate incident guard (see test_run_agent_fallback_sonnet_limit): never let this harness
+    # reach the real notify.send. This path must not notify at all — assert that too.
+    from orchestrator import notify as notify_module
+    sent: list[str] = []
+    original_send = notify_module.send
+    notify_module.send = lambda text, chat_id=None: (sent.append(text), True)[1]
+
     try:
         # Reset fallback state
         reset_sonnet_fallback()
@@ -383,10 +403,14 @@ def test_run_agent_fallback_all_models_cap():
         # Fallback should NOT be activated (both models hit the same cap)
         assert sonnet_fallback_active(cfg) is False, "Fallback should NOT activate when both models limit (All-models cap)"
 
+        # No fallback → no alert either
+        assert not sent, f"All-models cap must not notify, got {sent}"
+
         print("  ✓ Both Sonnet and Opus limit → no fallback (All-models cap)")
     finally:
         # Restore original
         agent_module.run_agent = original_run_agent
+        notify_module.send = original_send
         reset_sonnet_fallback()
 
 
