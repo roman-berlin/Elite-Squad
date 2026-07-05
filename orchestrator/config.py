@@ -282,13 +282,11 @@ class Config:
     max_cost_usd: float = 0.0           # 0 = no cap (subscription). Set a number only for API billing.
     max_tickets_per_run: int = 1        # per app, per run
     # QW4 (2026-07-05): per-ticket budgets, checked before each pass; breach → BLOCKED + Telegram.
-    # The Commander's spec: 400k tokens / 30 min. Be aware what 400k means against measured burn:
-    # a healthy pass 1 alone runs ~0.9–2.2M tokens (EU-119), so this budget effectively grants ONE
-    # pass — any review-fail retry parks the ticket. That is a deliberate throttle for the ramp-up;
-    # raise to ~3_000_000 (above the healthy-merge median, far below the 15.5–24.4M runaway tail)
-    # once the second pass should be available. 0 disables a dimension.
-    per_ticket_token_budget: int = 400_000   # input+output tokens across all officers of one attempt
-    per_ticket_time_budget_min: int = 30     # wall-clock minutes per attempt
+    # 3M (Commander-approved 2026-07-05): above the healthy-merge median (~2.1M tokens, EU-119) so
+    # both capped passes stay available, far below the 15.5–24.4M runaway tail that burned the
+    # plan. Lower to ~400k for a deliberate one-pass ramp-up throttle. 0 disables a dimension.
+    per_ticket_token_budget: int = 3_000_000  # input+output tokens across all officers of one attempt
+    per_ticket_time_budget_min: int = 30      # wall-clock minutes per attempt
 
     # --- merge behaviour (auto-merge to dev if green) ---
     merge_to_dev: bool = True           # merge feature -> dev when review passes & dev stays green
