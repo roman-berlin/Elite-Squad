@@ -79,10 +79,14 @@ chk("fingerprint: no failure signal → '' (non-comparable)",
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. scan_diff_for_secrets
 # ══════════════════════════════════════════════════════════════════════════════
+# Fixtures are CONCATENATION-BUILT so the credential patterns never appear contiguously in this
+# source file — otherwise any future self-ticket whose diff adds these lines would red-gate
+# itself on the very scanner they test (2026-07-06 review).
 RAW_KEY = "sk-" + "a1B2c3D4e5F6g7H8i9J0" + "k1L2m3N4"
+AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 DIRTY_DIFF = ("diff --git a/x.py b/x.py\n+++ b/x.py\n"
               f"+ANTHROPIC_KEY = \"{RAW_KEY}\"\n"
-              "+AKIAIOSFODNN7EXAMPLE is an aws id\n"
+              f"+{AWS_KEY} is an aws id\n"
               f"-old_removed = \"{RAW_KEY}\"\n"
               " context_line = 1\n")
 hits = gate_mod.scan_diff_for_secrets(DIRTY_DIFF)
@@ -91,6 +95,8 @@ chk("secrets: raw token never printed (masked)", all(RAW_KEY not in h for h in h
 chk("secrets: removed/context lines ignored, clean diff → []",
     gate_mod.scan_diff_for_secrets("+harmless = 1\n-junk\n") == []
     and gate_mod.scan_diff_for_secrets("") == [])
+chk("secrets: the gate:allow-secret pragma exempts fixture lines",
+    gate_mod.scan_diff_for_secrets(f"+key = \"{RAW_KEY}\"  # gate:allow-secret\n") == [])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. lockfile_sanity
@@ -149,11 +155,13 @@ def _red_runner(app, changed=None, **_):
 
 ok1, fp1, rep1 = gate_mod.base_gate_check(_bapp, _cfg_cache, _ShaGit("abc123"), runner=_red_runner)
 ok2, fp2, rep2 = gate_mod.base_gate_check(_bapp, _cfg_cache, _ShaGit("abc123"), runner=_red_runner)
-chk("base gate: red base detected with a fingerprint", ok1 is False and fp1 == fp_a1, f"{ok1},{fp1}")
+chk("base gate: red base detected with a fingerprint (after a confirmation re-run)",
+    ok1 is False and fp1 == fp_a1 and calls["n"] == 2, f"{ok1},{fp1},calls={calls['n']}")
 chk("base gate: second ticket on the same sha hits the cache (suite not re-run)",
-    calls["n"] == 1 and (ok2, fp2) == (ok1, fp1), f"runner calls={calls['n']}")
+    calls["n"] == 2 and (ok2, fp2) == (ok1, fp1), f"runner calls={calls['n']}")
 ok3, _, _ = gate_mod.base_gate_check(_bapp, _cfg_cache, _ShaGit("def456"), runner=_red_runner)
-chk("base gate: a NEW sha re-runs the gate", calls["n"] == 2, f"runner calls={calls['n']}")
+chk("base gate: a NEW sha re-runs the gate (red + confirm)", calls["n"] == 4,
+    f"runner calls={calls['n']}")
 
 
 class _NoShaGit:
@@ -162,9 +170,45 @@ class _NoShaGit:
 
 calls["n"] = 0
 gate_mod.base_gate_check(_bapp, _cfg_cache, _NoShaGit(), runner=_red_runner)
-gate_mod.base_gate_check(_bapp, _cfg_cache, _NoShaGit(), runner=_red_runner)
-chk("base gate: git without current_sha still works (uncached, runner each time)",
+chk("base gate: git without current_sha still works (uncached; red + confirm)",
     calls["n"] == 2, f"runner calls={calls['n']}")
+
+# Flake honesty: a red that does NOT reproduce on the confirmation re-run is treated as green
+# (one timing flake must never park the whole queue) — and the GREEN verdict is what gets cached.
+flake = {"n": 0}
+
+
+def _flaky_runner(app, changed=None, **_):
+    flake["n"] += 1
+    if flake["n"] == 1:
+        return GateResult(passed=False, report=REPORT_A1)
+    return GateResult(passed=True, report="")
+
+
+okf, fpf, _ = gate_mod.base_gate_check(_bapp, _cfg_cache, _ShaGit("flake01"), runner=_flaky_runner)
+okf2, _, _ = gate_mod.base_gate_check(_bapp, _cfg_cache, _ShaGit("flake01"), runner=_flaky_runner)
+chk("base gate: one flaky red → confirmation wins, verdict GREEN and cached",
+    okf is True and fpf == "" and okf2 is True and flake["n"] == 2, f"{okf},{flake['n']}")
+
+# A cached RED expires after _RED_BASE_RED_TTL_S and is re-verified (an environmental red —
+# missing venv, loaded box — must self-heal without the base sha moving).
+import json as _json
+_cache_file = Path(_cfg_cache.audit_path).with_name("red_base_cache.json")
+_data = _json.loads(_cache_file.read_text(encoding="utf-8"))
+_data[f"{_bapp.repo_path}@abc123"]["ts"] = 1.0        # ancient red
+_cache_file.write_text(_json.dumps(_data), encoding="utf-8")
+calls["n"] = 0
+gate_mod.base_gate_check(_bapp, _cfg_cache, _ShaGit("abc123"), runner=_red_runner)
+chk("base gate: an EXPIRED cached red is re-verified, not served stale",
+    calls["n"] == 2, f"runner calls={calls['n']}")
+
+# §3.1+§3.3: the base check covers the base's own LINT too — a red lint base would otherwise
+# burn every ticket's full pass budget at the deterministic stage.
+_lint_base_app = AppConfig(name="a", repo_path="/repo/lint", backlog_backend="none",
+                           gate_commands=["true"], lint_commands=["exit 3"], gate_timeout_sec=30)
+okl, fpl, repl = gate_mod.base_gate_check(_lint_base_app, _cfg_cache, _ShaGit("lint01"),
+                                          runner=lambda app, changed=None, **_: GateResult(passed=True, report=""))
+chk("base gate: a red LINT base short-circuits too", okl is False and "LINT" in repl, repl[:120])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # loop integration harness (run_cost/eu105 pattern)
@@ -190,15 +234,16 @@ class _Backlog:
 
 
 class _Git:
-    def __init__(self, diffs=None):
+    """At-base by default (current == base): the red-base check's provable-base guard passes."""
+    def __init__(self, diffs=None, head="base0001", base="base0001"):
         self._diffs = list(diffs or [])
+        self._head, self._base = head, base
         self.default_diff = "diff --git a/x b/x\n+clean_line"
     def has_changes(self): return True
+    def current_sha(self): return self._head
+    def base_sha(self): return self._base
     def diff_against_base(self):
         return self._diffs[0] if self._diffs else self.default_diff
-    def pop_diff(self):
-        if self._diffs:
-            self._diffs.pop(0)
     def changed_paths(self): return ["orchestrator/loop.py"]
 
 
@@ -282,6 +327,33 @@ try:
         rep2.outcome == Outcome.MERGED and BUILD_CALLS["n"] == 1,
         f"{rep2.outcome},{BUILD_CALLS}")
 
+    # NOT provably at base (resumed WIP feature branch: HEAD ≠ base) → the check is SKIPPED —
+    # the 2026-07-06 review's HIGH: gating the ticket's own red WIP as 'the base' permanently
+    # deadlocked every requeue in non-isolated mode.
+    loop.run_gate = _red_runner
+    BUILD_CALLS["n"] = 0
+    au_wip = _Audit()
+    rep_wip = _attempt(_mkcfg(), _Git(head="wipsha99", base="base0001"), au_wip, "EU-WIP1")
+    chk("resumed WIP branch (HEAD≠base): red-base check skipped — the build still runs",
+        BUILD_CALLS["n"] >= 1
+        and not any(e["event"] == "red_base_block" for e in au_wip.events)
+        and "red base" not in (rep_wip.notes or ""),
+        f"builds={BUILD_CALLS},notes={rep_wip.notes}")
+
+    # Per-app-gated monorepo → skipped (its in-pass gate runs only the touched component; the
+    # repo-wide fallback would block green-app tickets on a red sibling).
+    _mono = AppConfig(name="automatixy", repo_path="/tmp", base_branch="DEV",
+                      protected_branch="MAIN", backlog_backend="none",
+                      gate_commands=["true"], gate_commands_by_app={"web": ["true"]})
+    BUILD_CALLS["n"] = 0
+    au_mono = _Audit()
+    rep_mono = asyncio.run(loop._attempt(_ticket("EU-MONO1"), _mono, _mkcfg(), _Git(),
+                                         _Backlog(), au_mono, loop.Budget(0), "autodev/EU-MONO1"))
+    chk("per-app-gated monorepo: red-base check skipped — the build still runs",
+        BUILD_CALLS["n"] >= 1
+        and not any(e["event"] == "red_base_block" for e in au_mono.events),
+        f"builds={BUILD_CALLS}")
+
     # ── 7. identical-fingerprint escalation ─────────────────────────────────
     seq = {"n": 0}
 
@@ -294,10 +366,10 @@ try:
     loop.run_gate = _green_then_red
     BUILD_CALLS["n"] = 0
     au3 = _Audit()
-    rep3 = _attempt(_mkcfg(), _Git(), au3, "EU-FP1")
-    chk("stuck fingerprint: identical gate failure two passes running → ESCALATED",
-        rep3.outcome == Outcome.ESCALATED and "fingerprint" in (rep3.notes or ""),
-        f"{rep3.outcome},{rep3.notes}")
+    rep3 = _attempt(_mkcfg(pm_enabled=False), _Git(), au3, "EU-FP1")
+    chk("stuck fingerprint: identical gate failure two gates running → parked via exhaustion "
+        "(PM triage path kept — run_all only exposes harness granularity)",
+        rep3.outcome == Outcome.ESCALATED, f"{rep3.outcome},{rep3.notes}")
     chk("stuck fingerprint: exactly two builds (no third identical pass anywhere)",
         BUILD_CALLS["n"] == 2, str(BUILD_CALLS))
     chk("stuck fingerprint: gate_fingerprint_stuck audited",

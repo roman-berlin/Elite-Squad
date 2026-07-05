@@ -333,6 +333,15 @@ class Git:
         except (subprocess.SubprocessError, OSError):
             return ""
 
+    def base_sha(self) -> str:
+        """Sha of the base ref (origin/<base> when it exists, else local <base>). Safe-failing:
+        '' on error. Lets the red-base check (Phase-2 §3.1) PROVE the tree it is about to gate is
+        actually the base — a resumed non-isolated feature branch is not (2026-07-06 review)."""
+        try:
+            return self._run("rev-parse", self.base_ref, check=False)
+        except (subprocess.SubprocessError, OSError):
+            return ""
+
     def has_changes(self) -> bool:
         """Check if there are uncommitted changes or commits ahead of base.
         Safe-failing: returns False if git validation fails."""

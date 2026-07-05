@@ -249,10 +249,18 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 def scan_diff_for_secrets(diff: str) -> list[str]:
     """Scan a unified diff's ADDED lines for credential patterns. Returns masked findings
     ('label: sk-abc…wxyz'); an empty list means clean. Deterministic and cheap — runs on every
-    pass before any LLM sees the diff."""
+    pass before any LLM sees the diff.
+
+    A line carrying the pragma ``gate:allow-secret`` is exempt — the legitimate escape hatch for
+    test fixtures and docs that must contain credential-SHAPED strings (this repo builds itself,
+    so without it a fixture would deterministically red-gate every future ticket touching that
+    line — 2026-07-06 review). Prefer building fixtures by concatenation so the pattern never
+    appears contiguously in source at all; the pragma is for the cases that can't."""
     hits: list[str] = []
     for ln in (diff or "").splitlines():
         if not ln.startswith("+") or ln.startswith("+++"):
+            continue
+        if "gate:allow-secret" in ln:
             continue
         for label, pat in _SECRET_PATTERNS:
             m = pat.search(ln)
@@ -313,19 +321,30 @@ def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str
     return GateResult(passed=True, report="deterministic checks passed")
 
 
-_RED_BASE_CACHE_MAX = 40   # (repo@sha) entries kept; content-addressed so entries never go stale
+_RED_BASE_CACHE_MAX = 40   # (repo@sha) entries kept
+_RED_BASE_RED_TTL_S = 30 * 60   # a cached RED is re-verified after this long (see below)
+
+
+def _base_gate_once(app: AppConfig, run) -> GateResult:
+    """One base-tree gate pass: the verification gate plus the base's own lint (a red LINT base
+    would otherwise burn every ticket's full pass budget at the deterministic stage — 2026-07-06
+    review). Secrets/lockfile need a diff, so on the clean base only lint applies."""
+    res = run(app, [])
+    if not res.passed:
+        return res
+    return run_deterministic_checks(app, [], "")
 
 
 def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, str]:
-    """§3 item 1 — the EU-174 killer. Run the verification gate against the CLEAN base tree
-    (call BEFORE the first build pass, while the worktree still equals base). Returns
-    (passed, fingerprint, report).
+    """§3 item 1 — the EU-174 killer. Run the verification gate (and the base's lint) against
+    the CLEAN base tree, BEFORE the first build pass. Returns (passed, fingerprint, report).
 
-    Results are cached per (repo, base-sha) beside the audit log (locked RMW — many worktrees
-    can hit this concurrently), so one broken base blocks every queued ticket at the cost of ONE
-    suite run, and a green base is re-proven once per base commit, not once per ticket. The
-    cache is content-addressed by sha — no TTL needed; a flaky false-red for a sha clears when
-    the base moves, or delete red_base_cache.json / set red_base_check=false to override.
+    Flake honesty (2026-07-06 review; also this unit's own flaky-harness doctrine): a RED here
+    can halt the whole unit, so a red verdict must survive a CONFIRMATION re-run — one flaky red
+    never blocks. GREEN results are cached per (repo, base-sha) indefinitely (content-addressed;
+    a false green just restores the old behaviour). RED results are cached with a TTL so an
+    environmental red (venv missing from PATH, box under load) self-heals without the base
+    moving; deleting red_base_cache.json or red_base_check=false remain the manual overrides.
 
     ``runner`` lets loop.py pass ITS run_gate symbol so existing harness monkeypatching keeps
     working (tests stub loop.run_gate, and the base check must honor that stub)."""
@@ -344,11 +363,21 @@ def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, s
             data = json.loads(cache_path.read_text(encoding="utf-8"))
             hit = data.get(key)
             if isinstance(hit, dict) and "passed" in hit:
-                return bool(hit["passed"]), str(hit.get("fp", "")), str(hit.get("report", ""))
+                fresh_red = (not hit["passed"]
+                             and time.time() - float(hit.get("ts", 0)) <= _RED_BASE_RED_TTL_S)
+                if hit["passed"] or fresh_red:
+                    return bool(hit["passed"]), str(hit.get("fp", "")), str(hit.get("report", ""))
+                # expired red → fall through and re-verify
         except Exception:  # noqa: BLE001 — a missing/corrupt cache just re-runs the gate
             pass
 
-    res = run(app, [])
+    res = _base_gate_once(app, run)
+    if not res.passed:
+        # Confirmation re-run: only a red that REPRODUCES blocks (a single timing flake on this
+        # box must never park the whole queue). A green confirm wins — old behaviour proceeds.
+        confirm = _base_gate_once(app, run)
+        if confirm.passed:
+            res = confirm
     fp = "" if res.passed else gate_fingerprint(res.report or "")
     report = "" if res.passed else (res.report or "")[:4000]
 
