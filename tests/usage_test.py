@@ -322,6 +322,49 @@ chk("Pre-flight with no config defaults to go", pre_no_cfg["go"] is True)
 grace_no_cfg = usage.graceful_stop_check(None)
 chk("Graceful stop with no config doesn't trigger", grace_no_cfg["should_stop"] is False)
 
+# --- 2026-07-05 audit §7.4: prune races record() — every live row survives the locked rewrite ---
+# prune() runs on every CLI start while the serve process appends; the old unlocked write_text
+# dropped rows landing between its read and write (understating burn for the budget monitors).
+import threading as _th
+
+prune_dir = Path(tempfile.mkdtemp())
+usage.configure(str(prune_dir / "audit.jsonl"))
+led_p = usage._path()
+old_t = time.time() - 60 * 86400          # older than keep_days=35 → must be pruned
+with led_p.open("w", encoding="utf-8") as f:
+    for _ in range(9000):                  # pushes the file past prune's 400KB gate
+        f.write(json.dumps({"t": old_t, "m": "opus", "i": 1, "o": 1, "c": 0.0, "g": "old"}) + "\n")
+chk("prune race: seed ledger exceeds the size gate", led_p.stat().st_size > 400_000,
+    str(led_p.stat().st_size))
+
+N_LIVE = 30
+_bar = _th.Barrier(N_LIVE + 1)
+
+
+def _live_rec(i):
+    _bar.wait()
+    usage.record("claude-opus-4-8", 10, 5, 0.0, f"live-{i}")
+
+
+def _pruner():
+    _bar.wait()
+    usage.prune(None)
+
+
+_race = [_th.Thread(target=_live_rec, args=(i,)) for i in range(N_LIVE)] + [_th.Thread(target=_pruner)]
+for t in _race:
+    t.start()
+for t in _race:
+    t.join()
+_after = [json.loads(ln) for ln in led_p.read_text(encoding="utf-8").splitlines()]
+_live_tags = {r["g"] for r in _after if str(r.get("g", "")).startswith("live-")}
+chk("prune race: every concurrent record survives the locked rewrite",
+    _live_tags == {f"live-{i}" for i in range(N_LIVE)},
+    f"{len(_live_tags)} of {N_LIVE} survived")
+chk("prune race: expired rows were actually pruned", not any(r.get("g") == "old" for r in _after),
+    f"{sum(1 for r in _after if r.get('g') == 'old')} old rows left")
+usage.configure(str(audit))   # restore the suite's ledger
+
 print("\n=============== COST GOVERNOR v2 QA ===============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

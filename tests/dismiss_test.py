@@ -61,6 +61,25 @@ chk("a ticket whose LATEST run merged drops off needs-you (no stale failure)", "
 chk("the surviving row is the ticket's NEWEST run",
     next(t for t in ny if t["ticket_id"] == "AUTO-14")["started"] == "2026-06-21T01:03:06")
 
+# --- 2026-07-05 audit §7.4: concurrent dismisses must ALL persist (locked RMW) -----------------
+# Two /api/dismiss handlers on Flask threads did a bare load→mutate→write_text; the second write
+# dropped the first ticket's dismissal and its needs-you card silently reappeared.
+import threading
+
+tmp_c = Path(tempfile.mkdtemp())
+ap_c = str(tmp_c / "audit.jsonl")
+TIDS = [f"EU-{i:02d}" for i in range(12)]
+thr = [threading.Thread(target=D.dismiss, args=(ap_c, tid)) for tid in TIDS]
+for t in thr:
+    t.start()
+for t in thr:
+    t.join()
+# Read the file directly — load_dismissed was monkeypatched by the panel-wipe block above.
+import json as _json
+_persisted = _json.loads((tmp_c / "dismissed.json").read_text(encoding="utf-8"))
+chk("concurrent dismisses all persist (no lost update)",
+    set(_persisted) == set(TIDS), str(sorted(_persisted)))
+
 print("\n============ DISMISS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

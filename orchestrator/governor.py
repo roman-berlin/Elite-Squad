@@ -33,6 +33,13 @@ def note_call(cfg: Config, n: int = 1) -> None:
         pass
 
 
+def _row_t(line: str) -> float:
+    try:
+        return float(json.loads(line).get("t", 0))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 0.0
+
+
 def calls_last_hour(cfg: Config) -> int:
     """Calls recorded in the last hour (prunes the file when it grows large)."""
     p = _file(cfg)
@@ -42,17 +49,18 @@ def calls_last_hour(cfg: Config) -> int:
     kept: list[float] = []
     try:
         for line in p.read_text(encoding="utf-8").splitlines():
-            try:
-                t = float(json.loads(line).get("t", 0))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
+            t = _row_t(line)
             if t >= cutoff:
                 kept.append(t)
     except OSError:
         return 0
     try:
         if p.stat().st_size > 200_000:
-            p.write_text("".join(json.dumps({"t": t}) + "\n" for t in kept), encoding="utf-8")
+            # 2026-07-05 audit §7.4: the old unlocked write_text raced note_call's locked_append —
+            # a row landing between this function's read and its rewrite was truncated away, and
+            # the rewrite could split an in-flight append. locked_rewrite re-reads and filters
+            # INSIDE the same data-file flock the appenders take, so nothing lands in the gap.
+            locking.locked_rewrite(p, lambda lines: [ln for ln in lines if _row_t(ln) >= cutoff])
     except OSError:
         pass
     return len(kept)

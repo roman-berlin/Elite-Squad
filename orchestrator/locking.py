@@ -73,6 +73,39 @@ def locked_append(path: str | Path, line: str) -> None:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def locked_rewrite(path: str | Path, keep_fn: Callable[[list[str]], list[str]]) -> None:
+    """Atomically rewrite the JSONL file at ``path`` in place, keeping the lines ``keep_fn``
+    returns (it receives the current lines, freshly read under the lock).
+
+    This is the prune/compact counterpart of :func:`locked_append`, and the pairing is
+    load-bearing: both take the per-path thread lock AND an exclusive ``flock`` on the DATA
+    file's own fd, so a rewrite can never truncate mid-append or drop a row that landed
+    between its read and its write (the 2026-07-05 audit §7.4 races: governor's hourly prune
+    vs note_call, usage.prune on CLI start vs the serve process's record()). In-place
+    seek(0)+truncate is deliberate — a temp-file + ``os.replace`` swap (locked_rmw's pattern)
+    would strand a concurrently blocked appender on the orphaned old inode, losing its row
+    invisibly, because ``flock`` serialises on the inode the appender already has open.
+    """
+    p = Path(path)
+    if not p.exists():
+        return
+    with _lock_for(p):
+        with p.open("r+", encoding="utf-8") as f:
+            if fcntl is not None:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                kept = keep_fn(f.read().splitlines())
+                f.seek(0)
+                f.truncate()
+                if kept:
+                    f.write("\n".join(kept) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
 def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: Any = None,
                corrupt_to_default: bool = False) -> Any:
     """Atomically read-modify-write the JSON file at ``path``.

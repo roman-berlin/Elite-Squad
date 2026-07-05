@@ -709,9 +709,11 @@ def prune(cfg: Config | None = None, keep_days: int = 35) -> None:
         if p.stat().st_size < 400_000:
             return
         cutoff = time.time() - keep_days * _DAY
-        kept = [ln for ln in p.read_text(encoding="utf-8").splitlines()
-                if _safe_t(ln) >= cutoff]
-        p.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        # 2026-07-05 audit §7.4: prune runs on every CLI start while the always-on serve process
+        # appends via record()'s locked_append — the old unlocked write_text dropped any row that
+        # landed between its read and its write (understating burn for the budget monitors).
+        # locked_rewrite filters under the same data-file flock the appenders take.
+        locking.locked_rewrite(p, lambda lines: [ln for ln in lines if _safe_t(ln) >= cutoff])
     except OSError:
         pass
 
