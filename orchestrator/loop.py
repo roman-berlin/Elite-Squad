@@ -1249,7 +1249,16 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         _bar(LAND, active=LAND)
 
     clean = bool(cfg.merge_to_dev) and git.trial_merge(branch, temp, merge_msg)
-    green = clean and run_gate(app, git.changed_paths()).passed   # gate runs on the trial branch, not on DEV (EU-19: per-app)
+    gate = run_gate(app, git.changed_paths()) if clean else None  # gate runs on the trial branch, not on DEV (EU-19: per-app)
+    green = bool(gate and gate.passed)
+    if gate is not None:
+        # Keep the gate's evidence. A red post-merge gate used to leave only a terse pr_opened
+        # event — the failing harnesses appeared nowhere (not in audit.jsonl, not in the PR), so
+        # diagnosing meant re-running the whole suite (EU-139 run, 2026-07-05). One additive event
+        # per gate run carries the verdict and, when red, the failing names + report tail.
+        audit.record("dev_gate", ticket_id=ticket.id, passed=gate.passed,
+                     failing=[] if gate.passed else _gate_failures(gate.report),
+                     report_tail="" if gate.passed else (gate.report or "").strip()[-2000:])
     if not clean:
         reason = "could not merge cleanly into dev" if cfg.merge_to_dev else "merge_to_dev disabled"
     elif not green:
@@ -1363,7 +1372,9 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)
     git.push(branch)
-    pr_url = git.open_pr(branch, f"{ticket.id}: {ticket.summary}", _pr_body(ticket, app, review, coverage)) \
+    gate_failure = "" if (gate is None or gate.passed) else (gate.report or "").strip()
+    pr_url = git.open_pr(branch, f"{ticket.id}: {ticket.summary}",
+                         _pr_body(ticket, app, review, coverage, gate_failure=gate_failure)) \
         if cfg.open_pr_on_block else None
     print(f"  land · not auto-merged ({reason}) → "
           + (f"PR {pr_url}" if pr_url else "open a PR manually"), flush=True)
@@ -1518,11 +1529,38 @@ def _cleanup(cfg, git, audit, report) -> None:
         audit.record("cleanup_failed", error=str(exc))
 
 
-def _pr_body(ticket: Ticket, app: AppConfig, review, coverage: str = "") -> str:
+_GATE_FAIL_NAME = re.compile(r"^\s*[✗✘×]\s+(\S+)")
+
+
+def _gate_failures(report: str, limit: int = 12) -> list[str]:
+    """Best-effort names of the failing checks in a gate report — the per-check `✗ <name>` lines
+    and the trailing `FAILED: a b c` summary that tests/run_all.py (and most runners) print.
+    Empty when the runner doesn't name its failures; the report tail still carries the detail."""
+    names: list[str] = []
+    for ln in (report or "").splitlines():
+        m = _GATE_FAIL_NAME.match(ln)
+        if m:
+            if m.group(1) not in names:
+                names.append(m.group(1))
+            continue
+        s = ln.strip()
+        if s.startswith("FAILED:"):
+            for n in s[len("FAILED:"):].split():
+                if n not in names:
+                    names.append(n)
+    return names[:limit]
+
+
+def _pr_body(ticket: Ticket, app: AppConfig, review, coverage: str = "", gate_failure: str = "") -> str:
     ac = "\n".join(f"- [x] {c}" for c in ticket.acceptance_criteria)
     cov = f"\n## Coverage\n{coverage}\n" if coverage else ""
+    gf = ""
+    if gate_failure:
+        failing = _gate_failures(gate_failure)
+        names = ("**Failing:** " + ", ".join(f"`{n}`" for n in failing) + "\n\n") if failing else ""
+        gf = f"\n## Dev gate — FAILED after merge\n{names}```\n{gate_failure[-2000:]}\n```\n"
     return (f"Automated implementation of **{ticket.id}** for `{app.name}`, targeting "
-            f"`{app.base_branch}`.\n\n{ticket.url or ''}\n\n"
+            f"`{app.base_branch}`.\n\n{ticket.url or ''}\n{gf}\n"
             f"## Acceptance criteria\n{ac}\n{cov}\n## Reviewer summary\n{review.summary}\n")
 
 
