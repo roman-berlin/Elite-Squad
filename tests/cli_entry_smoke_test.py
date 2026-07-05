@@ -22,6 +22,7 @@ def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 tmp = Path(tempfile.mkdtemp())
+subprocess.run(["git", "init", "-q", str(tmp)], check=True)   # AppConfig validates repo_path is a git repo
 (tmp / "audit.jsonl").write_text(
     '{"event":"ticket_start","ticket_id":"AUTO-1","ts":"2026-06-18T10:00:00"}\n'
     '{"event":"merged","ticket_id":"AUTO-1","ts":"2026-06-18T10:05:00"}\n')
