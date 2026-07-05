@@ -54,6 +54,8 @@ Everything under `Documentation/` (these are the only files there — keep this 
   live land, newest first, written automatically by the Technical Writer (EU-41). Created on the
   first land if absent.
 - `Documentation/UNIT_REVIEW_2026-06-25.md` — a point-in-time unit review.
+- `Documentation/EU-153_Implementation_Summary.md` — point-in-time implementation summary of
+  EU-153 (the LLM ticket commenter), committed with that land.
 - `Documentation/OFFICER_NAMING.md` — canonical old→new officer-name map and the policy for what
   stays army-themed by design (EU-57).
 
