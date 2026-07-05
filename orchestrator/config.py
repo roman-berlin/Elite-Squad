@@ -297,7 +297,7 @@ class Config:
     test_engineer_effort: str = "medium"  # thinking depth for the Test Engineer's coverage pass
 
     # --- safety ---
-    dry_run: bool = False               # default LIVE (build + merge to DEV); pass --dry for a no-changes preview
+    dry_run: bool = False               # default LIVE (build + merge to DEV); set dry_run: true in config.yaml for a no-changes preview (there is no --dry CLI flag)
 
     # --- notifications ---
     notify_verbose: bool = False        # also Telegram on implemented / verdict / pushed (not just key events)

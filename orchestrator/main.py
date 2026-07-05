@@ -10,7 +10,8 @@ of apps, and lands passing work on dev. You stay in command of dev -> main.
   general drain automatixy                    # drain everything labelled autodev
   general drain                               # drain every backlogged app
 
-Add --live to actually push/merge/update Jira (default is a safe dry-run).
+Runs are LIVE by default (build + merge to dev + Jira updates); set dry_run: true
+in config.yaml for a no-changes preview. --live remains as an explicit override.
 "general" is the wrapper script; equivalently: python -m orchestrator.main <args>
 """
 from __future__ import annotations
