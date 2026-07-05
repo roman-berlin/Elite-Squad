@@ -223,6 +223,39 @@ chk("Pre-flight check passes with healthy budget", pre["go"] is True)
 chk("Pre-flight includes provider", pre["provider"] == "claude")
 chk("Pre-flight includes remaining", pre["remaining"] > 0)
 
+# --- 2026-07-05 audit §6: routed-call truthfulness (env-routed GLM behind a claude-* id) ---
+# When the base URL is flipped to z.ai while options.model stays "claude-*", agent.py passes
+# provider="GLM" from its live sniff. The row must (a) carry the full model id in "mid",
+# (b) land provider="glm" so the GLM gauges count it, (c) keep "m" family semantics untouched.
+routed_dir = Path(tempfile.mkdtemp())
+routed_audit = routed_dir / "audit.jsonl"
+usage.configure(str(routed_audit))
+
+usage.record("claude-opus-4-8", 4000, 1000, 0.0, "builder", provider="GLM")       # routed
+usage.record("claude-opus-4-8", 700, 300, 0.0, "builder", provider="Anthropic")   # native
+routed_rows = [json.loads(ln) for ln in usage._path().read_text(encoding="utf-8").splitlines()]
+r_glm, r_native = routed_rows[0], routed_rows[1]
+chk("routed row: full model id recorded in mid", r_glm.get("mid") == "claude-opus-4-8", str(r_glm))
+chk("routed row: provider param lands as provider=glm", r_glm.get("provider") == "glm", str(r_glm))
+chk("routed row: 'm' family unchanged (opus)", r_glm.get("m") == "opus", str(r_glm))
+chk("routed row: prv kept for backward compat", r_glm.get("prv") == "GLM", str(r_glm))
+chk("native row: no provider key (Claude default)", "provider" not in r_native, str(r_native))
+chk("native row: mid recorded too", r_native.get("mid") == "claude-opus-4-8", str(r_native))
+
+cfg_routed = Config(apps=[], audit_path=str(routed_audit), use_worktree=False)
+chk("routed tokens count toward the GLM gauge",
+    usage._glm_tokens_today(cfg_routed) == 4000 + 1000, str(usage._glm_tokens_today(cfg_routed)))
+chk("routed tokens excluded from the Claude gauge",
+    usage._claude_tokens_today(cfg_routed) == 700 + 300, str(usage._claude_tokens_today(cfg_routed)))
+
+# rollup stays shape-stable with the additive fields present (still keyed by short family)
+r_today = usage.rollup(None, usage._day_start())
+chk("rollup by_model unaffected by mid/provider fields",
+    set(r_today["by_model"]) == {"opus"} and r_today["by_model"]["opus"]["in"] == 4700,
+    str(r_today["by_model"]))
+
+usage.configure(str(glm_audit))   # restore the dual-provider ledger for the sections below
+
 # Test pre-flight check when budget is low (simulate by setting low cap)
 cfg_low = Config(
     apps=[],

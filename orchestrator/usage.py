@@ -104,9 +104,18 @@ def record(model: str, input_tokens: int, output_tokens: int,
             "c": round(float(cost_usd or 0.0), 6),
             "g": tag or "",
         }
+        # 2026-07-05 audit §6: "m" is the model FAMILY only, so a z.ai-routed call whose
+        # options.model stayed "claude-*" recorded m:"opus" — a model that was never served —
+        # and the full id was stored nowhere. "mid" carries the full model id, additively;
+        # "m" semantics stay untouched (by_model/code_mix consumers key on the short family).
+        if model:
+            row["mid"] = str(model)
         # EU-122: Add provider field for dual-provider tracking. Backward-compatible: old rows
         # without this field are treated as Claude (the default). For GLM models, store provider="glm".
-        if model and "glm" in model.lower():
+        # 2026-07-05 audit §6: also honor the provider PARAM — agent.py sniffs the live base URL
+        # (z.ai → "GLM") at call time, so env-routed claude-* calls now count toward the GLM
+        # budget gauges instead of silently charging the Claude one.
+        if (model and "glm" in model.lower()) or (provider and str(provider).strip().lower() == "glm"):
             row["provider"] = "glm"
         if ticket_id:
             row["k"] = str(ticket_id)
