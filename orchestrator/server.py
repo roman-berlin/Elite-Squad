@@ -105,6 +105,9 @@ def create_app(cfg: Config):
     audit = AuditLog(cfg.audit_path)
     from . import usage
     usage.configure(cfg.audit_path)   # the cockpit process meters token burn too
+    # QW4: every agent call also lands an `agent_call` audit event (model, tokens, duration).
+    from . import agent as _agent
+    _agent.configure_audit(audit)
 
     # ----------------------------------------------------------------------------------------------
     # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`

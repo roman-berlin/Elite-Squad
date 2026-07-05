@@ -50,6 +50,23 @@ class AgentRun:
     # EU-123: provider information for this run — which provider + model was used
     provider: str = ""          # "Anthropic" or "GLM" (z.ai)
     model_version: str = ""     # Clean model identifier (e.g., "claude-opus-4-8", "glm-4")
+    # QW4 (2026-07-05): wall-clock duration of this call — the forensic audit found NO duration
+    # was recorded anywhere (0 duration fields across 2,555 audit events).
+    duration_s: float = 0.0
+
+
+# QW4: optional audit sink — when a process configures it (main/server startup, beside
+# usage.configure), every agent call also lands a structured `agent_call` event in audit.jsonl
+# {tag, model, provider, tokens in/out, cost, duration, turns, ticket, pass}. audit.jsonl stays the
+# single source of truth for per-call economics; usage_ledger.jsonl remains the compact rollup the
+# gauges read. Unconfigured (tests, ad-hoc imports) → no-op.
+_AUDIT_SINK = None
+
+
+def configure_audit(audit) -> None:
+    """Point agent_call instrumentation at an AuditLog. Call once at process start."""
+    global _AUDIT_SINK
+    _AUDIT_SINK = audit
 
 
 def _tool_brief(name: str, inp) -> str:
@@ -118,6 +135,9 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     model = getattr(options, "model", "") or ""
     provider, model_version = _provider.get_provider_info(model)
 
+    import time as _time
+    _t0 = _time.monotonic()
+
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, AssistantMessage):
             parts: list[str] = []
@@ -153,13 +173,34 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
                           + int(u.get("cache_creation_input_tokens", 0) or 0))
                 out_tok = int(u.get("output_tokens", 0) or 0)
 
+    duration_s = round(_time.monotonic() - _t0, 2)
+
     # One choke-point for the token ledger: every officer/builder/soldier/chat call lands here.
     try:
         from . import usage as _usage
         _usage.record(getattr(options, "model", "") or "", in_tok, out_tok, cost, tag,
-                      ticket_id=ticket_id, pass_number=pass_number, provider=provider)
+                      ticket_id=ticket_id, pass_number=pass_number, provider=provider,
+                      duration_s=duration_s)
     except Exception:  # noqa: BLE001 — metering must never break a run
         pass
+
+    # QW4: per-call instrumentation into audit.jsonl — model, tokens in/out, duration (the three
+    # fields the 2026-07-05 forensics found missing from every one of the 2,555 audit events).
+    if _AUDIT_SINK is not None:
+        try:
+            extra = {}
+            if ticket_id:
+                extra["ticket_id"] = str(ticket_id)
+            if pass_number is not None:
+                extra["pass_number"] = pass_number
+            _AUDIT_SINK.record("agent_call", tag=tag or "",
+                               model=getattr(options, "model", "") or "",
+                               provider=provider, model_version=model_version,
+                               input_tokens=in_tok, output_tokens=out_tok,
+                               cost_usd=round(cost, 6), duration_s=duration_s,
+                               turns=turns, **extra)
+        except Exception:  # noqa: BLE001 — instrumentation must never break a run
+            pass
 
     # EU-174: Restore original environment variables after routing
     if routing_tier and _original_base_url is not None:
@@ -179,7 +220,7 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     return AgentRun(text="\n".join(chunks), final=final, cost_usd=cost,
                     num_turns=turns, is_error=is_error, tools=tools,
                     input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit,
-                    provider=provider, model_version=model_version)
+                    provider=provider, model_version=model_version, duration_s=duration_s)
 
 
 # ── EU-108: Sonnet-cap fallback detection ────────────────────────────────────────────────────────────

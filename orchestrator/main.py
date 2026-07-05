@@ -395,6 +395,9 @@ async def _main(argv: list[str]) -> int:
     from . import usage
     usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
     usage.prune(cfg)
+    # QW4: every agent call also lands an `agent_call` audit event (model, tokens, duration).
+    from . import agent as _agent
+    _agent.configure_audit(AuditLog(cfg.audit_path))
 
     if args.command == "serve":
         from . import server

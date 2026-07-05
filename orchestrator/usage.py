@@ -84,7 +84,7 @@ def _path(cfg: Config | None = None) -> Optional[Path]:
 def record(model: str, input_tokens: int, output_tokens: int,
            cost_usd: float = 0.0, tag: str = "",
            ticket_id: str | None = None, pass_number: int | None = None,
-           provider: str = "") -> None:
+           provider: str = "", duration_s: float | None = None) -> None:
     """Log one agent call's token burn. Best-effort; silent on any failure.
 
     EU-38: a build/soldier pass also stamps its ticket id (`k`) + pass number (`p`) so per-pass
@@ -117,6 +117,12 @@ def record(model: str, input_tokens: int, output_tokens: int,
                 pass
         if provider:
             row["prv"] = str(provider)
+        # QW4 (2026-07-05): wall-clock seconds for the call — duration was recorded nowhere before.
+        if duration_s is not None:
+            try:
+                row["d"] = round(float(duration_s), 2)
+            except (TypeError, ValueError):
+                pass
         # Locked append: every agent call records here from many threads/processes at once; an
         # unlocked write can interleave and split a row mid-line (the F8 lost-write bug, generalised).
         locking.locked_append(p, json.dumps(row))

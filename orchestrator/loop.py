@@ -10,6 +10,7 @@ import fcntl
 import os
 import re
 import subprocess
+import time
 from collections import deque
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -632,6 +633,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         return _dc_replace(report, token_burn=tb)
 
     max_passes = min(cfg.max_iterations, HARD_MAX_PASSES)
+    attempt_t0 = time.monotonic()
     for iteration in range(1, max_passes + 1):
         if stop_event is not None and stop_event.is_set():
             audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-build")
@@ -642,6 +644,29 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             audit.record("budget_exceeded", ticket_id=ticket.id, spent=budget.spent)
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes="cost budget exceeded"))
+        # QW4 (2026-07-05): per-ticket token/time budget, checked before each pass (a call in
+        # flight is never interrupted — the budget bounds the NEXT pass). Breach → BLOCKED via the
+        # same decisions.add plumbing as exhaustion (Jira 'Blocked' + Needs-you) + Telegram, never
+        # a silent continuation. Evidence: EU-174 burned 15.5M tokens/79 min with no budget check.
+        _burned = sum(store.token_burn.values())
+        _elapsed_min = (time.monotonic() - attempt_t0) / 60.0
+        _tok_over = cfg.per_ticket_token_budget > 0 and _burned >= cfg.per_ticket_token_budget
+        _time_over = cfg.per_ticket_time_budget_min > 0 and _elapsed_min >= cfg.per_ticket_time_budget_min
+        if _tok_over or _time_over:
+            why = (f"token budget: {_burned:,} ≥ {cfg.per_ticket_token_budget:,}" if _tok_over
+                   else f"time budget: {_elapsed_min:.0f}m ≥ {cfg.per_ticket_time_budget_min}m")
+            audit.record("ticket_budget_exceeded", ticket_id=ticket.id, iteration=iteration,
+                         tokens_burned=_burned, token_budget=cfg.per_ticket_token_budget,
+                         elapsed_min=round(_elapsed_min, 1),
+                         time_budget_min=cfg.per_ticket_time_budget_min, reason=why)
+            decisions.add(cfg, ticket, app.name,
+                          f"Per-ticket budget exceeded ({why}) after {iteration - 1} pass(es). "
+                          "Raise the budget, narrow the ticket, or answer the open review items.")
+            print(f"  ⛔ {ticket.id}: per-ticket budget exceeded ({why}) — parking.", flush=True)
+            _notify(cfg, f"⛔ {ticket.id} parked — per-ticket budget exceeded ({why}). "
+                         f"{decisions.reply_hint(ticket.id)}")
+            return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                         notes=f"per-ticket budget exceeded — {why}"))
 
         # 0) ARCHITECT — produce lightweight ADR for feature/large tickets before build
         # (Only on first iteration; retry passes reuse the ADR from the first pass.)
