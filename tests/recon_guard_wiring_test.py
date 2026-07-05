@@ -135,7 +135,7 @@ _orig_warn2 = guard.warn_if_absent
 guard.warn_if_absent = lambda officer="officer": _gate_warns.append(officer) or False
 
 
-async def _gate_run_agent(prompt, options, tag=None):  # noqa: ANN001
+async def _gate_run_agent(prompt, options, tag=None, **kw):  # noqa: ANN001
     _gate_run_agent.captured = options
     r = _FakeRun()
     r.final = "SECURITY GATE: PASS — no findings."

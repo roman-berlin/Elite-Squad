@@ -40,7 +40,7 @@ class Cfg:
     reviewer_model = "m"
 
 def run_gate(reply_or_exc):
-    async def runner(prompt, options, tag=""):
+    async def runner(prompt, options, tag="", **kw):
         if isinstance(reply_or_exc, Exception):
             raise reply_or_exc
         return FakeRun(reply_or_exc)
@@ -144,7 +144,7 @@ _PASS_WITH_SECS = (
 def run_gate_with_store(reply_or_exc):
     """Like run_gate() above but also captures the store state."""
     store = PerTicketArtifactStore()
-    async def runner(prompt, options, tag=""):
+    async def runner(prompt, options, tag="", **kw):
         if isinstance(reply_or_exc, Exception):
             raise reply_or_exc
         return FakeRun(reply_or_exc)

@@ -1093,7 +1093,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 _bar(SECURITY, active=SECURITY)
                 print("  security · Security Engineer gating the diff…", flush=True)
                 _sec_cost_before = float(store.stage_costs.get("provost", 0.0) or 0.0)
-                sec_ok, sec_report = await provost_mod.gate(cfg, app, diff, store=store)
+                # 2026-07-05 telemetry audit: ticket_id stamps the gate's ledger row with the
+                # ticket key ("k") so per-ticket burn slicing counts the gate spend.
+                sec_ok, sec_report = await provost_mod.gate(cfg, app, diff, store=store,
+                                                            ticket_id=ticket.id)
                 # 2026-07-05 telemetry audit: the gate's own agent call never reached `cost`, so
                 # run_end's total_cost_usd (sum of per-ticket report costs) under-reported the
                 # ledger-true run cost (EU-139: $1.481 vs $2.156). gate() keeps its (ok, report)

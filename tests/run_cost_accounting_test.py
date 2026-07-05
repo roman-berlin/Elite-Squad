@@ -7,7 +7,9 @@ gate ($0.289 — its (ok, report) return can't carry cost), and the gap-detect (
 fallback. Ledger-true cost $2.156, reported $1.481.
 
 Gap 2 — the gap-detect and squad-lead usage-ledger rows carried no ticket key ("k") even though
-they ran inside the EU-139 ticket flow, so per-ticket burn slicing undercounts.
+they ran inside the EU-139 ticket flow, so per-ticket burn slicing undercounts. The follow-up
+sweep found the same hole in two more per-ticket stages: the soldier·<role> dispatch rows and
+the provost-gate row.
 
 Pinned here:
   1. detect_domain_gap returns its own burn and threads ticket_id into run_agent.
@@ -20,6 +22,10 @@ Pinned here:
   5. loop._attempt: the ticket report cost — the number run_end sums — includes the gate spend.
   6. usage.record stamps "k" on the ledger row when a ticket_id is given (the choke-point that
      makes 1/2 land in usage_ledger.jsonl).
+  7. _soldier threads req.ticket.id into run_agent so every soldier·<role> ledger row carries
+     the ticket key (full build_delegated dispatch path, not just the planner).
+  8. provost.gate takes an additive ticket_id kwarg and threads it to run_agent; loop._attempt
+     passes ticket.id at the gate call site. Legacy calls without the kwarg stay unchanged.
 
 All offline — SDK and agents are stubbed; no real models, no network.
 """
@@ -161,6 +167,44 @@ _res_legacy, _n_legacy = asyncio.run(squad.build_delegated(
 chk("thin plan: legacy call without sunk= still returns (None, 0)",
     _res_legacy is None and _n_legacy == 0, f"{_res_legacy},{_n_legacy}")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2b. build_delegated (two-subtask plan) — every soldier dispatch carries the ticket id
+#     so the soldier·<role> ledger rows get a "k" (the second hole of Gap 2).
+# ══════════════════════════════════════════════════════════════════════════════
+SOLDIER_COST = 0.15
+
+_PLAN_TWO = ('[{"role":"ordnance-be","title":"add endpoint","detail":"POST /export","size":"M"},'
+             '{"role":"logistics-db","title":"migration","detail":"export_jobs table","size":"M"}]')
+
+
+async def _fake_run_agent_squad(prompt, options, tag="", ticket_id=None, pass_number=None, **kw):
+    _calls.append((tag, ticket_id))
+    if tag == "gap-detect":
+        reply = '{"covered": true, "domain": "vanguard-fe"}'
+        return AgentRun(text=reply, final=reply, cost_usd=GAP_COST, num_turns=1,
+                        is_error=False, tools=[], input_tokens=GAP_IN, output_tokens=GAP_OUT)
+    if tag == "squad-lead":
+        return AgentRun(text=_PLAN_TWO, final=_PLAN_TWO, cost_usd=LEAD_COST, num_turns=2,
+                        is_error=False, tools=["Read"], input_tokens=LEAD_IN, output_tokens=LEAD_OUT)
+    return AgentRun(text="done", final=f"implemented {tag}", cost_usd=SOLDIER_COST, num_turns=4,
+                    is_error=False, tools=["Edit"])
+
+
+squad.run_agent = _fake_run_agent_squad
+_calls.clear()
+_res2, _n2 = asyncio.run(squad.build_delegated(
+    BuildRequest(_ticket(), "autodev/EU-139", iteration=1), _APP, _cfg))
+_soldier_calls = [c for c in _calls if c[0].startswith("soldier·")]
+chk("squad dispatch: two subtasks → BuildResult, n=2", _res2 is not None and _n2 == 2,
+    f"{_res2 is not None},{_n2}")
+chk("squad dispatch: every soldier run_agent received ticket_id='EU-139' (ledger 'k' wiring)",
+    _soldier_calls == [("soldier·ordnance-be", "EU-139"), ("soldier·logistics-db", "EU-139")],
+    str(_soldier_calls))
+chk("squad dispatch: aggregate cost = gap-detect + squad-lead + both soldiers",
+    _res2 is not None and abs(_res2.cost_usd - (GAP_COST + LEAD_COST + 2 * SOLDIER_COST)) < 1e-9,
+    str(getattr(_res2, "cost_usd", None)))
+
 squad.run_agent = _orig_squad_runner
 
 
@@ -206,7 +250,11 @@ chk("builder.build: solo result absorbs the sunk tokens (EU-96 _burn sees them)"
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. provost.gate — cost lands in store.stage_costs; legacy stores stay safe
 # ══════════════════════════════════════════════════════════════════════════════
-async def _fake_provost_runner(prompt, options, tag="", **kw):
+_provost_calls: list[tuple[str, object]] = []   # (tag, ticket_id) per fake gate runner call
+
+
+async def _fake_provost_runner(prompt, options, tag="", ticket_id=None, **kw):
+    _provost_calls.append((tag, ticket_id))
     report = "\n".join([
         "§1-secrets: no secrets touched.",
         "§2-authz: no routes changed.",
@@ -241,6 +289,17 @@ chk("provost.gate: legacy store token burn unchanged",
 
 _ok3, _rep3 = asyncio.run(provost_mod.gate(_cfg, _APP, "diff --git a b", store=None))
 chk("provost.gate: store=None → still PASS (no crash)", _ok3 is True, _rep3[:60])
+
+# Ticket threading (the second hole of Gap 2): gate(ticket_id=…) reaches run_agent so the
+# 'provost-gate' ledger row gets a "k"; the three calls above (no kwarg) stay ticket-less.
+chk("provost.gate: legacy calls without ticket_id → run_agent got ticket_id=None",
+    _provost_calls == [("provost-gate", None)] * 3, str(_provost_calls))
+_ok4, _rep4 = asyncio.run(provost_mod.gate(_cfg, _APP, "diff --git a b", store=None,
+                                           ticket_id="EU-139"))
+chk("provost.gate: ticket_id kwarg keeps the (ok, report) contract (PASS)", _ok4 is True,
+    _rep4[:60])
+chk("provost.gate: run_agent received ticket_id='EU-139' (ledger 'k' wiring)",
+    _provost_calls[-1] == ("provost-gate", "EU-139"), str(_provost_calls))
 
 provost_mod.run_agent = _orig_provost_runner
 
@@ -295,8 +354,12 @@ class _StubReviewer:
         return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=REVIEW_C)
 
 
-async def _fake_gate(cfg, app, diff, store=None):
+_gate_ticket_ids: list = []
+
+
+async def _fake_gate(cfg, app, diff, store=None, ticket_id=None, **kw):
     """Mimic the real gate's store writes: signed artifact + stage_costs + token burn."""
+    _gate_ticket_ids.append(ticket_id)
     if store is not None:
         store.put(SecurityArtifact(s1_secrets="no secrets touched",
                                    s2_authz="no routes changed",
@@ -341,6 +404,8 @@ chk("loop: report cost = builder + TE + review + provost gate (run_end now sums 
     f"got={_land_costs}, want={_expected}")
 chk("loop: TicketReport.cost_usd carries the full ticket spend",
     abs(_report.cost_usd - _expected) < 1e-9, str(_report.cost_usd))
+chk("loop: gate call site passes ticket.id (so the 'provost-gate' ledger row gets a 'k')",
+    _gate_ticket_ids == ["EU-139"], str(_gate_ticket_ids))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -353,6 +418,8 @@ usage.configure(_led_audit)
 try:
     usage.record("claude-haiku-4-5", GAP_IN, GAP_OUT, GAP_COST, "gap-detect", ticket_id="EU-139")
     usage.record("claude-sonnet-4-6", LEAD_IN, LEAD_OUT, LEAD_COST, "squad-lead", ticket_id="EU-139")
+    usage.record("claude-sonnet-4-6", 1000, 200, SOLDIER_COST, "soldier·ordnance-be", ticket_id="EU-139")
+    usage.record("claude-opus-4-8", PROVOST_IN, PROVOST_OUT, PROVOST_COST, "provost-gate", ticket_id="EU-139")
     usage.record("claude-haiku-4-5", 10, 5, 0.001, "gap-detect")   # no ticket context
     _ledger = usage._path()
     rows = [json.loads(ln) for ln in _ledger.read_text(encoding="utf-8").splitlines()]
@@ -363,6 +430,10 @@ chk("ledger: gap-detect row carries k=EU-139",
     any(r.get("g") == "gap-detect" and r.get("k") == "EU-139" for r in rows), str(rows))
 chk("ledger: squad-lead row carries k=EU-139",
     any(r.get("g") == "squad-lead" and r.get("k") == "EU-139" for r in rows), str(rows))
+chk("ledger: soldier row carries k=EU-139",
+    any(r.get("g") == "soldier·ordnance-be" and r.get("k") == "EU-139" for r in rows), str(rows))
+chk("ledger: provost-gate row carries k=EU-139",
+    any(r.get("g") == "provost-gate" and r.get("k") == "EU-139" for r in rows), str(rows))
 chk("ledger: no-ticket gap-detect row has no k (shape additive, not forced)",
     any(r.get("g") == "gap-detect" and "k" not in r for r in rows), str(rows))
 

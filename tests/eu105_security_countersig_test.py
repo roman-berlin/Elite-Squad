@@ -220,7 +220,7 @@ def _run_attempt_with_gate(gate_fn):
 
 
 # ── Scenario 1: gate() PASS but store.security is None (artifact never published) ─
-async def _gate_pass_no_artifact(cfg, app, diff, store=None):
+async def _gate_pass_no_artifact(cfg, app, diff, store=None, **kw):
     """Gate claims PASS but never publishes a SecurityArtifact — store.security stays None."""
     # Do NOT call store.put() — simulate a Security Engineer that passed the verdict
     # but didn't produce the mandatory §1/§2/§3 countersig artifact.
@@ -239,7 +239,7 @@ chk(
 )
 
 # ── Scenario 2: gate() PASS but artifact is unsigned (signed=False) ───────────
-async def _gate_pass_unsigned_artifact(cfg, app, diff, store=None):
+async def _gate_pass_unsigned_artifact(cfg, app, diff, store=None, **kw):
     """Gate claims PASS but publishes an unsigned artifact (signed=False)."""
     if store is not None:
         store.put(SecurityArtifact(
@@ -263,7 +263,7 @@ chk(
 )
 
 # ── Scenario 3: gate() PASS and artifact is fully signed (happy path) ─────────
-async def _gate_pass_signed_artifact(cfg, app, diff, store=None):
+async def _gate_pass_signed_artifact(cfg, app, diff, store=None, **kw):
     """Gate passes AND publishes a fully-signed SecurityArtifact — green path."""
     if store is not None:
         store.put(SecurityArtifact(
@@ -287,7 +287,7 @@ chk(
 )
 
 # ── Scenario 4: gate() BLOCK outright (no artifact check needed) ──────────────
-async def _gate_block(cfg, app, diff, store=None):
+async def _gate_block(cfg, app, diff, store=None, **kw):
     """Gate itself returns BLOCK — countersig check is moot but block must still fire."""
     if store is not None:
         store.put(SecurityArtifact(s1_secrets="", s2_authz="", s3_injection="", signed=False))

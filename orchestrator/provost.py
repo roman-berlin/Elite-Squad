@@ -152,8 +152,13 @@ def _publish_artifact(store, s1: str, s2: str, s3: str, *, signed: bool) -> None
     store.put(artifact)
 
 
-async def gate(cfg: Config, app, diff: str, store=None) -> tuple[bool, str]:
+async def gate(cfg: Config, app, diff: str, store=None,
+               ticket_id: str | None = None) -> tuple[bool, str]:
     """Security-gate a diff before merge. Returns (passed, report).
+
+    ``ticket_id`` (additive, default None) stamps the gate's usage-ledger line with the ticket
+    key (``k``) so per-ticket burn slicing counts the gate — the 2026-07-05 telemetry audit found
+    the 'provost-gate' row carried no ticket key. The (ok, report) contract is unchanged.
 
     BLOCK on CRITICAL/HIGH findings. Fails CLOSED in the unsafe direction: only an explicit
     ``SECURITY GATE: PASS`` passes; absence / BLOCK / empty / parse-uncertainty all block, and
@@ -193,7 +198,7 @@ async def gate(cfg: Config, app, diff: str, store=None) -> tuple[bool, str]:
             f"Security-gate this diff before it merges to '{app.base_branch}':", "",
             "```diff", diff[:60000], "```", "", "Issue your gate verdict.",
         ])
-        run = await run_agent(prompt, options, tag="provost-gate")
+        run = await run_agent(prompt, options, tag="provost-gate", ticket_id=ticket_id)
         # EU-123: show actual provider+model in the live feed
         if getattr(cfg, "auto_model", False):
             display = _provider.format_provider_model(run.provider, run.model_version)

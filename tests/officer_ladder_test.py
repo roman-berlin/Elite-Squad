@@ -60,7 +60,7 @@ check("scout: auto ON -> routed through ladder (tight budget downgrades below ce
 
 # --- provost.gate: a ClaudeAgentOptions officer (security gate, reviewer ceiling) -------------- #
 gate_model = {}
-async def fake_agent_provost(prompt, options, tag=""):
+async def fake_agent_provost(prompt, options, tag="", **kw):
     gate_model["m"] = getattr(options, "model", None); return RR("SECURITY GATE: PASS")
 provost.run_agent = fake_agent_provost
 app = make_cfg(True).app("automatixy")
