@@ -75,7 +75,8 @@ chk(
 )
 
 # Test 4: Verify the expected KPI cards are still present
-expected_cards = ["Merged → DEV today", "Needs you", "Security blocks"]
+# ("Needs you" left the board in 5a882a6 — /needs is the inbox surface now.)
+expected_cards = ["Merged → DEV today", "Security blocks"]
 for expected in expected_cards:
     chk(
         f"Expected KPI '{expected}' is present",

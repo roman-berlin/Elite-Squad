@@ -130,7 +130,8 @@ chk("ensure_coverage accepts 'build_artifact' keyword arg",
 b_prompt_cap: dict[str, str] = {}
 
 
-async def _fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
+async def _fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None,
+                            routing_tier=None):
     """Stub run_agent for the builder: captures the prompt, returns a fake AgentRun."""
     b_prompt_cap["p"] = prompt
     return AgentRun(
@@ -198,7 +199,8 @@ ba = BuildArtifact(
 r_prompt_cap: dict[str, str] = {}
 
 
-async def _fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
+async def _fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None,
+                             routing_tier=None):
     """Stub run_agent for the reviewer: captures the prompt, returns a PASS verdict."""
     r_prompt_cap["p"] = prompt
     return AgentRun(
@@ -219,6 +221,8 @@ async def _fake_review_agent(prompt, options, tag="", ticket_id=None, pass_numbe
 
 
 reviewer.run_agent = _fake_review_agent
+# EU-108/EU-174: the reviewer now routes through run_agent_with_fallback — stub it too.
+reviewer.run_agent_with_fallback = _fake_review_agent
 store_r = PerTicketArtifactStore()
 store_r.put(ba)
 

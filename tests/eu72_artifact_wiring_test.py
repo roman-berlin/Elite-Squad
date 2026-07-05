@@ -76,7 +76,8 @@ tk = Ticket(id="AUTO-72", key="AUTO-72", summary="structured handoffs",
 
 # -- builder.build: reads the spec, publishes a BuildArtifact -------------------------------- #
 b_prompt = {}
-async def fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
+async def fake_build_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None,
+                           routing_tier=None):
     b_prompt["p"] = prompt
     return AgentRun(text=_summary, final=_summary, cost_usd=0.1, num_turns=2, is_error=False, tools=[])
 # EU-108: stub run_agent_with_fallback so builder tests don't hit real async iteration
@@ -138,12 +139,15 @@ chk("ensure_coverage falls back to store.build when build_artifact arg omitted",
 
 # -- reviewer.review: consumes the BuildArtifact, publishes a typed ReviewVerdict ------------ #
 r_prompt = {}
-async def fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
+async def fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None,
+                            routing_tier=None):
     r_prompt["p"] = prompt
     return AgentRun(text="", final='```json\n{"verdict":"PASS","spec_conformance":{"met":true,"gaps":[]},'
                     '"quality":{"issues":[]},"required_changes":[],"summary":"ok"}\n```',
                     cost_usd=0.1, num_turns=1, is_error=False, tools=[])
 reviewer.run_agent = fake_review_agent
+# EU-108/EU-174: the reviewer now routes through run_agent_with_fallback — stub it too.
+reviewer.run_agent_with_fallback = fake_review_agent
 store_r = PerTicketArtifactStore(); store_r.put(ba)
 res_r = asyncio.run(reviewer.review("a diff", tk, app, cfg, store=store_r, build_artifact=ba))
 chk("review returns a ReviewResult", isinstance(res_r, ReviewResult) and res_r.verdict is Verdict.PASS)

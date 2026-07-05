@@ -44,10 +44,12 @@ def fake_for_reviewer(cfg, diff="", iteration=1):
     seen["iteration"] = iteration
     return models.SONNET, f"sonnet (it={iteration})"
 ran = {}
-async def fake_run_agent(prompt, options, tag=""):
+async def fake_run_agent(prompt, options, tag="", cfg=None, routing_tier=None):
     ran["model"] = getattr(options, "model", None)
     return RR('{"verdict": "PASS", "spec_met": true}')
 reviewer_mod.run_agent = fake_run_agent
+# EU-108/EU-174: the reviewer now routes through run_agent_with_fallback — stub it too.
+reviewer_mod.run_agent_with_fallback = fake_run_agent
 models.for_reviewer = fake_for_reviewer   # captured by reviewer.review's `from . import models`
 
 d = Path(tempfile.mkdtemp())
@@ -72,7 +74,9 @@ chk("reviewer.review still defaults iteration to 1 when omitted (CLI/direct call
 
 # ============ INTEGRATION: the loop threads the REAL escalating build iteration ============ #
 # Each review returns DIFFERENT required changes so the retry-stuck guard never fires; the loop
-# rebuilds up to max_iterations, and each re-review must receive the incrementing build iteration.
+# rebuilds up to the effective pass cap, and each re-review must receive the incrementing build
+# iteration. QW3 (2026-07-05): loop.HARD_MAX_PASSES clamps the cap to 2 — max_iterations=3 below
+# deliberately exercises the clamp (3 requested, only 2 passes run).
 class Audit:
     def __init__(s): s.ev = []
     def record(s, e, **k): s.ev.append({"event": e, **k})
@@ -114,8 +118,9 @@ iapp = icfg.app("automatixy")
 itk = Ticket(id="AUTO-52", key="AUTO-52", summary="s", description="d", ephemeral=True, app="automatixy")
 asyncio.run(loop._attempt(itk, iapp, icfg, Git(), None, Audit(), loop.Budget(0), "autodev/AUTO-52"))
 
-chk("loop threads the REAL escalating build iteration into each re-review (1,2,3 — not constant 1)",
-    review_iters == [1, 2, 3], f"iters={review_iters}")
+chk("loop threads the REAL escalating build iteration into each re-review (1,2 — not constant 1) "
+    "and HARD_MAX_PASSES clamps max_iterations=3 to 2 passes (QW3)",
+    review_iters == [1, 2], f"iters={review_iters}")
 chk("review iteration tracks the build iteration one-for-one",
     review_iters == built, f"reviews={review_iters} builds={built}")
 

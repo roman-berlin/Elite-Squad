@@ -95,15 +95,17 @@ chk("1d. specialist-only: the row names the ticket in 'why'",
     "AUTO-90" in str(s1["rows"][0].get("why", "")), f"why={s1['rows'][0].get('why')!r}")
 
 # ───────────────────────────────────────────────────────────────────────────
-# 2. Cockpit board — ONE number across KPI card, side-panel badge, count()
+# 2. Cockpit board — the Needs-you badge/KPI card were deliberately removed (5a882a6,
+# 2026-07-01 "refactor: remove Needs you dashboard and UI components"); /needs is the
+# surface now. Pin the removal + that the ONE number still holds at the data layer.
 # ───────────────────────────────────────────────────────────────────────────
 board1 = warroom.render_board(cfg1, None, {"active": False})
-chk("2a. board side badge equals count() ('Needs you · 1')", "Needs you · 1" in board1, board1[:0])
-chk("2b. board side panel is NOT 'All clear' (the specialist row shows)",
-    "All clear — nothing needs you" not in board1)
-chk("2c. board surfaces the specialist 'why'", "Provision mql5 specialist squad for AUTO-90" in board1)
-chk("2d. KPI 'Needs you' card value == count() == 1",
-    _needs_card_value(cfg1) == needs.count(cfg1) == 1, f"card={_needs_card_value(cfg1)}")
+chk("2a. board no longer renders a Needs-you badge (removed by 5a882a6)",
+    "Needs you ·" not in board1)
+chk("2b. no Needs-you KPI card either (removed by 5a882a6)",
+    _needs_card_value(cfg1) is None, f"card={_needs_card_value(cfg1)}")
+chk("2c. the ONE number still holds at the data layer: count() == summary total == 1",
+    needs.count(cfg1) == s1["total"] == 1, f"count={needs.count(cfg1)} total={s1['total']}")
 
 # ───────────────────────────────────────────────────────────────────────────
 # 3. /needs renders an actionable specialist section (no dead-end)
@@ -120,7 +122,8 @@ chk("3e. /needs shows the pinned roster (charter name)", "MQL5 Algo Specialist" 
 chk("3f. /needs is NOT the 'All clear' dead-end", "All clear — nothing needs you" not in body1)
 
 # ───────────────────────────────────────────────────────────────────────────
-# 4. Mixed state — decision + errored + specialist: count == badge == KPI value
+# 4. Mixed state — decision + errored + specialist: the ONE number holds at the data
+# layer (board badge/KPI card removed by 5a882a6 — see section 2).
 # ───────────────────────────────────────────────────────────────────────────
 tmp2 = Path(tempfile.mkdtemp())
 cfg2 = _make_cfg(tmp2)
@@ -139,8 +142,10 @@ D.load_dismissed = lambda _p: {}
 cnt2 = needs.count(cfg2)
 board2 = warroom.render_board(cfg2, None, {"active": False})
 chk("4a. mixed: count() == 3 (decision + errored + specialist)", cnt2 == 3, f"count={cnt2}")
-chk("4b. mixed: board badge == count()", f"Needs you · {cnt2}" in board2)
-chk("4c. mixed: KPI card value == count()", _needs_card_value(cfg2) == cnt2, f"card={_needs_card_value(cfg2)}")
+chk("4b. mixed: board renders with no Needs-you badge (removed by 5a882a6)",
+    "Needs you ·" not in board2)
+chk("4c. mixed: no Needs-you KPI card (removed by 5a882a6)",
+    _needs_card_value(cfg2) is None, f"card={_needs_card_value(cfg2)}")
 chk("4d. mixed: count() == len(rows) == total", needs.summary(cfg2)["total"] == cnt2)
 
 # ── tally ──────────────────────────────────────────────────────────────────

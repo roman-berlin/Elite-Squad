@@ -118,7 +118,7 @@ def land(cmd, ticket, gate_passed):
 # ============================================================================ #
 # 2) RED smoke -> FLAG the merge (comment + note), merge STILL STANDS
 # ============================================================================ #
-rep, g, bk, au = land("npx playwright test", ns(id="AUTO-7", summary="feature", ephemeral=False), gate_passed=False)
+rep, g, bk, au = land("npx playwright test", ns(id="AUTO-7", key="AUTO-7", summary="feature", ephemeral=False), gate_passed=False)
 chk("red smoke -> outcome is still MERGED (merge stands, not reverted)", rep.outcome == Outcome.MERGED)
 chk("red smoke -> land actually happened (trial landed)", g.landed is not None)
 chk("red smoke -> MERGED note carries the smoke-FAILED flag", "smoke FAILED" in rep.notes)
@@ -132,7 +132,7 @@ chk("red smoke -> ticket still moved to QA (merge not unwound)", bk.status == "Q
 # ============================================================================ #
 # 3) GREEN smoke -> quiet: no fail comment, no flag in the notes
 # ============================================================================ #
-rep2, g2, bk2, au2 = land("npx playwright test", ns(id="AUTO-8", summary="feature", ephemeral=False), gate_passed=True)
+rep2, g2, bk2, au2 = land("npx playwright test", ns(id="AUTO-8", key="AUTO-8", summary="feature", ephemeral=False), gate_passed=True)
 chk("green smoke -> outcome MERGED", rep2.outcome == Outcome.MERGED)
 chk("green smoke -> notes do NOT mention a smoke failure", "smoke FAILED" not in rep2.notes)
 chk("green smoke -> no smoke-fail backlog comment", not any("Post-merge smoke FAILED" in c for c in bk2.comments))
@@ -141,7 +141,7 @@ chk("green smoke -> audit recorded smoke_pass", any(k == "smoke_pass" for k, _ i
 # ============================================================================ #
 # 4) RED smoke on an EPHEMERAL ticket -> flagged in notes, but NO backlog comment
 # ============================================================================ #
-rep3, g3, bk3, au3 = land("npx playwright test", ns(id="EPH-1", summary="probe", ephemeral=True), gate_passed=False)
+rep3, g3, bk3, au3 = land("npx playwright test", ns(id="EPH-1", key="EPH-1", summary="probe", ephemeral=True), gate_passed=False)
 chk("ephemeral red -> still MERGED", rep3.outcome == Outcome.MERGED)
 chk("ephemeral red -> notes still carry the smoke flag", "smoke FAILED" in rep3.notes)
 chk("ephemeral red -> NO backlog comment (ephemeral tickets are never commented)", bk3.comments == [])
@@ -153,7 +153,7 @@ smoke.gate.run_commands = lambda a, c: GateResult(passed=False, report="should n
 g5, bk5, au5 = FakeGit(), FakeBacklog(), Audit()
 off = Config(apps=[], audit_path="/tmp/x.jsonl", smoke_enabled=False,
              mark_done_on_merge=False, sync_base_after_merge=False, dry_run=False, merge_to_dev=True)
-rep5 = loop._land(ns(id="AUTO-9", summary="f", ephemeral=False), app("npx playwright test"), off,
+rep5 = loop._land(ns(id="AUTO-9", key="AUTO-9", summary="f", ephemeral=False), app("npx playwright test"), off,
                   g5, bk5, au5, "autodev/AUTO-9", 1, 0.0, ns(summary="b"), ns(summary="r"))
 chk("smoke disabled -> MERGED with no smoke flag", rep5.outcome == Outcome.MERGED and "smoke FAILED" not in rep5.notes)
 chk("smoke disabled -> no smoke audit event at all", not any(k.startswith("smoke_") for k, _ in au5.events))

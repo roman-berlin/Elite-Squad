@@ -146,9 +146,11 @@ with tempfile.TemporaryDirectory() as _tmp:
     )
 
     # --- Retained sections must still be present ---
+    # (The needs-you side panel was removed with the rest of the Needs-you board UI in 5a882a6;
+    # /needs is the inbox surface now.)
     chk(
-        "board: needs-you panel present (needspanel)",
-        "needspanel" in board_html,
+        "board: needs-you panel stays removed (5a882a6)",
+        "class=\"panel needspanel\"" not in board_html and "class='panel needspanel'" not in board_html,
     )
     chk(
         "board: phase bar present (phasebar)",
