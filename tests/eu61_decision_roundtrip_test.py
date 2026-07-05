@@ -125,7 +125,8 @@ chk("a pre-park comment is NOT mistaken for an answer (stays parked)",
 
 # --- 4) resume → In Progress (end-to-end through process_ticket) + autopilot pickup --------------- #
 captured = {}
-async def fake_attempt(ticket, app_, cfg_, git, backlog, audit, budget, branch, stop_event=None):
+async def fake_attempt(ticket, app_, cfg_, git, backlog, audit, budget, branch, stop_event=None,
+                       commenter=None):
     captured["desc"] = ticket.description
     return TicketReport(ticket.id, Outcome.MERGED, 1, 0.0, app_.name, branch)
 loop._attempt = fake_attempt
