@@ -9,6 +9,9 @@ Tests that:
 5. Telegram notification is sent once on activation
 6. Simulated Sonnet-limit → Opus retry → fallback activation
 7. All-models limit still pauses (no false fallback)
+8. Error classification splits transient rate limits from genuine cap exhaustion
+9. A transient 429 retries Sonnet with backoff and does NOT arm the weekly fallback
+10. A failed (non-plan-limit) Opus probe does NOT arm the weekly fallback
 """
 
 from __future__ import annotations
@@ -262,7 +265,8 @@ def test_run_agent_fallback_sonnet_limit():
                 is_error=True,
                 input_tokens=0,
                 output_tokens=0,
-                is_plan_limit=True  # Sonnet hit a limit
+                is_plan_limit=True,       # Sonnet hit a limit
+                plan_limit_kind="cap",    # cap-classified — only this kind may probe/arm
             )
 
         # Second call (Opus) - success
@@ -357,7 +361,8 @@ def test_run_agent_fallback_all_models_cap():
             is_error=True,
             input_tokens=0,
             output_tokens=0,
-            is_plan_limit=True  # Hit a limit
+            is_plan_limit=True,       # Hit a limit
+            plan_limit_kind="cap",    # cap-classified — only this kind may probe/arm
         )
 
     # Patch run_agent
@@ -414,6 +419,179 @@ def test_run_agent_fallback_all_models_cap():
         reset_sonnet_fallback()
 
 
+def test_plan_limit_error_classification():
+    """_classify_plan_limit splits transient rate limits from genuine cap exhaustion."""
+    from orchestrator.agent import _classify_plan_limit
+
+    # Genuine quota exhaustion — the message names the cap → eligible to probe/arm
+    cap_errors = [
+        "Claude usage limit reached|1751702400",
+        "429 {'type': 'error', 'error': {'message': 'Weekly limit exceeded'}}",
+        "Plan limit exceeded for this billing period",
+        "usage-limit",
+    ]
+    for err in cap_errors:
+        assert _classify_plan_limit(err) == "cap", f"Should classify as cap: {err}"
+
+    # Transient blips — per-minute 429 / 529 overload → retry, never arm
+    transient_errors = [
+        "429 rate_limit_error: This request would exceed your per-minute rate limit",
+        "429 Too Many Requests",
+        "529 overloaded_error: The API is temporarily overloaded",
+    ]
+    for err in transient_errors:
+        assert _classify_plan_limit(err) == "transient", f"Should classify as transient: {err}"
+
+    # Non-limit errors classify as neither
+    assert _classify_plan_limit("401 authentication_error: invalid x-api-key") == ""
+    assert _classify_plan_limit("connection reset by peer") == ""
+
+    print("  ✓ Error classification splits cap vs transient correctly")
+
+
+def test_transient_429_does_not_arm_fallback():
+    """A transient per-minute 429 retries Sonnet once — no Opus probe, no weekly arming."""
+    import asyncio
+    from orchestrator.agent import run_agent_with_fallback, AgentRun
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    calls = []
+
+    # Mock run_agent: first Sonnet call hits a transient 429, the retry succeeds
+    async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, routing_tier=None):
+        model = getattr(options, "model", "")
+        calls.append(model)
+
+        if len(calls) == 1:
+            return AgentRun(
+                text="",
+                final="",
+                cost_usd=0.0,
+                num_turns=0,
+                is_error=True,
+                input_tokens=0,
+                output_tokens=0,
+                is_plan_limit=True,
+                plan_limit_kind="transient",  # per-minute 429, NOT a cap
+            )
+
+        return AgentRun(
+            text="Success",
+            final="Success",
+            cost_usd=0.1,
+            num_turns=1,
+            is_error=False,
+            input_tokens=500,
+            output_tokens=200,
+            is_plan_limit=False,
+        )
+
+    import orchestrator.agent as agent_module
+    original_run_agent = agent_module.run_agent
+    original_backoff = agent_module._TRANSIENT_RETRY_BACKOFF_S
+    agent_module.run_agent = mock_run_agent
+    agent_module._TRANSIENT_RETRY_BACKOFF_S = 0.0  # no sleeping in tests
+
+    try:
+        reset_sonnet_fallback()
+        reset_sonnet_fallback_notification()
+
+        options = ClaudeAgentOptions(model=SONNET, system_prompt="Test")
+        cfg = MockConfig()
+
+        result = asyncio.run(
+            run_agent_with_fallback("test prompt", options, tag="test", cfg=cfg)
+        )
+
+        # Both calls stay on Sonnet — a transient blip must not trigger the Opus probe
+        assert len(calls) == 2, f"Expected 2 calls (Sonnet, Sonnet retry), got {len(calls)}: {calls}"
+        assert all("sonnet" in c.lower() for c in calls), f"All calls should be Sonnet, got {calls}"
+
+        assert result.is_error is False, "Retry should succeed"
+        assert result.final == "Success", "Should return the retry result"
+
+        # The critical pin: the WEEKLY fallback stays disarmed
+        assert sonnet_fallback_active(cfg) is False, \
+            "Transient 429 must NOT arm the weekly Opus fallback"
+
+        print("  ✓ Transient 429 → Sonnet retry, weekly fallback stays disarmed")
+    finally:
+        agent_module.run_agent = original_run_agent
+        agent_module._TRANSIENT_RETRY_BACKOFF_S = original_backoff
+        reset_sonnet_fallback()
+
+
+def test_failed_opus_probe_does_not_arm_fallback():
+    """An Opus probe that fails (auth/network, not plan-limit) must not arm the fallback."""
+    import asyncio
+    from orchestrator.agent import run_agent_with_fallback, AgentRun
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    calls = []
+
+    # Mock run_agent: Sonnet hits a genuine cap, but the Opus probe errors out (e.g. auth)
+    async def mock_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, routing_tier=None):
+        model = getattr(options, "model", "")
+        calls.append(model)
+
+        if "sonnet" in model.lower():
+            return AgentRun(
+                text="",
+                final="",
+                cost_usd=0.0,
+                num_turns=0,
+                is_error=True,
+                input_tokens=0,
+                output_tokens=0,
+                is_plan_limit=True,
+                plan_limit_kind="cap",
+            )
+
+        # Opus probe: failed, but NOT a plan limit (auth error, network error, …)
+        return AgentRun(
+            text="",
+            final="",
+            cost_usd=0.0,
+            num_turns=0,
+            is_error=True,
+            input_tokens=0,
+            output_tokens=0,
+            is_plan_limit=False,
+        )
+
+    import orchestrator.agent as agent_module
+    original_run_agent = agent_module.run_agent
+    agent_module.run_agent = mock_run_agent
+
+    try:
+        reset_sonnet_fallback()
+        reset_sonnet_fallback_notification()
+
+        options = ClaudeAgentOptions(model=SONNET, system_prompt="Test")
+        cfg = MockConfig()
+
+        result = asyncio.run(
+            run_agent_with_fallback("test prompt", options, tag="test", cfg=cfg)
+        )
+
+        assert len(calls) == 2, f"Expected 2 calls (Sonnet then Opus), got {len(calls)}: {calls}"
+        assert "opus" in calls[1].lower(), f"Second call should be the Opus probe, got {calls[1]}"
+
+        # A broken probe proves nothing — surface the original Sonnet plan-limit error
+        assert result.is_error is True, "Should return an error result"
+        assert result.is_plan_limit is True, \
+            "Should surface the Sonnet plan-limit error (for EU-82 pause handling)"
+
+        # The critical pin: no arming off a failed probe
+        assert sonnet_fallback_active(cfg) is False, \
+            "Failed (non-plan-limit) Opus probe must NOT arm the weekly fallback"
+
+        print("  ✓ Failed Opus probe → no arming, Sonnet error surfaced")
+    finally:
+        agent_module.run_agent = original_run_agent
+        reset_sonnet_fallback()
+
+
 def run_all():
     """Run all EU-108 tests."""
     print("\n🧪 EU-108: Sonnet-cap fallback tests\n")
@@ -430,6 +608,9 @@ def run_all():
         test_reset_time_string_format,
         test_run_agent_fallback_sonnet_limit,
         test_run_agent_fallback_all_models_cap,
+        test_plan_limit_error_classification,
+        test_transient_429_does_not_arm_fallback,
+        test_failed_opus_probe_does_not_arm_fallback,
     ]
 
     for test in tests:
