@@ -14,6 +14,7 @@ EU-108 Sonnet-cap fallback:
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 from claude_agent_sdk import (
@@ -28,6 +29,12 @@ try:  # tool-use block type name can vary across SDK versions
     from claude_agent_sdk import ToolUseBlock
 except Exception:  # pragma: no cover
     ToolUseBlock = None
+
+# Serialises the LOCAL-tier routing window: the Ollama base-URL/key swap is process-global env,
+# so overlapping routed calls must not interleave their save/restore (2026-07-06 review). Held
+# for the duration of one routed agent call; acquired via asyncio.to_thread so event loops in
+# any thread queue without blocking. Retired when Phase-2 routing moves to per-call options.
+_ROUTED_ENV_LOCK = threading.Lock()
 
 
 @dataclass
@@ -119,16 +126,38 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
         return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
                                          pass_number=pass_number)
 
+    import asyncio as _asyncio
     import os as _os
     from . import routing as _routing
     tier = _routing.RoutingTier(routing_tier)
 
-    _original_base_url = _os.environ.get("ANTHROPIC_BASE_URL")
-    _original_api_key = _os.environ.get("ANTHROPIC_API_KEY")
-    _original_model = getattr(options, "model", None)
+    if tier != _routing.RoutingTier.LOCAL:
+        # Cloud tier touches only THIS call's options.model — no process-global state.
+        _original_model = getattr(options, "model", None)
+        cloud_model = _routing.get_model_for_tier(tier)
+        if cloud_model and hasattr(options, "model"):
+            options.model = cloud_model
+        try:
+            return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
+                                             pass_number=pass_number)
+        finally:
+            if hasattr(options, "model"):
+                options.model = _original_model
 
-    if tier == _routing.RoutingTier.LOCAL:
-        # Route to local Ollama
+    # LOCAL tier mutates process-global env (base URL/key → Ollama). 2026-07-06 review: two
+    # overlapping routed calls could interleave save/restore — the later starter snapshots the
+    # earlier one's Ollama URL as its "original" and restores it after the pop, re-stranding the
+    # whole process (§6 defect 2 reopened via concurrency). The mutation window is therefore
+    # serialised process-wide; the Phase-2 routing slice replaces env mutation with per-call
+    # option routing, retiring this lock. An UNROUTED call overlapping a LOCAL window is still
+    # served by the mutated env — a known limitation until that slice. The blocking acquire runs
+    # off-loop (to_thread) so no event loop is ever stalled while queueing.
+    await _asyncio.to_thread(_ROUTED_ENV_LOCK.acquire)
+    try:
+        _original_base_url = _os.environ.get("ANTHROPIC_BASE_URL")
+        _original_api_key = _os.environ.get("ANTHROPIC_API_KEY")
+        _original_model = getattr(options, "model", None)
+
         base_url = _routing.get_base_url_for_tier(tier)
         api_key = _routing.get_api_key_for_tier(tier)
         model = _routing.get_model_for_tier(tier)
@@ -138,28 +167,25 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
             _os.environ["ANTHROPIC_API_KEY"] = api_key
         if hasattr(options, "model"):
             options.model = model
-    else:
-        # Route to cloud - use defaults or explicit cloud settings
-        cloud_model = _routing.get_model_for_tier(tier)
-        if cloud_model and hasattr(options, "model"):
-            options.model = cloud_model
 
-    try:
-        # The ledger/audit records inside see the ROUTED model — deliberate: the row must say
-        # what was actually served. Restore runs after them, exception or not.
-        return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
-                                         pass_number=pass_number)
+        try:
+            # The ledger/audit records inside see the ROUTED model — deliberate: the row must say
+            # what was actually served. Restore runs after them, exception or not.
+            return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
+                                             pass_number=pass_number)
+        finally:
+            if _original_base_url is not None:
+                _os.environ["ANTHROPIC_BASE_URL"] = _original_base_url
+            else:
+                _os.environ.pop("ANTHROPIC_BASE_URL", None)
+            if _original_api_key is not None:
+                _os.environ["ANTHROPIC_API_KEY"] = _original_api_key
+            else:
+                _os.environ.pop("ANTHROPIC_API_KEY", None)
+            if hasattr(options, "model"):
+                options.model = _original_model
     finally:
-        if _original_base_url is not None:
-            _os.environ["ANTHROPIC_BASE_URL"] = _original_base_url
-        else:
-            _os.environ.pop("ANTHROPIC_BASE_URL", None)
-        if _original_api_key is not None:
-            _os.environ["ANTHROPIC_API_KEY"] = _original_api_key
-        else:
-            _os.environ.pop("ANTHROPIC_API_KEY", None)
-        if hasattr(options, "model"):
-            options.model = _original_model
+        _ROUTED_ENV_LOCK.release()
 
 
 async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str = "",
@@ -340,8 +366,10 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     opus_options = copy.copy(options)
     opus_options.model = OPUS
 
-    # Try Opus once
-    opus_result = await run_agent(prompt, opus_options, tag=tag, ticket_id=ticket_id, pass_number=pass_number, routing_tier=routing_tier)
+    # Try Opus once. Deliberately NOT passing routing_tier: the probe's whole point is to test
+    # Anthropic Opus — routing it (CLOUD would rewrite the model to glm-5.2) re-runs the routed
+    # model instead and could arm a week of Opus fallback off a GLM result (2026-07-06 review).
+    opus_result = await run_agent(prompt, opus_options, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
 
     if opus_result.is_plan_limit:
         # Opus also hit a limit — this is the All-models cap, not just Sonnet

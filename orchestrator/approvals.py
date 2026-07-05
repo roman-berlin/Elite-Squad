@@ -157,6 +157,24 @@ def disapprove(cfg: Config, kind: str, reason: str = "") -> None:
 
 _PROPOSAL_HISTORY_CAP = 100   # keep recent actioned batches for audit, bound the file
 
+# A 'filing' claim older than this is presumed dead (SIGKILL between approve_proposals' claim
+# and record phases) and becomes actionable again — filing.file_findings' summary de-dup guards
+# the partially-filed case on the retry. Normal Jira filing completes in seconds.
+_FILING_STALE_S = 15 * 60
+
+
+def _actionable(b: dict) -> bool:
+    """A batch the Commander can still act on: pending, or a stale abandoned 'filing' claim
+    (2026-07-06 review: a hard crash mid-filing stranded the batch invisibly forever)."""
+    if b.get("status") == "pending":
+        return True
+    if b.get("status") == "filing":
+        try:
+            return (time.time() - float(b.get("claim_ts", 0))) > _FILING_STALE_S
+        except (TypeError, ValueError):
+            return True
+    return False
+
 
 def _proposals_file(cfg: Config) -> Path:
     return Path(cfg.audit_path).with_name("proposals.json")
@@ -235,8 +253,11 @@ def enqueue_proposals(cfg: Config, *, app_name: str, officer_label: str, source:
     bid = _hash(f"{source}::" + "||".join(p["title"].lower() for p in clean))
 
     def _enqueue(items: list[dict]) -> list[dict]:
-        for b in items:                              # idempotent: same pending batch -> reuse
-            if b.get("id") == bid and b.get("status") == "pending":
+        for b in items:                              # idempotent: same live batch -> reuse
+            # 'filing' counts as live too (2026-07-06 review): re-enqueuing the identical report
+            # while its batch is mid-claim appended a DUPLICATE id that could never be approved,
+            # denied, or trimmed (_find_batch always returned the first, actioned, copy).
+            if b.get("id") == bid and b.get("status") in ("pending", "filing"):
                 return items
         items.append({
             "id": bid, "kind": "proposal", "source": source, "app": app_name,
@@ -253,8 +274,9 @@ def enqueue_proposals(cfg: Config, *, app_name: str, officer_label: str, source:
 
 
 def pending_proposals(cfg: Config) -> list[dict]:
-    """Proposal batches still awaiting the Commander's decision (newest first)."""
-    return [b for b in reversed(_load_proposals(cfg)) if b.get("status") == "pending"]
+    """Proposal batches still awaiting the Commander's decision (newest first). Includes stale
+    abandoned 'filing' claims so a crash mid-approval never hides a batch forever."""
+    return [b for b in reversed(_load_proposals(cfg)) if _actionable(b)]
 
 
 def _find_batch(items: list[dict], batch_id: str) -> dict | None:
@@ -274,15 +296,17 @@ def approve_proposals(cfg: Config, batch_id: str, titles=None):
     actioned; the Jira network I/O then runs OUTSIDE the lock (a hung Jira call must not block
     every other proposals writer, e.g. the Telegram poller); phase 2 records the outcome. If
     filing raises, the claim is released back to 'pending' — same retryable end-state as before.
-    (A hard process crash mid-filing leaves the batch in 'filing'; before the lock existed the
-    same crash left it 'pending' with any already-created Jira tickets duplicated on retry.)"""
+    A hard process crash mid-filing leaves the batch in 'filing'; after _FILING_STALE_S the
+    claim is presumed dead and the batch turns actionable again (filing's summary de-dup guards
+    the partially-filed retry), so no crash can hide a batch forever (2026-07-06 review)."""
     from . import filing
     claim: dict = {}
 
     def _claim(items: list[dict]) -> list[dict]:
         batch = _find_batch(items, batch_id)
-        if batch is not None and batch.get("status") == "pending":
+        if batch is not None and _actionable(batch):
             batch["status"] = "filing"
+            batch["claim_ts"] = time.time()   # lets a dead claim go stale → actionable again
             claim["batch"] = dict(batch)      # snapshot for the out-of-lock filing step
         return items
     _mutate_proposals(cfg, _claim)
@@ -322,7 +346,7 @@ def approve_proposals(cfg: Config, batch_id: str, titles=None):
     _mutate_proposals(cfg, _record)
     try:
         from . import notify
-        notify.send(f"✅ Approved & filed — {batch.get('source')}: "
+        notify.send(f"✅ Approved & filed — {snapshot.get('source')}: "
                     f"{result.filed_n} new, {result.deduped_n} already open.")
     except Exception:  # noqa: BLE001
         pass
@@ -336,7 +360,7 @@ def deny_proposals(cfg: Config, batch_id: str, reason: str = "") -> bool:
 
     def _deny(items: list[dict]) -> list[dict]:
         batch = _find_batch(items, batch_id)
-        if batch is not None and batch.get("status") == "pending":
+        if batch is not None and _actionable(batch):
             batch["status"] = "denied"
             batch["reason"] = reason
             batch["actioned_ts"] = time.time()
@@ -359,7 +383,7 @@ def materialize_proposal(cfg: Config, ticket_ref: str) -> str:
     items = _load_proposals(cfg)
     matched = [
         b for b in items
-        if b.get("status") == "pending"
+        if _actionable(b)
         and ref_up in str(b.get("source", "")).upper()
     ]
     if not matched:
