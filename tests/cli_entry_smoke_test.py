@@ -10,6 +10,7 @@ This harness runs the actual module entry as a subprocess (offline `status` comm
 — any exception in the shared preamble (arg parsing → Config.load → usage/agent wiring → dispatch)
 fails it.
 """
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,20 @@ def chk(n, c, d=""):
 
 tmp = Path(tempfile.mkdtemp())
 subprocess.run(["git", "init", "-q", str(tmp)], check=True)   # AppConfig validates repo_path is a git repo
+
+# The subprocess runs the REAL orchestrator.main, whose import chain pulls claude_agent_sdk at
+# module level — installed in the dev venv but deliberately absent in CI. Inject a stub via
+# PYTHONPATH so the smoke exercises the CLI preamble identically in both environments (PYTHONPATH
+# prepends, so the stub wins even where the real SDK exists — CI parity by construction).
+stubdir = tmp / "stubs"
+stubdir.mkdir()
+(stubdir / "claude_agent_sdk.py").write_text(
+    "class _D:\n"
+    "    def __init__(self, *a, **k): pass\n"
+    "    def __call__(self, *a, **k): return self\n"
+    "def __getattr__(name):\n"
+    "    return _D\n")
+env = dict(os.environ, PYTHONPATH=str(stubdir))
 (tmp / "audit.jsonl").write_text(
     '{"event":"ticket_start","ticket_id":"AUTO-1","ts":"2026-06-18T10:00:00"}\n'
     '{"event":"merged","ticket_id":"AUTO-1","ts":"2026-06-18T10:05:00"}\n')
@@ -36,7 +51,7 @@ subprocess.run(["git", "init", "-q", str(tmp)], check=True)   # AppConfig valida
 
 r = subprocess.run([sys.executable, "-m", "orchestrator.main",
                     "--config", str(tmp / "config.yaml"), "status"],
-                   capture_output=True, text=True, timeout=120)
+                   capture_output=True, text=True, timeout=120, env=env)
 
 chk("`general status` exits 0 through the real _main preamble (no UnboundLocalError)",
     r.returncode == 0, (r.stderr or r.stdout)[-400:])
