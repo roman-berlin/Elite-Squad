@@ -1279,20 +1279,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     if triage and triage.get("raw"):
         _route_out_of_scope(cfg, ticket, app, audit, triage["raw"], source="pm-triage")
 
+    # Commander decision (Phase-2, 2026-07-06): the PM RESOLVE requeue is RETIRED. It granted a
+    # ticket one extra capped attempt, silently re-opening the QW3 2-pass loop cap — and §2 folds
+    # PM triage into the Planner's single decision anyway. A RESOLVE verdict now escalates like
+    # everything else, carrying the PM's corrective instruction as the Commander's brief (the
+    # `esc` below already prefers triage text). SPLIT — a planning decision — is unchanged until
+    # the Planner absorbs it.
     if triage and triage["action"] == "RESOLVE":
-        audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="RESOLVE",
-                     instruction=triage["text"][:600])
-        if not cfg.dry_run and not ticket.ephemeral:
-            try:
-                backlog.add_comment(ticket, "🎖️ [PM] One focused pass to finish — stay strictly in "
-                                    "scope:\n\n" + triage["text"][:1500])
-                backlog.set_status(ticket, "To Do")   # re-queue; the next drain re-runs it with this note
-            except Exception:  # noqa: BLE001
-                pass
-        _notify(cfg, f"🎖️ {ticket.id} — the PM is finishing it (one corrective pass):\n\n{_D.brief(triage['text'])}")
-        print(f"  🎖️ {ticket.id}: PM triage → re-queued for one corrective pass.", flush=True)
-        return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
-                                     notes="PM triage — re-queued for one corrective pass"))
+        audit.record("pm_resolve_retired", ticket_id=ticket.id,
+                     instruction=(triage.get("text") or "")[:600])
+        print(f"  🎖️ {ticket.id}: PM said RESOLVE — requeue retired (Phase-2); escalating with "
+              "its brief instead.", flush=True)
 
     if triage and triage["action"] == "SPLIT":
         # Too heavy for one build → the Scrum Master breaks it into small sub-tickets (filed on the

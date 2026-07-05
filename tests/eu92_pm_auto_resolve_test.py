@@ -45,7 +45,7 @@ from orchestrator import pm as pm_mod
 from orchestrator import filing
 from orchestrator.config import Config, AppConfig
 from orchestrator.contracts import (
-    BuildResult, GateResult, QualityIssue, ReviewResult, TestEngineerResult,
+    BuildResult, GateResult, Outcome, QualityIssue, ReviewResult, TestEngineerResult,
     Ticket, Verdict,
 )
 
@@ -316,7 +316,7 @@ async def _stub_triage_resolve(cfg, app_name, ticket_id, **_):
     return {"action": "RESOLVE", "text": "Re-run the builder with a narrower scope.", "raw": ""}
 
 
-def _run_exhaustion_resolve() -> StubBacklog:
+def _run_exhaustion_resolve() -> StubAudit:
     _install_loop_stubs()
     loop.builder_mod = StubBuilderFail
     loop.reviewer_mod.review = _stub_review_fail
@@ -336,20 +336,29 @@ def _run_exhaustion_resolve() -> StubBacklog:
     budget = loop.Budget(0)
 
     asyncio.run(loop._attempt(ticket, app_cfg, cfg, StubGit(), bl, audit, budget, BRANCH))
-    return bl
+    return audit
 
 
-_run_exhaustion_resolve()
+# Commander decision (Phase-2, 2026-07-06): the PM RESOLVE requeue is RETIRED — it granted one
+# extra capped attempt, re-opening the QW3 2-pass loop cap. A RESOLVE verdict now escalates like
+# everything else, with the PM's corrective instruction carried as the Commander's brief.
+_audit_c = _run_exhaustion_resolve()
 
 chk(
-    "(c) exhaustion RESOLVE: decisions.add is NOT called (PM self-resolved, no escalation)",
-    len(dec_calls) == 0,
+    "(c) RESOLVE retired: the ticket escalates (decisions.add IS called)",
+    len(dec_calls) == 1,
     f"dec_calls={dec_calls}",
 )
 chk(
-    "(c) exhaustion RESOLVE: no Commander page for a PM-resolved exhaustion",
-    not any("needs you" in t.lower() for t in notify_calls),
-    f"notify_calls={notify_calls}",
+    "(c) RESOLVE retired: the escalation brief carries the PM's corrective instruction",
+    dec_calls and "narrower scope" in dec_calls[0]["question"],
+    f"dec_calls={dec_calls}",
+)
+chk(
+    "(c) RESOLVE retired: pm_resolve_retired audited, and NO requeue event recorded",
+    any(e["event"] == "pm_resolve_retired" for e in _audit_c.events)
+    and not any(e["event"] == Outcome.REQUEUED.audit_event for e in _audit_c.events),
+    str([e["event"] for e in _audit_c.events]),
 )
 
 
