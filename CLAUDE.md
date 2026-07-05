@@ -56,6 +56,9 @@ Everything under `Documentation/` (these are the only files there — keep this 
 - `Documentation/UNIT_REVIEW_2026-06-25.md` — a point-in-time unit review.
 - `Documentation/EU-153_Implementation_Summary.md` — point-in-time implementation summary of
   EU-153 (the LLM ticket commenter), committed with that land.
+- `Documentation/RESTRUCTURE_PROPOSAL_2026-07-05.md` — the 2026-07-05 forensic audit findings and
+  the Phase-2 restructure proposal (3 LLM roles, deterministic gates, routing) awaiting the
+  Commander's approval.
 - `Documentation/OFFICER_NAMING.md` — canonical old→new officer-name map and the policy for what
   stays army-themed by design (EU-57).
 
