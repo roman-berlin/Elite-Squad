@@ -78,6 +78,26 @@ def daemon_running() -> bool:
         return False
 
 
+def _alert_unclean_restart(audit) -> bool:
+    """QW5 (2026-07-05): detect + announce an unclean previous shutdown at startup.
+
+    A leftover PID file whose process is dead means the previous autopilot was killed without
+    cleanup — the Jul-1 crash signature (an autopilot_start never closed by autopilot_stop).
+    Under the launchd keepalive daemon this fires on every auto-restart after a crash, so a
+    restart is never silent: one audit event + one Telegram alert. Returns True when it fired.
+    Best-effort — never raises, never blocks startup."""
+    try:
+        stale = _PID_FILE.read_text().strip()
+        if stale and stale != str(os.getpid()) and not daemon_running():
+            audit.record("autopilot_unclean_restart", stale_pid=stale)
+            notify.send(f"⚠️ Autopilot restarted after an unclean shutdown "
+                        f"(previous PID {stale} died without cleanup).")
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def _pid_file_holds_our_pid() -> bool:
     """True when the autopilot PID file records THIS process's PID.
 
@@ -374,6 +394,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
         # early raise would orphan /tmp/general-autopilot.pid pointing at this live process and pin
         # daemon_running() True forever (EU-73 — this is the single source of truth for the cockpit badge).
+        _alert_unclean_restart(audit)   # QW5: a restart after a crash is never silent
         _write_pid()
         if _on_main_thread:
             _orig_sigterm = signal.getsignal(signal.SIGTERM)

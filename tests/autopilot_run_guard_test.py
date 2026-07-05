@@ -128,6 +128,43 @@ for _ in range(60):
     time.sleep(0.05)
 chk("_run_bg releases the guard it claimed", srv._state["active"] is False)
 
+# ---- QW5 (2026-07-05): a restart after an unclean shutdown is never silent ---------------------- #
+# A leftover PID file with a DEAD pid = the previous autopilot was killed without cleanup (the
+# Jul-1 crash left exactly this: /tmp/general-autopilot.pid → dead 35185). Startup must record
+# autopilot_unclean_restart + Telegram-alert; a LIVE foreign pid (another daemon) must NOT alert.
+class _Audit:
+    def __init__(s): s.ev = []
+    def record(s, e, **k): s.ev.append({"event": e, **k})
+
+_orig_pidfile = ap_mod._PID_FILE
+_sent = []
+_orig_send = ap_mod.notify.send
+ap_mod.notify.send = lambda text, chat_id=None: _sent.append(text) or True
+try:
+    pf = d / "general-autopilot.pid"
+    ap_mod._PID_FILE = pf
+
+    pf.write_text("999999999")            # dead PID → unclean shutdown signature
+    au_stale = _Audit()
+    fired = ap_mod._alert_unclean_restart(au_stale)
+    chk("stale dead PID → unclean-restart fires (audit event + Telegram)",
+        fired and any(e["event"] == "autopilot_unclean_restart" for e in au_stale.ev)
+        and any("unclean shutdown" in t for t in _sent), f"ev={au_stale.ev} sent={_sent}")
+
+    import os as _os
+    pf.write_text(str(_os.getpid()))      # our own PID (cockpit-thread autopilot) → no alert
+    au_own = _Audit()
+    chk("own PID in the file → no false alert", ap_mod._alert_unclean_restart(au_own) is False
+        and not au_own.ev)
+
+    pf.unlink()                           # no PID file at all (clean previous exit) → no alert
+    au_clean = _Audit()
+    chk("no PID file (clean shutdown) → no alert", ap_mod._alert_unclean_restart(au_clean) is False
+        and not au_clean.ev)
+finally:
+    ap_mod._PID_FILE = _orig_pidfile
+    ap_mod.notify.send = _orig_send
+
 print("\n============ AUTOPILOT / RESUME RUN-GUARD QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
