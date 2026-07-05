@@ -65,6 +65,22 @@ usage_ledger.jsonl
 # Autopilot per-ticket error tally — runtime state, must not be versioned (caused dev/Mac merge churn).
 error_counts.json
 ROSTER.md
+# Runtime state relocation (EU audit 2026-07-05, Quick Win 2): everything the orchestrator derives
+# from cfg.audit_path via with_name() lives under state/ — never version any of it. The filename
+# entries above are kept so stragglers at the old repo-root location stay ignored too.
+state/
+# Lock/tmp sidecars minted by orchestrator/locking.py next to any state file.
+*.json.lock
+*.json.tmp
+*.jsonl.lock
+*.jsonl.tmp
+*.txt.lock
+*.txt.tmp
+# Remaining runtime state files that were never ignored (and were mistakenly committed).
+pending_specialist_approvals.json
+sonnet_fallback_state.json
+officer_discussion_tickets.json
+proposals.json
 # macOS
 .DS_Store
 cockpit.log
