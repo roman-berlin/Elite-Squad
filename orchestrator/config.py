@@ -171,7 +171,7 @@ class Config:
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
     # always-on box stays light against the Max limit and never competes with your own Opus coding.
-    discussion_model: str = "claude-sonnet-4-6"            # council / stand-up / meetings / group / General chat
+    discussion_model: str = "claude-sonnet-5"              # council / stand-up / meetings / group / General chat (upgraded 2026-07-05)
     smalltalk_model: str = "claude-haiku-4-5-20251001"     # corridor small-talk — cheapest
 
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---

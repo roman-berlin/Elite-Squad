@@ -5,7 +5,7 @@
 # ===========================================================================
 
 # --- the two officers (role asymmetry: a strong reviewer is worth it) ---
-builder_model: "claude-sonnet-4-6"
+builder_model: "claude-sonnet-5"
 reviewer_model: "claude-opus-4-8"
 
 builder_effort: "high"            # low | medium | high | max (thinking depth)

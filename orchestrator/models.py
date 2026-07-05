@@ -21,7 +21,7 @@ import time
 
 # canonical model strings, cheapest → dearest
 HAIKU = "claude-haiku-4-5-20251001"
-SONNET = "claude-sonnet-4-6"
+SONNET = "claude-sonnet-5"   # upgraded 2026-07-05 (Commander order) — was claude-sonnet-4-6
 OPUS = "claude-opus-4-8"
 LADDER = [HAIKU, SONNET, OPUS]
 
