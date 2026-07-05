@@ -331,6 +331,11 @@ class PerTicketArtifactStore:
     ``token_burn`` holds per-officer usage totals keyed by officer tag (e.g. ``"builder"``,
     ``"test-engineer"``, ``"reviewer"``) so the measurement layer can track Opus burn per stage
     without parsing raw ledger files.
+
+    ``stage_costs`` is the USD mirror of ``token_burn`` for stages whose (ok, report)-style
+    return can't carry a cost (today: the provost security gate). The 2026-07-05 EU-139-run
+    telemetry audit found the gate's spend never reached the ticket report, so run_end's
+    total_cost_usd under-reported the ledger-true run cost; the loop reads the delta from here.
     """
     spec: Optional[SpecArtifact] = None
     build: Optional[BuildArtifact] = None
@@ -338,6 +343,7 @@ class PerTicketArtifactStore:
     review: Optional[ReviewVerdict] = None
     security: Optional[SecurityArtifact] = None
     token_burn: dict[str, int] = field(default_factory=dict)
+    stage_costs: dict[str, float] = field(default_factory=dict)
 
     def put(self, artifact: SpecArtifact | BuildArtifact | TestEngineerArtifact | ReviewVerdict | SecurityArtifact) -> None:
         """Store *artifact* in the correct slot (determined by type).

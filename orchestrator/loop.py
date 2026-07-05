@@ -1092,7 +1092,16 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             if getattr(cfg, "security_gate", False):
                 _bar(SECURITY, active=SECURITY)
                 print("  security · Security Engineer gating the diff…", flush=True)
+                _sec_cost_before = float(store.stage_costs.get("provost", 0.0) or 0.0)
                 sec_ok, sec_report = await provost_mod.gate(cfg, app, diff, store=store)
+                # 2026-07-05 telemetry audit: the gate's own agent call never reached `cost`, so
+                # run_end's total_cost_usd (sum of per-ticket report costs) under-reported the
+                # ledger-true run cost (EU-139: $1.481 vs $2.156). gate() keeps its (ok, report)
+                # contract; the spend arrives via store.stage_costs, delta-read around the call.
+                _sec_cost_spent = float(store.stage_costs.get("provost", 0.0) or 0.0) - _sec_cost_before
+                if _sec_cost_spent > 0:
+                    cost += _sec_cost_spent
+                    budget.add(_sec_cost_spent)
                 # Countersignature gate: even when the verdict is PASS, the §1/§2/§3
                 # sign-off artifact must be fully populated and marked signed=True.
                 # An incomplete or missing artifact fails closed — the pipeline never

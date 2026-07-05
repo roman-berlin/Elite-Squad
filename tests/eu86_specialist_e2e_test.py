@@ -287,7 +287,8 @@ hr.check_promote = lambda domain, cfg, *a, **k: False
 hr.ensure_no_charter_written = lambda charters, **kw: _ensure_calls.append(list(charters))
 
 
-async def _fake_detect_gap(ticket_text, sq):
+async def _fake_detect_gap(ticket_text, sq, **kw):
+    # Legacy 2-tuple return (no burn dict) — _plan's defensive indexing must tolerate it.
     return (True, "mql5")
 
 
@@ -349,10 +350,10 @@ _land_calls: list[tuple] = []
 _orig_build_delegated = squad.build_delegated
 
 
-async def _tracked_build_delegated(req, app, cfg, audit=None):
+async def _tracked_build_delegated(req, app, cfg, audit=None, **kw):
     """Thin wrapper that records calls before delegating to the real implementation."""
     _delegated_calls.append(req.iteration)
-    return await _orig_build_delegated(req, app, cfg, audit=audit)
+    return await _orig_build_delegated(req, app, cfg, audit=audit, **kw)
 
 
 squad.build_delegated = _tracked_build_delegated

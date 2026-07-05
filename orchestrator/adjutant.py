@@ -197,7 +197,11 @@ async def propose(cfg: Config, *, ticket_text: str | None = None) -> str:
     # squad/HR delegation path (squad.build_delegated → squad._run_synthesis → synthesize_specialists).
     if ticket_text is not None:
         from .squad import detect_domain_gap, SQUAD
-        gap, domain = await detect_domain_gap(ticket_text, SQUAD)
+        # Index (not unpack): detect_domain_gap returns (gap, domain, burn) since the 2026-07-05
+        # telemetry fix; indexing also tolerates monkeypatched legacy 2-tuple fakes. No ticket id
+        # is threaded here — the advisory preview runs outside any ticket flow.
+        _res = await detect_domain_gap(ticket_text, SQUAD)
+        gap, domain = _res[0], _res[1]
         if gap and domain:
             print(
                 f"  · adjutant: domain gap '{domain}' detected — previewing specialist roster",

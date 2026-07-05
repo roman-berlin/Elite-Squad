@@ -12,6 +12,10 @@ Also locks the two ticket-level acceptance criteria:
           is never entered.
 
 All pure / offline — SDK and run_agent are stubbed; no real models, no network.
+
+2026-07-05 telemetry fix: detect_domain_gap now returns (gap, domain, burn) — the third element
+is the classifier call's own cost/token burn. The (gap, domain) assertions below compare the
+[:2] prefix; the burn accounting itself is pinned in run_cost_accounting_test.py.
 """
 import asyncio
 import sys
@@ -55,7 +59,7 @@ def _run(text: str) -> AgentRun:
 
 def _stub(text: str):
     """Return a coroutine factory that yields a fake AgentRun carrying ``text``."""
-    async def _fake(prompt, opts, tag=""):
+    async def _fake(prompt, opts, tag="", **kw):
         return _run(text)
     return _fake
 
@@ -69,19 +73,19 @@ _SQUAD = squad.SQUAD
 # ─────────────────────────────────────────────────────────────────────────────
 squad.run_agent = _stub('{"covered": true, "domain": "vanguard-fe"}')
 r = asyncio.run(squad.detect_domain_gap("Add a React button", _SQUAD))
-chk("covered=true → (False, None) — no gap declared", r == (False, None), str(r))
+chk("covered=true → (False, None) — no gap declared", r[:2] == (False, None), str(r))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. JSON parsing — covered=false → (True, domain)
 # ─────────────────────────────────────────────────────────────────────────────
 squad.run_agent = _stub('{"covered": false, "domain": "mql5"}')
 r2 = asyncio.run(squad.detect_domain_gap("Build an MQL5 Expert Advisor", _SQUAD))
-chk("covered=false + domain → (True, 'mql5')", r2 == (True, "mql5"), str(r2))
+chk("covered=false + domain → (True, 'mql5')", r2[:2] == (True, "mql5"), str(r2))
 
 # domain is lower-cased
 squad.run_agent = _stub('{"covered": false, "domain": "MQL5"}')
 r2b = asyncio.run(squad.detect_domain_gap("Build an MQL5 Expert Advisor", _SQUAD))
-chk("domain is lower-cased in the result", r2b == (True, "mql5"), str(r2b))
+chk("domain is lower-cased in the result", r2b[:2] == (True, "mql5"), str(r2b))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. JSON wrapped in prose (the classifier adds commentary)
@@ -90,45 +94,45 @@ squad.run_agent = _stub(
     'Sure! The answer is: {"covered": false, "domain": "solidity"} — good luck!'
 )
 r3 = asyncio.run(squad.detect_domain_gap("Deploy an ERC-20 contract", _SQUAD))
-chk("prose-wrapped JSON still parsed correctly", r3 == (True, "solidity"), str(r3))
+chk("prose-wrapped JSON still parsed correctly", r3[:2] == (True, "solidity"), str(r3))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. No JSON block → fail-safe (False, None)
 # ─────────────────────────────────────────────────────────────────────────────
 squad.run_agent = _stub("I cannot classify this ticket.")
 r4 = asyncio.run(squad.detect_domain_gap("Some ticket", _SQUAD))
-chk("no JSON block → (False, None) fail-safe", r4 == (False, None), str(r4))
+chk("no JSON block → (False, None) fail-safe", r4[:2] == (False, None), str(r4))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Malformed JSON → fail-safe (False, None)
 # ─────────────────────────────────────────────────────────────────────────────
 squad.run_agent = _stub("{covered: false}")  # not valid JSON
 r5 = asyncio.run(squad.detect_domain_gap("Some ticket", _SQUAD))
-chk("malformed JSON → (False, None) fail-safe", r5 == (False, None), str(r5))
+chk("malformed JSON → (False, None) fail-safe", r5[:2] == (False, None), str(r5))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. SDK / run_agent exception → fail-safe (False, None) — NEVER blocks the build
 # ─────────────────────────────────────────────────────────────────────────────
-async def _explode(prompt, opts, tag=""):
+async def _explode(prompt, opts, tag="", **kw):
     raise RuntimeError("model down")
 
 squad.run_agent = _explode
 r6 = asyncio.run(squad.detect_domain_gap("Some ticket", _SQUAD))
-chk("run_agent exception → (False, None) fail-safe (never crashes build)", r6 == (False, None), str(r6))
+chk("run_agent exception → (False, None) fail-safe (never crashes build)", r6[:2] == (False, None), str(r6))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. empty domain string → domain is None (not empty string)
 # ─────────────────────────────────────────────────────────────────────────────
 squad.run_agent = _stub('{"covered": false, "domain": ""}')
 r7 = asyncio.run(squad.detect_domain_gap("Some ticket", _SQUAD))
-chk("empty domain string → domain is None in tuple", r7 == (False, None) or r7[1] is None, str(r7))
+chk("empty domain string → domain is None in tuple", r7[:2] == (False, None) or r7[1] is None, str(r7))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. covered key absent (model omits it) → defaults to True → (False, None)
 # ─────────────────────────────────────────────────────────────────────────────
 squad.run_agent = _stub('{"domain": "rust"}')
 r8 = asyncio.run(squad.detect_domain_gap("Some ticket", _SQUAD))
-chk("absent 'covered' key defaults to True → (False, None)", r8 == (False, None), str(r8))
+chk("absent 'covered' key defaults to True → (False, None)", r8[:2] == (False, None), str(r8))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. AC#2 — React/FastAPI/Supabase ticket → covered=true → normal squad route,
@@ -138,7 +142,7 @@ squad.run_agent = _stub('{"covered": true, "domain": "vanguard-fe"}')
 r9 = asyncio.run(squad.detect_domain_gap(
     "Add a React button that POSTs to FastAPI and writes to Supabase", _SQUAD
 ))
-chk("AC#2: React/FastAPI/Supabase ticket → (False, None) — no gap, normal route", r9 == (False, None), str(r9))
+chk("AC#2: React/FastAPI/Supabase ticket → (False, None) — no gap, normal route", r9[:2] == (False, None), str(r9))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. AC#1 — MQL5 Expert Advisor ticket → gap detected → synthesis path entered,
@@ -186,7 +190,8 @@ _cfg = Config(apps=[_app], audit_path=_audit_path, use_worktree=False,
               delegation_enabled=True, auto_mode=True)
 
 # Stub detect_domain_gap and hr.synthesize_specialists; track calls.
-async def _gap_mql5(ticket_text, sq):
+async def _gap_mql5(ticket_text, sq, **kw):
+    # Legacy 2-tuple return (no burn dict) — _plan's defensive indexing must tolerate it.
     return (True, "mql5")
 
 _synth_calls: list[str] = []

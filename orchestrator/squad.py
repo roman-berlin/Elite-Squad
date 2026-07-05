@@ -98,18 +98,24 @@ If covered by a lane: {"covered": true, "domain": "<lane_key>"}
 If outside all lanes: {"covered": false, "domain": "<short domain label, e.g. mql5, rust, ml>"}"""
 
 
-async def detect_domain_gap(ticket_text: str, squad: dict) -> tuple[bool, str | None]:
+async def detect_domain_gap(ticket_text: str, squad: dict,
+                            ticket_id: str | None = None) -> tuple[bool, str | None, dict]:
     """Classify the ticket's primary domain against the known squad lanes using a Haiku call.
 
-    Returns ``(True, '<domain>')`` when no lane covers the ticket (e.g. ``(True, 'mql5')``),
-    or ``(False, None)`` when a lane already handles it.
+    Returns ``(True, '<domain>', burn)`` when no lane covers the ticket (e.g. ``(True, 'mql5', …)``),
+    or ``(False, None, burn)`` when a lane already handles it. ``burn`` is the classifier call's
+    own spend — ``{"cost_usd", "num_turns", "input_tokens", "output_tokens"}`` — or ``{}`` when the
+    call never ran. The 2026-07-05 EU-139-run telemetry audit found this cost was dropped from
+    every accounting surface, so callers must fold ``burn`` into their own totals.
 
-    Fail-safe: any error (network, parse, SDK) returns ``(False, None)`` so it never blocks the
-    normal delegation / solo-build path.
+    Fail-safe: any error (network, parse, SDK) returns ``(False, None, burn-so-far)`` so it never
+    blocks the normal delegation / solo-build path.
 
     Args:
         ticket_text: Combined summary + description + acceptance criteria of the ticket.
         squad: The squad lane mapping — same shape as the module-level ``SQUAD`` dict.
+        ticket_id: Ticket key when running inside a ticket flow — stamps the usage-ledger line
+            (``k``) so per-ticket burn slicing counts this call. None outside a ticket context.
     """
     from . import models as _models
     lane_desc = "\n".join(f"  {key}: {val[1]}" for key, val in squad.items())
@@ -122,6 +128,7 @@ async def detect_domain_gap(ticket_text: str, squad: dict) -> tuple[bool, str | 
         "",
         'Classify now — JSON only, e.g. {"covered": false, "domain": "mql5"}',
     ])
+    burn: dict = {}
     try:
         from claude_agent_sdk import ClaudeAgentOptions as _Opts
         options = _Opts(
@@ -133,20 +140,24 @@ async def detect_domain_gap(ticket_text: str, squad: dict) -> tuple[bool, str | 
             max_turns=3,
             effort="low",
         )
-        run = await run_agent(prompt, options, tag="gap-detect")
+        run = await run_agent(prompt, options, tag="gap-detect", ticket_id=ticket_id)
+        burn = {"cost_usd": float(getattr(run, "cost_usd", 0.0) or 0.0),
+                "num_turns": int(getattr(run, "num_turns", 0) or 0),
+                "input_tokens": int(getattr(run, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(run, "output_tokens", 0) or 0)}
         text = (run.final or run.text or "").strip()
         # Tolerate prose wrapping; pull the first {...} block.
         m = re.search(r"\{[^}]+\}", text)
         if not m:
-            return False, None
+            return False, None, burn
         data = json.loads(m.group(0))
         covered = bool(data.get("covered", True))
         domain = str(data.get("domain", "")).strip().lower() or None
         if covered:
-            return False, None
-        return True, domain
+            return False, None, burn
+        return True, domain, burn
     except Exception:  # noqa: BLE001 — fail-safe: gap detection must never break a run
-        return False, None
+        return False, None, burn
 
 
 def _ticket_in_backlog(ticket_id: str, app: AppConfig, cfg: Config) -> bool:
@@ -634,6 +645,9 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
     ``gap_domain`` is ``None`` for tickets that fit the fixed squad lanes, or a short domain
     label (e.g. ``'mql5'``) when ``detect_domain_gap`` finds no covering lane.  When a gap is
     detected, the planner LLM call is skipped — the caller routes to the synthesis flow instead.
+
+    The returned cost/turns/token numbers include the gap-detect classifier's own burn (the
+    2026-07-05 EU-139-run telemetry audit found it dropped from every accounting surface).
     """
     # EU-69: domain-gap check runs before the expensive planner LLM call so we never waste
     # tokens planning a squad split for a domain no soldier can handle.
@@ -642,10 +656,17 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
         req.ticket.description or "",
         *list(req.ticket.acceptance_criteria or []),
     ]))
-    gap, gap_domain = await detect_domain_gap(ticket_text, SQUAD)
+    res = await detect_domain_gap(ticket_text, SQUAD, ticket_id=req.ticket.id)
+    # Index (not unpack) so a monkeypatched legacy 2-tuple fake still works.
+    gap, gap_domain = res[0], res[1]
+    g_burn = res[2] if len(res) > 2 and isinstance(res[2], dict) else {}
+    g_cost = float(g_burn.get("cost_usd", 0.0) or 0.0)
+    g_turns = int(g_burn.get("num_turns", 0) or 0)
+    g_in = int(g_burn.get("input_tokens", 0) or 0)
+    g_out = int(g_burn.get("output_tokens", 0) or 0)
     if gap:
-        # On a gap the planner LLM call is skipped, so there is no 'squad-lead' burn to report (0/0).
-        return [], 0.0, 0, [], 0, 0, gap_domain, "", ""
+        # On a gap the planner LLM call is skipped — only the gap-detect burn is reported.
+        return [], g_cost, g_turns, [], g_in, g_out, gap_domain, "", ""
 
     cwd = app.workdir or app.repo_path
     # EU-52: the read-only squad-planning pass runs through the ladder under the Builder's ceiling — a
@@ -661,7 +682,9 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit"],
         setting_sources=[], max_turns=14, effort="medium")
-    run = await run_agent(_planner_prompt(req), options, tag="squad-lead")
+    # 2026-07-05 telemetry audit: stamp the ticket key on the planner's ledger line so per-ticket
+    # burn slicing counts it (the EU-139 run's 'squad-lead' row carried no "k").
+    run = await run_agent(_planner_prompt(req), options, tag="squad-lead", ticket_id=req.ticket.id)
     # EU-123: show actual provider+model in the live feed
     if getattr(cfg, "auto_model", False):
         display = _provider.format_provider_model(run.provider, run.model_version)
@@ -671,9 +694,9 @@ async def _plan(req: BuildRequest, app: AppConfig, cfg: Config):
     # call, and its cost/turns are already threaded back via run.cost_usd/run.num_turns, so its tokens
     # must be too or the delegated build's burn is under-reported.
     # EU-123: also surface provider/model information for audit logging
-    return (parse_subtasks(run.final or run.text), run.cost_usd, run.num_turns, run.tools,
-            getattr(run, "input_tokens", 0), getattr(run, "output_tokens", 0), None,
-            run.provider, run.model_version)
+    return (parse_subtasks(run.final or run.text), run.cost_usd + g_cost, run.num_turns + g_turns,
+            run.tools, getattr(run, "input_tokens", 0) + g_in, getattr(run, "output_tokens", 0) + g_out,
+            None, run.provider, run.model_version)
 
 
 async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, idx: int, total: int,
@@ -761,7 +784,8 @@ def should_delegate(cfg: Config, req: BuildRequest) -> bool:
     return len(req.ticket.acceptance_criteria or []) >= int(getattr(cfg, "delegation_min_ac", 3))
 
 
-async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=None):
+async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=None,
+                          sunk: dict | None = None):
     """Plan -> dispatch soldiers -> aggregate into one BuildResult. Returns (result, n_subtasks).
 
     n_subtasks meanings:
@@ -774,8 +798,24 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
 
     Returns (None, 0) when the plan has <2 subtasks, signalling the caller to do a solo build.
     Returns (None, 0) when a domain gap is detected but HR provisioned no usable specialist.
+
+    ``sunk`` (optional out-param): on a (None, 0) return the gap-detect + planner calls already
+    burned real tokens with no BuildResult to carry them — the 2026-07-05 EU-139-run telemetry
+    audit found exactly this path dropped $0.386 from the run total. When the caller passes a
+    dict, that burn is accumulated into it ({"cost_usd", "num_turns", "input_tokens",
+    "output_tokens"}) so the solo build's result can absorb it. Additive: None (the default)
+    preserves the old behaviour for direct callers.
     """
     subtasks, p_cost, p_turns, p_tools, p_in_tok, p_out_tok, gap_domain, p_provider, p_model = await _plan(req, app, cfg)
+
+    def _sink() -> None:
+        """Hand the plan-phase burn to the caller when no BuildResult will carry it."""
+        if sunk is None or (p_cost <= 0 and p_in_tok <= 0 and p_out_tok <= 0):
+            return
+        sunk["cost_usd"] = float(sunk.get("cost_usd", 0.0)) + p_cost
+        sunk["num_turns"] = int(sunk.get("num_turns", 0)) + p_turns
+        sunk["input_tokens"] = int(sunk.get("input_tokens", 0)) + p_in_tok
+        sunk["output_tokens"] = int(sunk.get("output_tokens", 0)) + p_out_tok
 
     # EU-69: a detected domain gap skips the soldier loop entirely and hands off to synthesis.
     if gap_domain is not None:
@@ -793,11 +833,21 @@ async def build_delegated(req: BuildRequest, app: AppConfig, cfg: Config, audit=
                 _hr.check_promote(gap_domain, cfg)
             except Exception:  # noqa: BLE001 — tracking hiccup must not lose the BuildResult
                 pass
+        if synthesis is not None:
+            # Fold the gap-detect burn (the whole plan-phase spend on this path) into the
+            # synthesis result, mirroring how the squad path seeds from p_cost/p_turns.
+            synthesis.cost_usd += p_cost
+            synthesis.num_turns += p_turns
+            synthesis.input_tokens += p_in_tok
+            synthesis.output_tokens += p_out_tok
+        else:
+            _sink()
         return synthesis, (1 if synthesis is not None else 0)
 
     cap = max(1, int(getattr(cfg, "delegation_max_soldiers", 4)))
     subtasks = subtasks[:cap]
     if len(subtasks) < 2:
+        _sink()
         return None, 0
     print("  squad · split into " + str(len(subtasks)) + ": "
           + ", ".join(f"{SQUAD[s.role][0]}({s.size})" for s in subtasks), flush=True)

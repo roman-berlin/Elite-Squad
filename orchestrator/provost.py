@@ -205,6 +205,13 @@ async def gate(cfg: Config, app, diff: str, store=None) -> tuple[bool, str]:
             # bare result object may not — a missing attr must never block the gate (EU-96).
             burn = getattr(run, "input_tokens", 0) + getattr(run, "output_tokens", 0)
             store.token_burn["provost"] = store.token_burn.get("provost", 0) + burn
+            # 2026-07-05 telemetry audit: USD mirror of the token write. The (ok, report)
+            # contract can't carry cost, so the loop reads the delta from store.stage_costs
+            # and adds it to the ticket total — the EU-139 run's run_end missed $0.289 here.
+            # isinstance-guarded so a legacy store stub without the field never blocks the gate.
+            sc = getattr(store, "stage_costs", None)
+            if isinstance(sc, dict):
+                sc["provost"] = sc.get("provost", 0.0) + float(getattr(run, "cost_usd", 0.0) or 0.0)
         report = (run.final or run.text or "").strip()
         if not report:
             _publish_artifact(store, "", "", "", signed=False)
