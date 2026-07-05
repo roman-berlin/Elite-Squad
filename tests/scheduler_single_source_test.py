@@ -64,7 +64,13 @@ chk("single source still schedules the weekly patrol (Mon)", "0 9 * * 1" in cron
 #    back. The two docs that *document the retirement itself* are allow-listed — they legitimately describe
 #    the agents as removed (SYSTEM_OVERVIEW = the corrected map; UNIT_REVIEW = the point-in-time finding).
 DOC_DIRS = [ROOT, ROOT / "Documentation"]
-DOC_ALLOW = {"Documentation/SYSTEM_OVERVIEW.md", "Documentation/UNIT_REVIEW_2026-06-25.md"}
+#    Development_Status.md is the machine-written changelog (loop._record_changelog appends every
+#    land's verify hint verbatim) — historical entries legitimately mention launchctl work such as
+#    EU-119/EU-120 (the allow-listed keepalive daemon), and a changelog entry is a record, not an
+#    actionable scheduler instruction. Without this allowance the unit poisons its own gate on the
+#    next launchd-adjacent land (this exact failure burned EU-173/EU-174 on 2026-07-01).
+DOC_ALLOW = {"Documentation/SYSTEM_OVERVIEW.md", "Documentation/UNIT_REVIEW_2026-06-25.md",
+             "Documentation/Development_Status.md"}
 DOC_NEEDLES = ("com.roman.general", "launchctl", "LaunchAgents",
                "run-autopilot.sh", "run-council.sh", "run-patrol.sh", "run-smalltalk.sh", "run-sync.sh")
 doc_offenders = []
