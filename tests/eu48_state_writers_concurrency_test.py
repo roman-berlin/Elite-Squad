@@ -131,6 +131,74 @@ hour = governor.calls_last_hour(cfg5)
 chk("governor/note_call: concurrent bursts all counted (no torn/lost rows)",
     hour == N_THREADS * BURST, f"{hour} != {N_THREADS * BURST}")
 
+# ---------------------------------------------------------------------------------------------------
+# (6) approvals — the 2026-07-05 audit §7.4 HIGH race, closed via locking.locked_rmw.
+#     proposals.json: N distinct enqueues from N threads racing approves/denies on other batches
+#     lose nothing, and no actioned batch reverts to pending. approvals.json: a concurrent
+#     approve('drill') + disapprove('adjutant') keeps BOTH kinds' records.
+# ---------------------------------------------------------------------------------------------------
+from orchestrator import approvals, filing
+
+tmp6 = Path(tempfile.mkdtemp())
+cfg6 = Config(apps=[], audit_path=str(tmp6 / "audit.jsonl"))
+
+N_BATCH = 24
+_run([(lambda i=i: approvals.enqueue_proposals(
+    cfg6, app_name="automatixy", officer_label="qa", source=f"council-{i:02d}",
+    report=[{"title": f"Finding {i:02d}", "type": "Task", "severity": "P2", "body": "b"}]))
+    for i in range(N_BATCH)])
+queued = approvals.pending_proposals(cfg6)
+chk("approvals/enqueue: every concurrent batch is persisted (no lost write)",
+    len(queued) == N_BATCH, f"{len(queued)} of {N_BATCH}")
+
+# Race approve (filing stubbed — no Jira) against deny on disjoint batches + more enqueues.
+_orig_file_findings = filing.file_findings
+filing.file_findings = lambda app, label, block: filing.FilingResult()
+try:
+    ids = [b["id"] for b in queued]
+    approve_ids, deny_ids = ids[:8], ids[8:16]
+    _run([(lambda b=b: approvals.approve_proposals(cfg6, b)) for b in approve_ids]
+         + [(lambda b=b: approvals.deny_proposals(cfg6, b, "no")) for b in deny_ids]
+         + [(lambda i=i: approvals.enqueue_proposals(
+             cfg6, app_name="automatixy", officer_label="qa", source=f"late-{i}",
+             report=[{"title": f"Late {i}", "type": "Task", "severity": "P2", "body": "b"}]))
+            for i in range(4)])
+finally:
+    filing.file_findings = _orig_file_findings
+final_items = approvals._load_proposals(cfg6)
+by_id = {b["id"]: b for b in final_items}
+chk("approvals/approve+deny+enqueue race: no actioned batch reverts, none lost",
+    all(by_id.get(b, {}).get("status") == "approved" for b in approve_ids)
+    and all(by_id.get(b, {}).get("status") == "denied" for b in deny_ids)
+    and len(approvals.pending_proposals(cfg6)) == (N_BATCH - 16) + 4,
+    f"statuses={[by_id.get(b, {}).get('status') for b in approve_ids + deny_ids]}, "
+    f"pending={len(approvals.pending_proposals(cfg6))}")
+
+# approvals.json: concurrent approve/disapprove of DIFFERENT kinds keeps both records.
+# disapprove() is sync; drive the state write the same way approve() does, via its marker path.
+(Path(cfg6.audit_path).with_name("drill-report.md")).write_text("drill body", encoding="utf-8")
+(Path(cfg6.audit_path).with_name("adjutant-report.md")).write_text("adj body", encoding="utf-8")
+
+
+def _approve_drill():
+    # approve() awaits drillmaster.apply + does git I/O; pin the RMW itself instead, exactly
+    # as approve() calls it, so the state-write interleaving is what's under test.
+    approvals._mutate_state(
+        cfg6, lambda st: {**st, "drill": {"hash": "h1", "action": "approved", "ts": 1.0}})
+
+
+_run([_approve_drill, (lambda: approvals.disapprove(cfg6, "adjutant", "not now"))] * 3)
+st6 = approvals._load(cfg6)
+chk("approvals/state: concurrent drill-approve + adjutant-disapprove keeps BOTH kinds",
+    st6.get("drill", {}).get("action") == "approved"
+    and st6.get("adjutant", {}).get("action") == "disapproved", str(st6))
+
+# Regression tripwire: the writers must stay on locking.locked_rmw (a quiet revert to bare
+# write_text reintroduces the lost-update race even if the assertions above get lucky).
+_src = Path(approvals.__file__).read_text(encoding="utf-8")
+chk("approvals: writers routed through locking.locked_rmw (no bare write_text left)",
+    "locked_rmw" in _src and "write_text(json.dumps" not in _src)
+
 print("\n======= EU-48 STATE-WRITERS CONCURRENCY QA =======")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

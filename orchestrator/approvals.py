@@ -16,6 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import locking
 from .config import Config
 
 # kind -> (label, report filename). Each report maps to an officer `apply` coroutine.
@@ -37,9 +38,15 @@ def _load(cfg: Config) -> dict:
         return {}
 
 
-def _save(cfg: Config, st: dict) -> None:
+def _mutate_state(cfg: Config, mutate_fn) -> None:
+    """Locked read-modify-write of approvals.json (2026-07-05 audit §7.4: approve() runs on a
+    server bg thread while disapprove() runs inline on a Flask request thread — the old bare
+    _load/_save pair lost one kind's record under that interleaving). Best-effort like the old
+    _save: an OSError never crashes an approval."""
+    def _mut(st):
+        return mutate_fn(st if isinstance(st, dict) else {})
     try:
-        _state_file(cfg).write_text(json.dumps(st), encoding="utf-8")
+        locking.locked_rmw(_state_file(cfg), _mut, default={}, corrupt_to_default=True)
     except OSError:
         pass
 
@@ -104,9 +111,11 @@ async def approve(cfg: Config, kind: str) -> str:
         from . import adjutant
         summary = await adjutant.apply(cfg)
     pushed = _commit_push(f"{KINDS[kind][0]} — applied (Commander-approved)")
-    st = _load(cfg)
-    st[kind] = {"hash": h, "action": "approved", "ts": time.time()}
-    _save(cfg, st)
+
+    def _mark(st: dict) -> dict:
+        st[kind] = {"hash": h, "action": "approved", "ts": time.time()}
+        return st
+    _mutate_state(cfg, _mark)
     try:
         from . import notify
         notify.send(f"✅ Approved & applied — {KINDS[kind][0]}. {pushed}")
@@ -121,9 +130,11 @@ def disapprove(cfg: Config, kind: str, reason: str = "") -> None:
         return
     p = _report_path(cfg, kind)
     h = _hash(p.read_text(encoding="utf-8")) if p.exists() else ""
-    st = _load(cfg)
-    st[kind] = {"hash": h, "action": "disapproved", "reason": reason, "ts": time.time()}
-    _save(cfg, st)
+
+    def _mark(st: dict) -> dict:
+        st[kind] = {"hash": h, "action": "disapproved", "reason": reason, "ts": time.time()}
+        return st
+    _mutate_state(cfg, _mark)
     try:
         from . import council
         council.add_commander_note(cfg, f"Disapproved {KINDS[kind][0]}: {reason or '(no reason given)'}")
@@ -159,9 +170,16 @@ def _load_proposals(cfg: Config) -> list[dict]:
         return []
 
 
-def _save_proposals(cfg: Config, items: list[dict]) -> None:
+def _mutate_proposals(cfg: Config, mutate_fn) -> None:
+    """Locked read-modify-write of proposals.json — the 2026-07-05 audit's HIGH-severity race:
+    the Telegram poller thread (materialize_proposal), Flask request threads (approve/deny),
+    server bg threads (council enqueue) and a possible concurrent `general council` PROCESS all
+    write this file; the old bare _load/_save pair silently lost whichever update finished first.
+    Best-effort like the old _save_proposals: an OSError never crashes the caller."""
+    def _mut(items):
+        return mutate_fn(items if isinstance(items, list) else [])
     try:
-        _proposals_file(cfg).write_text(json.dumps(items), encoding="utf-8")
+        locking.locked_rmw(_proposals_file(cfg), _mut, default=[], corrupt_to_default=True)
     except OSError:
         pass
 
@@ -215,19 +233,22 @@ def enqueue_proposals(cfg: Config, *, app_name: str, officer_label: str, source:
     if not clean:
         return None
     bid = _hash(f"{source}::" + "||".join(p["title"].lower() for p in clean))
-    items = _load_proposals(cfg)
-    for b in items:                                  # idempotent: same pending batch -> reuse
-        if b.get("id") == bid and b.get("status") == "pending":
-            return bid
-    items.append({
-        "id": bid, "kind": "proposal", "source": source, "app": app_name,
-        "label": officer_label, "proposals": clean, "body_raw": body_raw,
-        "ts": time.time(), "status": "pending",
-    })
-    # Bound the file: keep all pending + the most recent actioned batches.
-    pending_b = [b for b in items if b.get("status") == "pending"]
-    actioned = [b for b in items if b.get("status") != "pending"][-_PROPOSAL_HISTORY_CAP:]
-    _save_proposals(cfg, actioned + pending_b)
+
+    def _enqueue(items: list[dict]) -> list[dict]:
+        for b in items:                              # idempotent: same pending batch -> reuse
+            if b.get("id") == bid and b.get("status") == "pending":
+                return items
+        items.append({
+            "id": bid, "kind": "proposal", "source": source, "app": app_name,
+            "label": officer_label, "proposals": clean, "body_raw": body_raw,
+            "ts": time.time(), "status": "pending",
+        })
+        # Bound the file: keep all pending (incl. any mid-flight 'filing' claim — trimming one
+        # would strand approve_proposals' record phase) + the most recent actioned batches.
+        pending_b = [b for b in items if b.get("status") in ("pending", "filing")]
+        actioned = [b for b in items if b.get("status") not in ("pending", "filing")][-_PROPOSAL_HISTORY_CAP:]
+        return actioned + pending_b
+    _mutate_proposals(cfg, _enqueue)
     return bid
 
 
@@ -246,28 +267,59 @@ def _find_batch(items: list[dict], batch_id: str) -> dict | None:
 def approve_proposals(cfg: Config, batch_id: str, titles=None):
     """Approve a queued batch — file the chosen tickets to the board (de-duped, Roman-default
     create via filing.file_findings). `titles` selects a subset (None/empty = file the whole
-    batch). Returns the FilingResult, or None if the batch is unknown/already actioned."""
+    batch). Returns the FilingResult, or None if the batch is unknown/already actioned.
+
+    Two-phase under the proposals lock (2026-07-05 audit §7.4): phase 1 atomically CLAIMS the
+    pending batch (status='filing') so a concurrent approve/deny/materialize sees it as already
+    actioned; the Jira network I/O then runs OUTSIDE the lock (a hung Jira call must not block
+    every other proposals writer, e.g. the Telegram poller); phase 2 records the outcome. If
+    filing raises, the claim is released back to 'pending' — same retryable end-state as before.
+    (A hard process crash mid-filing leaves the batch in 'filing'; before the lock existed the
+    same crash left it 'pending' with any already-created Jira tickets duplicated on retry.)"""
     from . import filing
-    items = _load_proposals(cfg)
-    batch = _find_batch(items, batch_id)
-    if batch is None or batch.get("status") != "pending":
+    claim: dict = {}
+
+    def _claim(items: list[dict]) -> list[dict]:
+        batch = _find_batch(items, batch_id)
+        if batch is not None and batch.get("status") == "pending":
+            batch["status"] = "filing"
+            claim["batch"] = dict(batch)      # snapshot for the out-of-lock filing step
+        return items
+    _mutate_proposals(cfg, _claim)
+    if "batch" not in claim:
         return None
+    snapshot = claim["batch"]
+
     wanted = {str(t).strip().lower() for t in (titles or []) if str(t).strip()}
-    selected = [p for p in batch.get("proposals", [])
+    selected = [p for p in snapshot.get("proposals", [])
                 if not wanted or p["title"].strip().lower() in wanted]
-    app = _app_by_name(cfg, batch.get("app"))
+    app = _app_by_name(cfg, snapshot.get("app"))
     result = filing.FilingResult()
-    if selected and app is not None:
-        # Reuse filing.file_findings (de-dup + slice-1 Roman-default create) by handing it a
-        # ===TICKETS=== block of exactly the approved subset.
-        block = "===TICKETS===\n" + json.dumps(selected) + "\n===END==="
-        result = filing.file_findings(app, batch.get("label", "proposal"), block)
-    batch["status"] = "approved"
-    batch["filed"] = result.filed
-    batch["deduped"] = result.deduped
-    batch["selected_titles"] = [p["title"] for p in selected]
-    batch["actioned_ts"] = time.time()
-    _save_proposals(cfg, items)
+    try:
+        if selected and app is not None:
+            # Reuse filing.file_findings (de-dup + slice-1 Roman-default create) by handing it a
+            # ===TICKETS=== block of exactly the approved subset.
+            block = "===TICKETS===\n" + json.dumps(selected) + "\n===END==="
+            result = filing.file_findings(app, snapshot.get("label", "proposal"), block)
+    except BaseException:
+        def _release(items: list[dict]) -> list[dict]:
+            b = _find_batch(items, batch_id)
+            if b is not None and b.get("status") == "filing":
+                b["status"] = "pending"
+            return items
+        _mutate_proposals(cfg, _release)
+        raise
+
+    def _record(items: list[dict]) -> list[dict]:
+        b = _find_batch(items, batch_id)
+        if b is not None:
+            b["status"] = "approved"
+            b["filed"] = result.filed
+            b["deduped"] = result.deduped
+            b["selected_titles"] = [p["title"] for p in selected]
+            b["actioned_ts"] = time.time()
+        return items
+    _mutate_proposals(cfg, _record)
     try:
         from . import notify
         notify.send(f"✅ Approved & filed — {batch.get('source')}: "
@@ -280,15 +332,18 @@ def approve_proposals(cfg: Config, batch_id: str, titles=None):
 def deny_proposals(cfg: Config, batch_id: str, reason: str = "") -> bool:
     """Deny a queued batch — discard it, nothing is filed. Returns True if a pending batch was
     found and cleared."""
-    items = _load_proposals(cfg)
-    batch = _find_batch(items, batch_id)
-    if batch is None or batch.get("status") != "pending":
-        return False
-    batch["status"] = "denied"
-    batch["reason"] = reason
-    batch["actioned_ts"] = time.time()
-    _save_proposals(cfg, items)
-    return True
+    hit = {"ok": False}
+
+    def _deny(items: list[dict]) -> list[dict]:
+        batch = _find_batch(items, batch_id)
+        if batch is not None and batch.get("status") == "pending":
+            batch["status"] = "denied"
+            batch["reason"] = reason
+            batch["actioned_ts"] = time.time()
+            hit["ok"] = True
+        return items
+    _mutate_proposals(cfg, _deny)
+    return hit["ok"]
 
 
 def materialize_proposal(cfg: Config, ticket_ref: str) -> str:

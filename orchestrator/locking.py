@@ -73,7 +73,8 @@ def locked_append(path: str | Path, line: str) -> None:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: Any = None) -> Any:
+def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: Any = None,
+               corrupt_to_default: bool = False) -> Any:
     """Atomically read-modify-write the JSON file at ``path``.
 
     Reads the current JSON value (or ``default`` if the file is missing or empty), passes it to
@@ -84,6 +85,10 @@ def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: An
 
     ``mutate_fn`` should return the full new document; it may mutate the value in place and return
     it, or build and return a fresh object.
+
+    ``corrupt_to_default=True`` treats an unparsable (corrupt) existing file as ``default``
+    instead of raising — matching the tolerant `_load()` helpers this primitive replaces, whose
+    callers self-heal a corrupt sidecar on the next write (approvals/proposals, EU-48 family).
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +107,12 @@ def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: An
             if p.exists():
                 raw = p.read_text(encoding="utf-8").strip()
                 if raw:
-                    current = json.loads(raw)
+                    try:
+                        current = json.loads(raw)
+                    except json.JSONDecodeError:
+                        if not corrupt_to_default:
+                            raise
+                        current = default
 
             new_value = mutate_fn(current)
 
