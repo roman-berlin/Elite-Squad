@@ -662,6 +662,13 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             decisions.add(cfg, ticket, app.name,
                           f"Per-ticket budget exceeded ({why}) after {iteration - 1} pass(es). "
                           "Raise the budget, narrow the ticket, or answer the open review items.")
+            # Review fix (2026-07-05): also record the CANONICAL terminal event — the cockpit,
+            # forensics and _run_in_flight all key on Outcome audit events (needs_human), not on
+            # ticket_budget_exceeded; without this the parked ticket showed "running…" forever.
+            audit.record(Outcome.ESCALATED.audit_event, ticket_id=ticket.id, iterations=iteration,
+                         reason=f"per-ticket budget exceeded — {why}",
+                         question=f"Per-ticket budget exceeded ({why}). Raise the budget, narrow "
+                                  "the ticket, or answer the open review items.")
             print(f"  ⛔ {ticket.id}: per-ticket budget exceeded ({why}) — parking.", flush=True)
             _notify(cfg, f"⛔ {ticket.id} parked — per-ticket budget exceeded ({why}). "
                          f"{decisions.reply_hint(ticket.id)}")

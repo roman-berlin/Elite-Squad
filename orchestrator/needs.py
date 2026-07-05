@@ -77,6 +77,11 @@ def summary(cfg: Config) -> dict:
             "category": "decision",
             "why": str(d.get("question") or d.get("summary") or "pending decision"),
         })
+    # Review fix (2026-07-05): a ticket parked THROUGH a decision (budget breach, exhaustion —
+    # decisions.add also lands it in blocked_tickets.json) must surface as ONE row. The decision
+    # row wins: it carries the question and the reply hint. Base ids only — a decision id can be
+    # suffixed ("EU-81#out-of-scope").
+    decision_ids = {str(d.get("id") or "").split("#", 1)[0] for d in decisions_items if d.get("id")}
 
     # ── 2 & 4. latest_needs_you() → errored | escalated → "errored", PR → "pr" ──
     task_items: list[dict] = []
@@ -119,6 +124,10 @@ def summary(cfg: Config) -> dict:
     except Exception:  # noqa: BLE001
         pass
     for t in parked_items:
+        # Review fix (2026-07-05): skip parked rows already represented by their decision row —
+        # one blocked ticket, one row, one badge count.
+        if str(t.get("ticket_id") or "") in decision_ids:
+            continue
         rows.append({
             **t,
             "category": "parked",

@@ -122,6 +122,27 @@ chk("QW3: escalation records the structured builder/reviewer disagreement",
     any(e["event"] == "builder_reviewer_disagreement" and e.get("reviewer_position")
         for e in au2.ev))
 
+# ---- EU-56 deque guard stays PINNED behind the cap (review fix 2026-07-05) ----------------------
+# The A/B/A oscillation detection needs a 3rd pass, unreachable under HARD_MAX_PASSES=2 — but the
+# guard code stays live for any future cap raise. Pin it directly by widening the module constant
+# for one scenario (test-only; production has no override path).
+osc_built.clear(); osc_reviews.clear()
+_orig_cap = loop.HARD_MAX_PASSES
+loop.HARD_MAX_PASSES = 4
+try:
+    au2b = Audit()
+    ticket2b = Ticket(id="AUTO-15b", key="AUTO-15b", summary="s", description="d", ephemeral=True,
+                      app="automatixy")
+    rep2b = asyncio.run(loop._attempt(ticket2b, app, cfg, Git(), None, au2b, loop.Budget(0),
+                                      "autodev/AUTO-15b"))
+finally:
+    loop.HARD_MAX_PASSES = _orig_cap
+chk("EU-56 pin: with the cap widened, A/B/A trips retry_stuck on pass 3 — built 3×, NOT 4×",
+    len(osc_built) == 3 and any(e["event"] == "retry_stuck" for e in au2b.ev),
+    f"builds={osc_built} stuck={[e for e in au2b.ev if e['event']=='retry_stuck']}")
+chk("EU-56 pin: the widened-cap oscillation still escalates",
+    rep2b.outcome == Outcome.ESCALATED, str(rep2b.outcome))
+
 # ---- loop: distinct feedback every pass must NOT trip the guard (no false positive) (EU-56) ----
 # Guarding against over-firing: the deque widening (maxlen=3) must still only trip on a REPEAT.
 # Genuinely-different rejections are real progress, so the guard must stay silent — the loop runs

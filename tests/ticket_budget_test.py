@@ -146,6 +146,9 @@ chk("breach → a pending decision was filed (the BLOCKED path)",
     any(d.get("id") == "AUTO-99" for d in decisions.load(cfg)), str(decisions.load(cfg)))
 chk("breach → Telegram notify fired (never silent)", any("budget" in t for t in notified),
     str(notified))
+chk("breach → the CANONICAL terminal event fires too (needs_human — cockpit/forensics key on it)",
+    any(e["event"] == "needs_human" and "budget" in str(e.get("reason", "")) for e in au.ev),
+    str([e for e in au.ev if e["event"] == "needs_human"]))
 
 # ---------------------------------------------------------------------------------------------- #
 # 2) Budgets set to 0 disable the check
