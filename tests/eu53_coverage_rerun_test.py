@@ -98,12 +98,15 @@ loop.reviewer_mod = FakeReviewer
 au = Audit()
 asyncio.run(loop._attempt(ticket, app, cfg, git, Backlog(), au, loop.Budget(0), "autodev/AUTO-99"))
 
-# The builder changed the tree on every one of the 3 passes, so the coverage agent must have run
-# on every pass — never wrongly skipped as "unchanged".
+# The builder changed the tree on every pass, so the coverage agent must have run on every pass —
+# never wrongly skipped as "unchanged". QW3: loop.HARD_MAX_PASSES clamps the requested
+# max_iterations=3 to 2 effective passes; the EU-53 property (re-run on every changed tree) is
+# unchanged, only the pass count shrinks.
+effective_passes = min(cfg.max_iterations, loop.HARD_MAX_PASSES)
 chk("changed diff re-runs the coverage agent every pass (no false skip)",
-    te_calls["n"] == cfg.max_iterations, f"te={te_calls['n']} passes={cfg.max_iterations}")
+    te_calls["n"] == effective_passes, f"te={te_calls['n']} passes={effective_passes}")
 chk("each coverage pass saw a DISTINCT tree (proves it re-ran on new work, not cached)",
-    len(set(te_hashes)) == cfg.max_iterations, f"hashes={te_hashes}")
+    len(set(te_hashes)) == effective_passes, f"hashes={te_hashes}")
 chk("no test_engineer_skipped events were emitted when the diff kept changing",
     not any(e["event"] == "test_engineer_skipped" for e in au.ev),
     f"skips={[e for e in au.ev if e['event']=='test_engineer_skipped']}")

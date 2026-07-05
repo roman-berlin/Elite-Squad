@@ -568,6 +568,13 @@ def _changes_sig(changes: list[str]) -> str:
     return "|".join(norm)
 
 
+# QW3 (2026-07-05 audit): hard ceiling on builder↔reviewer rounds per attempt. Not configurable —
+# config/CLI may lower it but can never raise it. Evidence: EU-174 burned 4 max-effort passes
+# (15,535,048 builder tokens) against an unwinnable red base; corpus-wide, 100% of round-≥2 reviewer
+# objections were NEW (moving goalposts), so passes beyond 2 buy objections, not convergence.
+HARD_MAX_PASSES = 2
+
+
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None, commenter=None) -> TicketReport:
     if commenter is None:
         commenter = jira_commenter.TicketCommenter(
@@ -624,7 +631,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                          payload=tb, total=sum(tb.values()))
         return _dc_replace(report, token_burn=tb)
 
-    for iteration in range(1, cfg.max_iterations + 1):
+    max_passes = min(cfg.max_iterations, HARD_MAX_PASSES)
+    for iteration in range(1, max_passes + 1):
         if stop_event is not None and stop_event.is_set():
             audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-build")
             print(f"  ■ {ticket.id}: stopped by Commander — no merge.", flush=True)
@@ -1144,7 +1152,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 pass
         _notify(cfg, f"🎖️ {ticket.id} — the PM is finishing it (one corrective pass):\n\n{_D.brief(triage['text'])}")
         print(f"  🎖️ {ticket.id}: PM triage → re-queued for one corrective pass.", flush=True)
-        return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
+        return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
                                      notes="PM triage — re-queued for one corrective pass"))
 
     if triage and triage["action"] == "SPLIT":
@@ -1162,7 +1170,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _notify(cfg, f"🧩 {ticket.id} was too heavy — the Scrum Master split it into {kk} (on you) and "
                          "closed the parent. The unit takes the fragments next.")
             print(f"  🧩 {ticket.id}: too heavy → Scrum Master split into {kk}; parent closed.", flush=True)
-            return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, cfg.max_iterations, cost, app.name, branch,
+            return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
                                          notes=f"too heavy — Scrum Master split into {kk}"))
         print(f"  · Scrum Master couldn't split ({sp.get('error')}) — escalating instead.", flush=True)
 
@@ -1179,10 +1187,15 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # decisions.add already parked it to 'Blocked' (EU-61) — just leave the escalation note.
         backlog.add_comment(ticket, ("🎖️ [PM] " + esc[:1400]) if triage else esc)
     print("  ✗ escalated — needs you (max passes reached without a clean review)", flush=True)
+    # QW3: structured disagreement record — who wanted what when the loop was cut. One event the
+    # cockpit/forensics can read instead of re-mining build/review payloads.
+    audit.record("builder_reviewer_disagreement", ticket_id=ticket.id, passes=max_passes,
+                 builder_position=(build.summary or build.raw or "")[:800],
+                 reviewer_position=[(c or "")[:300] for c in (last_changes or [])[:6]])
     _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")
-    audit.record("needs_human", ticket_id=ticket.id, iterations=cfg.max_iterations,
+    audit.record("needs_human", ticket_id=ticket.id, iterations=max_passes,
                  reason="max passes — PM escalated", question=esc[:1500])
-    return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, cfg.max_iterations, cost, app.name, branch,
+    return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, max_passes, cost, app.name, branch,
                                  notes="max_iterations reached without a passing review"))
 
 

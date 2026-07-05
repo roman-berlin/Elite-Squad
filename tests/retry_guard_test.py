@@ -1,7 +1,12 @@
 """Retry-guard QA: when the reviewer returns a blocking feedback the build has already seen in the last
 few passes — whether it repeats back-to-back or oscillates A/B/A/B (EU-56) — the build isn't making
 progress, so the loop STOPS burning passes and escalates instead of grinding to max_iterations. Saves the
-wasted passes that drove yesterday's 30-retry burn."""
+wasted passes that drove yesterday's 30-retry burn.
+
+QW3 (2026-07-05): loop.HARD_MAX_PASSES clamps every attempt to 2 passes regardless of
+max_iterations. The back-to-back A/A repeat still trips retry_stuck inside the 2-pass window;
+oscillation/distinct/blank scenarios now end at the cap (2 builds, escalate via max passes) —
+the cap preempts the pass-3+ pathologies those scenarios used to exercise."""
 import sys, types, asyncio, tempfile
 from pathlib import Path
 
@@ -81,10 +86,10 @@ chk("a stuck ticket escalates to you, not a silent grind to max_iterations",
     rep.outcome == Outcome.ESCALATED, str(rep.outcome))
 chk("only escalated once it was actually stuck (2 reviews, not 1)", len(review_calls) == 2, f"reviews={review_calls}")
 
-# ---- loop: A/B/A/B oscillation -> trip on the 3rd pass, don't burn all max_iterations (EU-56) ----
-# The build alternates between two never-addressed rejections. The old guard only remembered the
-# immediately-previous signature, so A≠B≠A always looked like "progress" and ground to max_iterations.
-# The deque now remembers the last few, so the repeat of A on pass 3 trips escalation.
+# ---- loop: A/B/A/B oscillation -> the QW3 hard cap ends it at pass 2 (EU-56 guard preempted) ----
+# The build alternates between two never-addressed rejections. Pre-QW3 the deque guard tripped on
+# the repeat of A at pass 3; with HARD_MAX_PASSES=2 the cap ends the attempt first — oscillation
+# can no longer burn a 3rd pass at all.
 osc_built = []
 class OscBuilder:
     @staticmethod
@@ -107,17 +112,20 @@ au2 = Audit()
 ticket2 = Ticket(id="AUTO-15", key="AUTO-15", summary="s", description="d", ephemeral=True, app="automatixy")
 rep2 = asyncio.run(loop._attempt(ticket2, app, cfg, Git(), None, au2, loop.Budget(0), "autodev/AUTO-15"))
 
-chk("A/B/A/B oscillation tripped on pass 3 — built 3×, NOT 4× (saved the last pass)",
-    len(osc_built) == 3, f"builds={osc_built}")
-chk("the oscillation was detected and audited (retry_stuck)",
-    any(e["event"] == "retry_stuck" for e in au2.ev))
-chk("an oscillating ticket escalates, not a silent grind to max_iterations",
+chk("A/B oscillation is cut by the QW3 hard cap — built 2×, never a 3rd pass",
+    len(osc_built) == 2, f"builds={osc_built}")
+chk("no retry_stuck needed — the cap preempts the oscillation window",
+    not any(e["event"] == "retry_stuck" for e in au2.ev))
+chk("an oscillating ticket escalates, not a silent grind",
     rep2.outcome == Outcome.ESCALATED, str(rep2.outcome))
+chk("QW3: escalation records the structured builder/reviewer disagreement",
+    any(e["event"] == "builder_reviewer_disagreement" and e.get("reviewer_position")
+        for e in au2.ev))
 
 # ---- loop: distinct feedback every pass must NOT trip the guard (no false positive) (EU-56) ----
 # Guarding against over-firing: the deque widening (maxlen=3) must still only trip on a REPEAT.
-# Four genuinely-different rejections (A/B/C/D) are real progress, so the guard must stay silent —
-# the loop runs the full max_iterations and escalates only because passes ran out, NOT via retry_stuck.
+# Genuinely-different rejections are real progress, so the guard must stay silent — the loop runs
+# to the QW3 cap (2 passes) and escalates only because passes ran out, NOT via retry_stuck.
 prog_built = []
 class ProgBuilder:
     @staticmethod
@@ -141,8 +149,8 @@ au3 = Audit()
 ticket3 = Ticket(id="AUTO-16", key="AUTO-16", summary="s", description="d", ephemeral=True, app="automatixy")
 rep3 = asyncio.run(loop._attempt(ticket3, app, cfg, Git(), None, au3, loop.Budget(0), "autodev/AUTO-16"))
 
-chk("distinct feedback never trips the guard — ran the full max_iterations (built 4×)",
-    len(prog_built) == 4, f"builds={prog_built}")
+chk("distinct feedback never trips the guard — ran to the QW3 cap (built 2×)",
+    len(prog_built) == 2, f"builds={prog_built}")
 chk("no false retry_stuck on genuine progress",
     not any(e["event"] == "retry_stuck" for e in au3.ev))
 chk("still escalates when passes simply run out (not a silent grind that merges)",
@@ -153,7 +161,7 @@ chk("still escalates when passes simply run out (not a silent grind that merges)
 # `_changes_sig` is "" and progress is unmeasurable. The guard is `if sig and sig in recent_…`: the
 # `sig and` clause is what keeps an empty signature from looking like a repeat. Pin it — drop that
 # clause and two blank passes would falsely "match" and trip retry_stuck on pass 2. Here every pass is
-# blank, so it must run the FULL max_iterations and escalate only because passes ran out, never via the
+# blank, so it must run to the QW3 cap and escalate only because passes ran out, never via the
 # stuck guard.
 blank_built = []
 class BlankBuilder:
@@ -174,8 +182,8 @@ au4 = Audit()
 ticket4 = Ticket(id="AUTO-17", key="AUTO-17", summary="s", description="d", ephemeral=True, app="automatixy")
 rep4 = asyncio.run(loop._attempt(ticket4, app, cfg, Git(), None, au4, loop.Budget(0), "autodev/AUTO-17"))
 
-chk("blank reject signature never trips the guard — ran the full max_iterations (built 4×)",
-    len(blank_built) == 4, f"builds={blank_built}")
+chk("blank reject signature never trips the guard — ran to the QW3 cap (built 2×)",
+    len(blank_built) == 2, f"builds={blank_built}")
 chk("no retry_stuck fired on empty/unmeasurable feedback",
     not any(e["event"] == "retry_stuck" for e in au4.ev))
 chk("blank-feedback ticket still escalates when passes run out",

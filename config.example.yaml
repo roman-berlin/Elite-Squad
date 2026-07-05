@@ -13,7 +13,7 @@ reviewer_effort: "high"
 escalate_effort_on_retry: true    # bump the Builder's effort when a pass is rejected (low->medium->high->max)
 
 # --- loop bounds / cost ---
-max_iterations: 4            # build<->review cycles before escalating to you
+max_iterations: 2            # build<->review cycles before escalating to you (hard-clamped to 2 in loop.py)
 max_cost_usd: 0             # 0 = no cap (subscription/Max). Set a number only for per-token API billing.
 max_tickets_per_run: 1      # per app; raise once you trust it
 

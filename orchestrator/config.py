@@ -277,7 +277,8 @@ class Config:
     scout_after_merge: bool = False          # after a live merge, the QA Engineer smoke-tests DEV (extra cost; off by default)
 
     # --- loop bounds / cost ---
-    max_iterations: int = 4
+    # QW3: loop.HARD_MAX_PASSES clamps the effective value to 2 — raising this past 2 has no effect.
+    max_iterations: int = 2
     max_cost_usd: float = 0.0           # 0 = no cap (subscription). Set a number only for API billing.
     max_tickets_per_run: int = 1        # per app, per run
 
