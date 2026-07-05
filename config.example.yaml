@@ -10,7 +10,10 @@ reviewer_model: "claude-opus-4-8"
 
 builder_effort: "high"            # low | medium | high | max (thinking depth)
 reviewer_effort: "high"
-escalate_effort_on_retry: true    # bump the Builder's effort when a pass is rejected (low->medium->high->max)
+escalate_effort_on_retry: false   # OFF (2026-07-05 audit): 135/135 round-2+ review objections were NEW — effort
+                                  # escalation on retry bought context bloat, not convergence. Retry keeps the
+                                  # pass-1 effort and turn budget; the Sonnet->Opus MODEL ladder on retry is a
+                                  # separate, intended mechanism and stays on.
 
 # --- loop bounds / cost ---
 max_iterations: 2            # build<->review cycles before escalating to you (hard-clamped to 2 in loop.py)

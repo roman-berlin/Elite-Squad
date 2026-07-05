@@ -83,6 +83,19 @@ order = ["low", "medium", "high", "max"]
 assert order.index(e2) >= order.index(e1) and order.index(e3) >= order.index(e2), "must not de-escalate"
 assert e2 != e1 or e1 == "max", "retry should bump effort"
 
+print("\n=== retry does NOT escalate effort by default (2026-07-05 audit) ===")
+import dataclasses
+from orchestrator.config import Config
+from orchestrator.builder import turns_for
+_default = {f.name: f.default for f in dataclasses.fields(Config)}["escalate_effort_on_retry"]
+assert _default is False, "escalate_effort_on_retry must default OFF (135/135 round-2+ objections were new)"
+flat = ns(adaptive_effort=True, builder_effort="high", escalate_effort_on_retry=False)
+f1, f2, f3 = effort_for(flat, 1, med), effort_for(flat, 2, med), effort_for(flat, 3, med)
+print(f"flag off: pass1={f1}  pass2={f2}  pass3={f3}")
+assert f1 == f2 == f3, "retry must keep the pass-1 effort when escalation is off"
+assert turns_for(flat, f2) == turns_for(flat, f1), "turn budget must stay flat on retry"
+assert "escalated" not in effort_plan(flat, 3, med)[1], "reason must not claim escalation when off"
+
 print("\n=== xhigh pin escalates toward max on retry ===")
 xt = tk("x", "Re-architect auth, security-critical migration.", labels=["effort-ultra"])
 xe1, xe2 = effort_for(CFG, 1, xt), effort_for(CFG, 2, xt)

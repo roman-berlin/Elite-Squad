@@ -173,7 +173,10 @@ def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     """(effort, human-readable reason) for this build pass.
 
     Base effort is sized from the ticket when adaptive_effort is on; otherwise the
-    configured default. A rejected pass then escalates one level per retry (capped)."""
+    configured default. Retry keeps the pass-1 effort (and with it the turn budget) unless
+    `escalate_effort_on_retry` is explicitly enabled — then a rejected pass escalates one
+    level per retry (capped). Default is OFF: the 2026-07-05 audit found 135/135 round-≥2
+    reviewer objections were new, so effort escalation bought bloat, not convergence."""
     if ticket is not None and getattr(cfg, "adaptive_effort", True):
         size, base, why = size_ticket(ticket)
         reason = f"sized {size} → {base} ({why})"

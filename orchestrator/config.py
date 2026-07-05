@@ -179,7 +179,12 @@ class Config:
     reviewer_effort: str = "high"
     builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
-    escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
+    escalate_effort_on_retry: bool = False  # OFF by default (2026-07-05 audit): 135/135 round-≥2 reviewer
+                                            # objections were textually NEW, so bumping effort on retry (and the
+                                            # turn budget with it — turns_for scales off effort) bought context
+                                            # bloat, not convergence. Retry keeps pass-1 effort/turns; the
+                                            # cheap-first MODEL ladder (Sonnet→Opus, models.for_builder) still
+                                            # escalates on retry — that one is intended.
     auto_model: bool = True                 # ON by default: cheapest model that fits each task, escalating to the
                                             # ceiling on retry (<=ceiling, Sonnet floor for code). Fleet-wide econ;
                                             # set false to pin every officer to its configured model. See models.py.
