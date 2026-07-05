@@ -72,8 +72,11 @@ def main() -> int:
             failed += 1
             red.append(t.name)
             print(f"  ✗ {t.name:<32} {reason or line or '(crashed before a result line)'}")
-            if verbose:
-                print("\n".join(("      " + x) for x in (r.stdout + r.stderr).strip().splitlines()[-25:]))
+            # Always show a failing harness's tail — a bare tally made CI failures undiagnosable
+            # from the run log (2026-07-05: four harnesses failed only in CI and the email showed
+            # nothing but names). --verbose widens the tail.
+            tail = 25 if verbose else 12
+            print("\n".join(("      " + x) for x in (r.stdout + r.stderr).strip().splitlines()[-tail:]))
     print("=" * 64)
     print(f"  HARNESSES: {passed} passed / {passed + failed}     TOTAL CHECKS: {total_checks}")
     if red:

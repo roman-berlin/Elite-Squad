@@ -2,8 +2,19 @@
 from __future__ import annotations
 
 import sys
-import pytest
 from unittest.mock import Mock, patch, MagicMock
+
+# pytest is OPTIONAL — the repo's runner (tests/run_all.py) and CI execute harnesses as plain
+# scripts and do not install pytest; the bare import crashed every CI run. A tiny shim keeps the
+# @pytest.mark.integration decorator working when pytest is absent.
+try:
+    import pytest
+except ImportError:  # CI / bare venv
+    import types as _types
+    pytest = _types.SimpleNamespace(
+        mark=_types.SimpleNamespace(integration=lambda f: f),
+        main=None,
+    )
 
 # Allow running as standalone script or via pytest
 sys.path.insert(0, ".")
@@ -368,4 +379,21 @@ def test_end_to_end_comment_flow():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    # Repo-standard standalone runner (run_all.py executes harnesses as plain scripts; pytest is
+    # optional). Runs every test_* function, prints the k/n tally, exits non-zero on any failure.
+    import traceback
+    tests = [(n, f) for n, f in sorted(globals().items())
+             if n.startswith("test_") and callable(f)]
+    passed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            passed += 1
+            print(f"  [PASS] {name}")
+        except Exception:  # noqa: BLE001
+            print(f"  [FAIL] {name}")
+            traceback.print_exc()
+    print("-" * 50)
+    print(f"  {passed}/{len(tests)} passed")
+    print("  RESULT:", "ALL GREEN" if passed == len(tests) else f"{len(tests) - passed} FAIL")
+    sys.exit(0 if passed == len(tests) else 1)

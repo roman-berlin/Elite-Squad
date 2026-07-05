@@ -25,6 +25,9 @@ def setup_test_repo():
     repo = d / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True)
+    # CI runners have no global git identity — commits crash without a repo-local one.
+    subprocess.run(["git", "config", "user.email", "unit@test"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "Elite Unit test"], cwd=str(repo), check=True)
     (repo / "file").write_text("1")
     subprocess.run(["git", "add", "file"], cwd=str(repo), check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True)
