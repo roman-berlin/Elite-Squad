@@ -61,8 +61,16 @@ def pull_only() -> bool:
 
 
 def _repo_root(cfg: Config) -> Path:
-    """The General repo root — audit.jsonl lives at the repo root, so its parent is the root."""
-    return Path(cfg.audit_path).resolve().parent
+    """The General repo root, derived from audit_path so tests stay isolated in their tmp dirs.
+
+    Review fix (2026-07-05): audit.jsonl used to live AT the repo root; QW2 moved the runtime
+    state into a state/ subdirectory, so the audit dir's PARENT is the root whenever the dir uses
+    that convention. Without this, .unit-state/ and the pulled memory/UNIT.live.md would land
+    under state/ while every reader (memory.py, cockpit) keeps using the repo root."""
+    root = Path(cfg.audit_path).resolve().parent
+    if root.name == "state":
+        root = root.parent
+    return root
 
 
 def state_dir(cfg: Config) -> Path:
