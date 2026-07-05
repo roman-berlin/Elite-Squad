@@ -342,7 +342,11 @@ class Config:
     log_retention_days: int = 0
 
     # --- audit ---
-    audit_path: str = "./audit.jsonl"   # keep OUTSIDE every target repo
+    # The audit log's directory is the runtime-state root: every sidecar (blocked_tickets.json,
+    # pending_decisions.json, usage_ledger.jsonl, council/, report .md files, …) is derived from it
+    # via Path(audit_path).with_name(). Quick Win 2 (2026-07-05): default under state/ so runtime
+    # state never mingles with source. Keep OUTSIDE every target repo.
+    audit_path: str = "./state/audit.jsonl"
 
     @staticmethod
     def load(path: str | Path) -> "Config":

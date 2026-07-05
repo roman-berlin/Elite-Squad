@@ -75,7 +75,7 @@ smoke_enabled: true         # ARMED (EU-60): after a land, run that app's single
                                       # whose worktree has no package.json (e.g. a Python repo), and any app can
                                       # override this with its own per-app `worktree_setup_cmd:` (EU-54).
 
-audit_path: "./audit.jsonl" # append-only log of every step; keep outside your repos
+audit_path: "./state/audit.jsonl" # append-only log of every step; its directory is the runtime-state root (all sidecar state files live beside it) — keep outside your repos
 
 # --- your unit of apps. Add one block per app/repo. ---
 apps:

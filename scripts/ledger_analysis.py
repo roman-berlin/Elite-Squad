@@ -18,7 +18,7 @@ below are unit-tested in tests/ledger_analysis_test.py) or runnable from the CLI
     python3 scripts/ledger_analysis.py [path/to/usage_ledger.jsonl] [--tag builder] [--top N]
     python3 scripts/ledger_analysis.py --selftest      # verify the percentile / rollup math
 
-Default ledger path matches usage.configure(): <audit dir>/usage_ledger.jsonl (here, ./memory/usage_ledger.jsonl).
+Default ledger path matches usage.configure(): <audit dir>/usage_ledger.jsonl (here, ./state/usage_ledger.jsonl).
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from pathlib import Path
 # EU-38 acceptance targets for a build pass (input tokens), used to flag the distribution.
 MEDIAN_TARGET = 1_000_000
 P95_TARGET = 3_000_000
-DEFAULT_LEDGER = "memory/usage_ledger.jsonl"
+DEFAULT_LEDGER = "state/usage_ledger.jsonl"
 
 
 def load_rows(path: str | Path) -> list[dict]:
