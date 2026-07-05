@@ -57,9 +57,12 @@ def reap_stale_worktrees(cfg) -> None:
             is_locked = False
             lock_reason = ""
 
+            head_sha = None
             for line in lines:
                 if line.startswith("worktree "):
                     wt_path = line[9:].strip()
+                elif line.startswith("HEAD "):
+                    head_sha = line[5:].strip()
                 elif line.startswith("branch refs/heads/"):
                     branch_ref = line[18:].strip()
                 elif line == "locked" or line.startswith("locked "):
@@ -73,14 +76,22 @@ def reap_stale_worktrees(cfg) -> None:
             if not (".claude/worktrees/agent-" in wt_path or ".general-worktrees/" in wt_path):
                 continue
 
-            if not branch_ref:
+            # QW7 (2026-07-05): the orchestrator creates EVERY .general-worktrees worktree with
+            # `worktree add --detach` (see _fresh_worktree below), so a detached HEAD is the ONLY
+            # shape production produces — classify it by its HEAD sha instead of skipping it.
+            # (The Jul-1 crash orphan was exactly this: detached @ e94aa96, merged, owner dead,
+            # and the old `if not branch_ref: continue` made it unreachable — structurally.)
+            # Detached .claude/worktrees/agent-* paths keep the skip: their provenance is the
+            # Claude harness, not ours.
+            merge_probe = branch_ref or (head_sha if ".general-worktrees/" in wt_path else None)
+            if not merge_probe:
                 print(f"  · reaper: skipping {wt_path} (detached HEAD, unclassifiable)", flush=True)
                 continue
 
             # Check if merged into base
             try:
                 merge_res = subprocess.run(
-                    ["git", "merge-base", "--is-ancestor", branch_ref, base_ref],
+                    ["git", "merge-base", "--is-ancestor", merge_probe, base_ref],
                     cwd=str(repo), capture_output=True
                 )
                 if merge_res.returncode != 0:
@@ -108,12 +119,20 @@ def reap_stale_worktrees(cfg) -> None:
                     is_dead = True
 
             if is_dead:
-                print(f"  · reaper: cleaning up stale merged worktree {wt_path} (branch {branch_ref})", flush=True)
+                label = branch_ref or f"detached @ {(head_sha or '')[:9]}"
+                print(f"  · reaper: cleaning up stale merged worktree {wt_path} ({label})", flush=True)
                 if is_locked:
                     subprocess.run(["git", "worktree", "unlock", wt_path], cwd=str(repo))
                 subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=str(repo))
                 subprocess.run(["git", "worktree", "prune"], cwd=str(repo))
-                subprocess.run(["git", "branch", "-D", branch_ref], cwd=str(repo), capture_output=True)
+                if branch_ref:   # QW7: a detached worktree has no branch to delete
+                    subprocess.run(["git", "branch", "-D", branch_ref], cwd=str(repo), capture_output=True)
+                # QW7: also remove the dead session's flock sidecar (<worktree>.lock) — git doesn't
+                # know about it, and a stale one is the litter the Jul-1 crash left behind.
+                try:
+                    Path(wt_path + ".lock").unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 class Git:

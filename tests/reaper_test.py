@@ -72,20 +72,41 @@ def test_reaper():
     alive_wt = repo / ".claude" / "worktrees" / "agent-alive"
     subprocess.run(["git", "worktree", "add", "-b", "br-alive", str(alive_wt), "dev"], cwd=str(repo), check=True)
     subprocess.run(["git", "worktree", "lock", "--reason", f"pid {os.getpid()}", str(alive_wt)], cwd=str(repo), check=True)
-    
+
+    # 4. QW7 (2026-07-05): a DETACHED merged worktree with a dead owner — the ONLY shape production
+    # actually creates (git_ops adds every .general-worktrees worktree with `worktree add --detach`).
+    # This is byte-for-byte the Jul-1 crash orphan (.general-worktrees/Elite-Unit, detached @ a sha
+    # on dev, stale flock with a dead PID) that the old `if not branch_ref: continue` skipped.
+    detached_wt = repo / ".general-worktrees" / "Elite-Unit-detached"
+    subprocess.run(["git", "worktree", "add", "--detach", str(detached_wt), "dev"], cwd=str(repo), check=True)
+    (repo / ".general-worktrees" / "Elite-Unit-detached.lock").write_text("999999\n")
+
+    # 5. QW7 guard: a DETACHED .claude agent worktree keeps the skip (foreign provenance) even
+    # when merged — only .general-worktrees detached worktrees are ours to classify by sha.
+    foreign_wt = repo / ".claude" / "worktrees" / "agent-detached"
+    subprocess.run(["git", "worktree", "add", "--detach", str(foreign_wt), "dev"], cwd=str(repo), check=True)
+
     # Verify pre-state
     out = subprocess.run(["git", "worktree", "list"], cwd=str(repo), capture_output=True, text=True).stdout
     chk("pre: br-merged exists", "br-merged" in out)
     chk("pre: br-unmerged exists", "br-unmerged" in out)
     chk("pre: br-alive exists", "br-alive" in out)
-    
+    chk("pre: detached production worktree exists", "Elite-Unit-detached" in out)
+    chk("pre: detached foreign agent worktree exists", "agent-detached" in out)
+
     # Run reaper
     git_ops.reap_stale_worktrees(cfg)
-    
+
     out = subprocess.run(["git", "worktree", "list"], cwd=str(repo), capture_output=True, text=True).stdout
     chk("merged + dead IS reaped", "br-merged" not in out)
     chk("unmerged + dead IS LEFT untouched", "br-unmerged" in out)
     chk("merged + alive IS LEFT untouched", "br-alive" in out)
+    chk("QW7: DETACHED merged + dead .general-worktrees IS reaped (the Jul-1 orphan shape)",
+        "Elite-Unit-detached" not in out, out)
+    chk("QW7: DETACHED .claude agent worktree keeps the skip (foreign provenance)",
+        "agent-detached" in out)
+    chk("QW7: the dead session's flock sidecar is removed with its worktree",
+        not (repo / ".general-worktrees" / "Elite-Unit-detached.lock").exists())
 
 test_reaper()
 
