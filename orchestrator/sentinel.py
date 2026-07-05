@@ -31,8 +31,14 @@ def _is_misconfigured_error(report: str) -> bool:
     if not report:
         return False
 
-    # Pattern: "No such file or directory" (missing script)
+    # Pattern: missing script/command. macOS/bash says "No such file or directory";
+    # Linux dash (Ubuntu /bin/sh — the VPS and CI runners) says "sh: 1: <cmd>: not found" and
+    # bash says "command not found". Without the Linux variants a misconfigured smoke script on
+    # the server is misread as a genuine failure and wrongly REVERTS the merge (EU-117 fail-soft;
+    # this was also why eu117_sentinel_failsoft_test failed on every CI run).
     if "No such file or directory" in report or "cannot access" in report:
+        return True
+    if _re.search(r"command not found|sh: (line )?\d+: .{0,160}: not found", report):
         return True
 
     # Pattern: env-missing message from two_tenant_smoke.py

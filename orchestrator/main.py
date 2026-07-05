@@ -432,7 +432,6 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "council":
         from . import council
-        from .audit import AuditLog
         audit = AuditLog(cfg.audit_path)
         # The daily muster IS council + stand-up merged into one (see council.hold_council).
         briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None), audit=audit)
@@ -441,7 +440,6 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "meeting":
         from . import council
-        from .audit import AuditLog
         officers = [s.strip() for s in (args.officers or "").split(",") if s.strip()] or None
         decision = await council.hold_meeting(cfg, args.topic, officers=officers,
                                               rounds=getattr(args, "rounds", None),
@@ -451,7 +449,6 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "smalltalk":
         from . import council
-        from .audit import AuditLog
         print(await council.small_talk(cfg, audit=AuditLog(cfg.audit_path)))
         return 0
 
@@ -483,7 +480,6 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "ship-review":
         from . import council
-        from .audit import AuditLog
         print(await council.ship_review(cfg, getattr(args, "app", None),
                                         audit=AuditLog(cfg.audit_path)))
         return 0
@@ -544,7 +540,6 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "patrol":
         from . import patrol as patrol_mod
-        from .audit import AuditLog
         officers = [s.strip().lower() for s in (args.officers or "").split(",") if s.strip()] or None
         await patrol_mod.patrol(cfg, args.app, officers=officers,
                                 do_file=not getattr(args, "no_file", False),

@@ -15,6 +15,20 @@ from __future__ import annotations
 
 import sys
 import time
+import types
+
+# Stub the Agent SDK before any orchestrator import — the run_agent fallback check imports
+# orchestrator.agent, and CI does not install claude_agent_sdk (it crashed on every CI run).
+# ClaudeAgentOptions must be a REAL kwargs-holder: the fallback check reads options.model.
+sdk = types.ModuleType("claude_agent_sdk")
+class _D:
+    def __init__(s, *a, **k): pass
+    def __call__(s, *a, **k): return s
+class _Options:
+    def __init__(s, **kw): s.__dict__.update(kw)
+sdk.ClaudeAgentOptions = _Options
+sdk.__getattr__ = lambda n: _D
+sys.modules.setdefault("claude_agent_sdk", sdk)
 
 # Add parent directory to path for imports
 sys.path.insert(0, ".")

@@ -28,9 +28,23 @@ def clear_parked_repos() -> None:
 
 def reap_stale_worktrees(cfg) -> None:
     """Run on autopilot/cockpit startup to reap leaked, merged worktrees."""
+    import fcntl
     import os
     import re
     from . import loop
+
+    # Review fix (2026-07-05): the canonical persistent per-app worktrees are deliberately parked
+    # DETACHED at origin/<base> when idle, so sha-classification would call every healthy idle
+    # worktree "merged + dead" and destroy it on each startup (re-running worktree_setup_cmd and
+    # breaking EU-54's run-ONCE semantics). Git.setup() already self-heals these cheaply — the
+    # reaper must never touch them. Only NON-canonical leftovers (renamed/removed apps, crashed
+    # ad-hoc clones) are candidates.
+    canonical: set[str] = set()
+    for a in getattr(cfg, "apps", []) or []:
+        try:
+            canonical.add(str(Path(loop._worktree_path(a, cfg)).resolve()))
+        except Exception:  # noqa: BLE001 — a bad app entry must not disable the reaper
+            continue
 
     for app in getattr(cfg, "apps", []) or []:
         repo_path = getattr(app, "repo_path", "")
@@ -76,6 +90,15 @@ def reap_stale_worktrees(cfg) -> None:
             if not (".claude/worktrees/agent-" in wt_path or ".general-worktrees/" in wt_path):
                 continue
 
+            # Review fix (2026-07-05): never touch a configured app's canonical persistent
+            # worktree — idle ones are detached at origin/<base> (i.e. "merged") with a free
+            # flock (i.e. "dead"), indistinguishable from an orphan by state alone.
+            try:
+                if str(Path(wt_path).resolve()) in canonical:
+                    continue
+            except OSError:
+                continue
+
             # QW7 (2026-07-05): the orchestrator creates EVERY .general-worktrees worktree with
             # `worktree add --detach` (see _fresh_worktree below), so a detached HEAD is the ONLY
             # shape production produces — classify it by its HEAD sha instead of skipping it.
@@ -99,10 +122,21 @@ def reap_stale_worktrees(cfg) -> None:
             except OSError:
                 continue
 
-            # Check if owning session is dead
+            # Check if owning session is dead — and, for .general-worktrees paths, HOLD the flock
+            # through the removal (review fix 2026-07-05: a probe-then-remove race could let a run
+            # acquire the lock and reuse the worktree between the check and the force-remove, and
+            # unlinking a lock file another process holds open forks the lock identity).
             is_dead = False
+            held_lock = None
             if ".general-worktrees/" in wt_path:
-                is_dead = not loop.is_worktree_locked(wt_path)
+                try:
+                    held_lock = open(wt_path + ".lock", "a+")
+                    fcntl.flock(held_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    is_dead = True          # we now own the session lock until removal is done
+                except OSError:
+                    if held_lock is not None:
+                        held_lock.close()
+                    continue                 # lock held elsewhere → session alive → leave it
             else:
                 if is_locked:
                     m = re.search(r'pid\s*[:=]?\s*(\d+)', lock_reason, re.IGNORECASE)
@@ -118,21 +152,29 @@ def reap_stale_worktrees(cfg) -> None:
                 else:
                     is_dead = True
 
-            if is_dead:
-                label = branch_ref or f"detached @ {(head_sha or '')[:9]}"
-                print(f"  · reaper: cleaning up stale merged worktree {wt_path} ({label})", flush=True)
-                if is_locked:
-                    subprocess.run(["git", "worktree", "unlock", wt_path], cwd=str(repo))
-                subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=str(repo))
-                subprocess.run(["git", "worktree", "prune"], cwd=str(repo))
-                if branch_ref:   # QW7: a detached worktree has no branch to delete
-                    subprocess.run(["git", "branch", "-D", branch_ref], cwd=str(repo), capture_output=True)
-                # QW7: also remove the dead session's flock sidecar (<worktree>.lock) — git doesn't
-                # know about it, and a stale one is the litter the Jul-1 crash left behind.
-                try:
-                    Path(wt_path + ".lock").unlink(missing_ok=True)
-                except OSError:
-                    pass
+            try:
+                if is_dead:
+                    label = branch_ref or f"detached @ {(head_sha or '')[:9]}"
+                    print(f"  · reaper: cleaning up stale merged worktree {wt_path} ({label})", flush=True)
+                    if is_locked:
+                        subprocess.run(["git", "worktree", "unlock", wt_path], cwd=str(repo))
+                    subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=str(repo))
+                    subprocess.run(["git", "worktree", "prune"], cwd=str(repo))
+                    if branch_ref:   # QW7: a detached worktree has no branch to delete
+                        subprocess.run(["git", "branch", "-D", branch_ref], cwd=str(repo), capture_output=True)
+                    # QW7: also remove the dead session's flock sidecar (<worktree>.lock) — git
+                    # doesn't know about it; unlinked while we still hold the flock, so no other
+                    # process can be holding the same inode.
+                    try:
+                        Path(wt_path + ".lock").unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            finally:
+                if held_lock is not None:
+                    try:
+                        held_lock.close()
+                    except OSError:
+                        pass
 
 
 class Git:

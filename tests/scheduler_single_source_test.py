@@ -69,8 +69,12 @@ DOC_DIRS = [ROOT, ROOT / "Documentation"]
 #    EU-119/EU-120 (the allow-listed keepalive daemon), and a changelog entry is a record, not an
 #    actionable scheduler instruction. Without this allowance the unit poisons its own gate on the
 #    next launchd-adjacent land (this exact failure burned EU-173/EU-174 on 2026-07-01).
+#    RESTRUCTURE_PROPOSAL_2026-07-05.md is a point-in-time audit/postmortem (same class as
+#    UNIT_REVIEW): it documents the launchctl-needle incident itself and names the keepalive
+#    log files — records, not scheduler instructions.
 DOC_ALLOW = {"Documentation/SYSTEM_OVERVIEW.md", "Documentation/UNIT_REVIEW_2026-06-25.md",
-             "Documentation/Development_Status.md"}
+             "Documentation/Development_Status.md",
+             "Documentation/RESTRUCTURE_PROPOSAL_2026-07-05.md"}
 DOC_NEEDLES = ("com.roman.general", "launchctl", "LaunchAgents",
                "run-autopilot.sh", "run-council.sh", "run-patrol.sh", "run-smalltalk.sh", "run-sync.sh")
 doc_offenders = []

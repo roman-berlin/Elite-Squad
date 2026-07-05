@@ -124,9 +124,12 @@ loop.test_engineer_mod.ensure_coverage = fake_te
 loop.reviewer_mod = FailReviewer
 
 tmp = Path(tempfile.mkdtemp())
+# Explicit 400k budget: the scenario pins breach mechanics, independent of the shipped default
+# (3M, Commander-approved 2026-07-05 — see config.py).
 cfg = Config(apps=[AppConfig(name="automatixy", repo_path=".", base_branch="DEV",
                              protected_branch="MAIN", backlog_backend="none")],
-             audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
+             audit_path=str(tmp / "audit.jsonl"), use_worktree=False,
+             per_ticket_token_budget=400_000)
 app = cfg.app("automatixy")
 tkt = Ticket(id="AUTO-99", key="AUTO-99", summary="s", description="d", ephemeral=True, app="automatixy")
 
@@ -146,6 +149,9 @@ chk("breach → a pending decision was filed (the BLOCKED path)",
     any(d.get("id") == "AUTO-99" for d in decisions.load(cfg)), str(decisions.load(cfg)))
 chk("breach → Telegram notify fired (never silent)", any("budget" in t for t in notified),
     str(notified))
+chk("breach → the CANONICAL terminal event fires too (needs_human — cockpit/forensics key on it)",
+    any(e["event"] == "needs_human" and "budget" in str(e.get("reason", "")) for e in au.ev),
+    str([e for e in au.ev if e["event"] == "needs_human"]))
 
 # ---------------------------------------------------------------------------------------------- #
 # 2) Budgets set to 0 disable the check

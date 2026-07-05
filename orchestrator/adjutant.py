@@ -109,7 +109,14 @@ def _format_roster_preview(domain: str, charters: list[dict]) -> str:
 
 
 def officers_dir(cfg: Config) -> Path:
-    return Path(cfg.audit_path).resolve().parent / "officers"
+    # Review fix (2026-07-05): officers doctrine is COMMITTED SOURCE at the repo root, not runtime
+    # state. audit_path used to sit AT the repo root; QW2 moved it into a state/ subdirectory, so
+    # hop out of that convention — otherwise hires would land in a gitignored state/officers/ that
+    # no consumer reads. Still cfg-derived (not __file__-anchored) so tests stay in their tmp dirs.
+    root = Path(cfg.audit_path).resolve().parent
+    if root.name == "state":
+        root = root.parent
+    return root / "officers"
 
 
 def list_officers(cfg: Config) -> list[str]:
