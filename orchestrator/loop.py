@@ -26,7 +26,7 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
-from .gate import run_gate
+from .gate import base_gate_check, gate_fingerprint, run_deterministic_checks, run_gate
 from . import jira_adapter as jira_commenter
 from .git_ops import Git, GitError
 from .officers import display
@@ -632,6 +632,53 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                          payload=tb, total=sum(tb.values()))
         return _dc_replace(report, token_burn=tb)
 
+    # Phase-2 §3.1: red-base short-circuit (the EU-174 killer) — the worktree still equals the
+    # base tree here, so gate it BEFORE the first build. A red base means the failure predates
+    # this ticket: block immediately (Telegram + Needs-you) instead of billing max-effort builds
+    # for a failure no builder can fix. Cached per base sha — the suite runs once per base
+    # commit, not once per ticket (EU-174 alone burned 15.5M tokens against a red base).
+    if getattr(cfg, "red_base_check", True) and app.gate_commands:
+        base_ok, base_fp, base_report = base_gate_check(app, cfg, git, runner=run_gate)
+        if not base_ok:
+            audit.record("red_base_block", ticket_id=ticket.id, fingerprint=base_fp,
+                         report=(base_report or "")[:2500])
+            decisions.add(cfg, ticket, app.name,
+                          f"Base branch '{app.base_branch}' is RED before any build — the gate "
+                          "fails on the clean base tree. Fix the base (or land the fix ticket) "
+                          "before re-queuing this one.\n\n" + (base_report or "")[:1500])
+            audit.record(Outcome.ESCALATED.audit_event, ticket_id=ticket.id, iterations=0,
+                         reason="red base — gate fails on the clean base tree",
+                         question=f"Base branch '{app.base_branch}' is red before any build; "
+                                  "fix the base before re-queuing this ticket.")
+            print(f"  ⛔ {ticket.id}: base branch is RED before any build — blocking (no build).",
+                  flush=True)
+            _notify(cfg, f"⛔ {ticket.id} blocked — base branch '{app.base_branch}' is RED before "
+                         f"any build (gate fails on the clean base). {decisions.reply_hint(ticket.id)}")
+            return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, 0, cost, app.name, branch,
+                                         notes="red base — gate fails on the clean base tree"))
+
+    # §3.1 second half: identical gate-failure fingerprint on consecutive passes → escalate,
+    # don't rebuild (the review-path twin is recent_reject_sigs / EU-56).
+    last_gate_fp: str = ""
+
+    def _gate_stuck_escalate(fp: str, iteration: int, report: str) -> TicketReport:
+        audit.record("gate_fingerprint_stuck", ticket_id=ticket.id, iteration=iteration,
+                     fingerprint=fp)
+        decisions.add(cfg, ticket, app.name,
+                      "Gate failed with an IDENTICAL failure fingerprint on consecutive passes — "
+                      "the rebuild isn't moving it. Fix the underlying failure or narrow the "
+                      "ticket.\n\n" + (report or "")[:1500])
+        audit.record(Outcome.ESCALATED.audit_event, ticket_id=ticket.id, iterations=iteration,
+                     reason="identical gate-failure fingerprint on consecutive passes",
+                     question="The gate fails identically across passes — rebuilding won't fix "
+                              "it. Fix the underlying failure or narrow the ticket.")
+        print("  gate · identical failure fingerprint two passes running — escalating (no rebuild)",
+              flush=True)
+        _notify(cfg, f"⛔ {ticket.id} parked — gate failure repeated identically across passes. "
+                     f"{decisions.reply_hint(ticket.id)}")
+        return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name,
+                                     branch, notes="identical gate-failure fingerprint on consecutive passes"))
+
     max_passes = min(cfg.max_iterations, HARD_MAX_PASSES)
     attempt_t0 = time.monotonic()
     for iteration in range(1, max_passes + 1):
@@ -851,6 +898,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
                      report=("" if gate.passed else (gate.report or "")[:2500]))
         if not gate.passed:
+            # §3.1: same failure fingerprint as the previous failed gate → the rebuild didn't
+            # move it; escalate now instead of burning another identical pass (EU-174's shape).
+            fp = gate_fingerprint(gate.report or "")
+            if fp and fp == last_gate_fp:
+                return _gate_stuck_escalate(fp, iteration, gate.report or "")
+            last_gate_fp = fp
             print("  gate · FAILED → sending fixes back to builder", flush=True)
             # EU-153: Post gate failure comment
             gate_comment = commenter.summarize_gate_event(
@@ -918,10 +971,28 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     # review failure.
                     te_gate = run_gate(app, git.changed_paths())
                     if not te_gate.passed:
+                        # §3.1: the fingerprint guard covers this failure point too — a repeat of
+                        # the previous failed gate here is the same stuck loop.
+                        fp = gate_fingerprint(te_gate.report or "")
+                        if fp and fp == last_gate_fp:
+                            return _gate_stuck_escalate(fp, iteration, te_gate.report or "")
+                        last_gate_fp = fp
                         print("  gate · FAILED after tests → sending fixes back to builder", flush=True)
                         _bar(TESTS, fail=TESTS)
                         last_changes = [f"Verification failed after the coverage pass; fix these:\n{te_gate.report}"]
                         continue
+
+        # 2.7) DETERMINISTIC CHECKS (§3.3–5): lint → secret scan → lockfile sanity. Scripts, not
+        # LLMs — cheap, unhallucinatable, and no reviewer runs until they are green; a failure
+        # feeds the Builder as plain text (a free review round).
+        det = run_deterministic_checks(app, git.changed_paths(), git.diff_against_base())
+        audit.record("deterministic_gate", ticket_id=ticket.id, iteration=iteration,
+                     passed=det.passed, report=("" if det.passed else (det.report or "")[:2500]))
+        if not det.passed:
+            print("  gate · deterministic checks FAILED → sending fixes back to builder", flush=True)
+            _bar(GATE, fail=GATE)
+            last_changes = [f"Deterministic checks failed; fix these:\n{det.report}"]
+            continue
 
         # 3) REVIEW (spec + quality) on the diff
         _bar(REVIEW, active=REVIEW)

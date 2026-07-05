@@ -61,6 +61,9 @@ sync_base_after_merge: true # after a green live merge, bring <base> in your mai
                             # (ff if you're on <base> & clean, else advance the ref; never clobbers dirty work)
 security_gate: false        # true = the Provost Marshal reviews each diff before merge; a CRITICAL/HIGH security
                             # finding (secrets, tenant-isolation, authz, injection) opens a PR instead of landing
+red_base_check: true        # Phase-2 §3.1 (the EU-174 killer): before the FIRST build pass, gate the CLEAN base
+                            # tree; a red base BLOCKS the ticket (Telegram + Needs-you) instead of billing builds
+                            # for a failure that predates the diff. Cached per base sha (state/red_base_cache.json)
 
 # --- post-merge safety net (Sentinel) ---
 sentinel_enabled: true      # ARMED: after a feature lands on <base>, Sentinel runs that app's `postmerge_commands`
@@ -94,6 +97,10 @@ apps:
       # worker PER CPU CORE -> it can OOM/freeze the box; pin --pool=forks + a low maxForks. Keep it
       # FAST + STABLE (a slow/flaky gate stalls or bounces every build):
       - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
+    # Phase-2 §3.3: fast lint/format DETERMINISTIC gate — runs after the test gate and before
+    # any LLM reviewer; failures feed the Builder as plain text. Keep it fast (seconds).
+    # Python repos: ["ruff check ."]. Empty/omitted = no lint gate for this app.
+    lint_commands: []
     # --- MONOREPO: per-app gates (EU-19) ---------------------------------------------------
     # If this repo is a monorepo (apps/<x>/, packages/<x>/), set per-app gate commands here.
     # The gate detects which apps/packages a ticket's diff touched and runs ONLY their gates

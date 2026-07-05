@@ -6,9 +6,13 @@ test suite would catch.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 from .config import AppConfig
 from .contracts import GateResult
@@ -194,6 +198,175 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
     if failures:
         return GateResult(passed=False, report="\n\n".join(failures))
     return GateResult(passed=True, report="app gates passed: " + ", ".join(passed_apps))
+
+
+# --------------------------------------------------------------------------- #
+# Phase-2 §3 — deterministic gates (2026-07-05 restructure, Commander-approved 2026-07-06).
+# Everything here is a script, not an LLM: failures feed the Builder as plain text (a free
+# review round) and no LLM reviewer runs until they are green.
+# --------------------------------------------------------------------------- #
+
+# Lines that carry the SIGNAL of a failure (which harness/command failed, which error class) —
+# everything else in a gate report is noise for identity purposes.
+_FAIL_LINE = re.compile(r"(?i)(\bFAILED\b|\bFAILURES?\b|✗|✘|\bERRORS?\b|Traceback|exit \d+|"
+                        r"AssertionError|\bFAIL\b)")
+# Volatile fragments that differ between two runs of the SAME failure: durations, hex addresses,
+# tmp paths, line numbers.
+_NOISE = re.compile(r"\b\d+(\.\d+)?s\b|\b0x[0-9a-f]+\b|/(?:tmp|var|private)/\S+|:\d+\b")
+
+
+def gate_fingerprint(report: str) -> str:
+    """Stable identity of WHAT failed in a gate report — the EU-174 lever: the same red base
+    produced byte-different reports every pass (timings, tmp paths), so nothing could see that
+    4 max-effort builds were fighting one unchanged failure. Extracts only failure-signal lines,
+    strips volatile fragments, order-independent. '' when the report carries no failure signal
+    (callers must treat '' as non-comparable, never as 'identical')."""
+    lines: set[str] = set()
+    for ln in (report or "").splitlines():
+        if _FAIL_LINE.search(ln):
+            lines.add(_NOISE.sub("", " ".join(ln.lower().split()))[:200])
+    if not lines:
+        return ""
+    sig = "|".join(sorted(lines))[:8000]
+    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
+
+
+# Deterministic secret patterns over ADDED diff lines — replaces the secrets half of the
+# per-diff Opus provost-gate call (161 calls / 8.0M tokens on the audited corpus). Matches are
+# MASKED in the report (provost doctrine: never print a real secret).
+_SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("secret key (sk-…)", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    ("assigned secret literal",
+     re.compile(r"(?i)\b(api[_-]?key|secret|token|passwd|password)\b\s*[:=]\s*[\"'][^\"'\s]{16,}[\"']")),
+]
+
+
+def scan_diff_for_secrets(diff: str) -> list[str]:
+    """Scan a unified diff's ADDED lines for credential patterns. Returns masked findings
+    ('label: sk-abc…wxyz'); an empty list means clean. Deterministic and cheap — runs on every
+    pass before any LLM sees the diff."""
+    hits: list[str] = []
+    for ln in (diff or "").splitlines():
+        if not ln.startswith("+") or ln.startswith("+++"):
+            continue
+        for label, pat in _SECRET_PATTERNS:
+            m = pat.search(ln)
+            if m:
+                tok = m.group(0)
+                masked = (tok[:6] + "…" + tok[-4:]) if len(tok) > 12 else "…masked…"
+                hits.append(f"{label}: {masked}")
+    return hits
+
+
+# manifest filename -> lockfile siblings that must move with it (only pairs with a real
+# lockfile convention; requirements.txt has none, so it is deliberately absent).
+_LOCKFILE_PAIRS: list[tuple[str, tuple[str, ...]]] = [
+    ("package.json", ("bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")),
+    ("pyproject.toml", ("uv.lock", "poetry.lock")),
+    ("Cargo.toml", ("Cargo.lock",)),
+    ("Gemfile", ("Gemfile.lock",)),
+]
+
+
+def lockfile_sanity(changed_paths: list[str], repo_root: str) -> list[str]:
+    """Detect manifest/lockfile drift in a diff: a dependency manifest changed while its sibling
+    lockfile — which EXISTS in the repo — did not. Returns human-readable problems ([] = clean).
+    Repos without a lockfile for that manifest are never flagged (nothing to drift against)."""
+    problems: list[str] = []
+    changed = {p.replace("\\", "/") for p in (changed_paths or [])}
+    for path in sorted(changed):
+        d, base = os.path.split(path)
+        for manifest, locks in _LOCKFILE_PAIRS:
+            if base != manifest:
+                continue
+            siblings = [(os.path.join(d, lk) if d else lk) for lk in locks]
+            existing = [s for s in siblings if os.path.exists(os.path.join(repo_root, s))]
+            if existing and not any(s in changed for s in existing):
+                problems.append(f"{path} changed but {existing[0]} did not — regenerate the lockfile "
+                                "in the same commit")
+    return problems
+
+
+def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:
+    """§3 items 3–5, in order: lint → secret scan → lockfile sanity. Runs AFTER the test gate is
+    green and BEFORE any LLM reviewer; a failure feeds the Builder as plain text. All three are
+    cheap relative to one review round, and none can hallucinate."""
+    reports: list[str] = []
+    if getattr(app, "lint_commands", None):
+        lint = run_commands(app, app.lint_commands)
+        if not lint.passed:
+            reports.append("LINT gate failed:\n" + lint.report)
+    hits = scan_diff_for_secrets(diff or "")
+    if hits:
+        reports.append("SECRET-LEAK gate failed — remove these from the diff (values masked):\n"
+                       + "\n".join(f"  · {h}" for h in hits))
+    problems = lockfile_sanity(changed_paths or [], app.workdir or app.repo_path)
+    if problems:
+        reports.append("LOCKFILE gate failed:\n" + "\n".join(f"  · {p}" for p in problems))
+    if reports:
+        return GateResult(passed=False, report="\n\n".join(reports))
+    return GateResult(passed=True, report="deterministic checks passed")
+
+
+_RED_BASE_CACHE_MAX = 40   # (repo@sha) entries kept; content-addressed so entries never go stale
+
+
+def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, str]:
+    """§3 item 1 — the EU-174 killer. Run the verification gate against the CLEAN base tree
+    (call BEFORE the first build pass, while the worktree still equals base). Returns
+    (passed, fingerprint, report).
+
+    Results are cached per (repo, base-sha) beside the audit log (locked RMW — many worktrees
+    can hit this concurrently), so one broken base blocks every queued ticket at the cost of ONE
+    suite run, and a green base is re-proven once per base commit, not once per ticket. The
+    cache is content-addressed by sha — no TTL needed; a flaky false-red for a sha clears when
+    the base moves, or delete red_base_cache.json / set red_base_check=false to override.
+
+    ``runner`` lets loop.py pass ITS run_gate symbol so existing harness monkeypatching keeps
+    working (tests stub loop.run_gate, and the base check must honor that stub)."""
+    run = runner or run_gate
+    sha = ""
+    try:
+        sha = (getattr(git, "current_sha", lambda: "")() or "").strip()
+    except Exception:  # noqa: BLE001 — a stub git without sha support just skips the cache
+        sha = ""
+    cache_path = Path(cfg.audit_path).with_name("red_base_cache.json")
+    key = f"{app.repo_path}@{sha}"
+
+    if sha:
+        try:
+            import json
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            hit = data.get(key)
+            if isinstance(hit, dict) and "passed" in hit:
+                return bool(hit["passed"]), str(hit.get("fp", "")), str(hit.get("report", ""))
+        except Exception:  # noqa: BLE001 — a missing/corrupt cache just re-runs the gate
+            pass
+
+    res = run(app, [])
+    fp = "" if res.passed else gate_fingerprint(res.report or "")
+    report = "" if res.passed else (res.report or "")[:4000]
+
+    if sha:
+        try:
+            from . import locking
+
+            def _put(data):
+                data = data if isinstance(data, dict) else {}
+                data[key] = {"passed": res.passed, "fp": fp, "report": report, "ts": time.time()}
+                if len(data) > _RED_BASE_CACHE_MAX:
+                    for old in sorted(data, key=lambda k: data[k].get("ts", 0))[:len(data) - _RED_BASE_CACHE_MAX]:
+                        data.pop(old, None)
+                return data
+            locking.locked_rmw(cache_path, _put, default={}, corrupt_to_default=True)
+        except Exception:  # noqa: BLE001 — cache write failure must never block the pipeline
+            pass
+    return res.passed, fp, report
 
 
 # --------------------------------------------------------------------------- #

@@ -119,6 +119,10 @@ class AppConfig:
     gate_shared_packages: dict[str, list[str]] = field(default_factory=dict)
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
+    # Phase-2 §3.3: fast lint/format commands run as a deterministic gate AFTER the test gate and
+    # BEFORE any LLM reviewer (e.g. ["ruff check orchestrator/"], ["bun run lint"]). Failures feed
+    # the Builder as plain text. Empty = no lint gate for this app.
+    lint_commands: list[str] = field(default_factory=list)
     # EU-54 health check: modules the gate's python interpreter MUST be able to import. Checked once
     # before the suite runs (and by the doctor); a missing one fails the gate fast with a clear venv
     # hint instead of a cryptic mid-suite `ModuleNotFoundError`. Empty = no check (e.g. a Bun app).
@@ -306,6 +310,12 @@ class Config:
     sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
     security_gate: bool = False         # the Security Engineer reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
     test_gate: bool = True              # ARMED: Test Engineer runs after build, before review — adds happy-path + regression tests and owns the PR coverage artifact
+    # Phase-2 §3.1 (the EU-174 killer, Commander-approved 2026-07-06): before the FIRST build pass,
+    # run the gate against the clean base tree; a red base BLOCKS the ticket immediately (Telegram +
+    # Needs-you) instead of billing up to HARD_MAX_PASSES max-effort builds for a failure that
+    # predates the diff. Cached per base sha (state/red_base_cache.json) so the suite runs once per
+    # base commit, not once per ticket. ARMED by default — EU-174 alone burned 15.5M tokens on this.
+    red_base_check: bool = True
     test_engineer_effort: str = "medium"  # thinking depth for the Test Engineer's coverage pass
 
     # --- safety ---
