@@ -86,6 +86,16 @@ def test_reaper():
     foreign_wt = repo / ".claude" / "worktrees" / "agent-detached"
     subprocess.run(["git", "worktree", "add", "--detach", str(foreign_wt), "dev"], cwd=str(repo), check=True)
 
+    # 6. Review fix (2026-07-05): the CANONICAL persistent per-app worktree
+    # (loop._worktree_path = <repo_parent>/.general-worktrees/<app.name>) is parked detached at
+    # base with a free flock whenever it is idle — state-identical to an orphan. The reaper must
+    # NEVER touch it (Git.setup() self-heals it); reaping it would re-run worktree_setup_cmd on
+    # every autopilot restart (EU-54 run-ONCE violation).
+    canonical_wt = d / ".general-worktrees" / "testapp"
+    canonical_wt.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "worktree", "add", "--detach", str(canonical_wt), "dev"], cwd=str(repo), check=True)
+    (d / ".general-worktrees" / "testapp.lock").write_text("999999\n")   # idle: free flock, dead pid
+
     # Verify pre-state
     out = subprocess.run(["git", "worktree", "list"], cwd=str(repo), capture_output=True, text=True).stdout
     chk("pre: br-merged exists", "br-merged" in out)
@@ -107,6 +117,10 @@ def test_reaper():
         "agent-detached" in out)
     chk("QW7: the dead session's flock sidecar is removed with its worktree",
         not (repo / ".general-worktrees" / "Elite-Unit-detached.lock").exists())
+    chk("review fix: the canonical idle per-app worktree is LEFT untouched",
+        "general-worktrees/testapp" in out, out)
+    chk("review fix: the canonical worktree's lock sidecar survives too",
+        (d / ".general-worktrees" / "testapp.lock").exists())
 
 test_reaper()
 
