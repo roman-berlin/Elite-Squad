@@ -757,7 +757,7 @@ async def _soldier(st: Subtask, req: BuildRequest, app: AppConfig, cfg: Config, 
         system_prompt=system_prompt,
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-        hooks=guard.hooks_config(),    # same hard denylist as the builder
+        hooks=guard.hooks_config(cwd),  # same denylist as the builder + EU-188 worktree confinement
         setting_sources=[], max_turns=turns_for(cfg, st.effort()), effort=st.effort())
     # 2026-07-05 telemetry audit: stamp the ticket key on each soldier's ledger line so per-ticket
     # burn slicing counts the squad (the same "k" fix as gap-detect / squad-lead).

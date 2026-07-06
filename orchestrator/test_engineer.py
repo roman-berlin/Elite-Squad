@@ -200,7 +200,7 @@ async def ensure_coverage(ticket: Ticket, app: AppConfig, cfg: Config,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         setting_sources=[],                 # no settings files -> no ask/deny gate at any level
-        hooks=guard.hooks_config(),         # hard denylist: blocks secrets/.env/CI writes + destructive shell
+        hooks=guard.hooks_config(workdir),  # denylist + EU-188 worktree confinement (no writes outside workdir)
         max_turns=int(getattr(cfg, "builder_max_turns", 60) or 60),
         effort=eff,
     )

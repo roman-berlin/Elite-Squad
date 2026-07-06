@@ -22,6 +22,7 @@ anything it doesn't recognise is allowed, so it never gets in the way of normal 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 # Paths an officer must never write to / edit.
 _SECRET_PATH = re.compile(
@@ -179,10 +180,41 @@ def _shell_secret_ref(cmd: str) -> str:
     return ""
 
 
-def is_dangerous(tool_name: str, tool_input: dict | None) -> tuple[bool, str]:
+def _write_escapes_workdir(path: str, workdir: str) -> bool:
+    """True when a write target resolves OUTSIDE ``workdir`` (the officer's cwd / isolated worktree).
+    Relative paths resolve against ``workdir`` (matching the SDK's cwd); absolute paths resolve as-is.
+
+    EU-188: the write-guard previously blocked only secret/destructive writes, so a self-development
+    builder could ``Edit /…/General/orchestrator/x.py`` by ABSOLUTE path and mutate the live MAIN tree —
+    the change then landed outside the worktree, the gate diffed an empty worktree, and the loop falsely
+    reported "no changes" and escalated. Confining writes to the worktree makes it the only writable root.
+    Fail-OPEN (return False) on any resolution error, consistent with the guard's 'deny only on a clear
+    match' contract — a resolution hiccup must never crash a run or false-deny a legitimate edit."""
+    try:
+        root = Path(workdir).resolve()
+        target = Path(path)
+        if not target.is_absolute():
+            target = root / target
+        target = target.resolve()
+        return root != target and root not in target.parents
+    except Exception:  # noqa: BLE001 - never crash / never false-deny on a weird path
+        return False
+
+
+def is_dangerous(tool_name: str, tool_input: dict | None, workdir: str | None = None) -> tuple[bool, str]:
     """Pure denylist: does this tool call cross a hard line? Returns ``(blocked, reason)``.
-    Unit-testable without the SDK — this is the heart of the guard."""
+    Unit-testable without the SDK — this is the heart of the guard. ``workdir`` (an officer's isolated
+    worktree) enables EU-188 write-confinement; when None, only the secret/destructive rules apply."""
     ti = tool_input or {}
+    # EU-188: worktree confinement — a WRITE whose target resolves outside the officer's worktree is
+    # blocked (a normal source edit isn't a secret, so the rules below don't catch a leak to MAIN). Only
+    # enforced when a workdir is supplied; write-capable worktree officers (builder/soldier/test-engineer)
+    # pass it. Reads are deliberately NOT confined — the builder may read outside the worktree for context.
+    if workdir and tool_name in _WRITE_TOOLS:
+        wpath = str(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
+        if wpath and _write_escapes_workdir(wpath, workdir):
+            return True, (f"writing outside the isolated worktree — {wpath} is not under {workdir}; "
+                          "edit the file at its worktree-relative path, never the MAIN tree")
     if tool_name in _PATH_TOOLS:
         path = str(ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or "")
         low = path.lower()
@@ -223,14 +255,15 @@ def is_dangerous(tool_name: str, tool_input: dict | None) -> tuple[bool, str]:
     return False, ""
 
 
-async def _pretooluse(input_data, tool_use_id, context):  # noqa: ANN001 - SDK callback signature
-    """PreToolUse hook: DENY in code when the call is dangerous, otherwise stay out of the way."""
+async def _pretooluse(input_data, tool_use_id, context, workdir=None):  # noqa: ANN001 - SDK callback signature
+    """PreToolUse hook: DENY in code when the call is dangerous, otherwise stay out of the way.
+    ``workdir`` (bound per-officer by ``hooks_config``) enables EU-188 write-confinement."""
     try:
         if isinstance(input_data, dict):
             name, ti = input_data.get("tool_name", ""), input_data.get("tool_input", {})
         else:
             name, ti = getattr(input_data, "tool_name", ""), getattr(input_data, "tool_input", {})
-        blocked, why = is_dangerous(name, ti)
+        blocked, why = is_dangerous(name, ti, workdir)
     except Exception:  # noqa: BLE001 - a guard bug must not crash the run
         return {}
     if blocked:
@@ -243,17 +276,24 @@ async def _pretooluse(input_data, tool_use_id, context):  # noqa: ANN001 - SDK c
     return {}
 
 
-def hooks_config():
+def hooks_config(workdir: str | None = None):
     """The ``hooks=`` dict to attach to every WRITE-CAPABLE officer's ClaudeAgentOptions. Returns None
-    if the SDK is too old to support hooks (the guard then simply isn't installed — never an error)."""
+    if the SDK is too old to support hooks (the guard then simply isn't installed — never an error).
+
+    Pass ``workdir`` (the officer's isolated worktree / cwd) to enable EU-188 write-confinement: any write
+    to a path outside that root is denied. Write-capable worktree officers (builder / soldier /
+    test-engineer) pass it; read-only officers omit it (they disallow the write tools anyway)."""
     try:
         from claude_agent_sdk import HookMatcher
-        # 'Read' MUST stay in this matcher: the hook only fires for tools it names, so without Read the
-        # secret-READ blocking in is_dangerous() (EU-2 F1) would be dead code at runtime.
-        return {"PreToolUse": [HookMatcher(matcher="Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
-                                           hooks=[_pretooluse])]}
     except Exception:  # noqa: BLE001
         return None
+    # Bind this officer's workdir into the hook so is_dangerous() can confine writes to it (EU-188).
+    async def _hook(input_data, tool_use_id, context):  # noqa: ANN001 - SDK callback signature
+        return await _pretooluse(input_data, tool_use_id, context, workdir=workdir)
+    # 'Read' MUST stay in this matcher: the hook only fires for tools it names, so without Read the
+    # secret-READ blocking in is_dangerous() (EU-2 F1) would be dead code at runtime.
+    return {"PreToolUse": [HookMatcher(matcher="Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
+                                       hooks=[_hook])]}
 
 
 def is_installed() -> bool:
