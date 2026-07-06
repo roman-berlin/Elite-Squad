@@ -49,7 +49,6 @@ autopilot.intake.from_drain = lambda c, app, n: []          # worklist empty the
 autopilot.intake.LAST_DRAIN_ERRORS.clear()
 autopilot.intake.LAST_DRAIN_ERRORS["Elite-Unit"] = MSG_A    # cycle 1 starts already dark on board A
 async def _ac(c, reports, audit, blocked): return None
-autopilot.events.after_cycle = _ac
 autopilot.notify.configured = lambda: False
 sent = []
 autopilot.notify.send = lambda *a, **k: sent.append(a[0] if a else "")

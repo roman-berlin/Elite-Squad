@@ -183,7 +183,6 @@ import orchestrator.loop as _real_loop  # noqa: F401 — we patch via the autopi
 autopilot.run_loop = _fake_loop
 
 async def _ac(c, reports, audit, blocked): return None
-autopilot.events.after_cycle = _ac
 
 asyncio.run(autopilot.autopilot(cfg, once=True))
 

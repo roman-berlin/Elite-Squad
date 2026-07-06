@@ -130,7 +130,6 @@ def _run_cycle() -> None:
     async def _after_cycle(c, reports, audit, blocked):  # noqa: ANN001
         return None
 
-    autopilot.events.after_cycle = _after_cycle
     autopilot.notify.configured = lambda: False
     autopilot.notify.send = lambda *a, **k: None
 

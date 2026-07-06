@@ -28,7 +28,6 @@ cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
 autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used": 0, "cap": 1, "pct": 0.0}
 autopilot.intake.from_drain = lambda c, app, n: []          # always empty → permanently idle
 async def _ac(c, reports, audit, blocked): return None
-autopilot.events.after_cycle = _ac
 autopilot.notify.configured = lambda: False
 autopilot.notify.send = lambda *a, **k: None
 

@@ -1,5 +1,11 @@
-"""QA for proactive autonomy — MEETING: detection, the event reactor's auto-convene, meeting
-auto-file, and the after-merge Scout. Stubs the agents/backlog so nothing real runs."""
+"""QA for meeting ticket auto-file (council._autospawn_tickets) + the after-merge Scout hook.
+Stubs the agents/backlog so nothing real runs.
+
+Phase-2 §2 (2026-07-06): the events.py autonomy layer (auto-convene reactor) and the
+officer-raised 'MEETING:' request pipeline were DELETED — ceremonies are on-demand only, so
+their halves of this harness went with them. What survives: the autospawn flow (a HUMAN-convened
+meeting may still propose or, with meeting_autospawn=true, file tickets) and loop's opt-in
+after-merge Scout smoke."""
 import asyncio, sys, tempfile, types
 from pathlib import Path
 
@@ -16,9 +22,9 @@ results = []
 def check(name, cond, detail=""):
     results.append((name, bool(cond), detail))
 
-from orchestrator import council, events, loop, filing
+from orchestrator import council, loop, filing
 from orchestrator.config import Config, AppConfig
-from orchestrator.contracts import Outcome, Ticket
+from orchestrator.contracts import Ticket
 
 class FakeAudit:
     def __init__(self): self.events = []
@@ -30,24 +36,7 @@ app = AppConfig(name="automatixy", repo_path=str(d), base_branch="DEV", protecte
                 backlog_backend="none")
 cfg = Config(apps=[app], audit_path=str(d / "audit.jsonl"), use_worktree=False)
 
-# ===================== 1) extract_meeting_requests =====================
-transcript = ("### Inspector General\nWe keep bouncing on a11y.\n"
-              "MEETING: close the superadmin authz gap, attendees: Provost, Field Engineer\n\n"
-              "### Provost\nAgreed.\nMEETING: close the superadmin authz gap\n"
-              "### Scout\nMEETING: hi\n")
-reqs = council.extract_meeting_requests(transcript)
-check("extract: finds the request", reqs and reqs[0] == "close the superadmin authz gap", str(reqs))
-check("extract: strips the 'attendees:' clause", all("attendees" not in r.lower() for r in reqs))
-check("extract: de-dupes + drops too-short", len(reqs) == 1, str(reqs))
-check("extract: none -> []", council.extract_meeting_requests("no requests here") == [])
-
-# ===================== 2) pending_meeting_requests =====================
-council.history = lambda c, limit=1: [{"file": "council-1.md", "ts": "x", "title": "t", "summary": "s"}]
-council.transcript_text = lambda c, f: transcript
-src, topics = council.pending_meeting_requests(cfg)
-check("pending: reads latest transcript", src == "council-1.md" and topics == ["close the superadmin authz gap"])
-
-# ===================== 3) _autospawn_tickets =====================
+# ===================== 1) _autospawn_tickets =====================
 DEC = ('**DECISION** Do the thing.\n\n===TICKETS===\n'
        '[{"title":"Add authz probe test","type":"Task","severity":"HIGH","body":"b"}]\n===END===')
 filing.file_findings = lambda app, label, report: filing.FilingResult(
@@ -63,26 +52,7 @@ clean2, note2 = council._autospawn_tickets(cfg, DEC, FakeAudit())
 check("autospawn off: proposes, files nothing", "Proposed tickets" in note2 and "Auto-filed" not in note2)
 check("no ticket block -> no note", council._autospawn_tickets(cfg, "just a decision", None) == ("just a decision", ""))
 
-# ===================== 4) events._meeting_request gating =====================
-council.pending_meeting_requests = lambda c: ("council-9.md", ["do the thing"])
-check("reactor: fresh request -> returned", events._meeting_request(cfg, {}) == ("do the thing", "council-9.md"))
-check("reactor: already-acted request -> None", events._meeting_request(cfg, {"acted_council": "council-9.md"}) is None)
-
-# ===================== 5) after_cycle auto-convenes the meeting =====================
-called = {"meeting": None}
-async def _fake_meeting(c, topic, officers=None, rounds=None, audit=None):
-    called["meeting"] = topic
-    return "decided"
-council.hold_meeting = _fake_meeting
-audit5 = FakeAudit()
-fired = asyncio.run(events.after_cycle(cfg, reports=[], audit=audit5, blocked=None))
-check("after_cycle: fires 'officer-requested-meeting'", fired == "officer-requested-meeting", str(fired))
-check("after_cycle: actually convened the requested topic", called["meeting"] == "do the thing")
-import json as _json
-st = _json.loads((d / "autonomy.json").read_text())
-check("after_cycle: marks the council acted (won't repeat)", st.get("acted_council") == "council-9.md", str(st))
-
-# ===================== 6) after-merge Scout (loop) =====================
+# ===================== 2) after-merge Scout (loop) =====================
 _c0 = Config(apps=[app], audit_path=str(d / "audit.jsonl"))
 check("config: scout_after_merge + meeting_autospawn default False",
       _c0.scout_after_merge is False and _c0.meeting_autospawn is False)
@@ -100,10 +70,11 @@ check("after-merge scout: writes scout-report.md (block stripped)",
 check("after-merge scout: records audit", any(e == "scout_smoke" for e, _ in audit6.events))
 
 # ===================== report =====================
-print("\n================ PROACTIVE AUTONOMY QA ================")
+print("\n================ AUTOSPAWN + AFTER-MERGE SCOUT QA ================")
 passed = sum(1 for _, ok, _ in results if ok)
 for name, ok, detail in results:
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if (detail and not ok) else ""))
 print("------------------------------------------------------")
 print(f"  {passed}/{len(results)} passed")
 print("  RESULT:", "ALL GREEN ✅" if passed == len(results) else f"{len(results)-passed} FAILURE(S) ❌")
+sys.exit(0 if passed == len(results) else 1)

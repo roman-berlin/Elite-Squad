@@ -233,13 +233,10 @@ class Config:
     glm_low_watermark_tokens: Optional[int] = None          # e.g. 100_000 for ~1 ticket
     glm_low_watermark_pct: Optional[float] = None           # e.g. 0.05 for 5%
 
-    # --- autonomy (officers convene themselves between autopilot cycles) ---
-    autonomy_enabled: bool = True
-    autonomy_cooldown_min: int = 45         # min minutes between auto-convened sessions (anti-spam)
-    meeting_on_security_block: bool = True   # a security block -> Security Engineer + Dev Team Lead + Code Reviewer huddle
-    parks_meeting_threshold: int = 3         # this many parked tickets -> a "why are we stuck" meeting
-    smalltalk_prob: float = 0.15             # chance of corridor small-talk on a quiet cycle
-    random_meeting_prob: float = 0.06        # chance of a spontaneous meeting on a quiet cycle
+    # --- autonomy layer (events.py auto-convene): DELETED in Phase-2 §2 (2026-07-06). The
+    #     event reactor auto-convened meetings/small-talk between autopilot cycles (<3% of tokens
+    #     but ~100% of the org-chart noise, per the audit). Ceremonies are now ON-DEMAND ONLY
+    #     (CLI / cockpit / Telegram); the 6 autonomy flags went with it. ---
     meeting_autospawn: bool = False          # a meeting may FILE the tickets it proposes (de-duped); drills/hires stay proposal-only
     scout_after_merge: bool = False          # after a live merge, the QA Engineer smoke-tests DEV (extra cost; off by default)
 

@@ -42,10 +42,11 @@ out_of_scope_autofile: false  # false = PROPOSE-FIRST: a finding outside the tic
                               # (de-duped) but NOT auto-filed into the backlog. Flip true to let filing.py
                               # open backlog tickets for out-of-scope findings automatically.
 
-# --- autonomy defaults (decided + documented, EU-42) ---
-# Both kept OFF: they incur extra cost/noise and are opt-in only.
+# --- opt-in extras (both OFF: extra cost/noise) ---
 # scout_after_merge: false    # OFF: don't smoke-test DEV after each merge (extra QA-Engineer cost)
 # meeting_autospawn: false    # OFF: meetings may PROPOSE tickets but never auto-file them (review-first)
+# (Phase-2 §2: the events.py autonomy layer — auto-convened meetings/small-talk — was deleted;
+#  ceremonies are on-demand only, so the old autonomy_* flags no longer exist.)
 
 # --- safety ---
 dry_run: true               # full loop incl. a trial merge, but NO push / merge / Jira writes

@@ -40,7 +40,6 @@ autopilot.intake.from_drain = lambda c, app, n: []          # empty worklist...
 autopilot.intake.LAST_DRAIN_ERRORS.clear()
 autopilot.intake.LAST_DRAIN_ERRORS["Elite-Unit"] = AUTH_MSG  # ...because the board was UNREACHABLE
 async def _ac(c, reports, audit, blocked): return None
-autopilot.events.after_cycle = _ac
 autopilot.notify.configured = lambda: False
 sent = []
 autopilot.notify.send = lambda *a, **k: sent.append(a[0] if a else "")

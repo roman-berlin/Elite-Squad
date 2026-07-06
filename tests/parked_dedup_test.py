@@ -22,7 +22,7 @@ req.Session = lambda: types.SimpleNamespace(auth=None, headers=types.SimpleNames
 sys.modules["requests"] = req
 sys.path.insert(0, ".")
 
-from orchestrator import autopilot, contracts, events
+from orchestrator import autopilot, contracts
 from orchestrator.contracts import Outcome
 
 results = []
@@ -39,9 +39,11 @@ chk("autopilot exposes PARKED", hasattr(autopilot, "PARKED"))
 chk("autopilot.PARKED IS the contracts constant (single source, not a copy)",
     autopilot.PARKED is contracts.PARKED)
 
-# --- the dead, divergent duplicate in events.py is gone for good ---
-chk("events.py no longer defines its own _PARKED (dead duplicate removed)", not hasattr(events, "_PARKED"))
-chk("events.py exposes no stray PARKED under any name", not hasattr(events, "PARKED"))
+# --- the dead, divergent duplicate in events.py is gone for good — and so is the module
+#     itself (Phase-2 §2, 2026-07-06: the autonomy layer was deleted; on-demand ceremonies only).
+import importlib.util
+chk("events.py stays deleted (its divergent _PARKED can never return)",
+    importlib.util.find_spec("orchestrator.events") is None)
 
 print("\n============ PARKED SINGLE-SOURCE QA (EU-56b) ============")
 passed = sum(1 for _, ok, _ in results if ok)

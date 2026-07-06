@@ -57,9 +57,7 @@ _OFFICER_RULES = (
     "Most days there is none. Do not write or edit files.\n"
     "This is a real round-table: in later rounds you will see what your fellow officers said — "
     "RESPOND to them, by name, when it touches your lens: agree and build, or push back with a "
-    "reason. If you have nothing to add this round, reply with exactly 'PASS'. If a specific "
-    "problem genuinely needs a focused cross-officer huddle, end with a line prefixed exactly "
-    "'MEETING:' naming the topic and which officers should attend."
+    "reason. If you have nothing to add this round, reply with exactly 'PASS'."
 )
 
 COUNCIL = [
@@ -392,28 +390,9 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     return briefing
 
 
-_MEETING_REQ = re.compile(r"^\s*MEETING:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
-
-
-def extract_meeting_requests(text: str) -> list[str]:
-    """Pull officer-raised 'MEETING: <topic>' requests out of a transcript (trimmed, de-duped)."""
-    out: list[str] = []
-    for m in _MEETING_REQ.finditer(text or ""):
-        topic = m.group(1).strip()
-        topic = re.split(r"\b(attendees?|officers?)\s*:", topic, maxsplit=1, flags=re.IGNORECASE)[0]
-        topic = topic.strip().rstrip(" ,.;:—-").strip()
-        if len(topic) > 4 and topic.lower() not in (t.lower() for t in out):
-            out.append(topic)
-    return out
-
-
-def pending_meeting_requests(cfg: Config) -> tuple[str, list[str]]:
-    """(latest council/meeting file, the MEETING: topics raised in it). ('', []) when none."""
-    hist = history(cfg, limit=1)
-    if not hist:
-        return "", []
-    f = hist[0]["file"]
-    return f, extract_meeting_requests(transcript_text(cfg, f))
+# Phase-2 §2 (2026-07-06): the officer-raised 'MEETING:' request pipeline
+# (extract_meeting_requests / pending_meeting_requests) was deleted with the events.py autonomy
+# layer — its only consumer. Meetings are convened on demand (CLI / cockpit / Telegram) only.
 
 
 def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None, *,

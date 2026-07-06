@@ -43,7 +43,6 @@ autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used"
 autopilot.intake.from_drain = lambda c, app, n: []          # worklist stays empty the whole run...
 autopilot.intake.LAST_DRAIN_ERRORS.clear()                  # ...and the board starts REACHABLE (queue truly clear)
 async def _ac(c, reports, audit, blocked): return None
-autopilot.events.after_cycle = _ac
 autopilot.notify.configured = lambda: False
 sent = []
 autopilot.notify.send = lambda *a, **k: sent.append(a[0] if a else "")

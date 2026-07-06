@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import events, intake, locking, notify, usage
+from . import intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
@@ -712,7 +712,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     idle_state = state
                 if once:
                     break
-                await events.after_cycle(cfg, [], audit, blocked)   # quiet cycle — room for life
+                # Phase-2 §2: the events.py autonomy layer (auto-convened smalltalk/meetings on
+                # quiet cycles) was deleted — ceremonies are on-demand only now.
                 _sleep(max(5, interval), stop_event)
                 continue
             idle_state = None   # work again → re-announce next time the queue empties
@@ -775,7 +776,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 notify.send("⏸️ Parked (need you): " + ", ".join(newly)
                             + "\nReply /unblock <id> once handled and I'll retry it.")
             _learn_from_cycle(cfg, reports, audit)   # fold this cycle's lessons into memory (free)
-            await events.after_cycle(cfg, reports, audit, blocked)   # the unit may convene itself
+            # Phase-2 §2: events.after_cycle (the auto-convene reactor) deleted — on-demand only.
 
             # EU-128: In dry-run mode, track processed tickets so they're not re-picked in
             # subsequent cycles. This prevents continuous+dry-run from re-processing the same
