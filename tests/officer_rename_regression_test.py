@@ -196,7 +196,6 @@ for uikey, gname in warroom._GROUP_NAME.items():
 # intentionally STAY "soldier"; only the agent-facing PROMPT prose is renamed. We assert on the exact
 # retired phrases — which only ever lived in prompts — so this can't false-fire on those internals.
 PROMPT_RENAME = [
-    ("orchestrator/squad.py",       ["You are a SOLDIER"],                          "You are an ENGINEER of the Dev Team Lead"),
     ("orchestrator/council.py",     ["soldiers do not speak", "needs a new soldier", "command soldiers"], "engineers do not speak"),
     ("orchestrator/recon.py",       ["YOU ARE A SOLDIER", "SOLDIER FINDINGS", "Your soldiers"], "YOU ARE AN ENGINEER"),
     ("orchestrator/drillmaster.py", ["officer or soldier"],                         "officer or engineer"),

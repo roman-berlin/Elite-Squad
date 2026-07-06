@@ -328,42 +328,17 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
 async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None,
                 *, store: PerTicketArtifactStore | None = None,
                 spec: SpecArtifact | None = None) -> BuildResult:
-    """Implement the ticket. For a sized-big ticket on its first pass (and only when delegation is
-    armed), the Dev Team Lead splits it across sized soldiers; otherwise a single focused builder
-    pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build.
+    """Implement the ticket with a single focused builder pass.
+
+    Phase-2 §2 (2026-07-06): the Dev Team Lead's build-delegation path (squad-lead planner +
+    soldiers + ephemeral-specialist synthesis) was removed; the Builder always builds solo.
 
     EU-72: ``spec`` is the upstream SpecArtifact (primary context — the builder reads its acceptance
     criteria / non-goals, falling back to the raw ticket when None). After the build, the typed
-    BuildArtifact is published into ``store`` so the Test Engineer + Reviewer read a tight handoff
-    instead of re-deriving from the full diff. Both default to None so direct/CLI callers are
-    unaffected.
-
-    ``n`` from ``build_delegated`` encodes the flow used:
-      0   → thin plan or synthesis stub not ready → fall through to solo.
-      1   → synthesis flow produced a result (EU-69 domain gap, single specialist).
-      ≥2  → normal squad delegation with n soldiers.
-    All three cases keep the fail-safe: any exception → solo build.
+    BuildArtifact is published into ``store`` so the Reviewer reads a tight handoff instead of
+    re-deriving from the full diff. Both default to None so direct/CLI callers are unaffected.
     """
-    from . import squad
-    result: BuildResult | None = None
-    # 2026-07-05 telemetry audit: when delegation falls back to solo, the gap-detect + planner
-    # calls already burned real tokens with no BuildResult to carry them (the EU-139 run dropped
-    # $0.386 this way). build_delegated reports that burn here; the solo result absorbs it below.
-    sunk: dict = {}
-    if squad.should_delegate(cfg, req):
-        try:
-            delegated, n = await squad.build_delegated(req, app, cfg, audit=audit, sunk=sunk)
-            if delegated is not None and n >= 1:   # n=1: synthesis; n>=2: squad split
-                result = delegated
-        except Exception as exc:  # noqa: BLE001 - delegation must never break a run
-            print(f"  · delegation off ({str(exc).splitlines()[0][:80]}); building solo", flush=True)
-    if result is None:
-        result = await _solo_build(req, app, cfg, spec=spec)
-        if sunk:
-            result.cost_usd += float(sunk.get("cost_usd", 0.0) or 0.0)
-            result.num_turns += int(sunk.get("num_turns", 0) or 0)
-            result.input_tokens += int(sunk.get("input_tokens", 0) or 0)
-            result.output_tokens += int(sunk.get("output_tokens", 0) or 0)
+    result = await _solo_build(req, app, cfg, spec=spec)
     # EU-72: publish the typed BuildArtifact into the shared per-ticket pool. The loop stamps the
     # authoritative files_changed (it owns git); the full summary/raw stays on the result for digging.
     if store is not None:

@@ -217,7 +217,7 @@ chk("hook ALLOWS a normal call (empty output)", ok == {})
 weird = asyncio.run(guard._pretooluse(None, None, {}))
 chk("hook never raises on weird input", weird == {})
 
-# --- hooks_config wires a PreToolUse matcher; builder + soldier attach it ---
+# --- hooks_config wires a PreToolUse matcher; the builder attaches it ---
 hc = guard.hooks_config()
 chk("hooks_config has a PreToolUse matcher", isinstance(hc, dict) and "PreToolUse" in hc)
 # EU-2 F1: the matcher MUST name 'Read' or the secret-read deny never runs in production. Guard against drift.
@@ -225,16 +225,13 @@ _matcher = hc["PreToolUse"][0].matcher if isinstance(hc, dict) and hc.get("PreTo
 chk("hooks_config matcher includes Read (hook fires on secret reads)", "Read" in _matcher, _matcher)
 from pathlib import Path
 b = Path("./orchestrator/builder.py").read_text()
-s = Path("./orchestrator/squad.py").read_text()
-# EU-188: the write-capable worktree officers attach the guard WITH their workdir (confinement on).
+# EU-188: the write-capable worktree officer attaches the guard WITH its workdir (confinement on).
 chk("builder attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(workdir)" in b)
-chk("soldier attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(cwd)" in s)
 
 # --- EU-2 F7: fail LOUD when the guard isn't installed ---
 chk("is_installed() True when SDK supports hooks", guard.is_installed() is True)
-# builder + soldier emit the loud start-up warning when the guard is absent
+# the builder emits the loud start-up warning when the guard is absent
 chk("builder calls warn_if_absent", "guard.warn_if_absent(" in b)
-chk("soldier calls warn_if_absent", "guard.warn_if_absent(" in s)
 
 # --- EU-47: the READ-ONLY recon officers must attach the guard too (drift-guard the wiring) ---
 # provost/scout/quartermaster recon all funnel through recon._opts, which runs bypassPermissions with

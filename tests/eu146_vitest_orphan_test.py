@@ -193,29 +193,6 @@ chk(
 
 
 # ════════════════════════════════════════════════════════════
-# 5. Process-group cleanup wired in squad.py (_run_gate)
-# ════════════════════════════════════════════════════════════
-
-squad_src = Path("./orchestrator/squad.py").read_text()
-
-chk(
-    "squad._run_gate uses start_new_session=True (EU-146)",
-    "start_new_session=True" in squad_src,
-    "start_new_session=True not found in squad.py",
-)
-chk(
-    "squad._run_gate calls os.killpg on TimeoutError (EU-146)",
-    "os.killpg" in squad_src,
-    "os.killpg not found in squad.py",
-)
-chk(
-    "squad._run_gate has a finally cleanup block (EU-146)",
-    "finally:" in squad_src and "proc.returncode is None" in squad_src,
-    "finally+returncode is None not found in squad.py",
-)
-
-
-# ════════════════════════════════════════════════════════════
 # 6. Builder system prompt mandates vitest run / bounded workers
 # ════════════════════════════════════════════════════════════
 
@@ -238,26 +215,6 @@ chk(
     "--pool=forks / maxForks not found in builder.py",
 )
 
-
-# ════════════════════════════════════════════════════════════
-# 7. Soldier system prompts (squad.py) also mandate vitest run
-# ════════════════════════════════════════════════════════════
-
-chk(
-    "_SOLDIER_SYSTEM mandates 'vitest run' (EU-146)",
-    "vitest run" in squad_src,
-    "'vitest run' not found in _SOLDIER_SYSTEM",
-)
-chk(
-    "_SOLDIER_SYSTEM bans watch mode (EU-146)",
-    "Never start watch mode" in squad_src or "never watch mode" in squad_src.lower(),
-    "watch-mode ban not found in squad.py",
-)
-chk(
-    "squad.py mentions maxForks or --pool=forks (EU-146)",
-    "--pool=forks" in squad_src or "maxForks" in squad_src,
-    "--pool=forks / maxForks not found in squad.py",
-)
 
 
 # ════════════════════════════════════════════════════════════

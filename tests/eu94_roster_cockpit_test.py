@@ -35,7 +35,6 @@ sys.path.insert(0, ".")
 from orchestrator import cockpit_views, officers, roster, server
 from orchestrator import sync as _sync
 from orchestrator.config import AppConfig, Config
-from orchestrator.squad import SQUAD
 
 results: list[tuple[str, bool, str]] = []
 
@@ -65,8 +64,8 @@ chk("cockpit nav bar contains the Roster link (/roster-doc)",
     'href="/roster-doc"' in bar)
 chk("Roster is a top-level btn (not only inside a dropdown)",
     'class="btn" href="/roster-doc"' in bar)
-chk("Roster nav button title mentions officers and soldiers",
-    "Officers, soldiers" in bar)
+chk("Roster nav button title mentions officers",
+    "Officers" in bar)
 
 # ── 2. /roster-doc page: every officer with their duty ───────────────────────
 client = server.create_app(cfg).test_client()
@@ -86,24 +85,11 @@ for snippet in ["Orchestrator", "Builder", "Security", "Reviewer"]:
     chk(f"Roster page shows the '{snippet}' role",
         snippet in page, f"'{snippet}' not found on /roster-doc")
 
-# ── 3. /roster-doc page: every soldier with their duty ────────────────────────
-# The SQUAD dict is the single source of truth for on-demand engineers.
-_missing_soldiers = [label for label, _lane in SQUAD.values() if label not in page]
-chk("Every soldier (engineer) is listed on the Roster page",
-    not _missing_soldiers, f"missing: {_missing_soldiers}")
-
-# Each soldier's lane should also appear.
-_missing_lanes = [lane for _label, lane in SQUAD.values() if lane not in page]
-chk("Every soldier's duty/lane is listed on the Roster page",
-    not _missing_lanes, f"missing lanes: {_missing_lanes}")
-
 # ── 4. Roster view structure ─────────────────────────────────────────────────
 chk("Roster page includes the chain-of-command section",
     "Chain of command" in page)
 chk("Roster page includes the Officers &amp; duties section",
     "Officers" in page and "duties" in page.lower())
-chk("Roster page includes the Engineers / soldiers section",
-    "Engineer" in page)
 
 # ── Report ────────────────────────────────────────────────────────────────────
 print("\n============ EU-94 ROSTER COCKPIT GATE ============")

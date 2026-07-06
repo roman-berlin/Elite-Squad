@@ -1,26 +1,15 @@
-"""Run-cost accounting — the two telemetry gaps found on the EU-139 run (2026-07-05 audit).
+"""Run-cost accounting — telemetry pins that survive the Phase-2 §2 collapse.
 
-Gap 1 — run_end under-reported the run cost. The run_end audit event's total_cost_usd sums the
-per-ticket report costs, but the gap-detect ($0.042) + squad-lead ($0.344) plan-phase calls never
-reached that sum when the plan is thin and build_delegated returns (None, 0) for a solo fallback.
-(The provost security gate was a third under-reported stage in the original EU-139 finding; it was
-DELETED in Phase-2 §2, 2026-07-06, so its accounting is gone with it.)
-
-Gap 2 — the gap-detect and squad-lead usage-ledger rows carried no ticket key ("k") even though
-they ran inside the EU-139 ticket flow, so per-ticket burn slicing undercounts. The follow-up
-sweep found the same hole in the soldier·<role> dispatch rows.
-
-Pinned here:
-  1. detect_domain_gap returns its own burn and threads ticket_id into run_agent.
-  2. build_delegated (thin plan) reports the sunk plan-phase burn via the `sunk` out-param, and
-     the squad-lead call carries the ticket id.
-  3. builder.build folds the sunk burn into the solo BuildResult (so loop's `cost += build.cost_usd`
-     and _burn("builder", …) see it).
-  4. loop._attempt: the ticket report cost — the number run_end sums — = builder + TE + review.
-  5. usage.record stamps "k" on the ledger row when a ticket_id is given (the choke-point that
-     makes 1/2 land in usage_ledger.jsonl).
-  6. _soldier threads req.ticket.id into run_agent so every soldier·<role> ledger row carries
-     the ticket key (full build_delegated dispatch path, not just the planner).
+The EU-139-run (2026-07-05) audit found several stages whose spend never reached run_end's
+total_cost_usd. The build-delegation stages it pinned (squad-lead planning, soldier dispatch,
+build_delegated's `sunk` out-param) were REMOVED in Phase-2 §2 along with the build squad; the
+provost security gate and the Test Engineer stage were likewise deleted. What remains worth
+guarding:
+  1. detect_domain_gap returns its own burn and threads ticket_id into run_agent (still used by
+     the Engineering Manager's advisory roster preview).
+  5. loop._attempt: the ticket report cost — the number run_end sums — = builder + review.
+  6. usage.record stamps "k" on the ledger row when a ticket_id is given (the choke-point that
+     makes per-ticket burn slicing work).
 
 All offline — SDK and agents are stubbed; no real models, no network.
 """
@@ -44,16 +33,14 @@ sdk.__getattr__ = lambda n: _D
 sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
-import orchestrator.builder as builder                 # noqa: E402
 import orchestrator.loop as loop                       # noqa: E402
 import orchestrator.squad as squad                     # noqa: E402
 import orchestrator.usage as usage                     # noqa: E402
 from orchestrator.agent import AgentRun                # noqa: E402
 from orchestrator.config import Config, AppConfig      # noqa: E402
 from orchestrator.contracts import (                   # noqa: E402
-    BuildArtifact, BuildRequest, BuildResult, GateResult, Outcome,
-    PerTicketArtifactStore, ReviewResult, ReviewVerdict,
-    Ticket, TicketReport, Verdict,
+    BuildArtifact, BuildResult, GateResult, Outcome,
+    ReviewResult, ReviewVerdict, Ticket, TicketReport, Verdict,
 )
 
 results: list[tuple[str, bool, str]] = []
@@ -81,9 +68,8 @@ def _ticket(tid: str = "EU-139") -> Ticket:
 # The EU-139 run's actual ledger numbers — pinned so the harness mirrors the audit evidence.
 GAP_COST, GAP_IN, GAP_OUT = 0.041794, 18898, 552
 LEAD_COST, LEAD_IN, LEAD_OUT = 0.344076, 68517, 1507
+SOLDIER_COST = 0.15
 _calls: list[tuple[str, object]] = []   # (tag, ticket_id) per fake run_agent call
-
-_THIN_PLAN = '[{"role":"ordnance-be","title":"only slice","detail":"one slice","size":"M"}]'
 
 
 async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, **kw):
@@ -92,9 +78,6 @@ async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=N
         reply = '{"covered": true, "domain": "vanguard-fe"}'
         return AgentRun(text=reply, final=reply, cost_usd=GAP_COST, num_turns=1,
                         is_error=False, tools=[], input_tokens=GAP_IN, output_tokens=GAP_OUT)
-    if tag == "squad-lead":
-        return AgentRun(text=_THIN_PLAN, final=_THIN_PLAN, cost_usd=LEAD_COST, num_turns=2,
-                        is_error=False, tools=["Read"], input_tokens=LEAD_IN, output_tokens=LEAD_OUT)
     return AgentRun(text="done", final="done", cost_usd=0.0, num_turns=1,
                     is_error=False, tools=[])
 
@@ -128,119 +111,7 @@ squad.run_agent = _explode
 res_err = asyncio.run(squad.detect_domain_gap("some ticket", squad.SQUAD, ticket_id="EU-139"))
 chk("gap-detect: exception → (False, None, {}) fail-safe",
     res_err[:2] == (False, None) and res_err[2] == {}, str(res_err))
-squad.run_agent = _fake_run_agent
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2. build_delegated (thin plan) — sunk burn reported, squad-lead tagged with the ticket
-#    This is the exact EU-139 path: gap-detect → squad-lead → thin plan → solo fallback.
-# ══════════════════════════════════════════════════════════════════════════════
-_cfg = Config(apps=[_APP], audit_path=_aud_path, use_worktree=False, delegation_enabled=True)
-
-_calls.clear()
-_sunk: dict = {}
-_res, _n = asyncio.run(squad.build_delegated(
-    BuildRequest(_ticket(), "autodev/EU-139", iteration=1), _APP, _cfg, sunk=_sunk))
-chk("thin plan: still returns (None, 0) — caller falls back to solo", _res is None and _n == 0,
-    f"{_res},{_n}")
-chk("thin plan: sunk cost = gap-detect + squad-lead ($0.042 + $0.344)",
-    abs(_sunk.get("cost_usd", 0) - (GAP_COST + LEAD_COST)) < 1e-9, str(_sunk))
-chk("thin plan: sunk tokens = gap-detect + squad-lead",
-    _sunk.get("input_tokens") == GAP_IN + LEAD_IN
-    and _sunk.get("output_tokens") == GAP_OUT + LEAD_OUT, str(_sunk))
-chk("thin plan: squad-lead run_agent received ticket_id='EU-139' (ledger 'k' wiring)",
-    ("squad-lead", "EU-139") in _calls, str(_calls))
-chk("thin plan: gap-detect inside the ticket flow also carried the ticket id",
-    ("gap-detect", "EU-139") in _calls, str(_calls))
-
-# Legacy direct call without sunk= — the old contract must be preserved (additive param).
-_res_legacy, _n_legacy = asyncio.run(squad.build_delegated(
-    BuildRequest(_ticket(), "autodev/EU-139", iteration=1), _APP, _cfg))
-chk("thin plan: legacy call without sunk= still returns (None, 0)",
-    _res_legacy is None and _n_legacy == 0, f"{_res_legacy},{_n_legacy}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2b. build_delegated (two-subtask plan) — every soldier dispatch carries the ticket id
-#     so the soldier·<role> ledger rows get a "k" (the second hole of Gap 2).
-# ══════════════════════════════════════════════════════════════════════════════
-SOLDIER_COST = 0.15
-
-_PLAN_TWO = ('[{"role":"ordnance-be","title":"add endpoint","detail":"POST /export","size":"M"},'
-             '{"role":"logistics-db","title":"migration","detail":"export_jobs table","size":"M"}]')
-
-
-async def _fake_run_agent_squad(prompt, options, tag="", ticket_id=None, pass_number=None, **kw):
-    _calls.append((tag, ticket_id))
-    if tag == "gap-detect":
-        reply = '{"covered": true, "domain": "vanguard-fe"}'
-        return AgentRun(text=reply, final=reply, cost_usd=GAP_COST, num_turns=1,
-                        is_error=False, tools=[], input_tokens=GAP_IN, output_tokens=GAP_OUT)
-    if tag == "squad-lead":
-        return AgentRun(text=_PLAN_TWO, final=_PLAN_TWO, cost_usd=LEAD_COST, num_turns=2,
-                        is_error=False, tools=["Read"], input_tokens=LEAD_IN, output_tokens=LEAD_OUT)
-    return AgentRun(text="done", final=f"implemented {tag}", cost_usd=SOLDIER_COST, num_turns=4,
-                    is_error=False, tools=["Edit"])
-
-
-squad.run_agent = _fake_run_agent_squad
-_calls.clear()
-_res2, _n2 = asyncio.run(squad.build_delegated(
-    BuildRequest(_ticket(), "autodev/EU-139", iteration=1), _APP, _cfg))
-_soldier_calls = [c for c in _calls if c[0].startswith("soldier·")]
-chk("squad dispatch: two subtasks → BuildResult, n=2", _res2 is not None and _n2 == 2,
-    f"{_res2 is not None},{_n2}")
-chk("squad dispatch: every soldier run_agent received ticket_id='EU-139' (ledger 'k' wiring)",
-    _soldier_calls == [("soldier·ordnance-be", "EU-139"), ("soldier·logistics-db", "EU-139")],
-    str(_soldier_calls))
-chk("squad dispatch: aggregate cost = gap-detect + squad-lead + both soldiers",
-    _res2 is not None and abs(_res2.cost_usd - (GAP_COST + LEAD_COST + 2 * SOLDIER_COST)) < 1e-9,
-    str(getattr(_res2, "cost_usd", None)))
-
 squad.run_agent = _orig_squad_runner
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 3. builder.build — sunk delegation burn folds into the solo BuildResult
-# ══════════════════════════════════════════════════════════════════════════════
-SOLO_COST, SOLO_IN, SOLO_OUT = 0.652455, 636632, 8773   # EU-139's solo builder ledger row
-
-
-async def _fake_build_delegated(req, app, cfg, audit=None, sunk=None):
-    if sunk is not None:
-        sunk["cost_usd"] = GAP_COST + LEAD_COST
-        sunk["num_turns"] = 3
-        sunk["input_tokens"] = GAP_IN + LEAD_IN
-        sunk["output_tokens"] = GAP_OUT + LEAD_OUT
-    return None, 0
-
-
-async def _fake_solo(req, app, cfg, *, spec=None):
-    return BuildResult(ok=True, summary="SOLO build done", cost_usd=SOLO_COST, num_turns=22,
-                       raw="", tools=[], input_tokens=SOLO_IN, output_tokens=SOLO_OUT)
-
-
-_orig_delegated = squad.build_delegated
-_orig_solo = builder._solo_build
-squad.build_delegated = _fake_build_delegated
-builder._solo_build = _fake_solo
-try:
-    _b = asyncio.run(builder.build(
-        BuildRequest(_ticket(), "autodev/EU-139", iteration=1), _APP, _cfg))
-finally:
-    squad.build_delegated = _orig_delegated
-    builder._solo_build = _orig_solo
-
-chk("builder.build: solo result absorbs the sunk plan-phase cost",
-    abs(_b.cost_usd - (SOLO_COST + GAP_COST + LEAD_COST)) < 1e-9, str(_b.cost_usd))
-chk("builder.build: solo result absorbs the sunk tokens (EU-96 _burn sees them)",
-    _b.input_tokens == SOLO_IN + GAP_IN + LEAD_IN
-    and _b.output_tokens == SOLO_OUT + GAP_OUT + LEAD_OUT,
-    f"in={_b.input_tokens},out={_b.output_tokens}")
-
-
-# (Phase-2 §2, 2026-07-06: section 4 — the provost.gate cost/stage_costs/ticket-threading pins —
-#  was removed with the deleted LLM security gate. Its telemetry no longer exists to account for.)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -292,7 +163,7 @@ _land_costs: list[float] = []
 
 
 def _fake_land(tk, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
-               coverage=""):
+               commenter=None):
     _land_costs.append(cost)
     return TicketReport(tk.id, Outcome.MERGED, iteration, cost, app.name, branch)
 
