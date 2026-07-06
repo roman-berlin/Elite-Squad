@@ -205,6 +205,13 @@ class Config:
     #     Scrum Master split when the design exceeds thresholds. ---
     architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
 
+    # --- Planner (Phase-2 §2 centerpiece): ONE Opus design call/ticket before the build that
+    #     absorbs the Architect ADR + squad-lead planning + Scrum split decision. Produces the
+    #     design brief + TESTABLE acceptance criteria (the Builder writes tests against them) +
+    #     in-scope file list. When on, it runs INSTEAD of the Architect. OFF by default — arm it
+    #     once proven live, which then unlocks retiring the separate Test Engineer coverage pass. ---
+    planner_enabled: bool = False
+
     # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
     #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
     #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as

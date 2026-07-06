@@ -730,10 +730,57 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes=f"per-ticket budget exceeded — {why}"))
 
-        # 0) ARCHITECT — produce lightweight ADR for feature/large tickets before build
-        # (Only on first iteration; retry passes reuse the ADR from the first pass.)
+        # 0) PLANNER (Phase-2 §2) — one Opus design call before the build; absorbs the Architect.
+        # Produces the design brief (→ adr channel), sharper TESTABLE acceptance criteria (→ the
+        # SpecArtifact the Builder reads, so it writes tests against them), and the in-scope file
+        # list. Iteration 1 only; retries reuse the first pass's brief. Fail-safe: plan() never
+        # raises, and a non-BUILD verdict is CONSERVATIVE for now (recorded, still built — acting
+        # on ANSWER/CLOSE/REFILE is a guarded follow-up; a bad auto-close is the senior_pm mistake
+        # §2 is undoing). SPLIT routes to the Scrum Master, same as architect-oversized.
         adr: str | None = None
-        if iteration == 1 and getattr(cfg, "architect_enabled", False):
+        _planned = False
+        if iteration == 1 and getattr(cfg, "planner_enabled", False):
+            from . import planner as _planner
+            print(f"  planner · designing {ticket.id}…", flush=True)
+            _pres = await _planner.plan(cfg, ticket, app=app, audit=audit)
+            cost += _pres.cost_usd
+            budget.add(_pres.cost_usd)
+            _burn("planner", _pres.input_tokens, _pres.output_tokens)
+            _planned = True
+            if _pres.verdict == "SPLIT":
+                from . import scrum as _scrum
+                recap = _pres.answer or _pres.approach
+                try:
+                    sp = await _scrum.split(cfg, app.name, ticket, recap=recap,
+                                            reason="Planner: too large for one build")
+                    if sp.get("ok") and sp.get("keys"):
+                        kk = ", ".join(sp["keys"])
+                        audit.record("scrum_split", ticket_id=ticket.id, reason="planner-split", into=sp["keys"])
+                        _notify(cfg, f"🧩 {ticket.id} was too big — the Planner split it into {kk} "
+                                     "(on you) and closed the parent.")
+                        print(f"  🧩 {ticket.id}: Planner → Scrum Master split into {kk}; parent closed.", flush=True)
+                        return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, iteration, cost,
+                                                     app.name, branch, notes=f"Planner split into {kk}"))
+                    print(f"  · Scrum Master couldn't split ({sp.get('error')}) — building instead.", flush=True)
+                except Exception as exc:  # noqa: BLE001 — a split failure falls through to a normal build
+                    print(f"  · Planner-triggered split crashed: {exc} — building instead.", flush=True)
+            brief = _pres.as_builder_brief()
+            if brief:
+                adr = brief
+            if _pres.testable_ac and store.spec is not None:
+                store.spec.acceptance = list(_pres.testable_ac)   # sharpen the AC the Builder reads
+            if _pres.verdict not in ("BUILD", "SPLIT"):
+                audit.record("planner_nonbuild_verdict", ticket_id=ticket.id,
+                             verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
+                print(f"  planner · verdict {_pres.verdict} — building anyway (conservative; verdict "
+                      "routing is a guarded follow-up)", flush=True)
+            else:
+                print(f"  planner · BUILD · {len(_pres.testable_ac)} testable AC · "
+                      f"{len(_pres.in_scope_files)} in-scope files", flush=True)
+
+        # 0b) ARCHITECT — only when the Planner didn't run (the Planner absorbs it, §2).
+        # (Only on first iteration; retry passes reuse the ADR from the first pass.)
+        if iteration == 1 and not _planned and getattr(cfg, "architect_enabled", False):
             from . import architect as _arch
             if await _arch.should_run_architect(cfg, ticket):
                 print(f"  architect · producing ADR for {ticket.id}…", flush=True)

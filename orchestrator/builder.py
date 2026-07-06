@@ -301,11 +301,12 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
         "ACCEPTANCE CRITERIA:",
         ac,
     ]
-    # EU-109: include the Architect's ADR if produced (provides approach, risk, touch-points, DoD)
+    # The up-front design brief (Phase-2 §2 Planner, or the Architect's ADR when the Planner is
+    # off). Both flow through req.adr — approach + testable AC + in-scope files / touch-points.
     if req.adr:
         parts += [
             "",
-            "ARCHITECT'S ADR (design upfront — follow this approach):",
+            "DESIGN BRIEF (produced up front — follow this approach):",
             req.adr,
         ]
     if spec is not None and spec.non_goals:

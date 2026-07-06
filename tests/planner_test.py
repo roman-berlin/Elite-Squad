@@ -146,6 +146,140 @@ chk("plan: agent exception → BUILD result, never raises",
     res_err.verdict == "BUILD" and "planner error" in res_err.raw, res_err.raw[:80])
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 5. loop wiring — planner_enabled runs the Planner before build, injects the brief into the
+#    Builder, sharpens the SpecArtifact AC, routes SPLIT to Scrum; off → inert.
+# ══════════════════════════════════════════════════════════════════════════════
+import orchestrator.loop as loop                     # noqa: E402
+from orchestrator.contracts import (                 # noqa: E402
+    BuildArtifact, BuildResult, GateResult, Outcome, ReviewResult, ReviewVerdict,
+    TestEngineerResult, TicketReport, Verdict,
+)
+
+_APP = AppConfig(name="automatixy", repo_path="/tmp", base_branch="DEV",
+                 protected_branch="MAIN", backlog_backend="none")
+_captured_req = {}
+
+
+class _Git:
+    def has_changes(self): return True
+    def diff_against_base(self): return "diff --git a/x b/x\n+line"
+    def changed_paths(self): return ["orchestrator/deploy.py"]
+    def current_sha(self): return "s1"
+    def base_sha(self): return "s1"
+
+
+class _Backlog:
+    def set_status(self, *a, **k): pass
+    def add_comment(self, *a, **k): pass
+
+
+class _StubBuilder:
+    @staticmethod
+    def effort_plan(cfg, it, ticket): return ("low", "sized")
+
+    @staticmethod
+    async def build(req, app, cfg, audit=None, store=None, spec=None):
+        _captured_req["adr"] = req.adr
+        _captured_req["spec_ac"] = list(store.spec.acceptance) if (store and store.spec) else None
+        if store is not None:
+            store.put(BuildArtifact(files_changed=[], diff_digest="d", decisions=[], open_questions=[]))
+        return BuildResult(ok=True, summary="built", cost_usd=0.1, num_turns=2)
+
+
+class _StubReviewer:
+    @staticmethod
+    async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None):
+        if store is not None:
+            store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))
+        return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=0.1)
+
+
+def _fake_land(tk, app, cfg, git, backlog, audit, branch, iteration, cost, build, review, coverage=""):
+    return TicketReport(tk.id, Outcome.MERGED, iteration, cost, app.name, branch)
+
+
+_BUILD_PLAN = planner.PlannerResult(
+    verdict="BUILD", approach="Wrap deploy in a bounded retry (deploy.py).",
+    testable_ac=["3 fails → abort", "first success → no retry"],
+    in_scope_files=["orchestrator/deploy.py"], cost_usd=0.02, input_tokens=4000, output_tokens=200)
+
+
+def _mkcfg(**kw):
+    from pathlib import Path
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    base = dict(apps=[_APP], audit_path=str(d / "audit.jsonl"), use_worktree=False,
+                pm_enabled=False, test_gate=False, red_base_check=False, max_iterations=1)
+    base.update(kw)
+    return Config(**base)
+
+
+_orig_loop = (loop.builder_mod, loop.reviewer_mod, loop.run_gate, loop._land, loop._notify)
+loop.builder_mod = _StubBuilder
+loop.reviewer_mod = _StubReviewer
+loop.run_gate = lambda app, changed=None, **_: GateResult(passed=True, report="")
+loop._land = _fake_land
+loop._notify = lambda c, t: None
+
+_plan_calls = {"n": 0}
+
+
+async def _stub_plan(cfg, ticket, app=None, audit=None):
+    _plan_calls["n"] += 1
+    if audit is not None:
+        audit.record("planner", ticket_id=ticket.id, verdict=_BUILD_PLAN.verdict,
+                     testable_ac=len(_BUILD_PLAN.testable_ac), in_scope_files=len(_BUILD_PLAN.in_scope_files))
+    return _BUILD_PLAN
+
+
+_orig_plan = planner.plan
+try:
+    import orchestrator.planner as _pmod
+    loop.__dict__.setdefault("planner", _pmod)
+    _pmod.plan = _stub_plan
+
+    # planner_enabled → Planner runs, brief injected, AC sharpened, ticket lands
+    _captured_req.clear(); _plan_calls["n"] = 0
+    au = _Audit()
+    rep = asyncio.run(loop._attempt(_ticket("EU-P1"), _APP, _mkcfg(planner_enabled=True),
+                                    _Git(), _Backlog(), au, loop.Budget(0), "autodev/EU-P1"))
+    chk("loop: Planner ran once (planner_enabled)", _plan_calls["n"] == 1, str(_plan_calls))
+    chk("loop: design brief injected into the Builder (req.adr)",
+        _captured_req.get("adr") and "bounded retry" in _captured_req["adr"], str(_captured_req.get("adr"))[:80])
+    chk("loop: testable AC sharpened the SpecArtifact the Builder reads",
+        _captured_req.get("spec_ac") == ["3 fails → abort", "first success → no retry"],
+        str(_captured_req.get("spec_ac")))
+    chk("loop: 'planner' audit event recorded", any(e["event"] == "planner" for e in au.events))
+    chk("loop: ticket built + landed", rep.outcome == Outcome.MERGED, str(rep.outcome))
+
+    # planner_enabled=False → Planner NOT called (inert)
+    _plan_calls["n"] = 0
+    asyncio.run(loop._attempt(_ticket("EU-P2"), _APP, _mkcfg(planner_enabled=False),
+                              _Git(), _Backlog(), _Audit(), loop.Budget(0), "autodev/EU-P2"))
+    chk("loop: Planner OFF → not called (inert by default)", _plan_calls["n"] == 0, str(_plan_calls))
+
+    # SPLIT verdict → Scrum split → REQUEUED (builder never runs)
+    async def _split_plan(cfg, ticket, app=None, audit=None):
+        return planner.PlannerResult(verdict="SPLIT", answer="two unrelated asks", cost_usd=0.01)
+    _pmod.plan = _split_plan
+
+    class _Scrum:
+        @staticmethod
+        async def split(cfg, app_name, ticket, recap="", reason=""):
+            return {"ok": True, "keys": ["EU-P3a", "EU-P3b"]}
+    import sys as _sys
+    _sys.modules["orchestrator.scrum"] = _Scrum
+    _captured_req.clear()
+    rep3 = asyncio.run(loop._attempt(_ticket("EU-P3"), _APP, _mkcfg(planner_enabled=True),
+                                     _Git(), _Backlog(), _Audit(), loop.Budget(0), "autodev/EU-P3"))
+    chk("loop: SPLIT verdict → REQUEUED (Scrum split), builder never ran",
+        rep3.outcome == Outcome.REQUEUED and _captured_req.get("adr") is None, str(rep3.outcome))
+finally:
+    _pmod.plan = _orig_plan
+    (loop.builder_mod, loop.reviewer_mod, loop.run_gate, loop._land, loop._notify) = _orig_loop
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 passed = sum(1 for _, ok, _ in results if ok)
 print(f"\nplanner_test: {passed}/{len(results)} passed")
 for n, ok, det in results:
