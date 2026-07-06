@@ -69,7 +69,7 @@ sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
 from orchestrator import agent, provider
-from orchestrator.contracts import BuildResult, ReviewResult, TestEngineerResult
+from orchestrator.contracts import BuildResult, ReviewResult
 
 results = []
 def chk(n, c, d=""):
@@ -124,27 +124,6 @@ chk("BuildResult has provider field",
 chk("BuildResult has model_version field",
     hasattr(build_result, "model_version") and build_result.model_version == "claude-opus-4-8",
     f"model_version={build_result.model_version}")
-
-# Test 4: TestEngineerResult includes provider and model fields
-te_result = TestEngineerResult(
-    ok=True,
-    coverage="Coverage: 95%",
-    summary="Tests added",
-    cost_usd=0.05,
-    num_turns=1,
-    raw="Test",
-    tools=["Read", "Write"],
-    input_tokens=500,
-    output_tokens=200,
-    provider="GLM",
-    model_version="glm-4"
-)
-chk("TestEngineerResult has provider field",
-    hasattr(te_result, "provider") and te_result.provider == "GLM",
-    f"provider={te_result.provider}")
-chk("TestEngineerResult has model_version field",
-    hasattr(te_result, "model_version") and te_result.model_version == "glm-4",
-    f"model_version={te_result.model_version}")
 
 # Test 5: ReviewResult includes provider and model fields
 from orchestrator.contracts import Verdict

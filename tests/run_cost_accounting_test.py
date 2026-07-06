@@ -53,7 +53,7 @@ from orchestrator.config import Config, AppConfig      # noqa: E402
 from orchestrator.contracts import (                   # noqa: E402
     BuildArtifact, BuildRequest, BuildResult, GateResult, Outcome,
     PerTicketArtifactStore, ReviewResult, ReviewVerdict,
-    TestEngineerResult, Ticket, TicketReport, Verdict,
+    Ticket, TicketReport, Verdict,
 )
 
 results: list[tuple[str, bool, str]] = []
@@ -244,11 +244,12 @@ chk("builder.build: solo result absorbs the sunk tokens (EU-96 _burn sees them)"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. loop._attempt — the ticket report cost (what run_end sums) = builder + TE + review.
-#    EU-139 arithmetic: builder 0.6524547 + TE 0.3760782 + review 0.4528022 = 1.4813351.
-#    (Phase-2 §2: the provost gate that used to add 0.288974 here is deleted.)
+# 5. loop._attempt — the ticket report cost (what run_end sums) = builder + review.
+#    EU-139 arithmetic: builder 0.6524547 + review 0.4528022 = 1.1052569.
+#    (Phase-2 §2: the provost gate and the Test Engineer stage that used to add to this
+#     sum are both deleted — the Builder writes its own tests now.)
 # ══════════════════════════════════════════════════════════════════════════════
-BUILD_C, TE_C, REVIEW_C = 0.6524547, 0.3760782, 0.4528022
+BUILD_C, REVIEW_C = 0.6524547, 0.4528022
 
 
 class _Audit:
@@ -279,12 +280,6 @@ class _StubBuilder:
         return BuildResult(ok=True, summary="built", cost_usd=BUILD_C, num_turns=22)
 
 
-class _StubTE:
-    @staticmethod
-    async def ensure_coverage(ticket, app, cfg, store=None, build_artifact=None):
-        return TestEngineerResult(ok=True, coverage="all green", cost_usd=TE_C)
-
-
 class _StubReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None):
@@ -302,10 +297,9 @@ def _fake_land(tk, app, cfg, git, backlog, audit, branch, iteration, cost, build
     return TicketReport(tk.id, Outcome.MERGED, iteration, cost, app.name, branch)
 
 
-_orig = (loop.builder_mod, loop.test_engineer_mod, loop.reviewer_mod,
+_orig = (loop.builder_mod, loop.reviewer_mod,
          loop.run_gate, loop._land, loop._notify)
 loop.builder_mod = _StubBuilder
-loop.test_engineer_mod = _StubTE
 loop.reviewer_mod = _StubReviewer
 loop.run_gate = lambda app, changed=None, **_: GateResult(passed=True, report="")
 loop._land = _fake_land
@@ -317,12 +311,12 @@ try:
     _report = asyncio.run(loop._attempt(_ticket(), _APP, _loop_cfg, _Git(), _Backlog(),
                                         _Audit(), loop.Budget(0), "autodev/EU-139"))
 finally:
-    (loop.builder_mod, loop.test_engineer_mod, loop.reviewer_mod,
+    (loop.builder_mod, loop.reviewer_mod,
      loop.run_gate, loop._land, loop._notify) = _orig
 
-_expected = BUILD_C + TE_C + REVIEW_C
+_expected = BUILD_C + REVIEW_C
 chk("loop: ticket landed (MERGED)", _report.outcome == Outcome.MERGED, str(_report.outcome))
-chk("loop: report cost = builder + TE + review (no more provost gate to sum)",
+chk("loop: report cost = builder + review (no more provost gate or TE to sum)",
     _land_costs and abs(_land_costs[0] - _expected) < 1e-9,
     f"got={_land_costs}, want={_expected}")
 chk("loop: TicketReport.cost_usd carries the full ticket spend",

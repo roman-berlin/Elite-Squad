@@ -118,27 +118,6 @@ class ReviewResult:
 
 
 # --------------------------------------------------------------------------- #
-# Test Engineer <-> Orchestrator
-# --------------------------------------------------------------------------- #
-@dataclass
-class TestEngineerResult:
-    """The Test Engineer's output: it runs AFTER the Builder and BEFORE the Reviewer,
-    ensures the change is covered (happy-path + regression), and owns the coverage
-    artifact that goes into the PR description."""
-    ok: bool                      # did the Test Engineer process complete without error
-    coverage: str = ""            # coverage artifact for the PR description (plain before→after numbers)
-    summary: str = ""             # the officer's own description of the tests it added
-    cost_usd: float = 0.0
-    num_turns: int = 0
-    raw: str = ""                 # final assistant text, for the audit log
-    tools: list[str] = field(default_factory=list)
-    input_tokens: int = 0         # prompt + cache tokens this run (EU-96 per-officer burn tracking)
-    output_tokens: int = 0        # completion tokens this run
-    provider: str = ""            # EU-123: which provider served this run ("Anthropic" or "GLM")
-    model_version: str = ""       # EU-123: clean model identifier (e.g., "claude-opus-4-8", "glm-4")
-
-
-# --------------------------------------------------------------------------- #
 # Final per-ticket outcome
 # --------------------------------------------------------------------------- #
 class Outcome(str, Enum):
@@ -252,26 +231,6 @@ class ReviewVerdict:
 
 
 # --------------------------------------------------------------------------- #
-# Test Engineer artifact — EU-96
-# --------------------------------------------------------------------------- #
-
-@dataclass
-class TestEngineerArtifact:
-    """Written by the Test Engineer; consumed by the orchestrator for audit/measurement.
-
-    Carries the machine-readable coverage record so the loop and the audit chain
-    can track what the Test Engineer actually measured — a typed record rather
-    than the free-text COVERAGE: line on TestEngineerResult.  ``files_added`` is
-    left empty by the Test Engineer itself (the loop owns git); ``coverage_pct``
-    is parsed from the COVERAGE: artifact line (None when the runner reports no
-    numeric percentage).  ``ok`` mirrors TestEngineerResult.ok.
-    """
-    files_added: list[str]          # test files added or modified (stamped by the loop, or [])
-    coverage_pct: Optional[float]   # line coverage percentage if parseable, else None
-    ok: bool                        # did the Test Engineer stage complete without error
-
-
-# --------------------------------------------------------------------------- #
 # Security Engineer artifact — EU-105
 # --------------------------------------------------------------------------- #
 import re as _re
@@ -309,12 +268,11 @@ class PerTicketArtifactStore:
     """
     spec: Optional[SpecArtifact] = None
     build: Optional[BuildArtifact] = None
-    test: Optional[TestEngineerArtifact] = None
     review: Optional[ReviewVerdict] = None
     token_burn: dict[str, int] = field(default_factory=dict)
     stage_costs: dict[str, float] = field(default_factory=dict)
 
-    def put(self, artifact: SpecArtifact | BuildArtifact | TestEngineerArtifact | ReviewVerdict) -> None:
+    def put(self, artifact: SpecArtifact | BuildArtifact | ReviewVerdict) -> None:
         """Store *artifact* in the correct slot (determined by type).
 
         Raises TypeError for unknown artifact types so callers discover
@@ -324,8 +282,6 @@ class PerTicketArtifactStore:
             self.spec = artifact
         elif isinstance(artifact, BuildArtifact):
             self.build = artifact
-        elif isinstance(artifact, TestEngineerArtifact):
-            self.test = artifact
         elif isinstance(artifact, ReviewVerdict):
             self.review = artifact
         else:

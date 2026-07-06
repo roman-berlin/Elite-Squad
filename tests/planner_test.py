@@ -164,7 +164,7 @@ chk("plan: agent exception → BUILD result, never raises",
 import orchestrator.loop as loop                     # noqa: E402
 from orchestrator.contracts import (                 # noqa: E402
     BuildArtifact, BuildResult, GateResult, Outcome, ReviewResult, ReviewVerdict,
-    TestEngineerResult, TicketReport, Verdict,
+    TicketReport, Verdict,
 )
 
 _APP = AppConfig(name="automatixy", repo_path="/tmp", base_branch="DEV",
@@ -221,7 +221,7 @@ def _mkcfg(**kw):
     import tempfile
     d = Path(tempfile.mkdtemp())
     base = dict(apps=[_APP], audit_path=str(d / "audit.jsonl"), use_worktree=False,
-                pm_enabled=False, test_gate=False, red_base_check=False, max_iterations=1)
+                pm_enabled=False, red_base_check=False, max_iterations=1)
     base.update(kw)
     return Config(**base)
 

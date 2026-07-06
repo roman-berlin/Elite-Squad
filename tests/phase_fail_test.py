@@ -28,8 +28,8 @@ def _audit(rows):
     return ns(audit_path=str(a), apps=[ns(name="automatixy")])
 
 
-# --- Case 1: errored run whose review verdict is FAIL -> Review (index 3) red --------------------
-# (EU-55: Review moved from index 2 to 3 once the Tests/Security phases joined the shared bar.)
+# --- Case 1: errored run whose review verdict is FAIL -> Review (index 2) red --------------------
+# (EU-55: Review moved from index 3 to 2 once the Tests phase was removed from the shared bar.)
 cfg = _audit([
     dict(event="ticket_start", ticket_id="AUTO-90", app="automatixy", branch="auto/AUTO-90", ts=ts),
     dict(event="build", ticket_id="AUTO-90", app="automatixy", iteration=1, turns=8,
@@ -74,7 +74,7 @@ def chk(name, cond):
     print(("  ok " if cond else "  XX ") + name)
 
 # Acceptance: review-FAIL lights Review red, gate failure lights Gate red.
-chk("review-FAIL -> failed_phase == 3 (Review)", run.get("failed_phase") == 3)
+chk("review-FAIL -> failed_phase == 2 (Review)", run.get("failed_phase") == 2)
 chk("review-FAIL renders Review node red", '<div class="ph failed"><span></span>Review</div>' in html_fail)
 chk("review-FAIL does NOT mark Review as done", '<span></span>Review</div>' not in html_fail.replace(
     '<div class="ph failed"><span></span>Review</div>', ""))

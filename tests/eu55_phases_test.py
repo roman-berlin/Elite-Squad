@@ -1,12 +1,12 @@
 """EU-55 / F12: the terminal phase bar (loop._bar) and the War Room web phase bar
 (warroom.active_run) must derive from ONE shared PHASES constant, so they can never
-drift apart again — and that constant must include the real pipeline's Test Engineer
-("Tests") and Security steps, which both old hardcoded bars omitted.
+drift apart again.
 
 Guards three things:
   1. single source of truth — loop and warroom both bind the same phases.PHASES object;
-  2. the Tests (Test Engineer) and Security phases are present, in pipeline order;
-  3. the reached / failed_phase index logic matches the new phase count/order (no drift).
+  2. the pipeline phases are present, in pipeline order (Phase-2 §2: the Security phase
+     AND the Test Engineer 'Tests' phase were removed — Build → Gate → Review → Land);
+  3. the reached / failed_phase index logic matches the phase count/order (no drift).
 """
 import io
 import json
@@ -52,15 +52,17 @@ def chk(name, cond):
 
 # --- 1) Single source of truth -----------------------------------------------------------------
 PH = phases.PHASES
-# Phase-2 §2 (2026-07-06): the LLM per-diff Security phase was removed — 5 phases now.
-chk("PHASES is the exact pipeline order", PH == ("Build", "Gate", "Tests", "Review", "Land"))
+# Phase-2 §2 (2026-07-06): the LLM per-diff Security phase and the Test Engineer 'Tests' coverage
+# phase were both removed — 4 phases now (the Builder writes tests against the Planner's AC and the
+# deterministic gate runs them).
+chk("PHASES is the exact pipeline order", PH == ("Build", "Gate", "Review", "Land"))
 chk("loop._bar derives from the shared PHASES (identity)", loop.PHASES is phases.PHASES)
 chk("warroom bar derives from the shared PHASES (identity)", warroom.PHASES is phases.PHASES)
 
-# --- 2) Test Engineer 'Tests' phase present, between the right neighbours ------------------------
-chk("Test Engineer 'Tests' phase present", "Tests" in PH)
+# --- 2) Removed phases stay removed; survivors are in the right order ----------------------------
+chk("Test Engineer 'Tests' phase removed (Phase-2 §2)", "Tests" not in PH)
 chk("Security phase removed (Phase-2 §2)", "Security" not in PH)
-chk("Tests runs between Gate and Review", PH.index("Gate") < PH.index("Tests") < PH.index("Review"))
+chk("Gate runs between Build and Review", PH.index("Build") < PH.index("Gate") < PH.index("Review"))
 chk("Review runs just before Land", PH.index("Review") < PH.index("Land"))
 
 # --- 3) Both bars render the SAME ordered phases from that one constant --------------------------
@@ -76,15 +78,15 @@ with redirect_stdout(buf):
     loop._bar(loop.BUILD, active=loop.BUILD)
 term = buf.getvalue()
 chk("terminal bar prints every phase name", all(p in term for p in PH))
-chk("terminal bar prints Tests (and no Security)", "Tests" in term and "Security" not in term)
+chk("terminal bar prints no removed phases", "Tests" not in term and "Security" not in term)
 chk("terminal bar phase order matches PHASES",
     [term.index(p) for p in PH] == sorted(term.index(p) for p in PH))
 
-# --- 4) reached / failed_phase indices match the new 5-phase order (drift guard) ----------------
+# --- 4) reached / failed_phase indices match the 4-phase order (drift guard) ---------------------
 # build done + live -> we've reached the Gate (next phase = index 1).
 chk("has_build (live) -> reached == Gate index", web["reached"] == PH.index("Gate"))
 
-# reviewed + live -> Build, Gate, Tests, Review behind us; Land is next.
+# reviewed + live -> Build, Gate, Review behind us; Land is next.
 reviewed = _run([dict(event="ticket_start", ticket_id="AUTO-2", app="automatixy", branch="b", ts=ts),
                  dict(event="build", ticket_id="AUTO-2", app="automatixy", iteration=1, tools=["Edit"],
                       summary="built", ts=ts),
@@ -101,14 +103,14 @@ merged = _run([dict(event="ticket_start", ticket_id="AUTO-3", app="automatixy", 
 chk("merged -> reached == len(PHASES)", merged["reached"] == len(PH))
 chk("merged -> no failed_phase", merged["failed_phase"] is None)
 
-# review-FAIL errored -> Review lights red at its NEW index (3, not the old 2).
+# review-FAIL errored -> Review lights red at its NEW index (2, after Tests was removed).
 rev_fail = _run([dict(event="ticket_start", ticket_id="AUTO-4", app="automatixy", branch="b", ts=ts),
                  dict(event="build", ticket_id="AUTO-4", app="automatixy", iteration=1, tools=["Edit"],
                       summary="built", ts=ts),
                  dict(event="review", ticket_id="AUTO-4", iteration=1, verdict="FAIL", summary="no", ts=ts),
                  dict(event="ticket_exception", ticket_id="AUTO-4", app="automatixy", error="x", ts=ts)],
                 live=False)
-chk("review-FAIL -> failed_phase == Review index (3)", rev_fail["failed_phase"] == PH.index("Review") == 3)
+chk("review-FAIL -> failed_phase == Review index (2)", rev_fail["failed_phase"] == PH.index("Review") == 2)
 
 # built-but-not-reviewed errored -> Gate lights red (index 1, unchanged).
 gate_fail = _run([dict(event="ticket_start", ticket_id="AUTO-5", app="automatixy", branch="b", ts=ts),

@@ -19,7 +19,6 @@ from . import builder as builder_mod
 from . import decisions
 from . import notify
 from . import reviewer as reviewer_mod
-from . import test_engineer as test_engineer_mod
 from .audit import AuditLog
 from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
@@ -29,7 +28,7 @@ from .gate import base_gate_check, gate_fingerprint, run_deterministic_checks, r
 from . import jira_adapter as jira_commenter
 from .git_ops import Git, GitError
 from .officers import display
-from .phases import BUILD, GATE, LAND, PHASES, REVIEW, TESTS
+from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 
 # Get the module reference for explicit subprocess access
 import sys as _sys
@@ -171,7 +170,7 @@ def _bar(done: int, active: int = -1, fail: int = -1) -> None:
     Phases come from the shared ``PHASES`` constant (EU-55) so this terminal bar and the
     War Room web bar derive from one source and can never drift apart again. ``done`` is the
     count of completed phases; ``active``/``fail`` are PHASES indices — pass them by name
-    (BUILD/GATE/TESTS/REVIEW/LAND) so the call sites can't drift if the order changes.
+    (BUILD/GATE/REVIEW/LAND) so the call sites can't drift if the order changes.
     """
     cells = []
     for i, name in enumerate(PHASES):
@@ -588,10 +587,6 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     # previous one, so an A/B/A/B rejection oscillation — where the build alternates between two
     # unaddressed failures — trips escalation instead of burning every remaining Opus pass.
     recent_reject_sigs: deque[str] = deque(maxlen=3)
-    coverage_artifact = ""        # Test Engineer's PR coverage line for this ticket (latest pass)
-    covered_diff_hash: str | None = None   # EU-53: hash of the tree the Test Engineer last covered —
-                                           # lets a later pass skip the (Opus) coverage agent + re-gate
-                                           # when nothing changed since.
     pm_used = False
     # EU-90: fingerprint of the in-scope finding SET we last commented on this ticket, kept across
     # passes so the "Builder retrying" Jira comment is posted only when that set actually CHANGES —
@@ -981,72 +976,6 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         last_gate_fp = ""   # a passing gate breaks the "consecutive" chain (flakes ≠ stuck)
         if app.gate_commands:
             print("  gate · passed", flush=True)
-        _bar(TESTS, active=TESTS)
-
-        # 2.5) TEST ENGINEER — coverage gate: after the build, before review, ensure the change is
-        # proven (happy-path + regression test) and own the coverage artifact for the PR description.
-        if getattr(cfg, "test_gate", True):
-            # EU-53: the coverage pass runs a full-tools (Opus) agent and the re-gate below re-runs
-            # the repo's whole test command — both are pure waste on a retry whose tree is byte-for-byte
-            # what the Test Engineer already covered (e.g. a review rejection the builder didn't act on,
-            # or any unchanged-scope pass). Hash the current diff and skip the whole stage when it
-            # matches the tree we last covered.
-            pre_te_hash = AuditLog.diff_hash(git.diff_against_base())
-            if pre_te_hash == covered_diff_hash:
-                print("  tests · change unchanged since last coverage pass — skipping Test Engineer (EU-53)",
-                      flush=True)
-                audit.record("test_engineer_skipped", ticket_id=ticket.id, iteration=iteration,
-                             reason="diff unchanged since last coverage pass")
-            else:
-                print("  tests · Test Engineer covering the change…", flush=True)
-                # EU-72: hand the Test Engineer the Builder's BuildArtifact as primary context.
-                te = await test_engineer_mod.ensure_coverage(ticket, app, cfg,
-                                                             store=store, build_artifact=store.build)
-                cost += te.cost_usd
-                budget.add(te.cost_usd)
-                _burn("test-engineer", te.input_tokens, te.output_tokens)   # EU-96
-                audit.record("test_engineer", ticket_id=ticket.id, iteration=iteration, ok=te.ok,
-                             coverage=te.coverage, cost_usd=te.cost_usd, turns=te.num_turns,
-                             tools=te.tools, summary=(te.summary or "")[:1000],
-                             provider=te.provider, model=te.model_version)
-                if te.coverage:
-                    coverage_artifact = te.coverage
-                    print(f"  tests · coverage {te.coverage}", flush=True)
-                elif te.ok:
-                    print("  tests · Test Engineer added tests (no coverage delta reported)", flush=True)
-                else:
-                    print("  tests · Test Engineer errored — proceeding to review", flush=True)
-                # Record the tree the Test Engineer just covered so a later unchanged pass can skip above.
-                covered_diff_hash = AuditLog.diff_hash(git.diff_against_base())
-                # EU-53: only re-gate when the Test Engineer ACTUALLY changed the tree (added/edited test
-                # files). When it added nothing, the build already passed this exact gate above, so the
-                # re-gate — for the EU repo the whole `python3 tests/run_all.py` — is pure redundant burn.
-                if covered_diff_hash == pre_te_hash:
-                    print("  tests · Test Engineer added no files — skipping re-gate (EU-53)", flush=True)
-                else:
-                    # The Test Engineer added test files. Re-run the SAME verification gate the build
-                    # passed — run_gate over the app's configured gate_commands. That re-gate catches a
-                    # newly-broken test ONLY when those commands actually run the repo's tests (e.g.
-                    # automatixy's vitest, the EU repo's `python3 tests/run_all.py`); when the gate is
-                    # lint/typecheck-only it instead catches type/lint breakage the new test files
-                    # introduced, and a failing test would surface later (the Test Engineer's own run, or
-                    # CI). Either way a red here goes back to the builder now rather than as a confusing
-                    # review failure.
-                    te_gate = run_gate(app, git.changed_paths())
-                    if not te_gate.passed:
-                        # §3.1: the fingerprint guard covers this failure point too — a repeat of
-                        # the previous failed gate here is the same stuck loop.
-                        fp = gate_fingerprint(te_gate.report or "")
-                        if fp and fp == last_gate_fp:
-                            _note_gate_stuck(fp, iteration)
-                            last_changes = [f"Verification failed identically two gates running; fix these:\n{te_gate.report}"]
-                            break
-                        last_gate_fp = fp
-                        print("  gate · FAILED after tests → sending fixes back to builder", flush=True)
-                        _bar(TESTS, fail=TESTS)
-                        last_changes = [f"Verification failed after the coverage pass; fix these:\n{te_gate.report}"]
-                        continue
-                    last_gate_fp = ""   # green re-gate breaks the consecutive-failure chain
 
         # 2.7) DETERMINISTIC CHECKS (§3.3–5): lint → secret scan → lockfile sanity. Scripts, not
         # LLMs — cheap, unhallucinatable, and no reviewer runs until they are green; a failure
@@ -1241,10 +1170,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _land_sig = inspect.signature(_land)
             if "commenter" in _land_sig.parameters:
                 result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review, coverage=coverage_artifact, commenter=commenter)
+                               review, commenter=commenter)
             else:
                 result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review, coverage=coverage_artifact)
+                               review)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
             return _resolve(result)
@@ -1344,7 +1273,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
-          coverage="", commenter=None) -> TicketReport:
+          commenter=None) -> TicketReport:
     if commenter is None:
         commenter = jira_commenter.TicketCommenter(
             cfg,
@@ -1483,7 +1412,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     git.push(branch)
     gate_failure = "" if (gate is None or gate.passed) else (gate.report or "").strip()
     pr_url = git.open_pr(branch, f"{ticket.id}: {ticket.summary}",
-                         _pr_body(ticket, app, review, coverage, gate_failure=gate_failure)) \
+                         _pr_body(ticket, app, review, gate_failure=gate_failure)) \
         if cfg.open_pr_on_block else None
     print(f"  land · not auto-merged ({reason}) → "
           + (f"PR {pr_url}" if pr_url else "open a PR manually"), flush=True)
@@ -1660,9 +1589,8 @@ def _gate_failures(report: str, limit: int = 12) -> list[str]:
     return names[:limit]
 
 
-def _pr_body(ticket: Ticket, app: AppConfig, review, coverage: str = "", gate_failure: str = "") -> str:
+def _pr_body(ticket: Ticket, app: AppConfig, review, gate_failure: str = "") -> str:
     ac = "\n".join(f"- [x] {c}" for c in ticket.acceptance_criteria)
-    cov = f"\n## Coverage\n{coverage}\n" if coverage else ""
     gf = ""
     if gate_failure:
         failing = _gate_failures(gate_failure)
@@ -1670,7 +1598,7 @@ def _pr_body(ticket: Ticket, app: AppConfig, review, coverage: str = "", gate_fa
         gf = f"\n## Dev gate — FAILED after merge\n{names}```\n{gate_failure[-2000:]}\n```\n"
     return (f"Automated implementation of **{ticket.id}** for `{app.name}`, targeting "
             f"`{app.base_branch}`.\n\n{ticket.url or ''}\n{gf}\n"
-            f"## Acceptance criteria\n{ac}\n{cov}\n## Reviewer summary\n{review.summary}\n")
+            f"## Acceptance criteria\n{ac}\n\n## Reviewer summary\n{review.summary}\n")
 
 
 def _escalation_comment(last_changes: list[str]) -> str:

@@ -69,7 +69,7 @@ import orchestrator.loop as loop              # noqa: E402
 from orchestrator import decisions, usage     # noqa: E402
 from orchestrator.config import Config, AppConfig                       # noqa: E402
 from orchestrator.contracts import (Ticket, BuildResult, GateResult,    # noqa: E402
-                                    TestEngineerResult, Outcome, TicketReport)
+                                    Outcome, TicketReport)
 
 results = []
 
@@ -107,10 +107,6 @@ class FatBuilder:
                            tools=[], input_tokens=490_000, output_tokens=10_000)
 
 
-async def fake_te(ticket, app, cfg, **_):
-    return TestEngineerResult(ok=True, coverage="lines 80%")
-
-
 class FailReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration=1, **_):
@@ -120,7 +116,6 @@ class FailReviewer:
 
 
 loop.builder_mod = FatBuilder
-loop.test_engineer_mod.ensure_coverage = fake_te
 loop.reviewer_mod = FailReviewer
 
 tmp = Path(tempfile.mkdtemp())

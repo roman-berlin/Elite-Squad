@@ -37,7 +37,6 @@ from orchestrator.contracts import (  # noqa: E402
     Outcome,
     PerTicketArtifactStore,
     ReviewResult,
-    TestEngineerResult,
     TicketReport,
     Verdict,
 )
@@ -63,7 +62,7 @@ chk("TicketReport.token_burn holds officer totals",
     tr_with_burn.token_burn == {"builder": 1500, "reviewer": 800},
     repr(tr_with_burn.token_burn))
 
-# ── (b) BuildResult / TestEngineerResult / ReviewResult carry token fields ──────
+# ── (b) BuildResult / ReviewResult carry token fields ──────
 
 br = BuildResult(ok=True, summary="done", input_tokens=1200, output_tokens=300)
 chk("BuildResult has input_tokens", br.input_tokens == 1200, repr(br.input_tokens))
@@ -72,13 +71,6 @@ chk("BuildResult has output_tokens", br.output_tokens == 300, repr(br.output_tok
 br_default = BuildResult(ok=True, summary="done")
 chk("BuildResult.input_tokens defaults to 0", br_default.input_tokens == 0)
 chk("BuildResult.output_tokens defaults to 0", br_default.output_tokens == 0)
-
-te = TestEngineerResult(ok=True, input_tokens=900, output_tokens=200)
-chk("TestEngineerResult has input_tokens", te.input_tokens == 900, repr(te.input_tokens))
-chk("TestEngineerResult has output_tokens", te.output_tokens == 200, repr(te.output_tokens))
-
-te_default = TestEngineerResult(ok=True)
-chk("TestEngineerResult.input_tokens defaults to 0", te_default.input_tokens == 0)
 
 rr = ReviewResult(verdict=Verdict.PASS, spec_met=True, input_tokens=700, output_tokens=150)
 chk("ReviewResult has input_tokens", rr.input_tokens == 700, repr(rr.input_tokens))
@@ -103,9 +95,9 @@ chk("builder burn accumulated correctly",
     store.token_burn.get("builder") == 1500,
     repr(store.token_burn))
 
-_burn(store, "test-engineer", 900, 200)
-chk("test-engineer burn accumulated correctly",
-    store.token_burn.get("test-engineer") == 1100,
+_burn(store, "planner", 900, 200)
+chk("planner burn accumulated correctly",
+    store.token_burn.get("planner") == 1100,
     repr(store.token_burn))
 
 _burn(store, "reviewer", 700, 150)

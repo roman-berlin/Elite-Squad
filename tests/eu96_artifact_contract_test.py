@@ -1,4 +1,4 @@
-"""EU-96 artifact-contract test: Builder → Reviewer → TestEngineer handoff chain.
+"""EU-96 artifact-contract test: Builder → Reviewer handoff chain.
 
 Asserts the typed artifact pipeline described in EU-96:
 
@@ -7,8 +7,6 @@ Asserts the typed artifact pipeline described in EU-96:
   (2) Reviewer prompt-builder injects the BuildArtifact fields (open_questions,
       diff_digest) and Reviewer.review() publishes a ReviewVerdict with
       verdict/blocking fields.
-  (3) TestEngineer prompt-builder injects FILES CHANGED from BuildArtifact and
-      ensure_coverage() publishes a TestEngineerArtifact with ok/coverage_pct.
   (4) After two simulated officer calls, store.token_burn has entries for both
       officer keys.
 
@@ -54,7 +52,7 @@ def chk(name: str, cond: bool, detail: str = "") -> None:
 
 
 # ── Imports (after SDK stub is in place) ──────────────────────────────────────
-from orchestrator import builder, reviewer, test_engineer  # noqa: E402
+from orchestrator import builder, reviewer  # noqa: E402
 from orchestrator.agent import AgentRun  # noqa: E402
 from orchestrator.config import Config, AppConfig  # noqa: E402
 from orchestrator.contracts import (  # noqa: E402
@@ -65,8 +63,6 @@ from orchestrator.contracts import (  # noqa: E402
     ReviewResult,
     ReviewVerdict,
     SpecArtifact,
-    TestEngineerArtifact,
-    TestEngineerResult,
     Ticket,
     Verdict,
 )
@@ -116,13 +112,6 @@ chk("reviewer.review accepts 'store' keyword arg", "store" in _review_sig.parame
 chk("reviewer.review accepts 'build_artifact' keyword arg",
     "build_artifact" in _review_sig.parameters,
     str(list(_review_sig.parameters)))
-
-_te_sig = inspect.signature(test_engineer.ensure_coverage)
-chk("ensure_coverage accepts 'store' keyword arg", "store" in _te_sig.parameters,
-    str(list(_te_sig.parameters)))
-chk("ensure_coverage accepts 'build_artifact' keyword arg",
-    "build_artifact" in _te_sig.parameters,
-    str(list(_te_sig.parameters)))
 
 
 # =================== (1) Builder publishes BuildArtifact ===================== #
@@ -242,61 +231,6 @@ chk("ReviewVerdict.verdict field is set (Verdict enum)",
     store_r.review is not None and isinstance(store_r.review.verdict, Verdict))
 chk("ReviewVerdict.blocking field is a list",
     store_r.review is not None and isinstance(store_r.review.blocking, list))
-
-
-# ============= (3) TestEngineer injects files_changed + publishes artifact === #
-
-te_prompt_cap: dict[str, str] = {}
-
-
-async def _fake_te_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
-    """Stub run_agent for the test engineer: captures the prompt, returns a coverage line."""
-    te_prompt_cap["p"] = prompt
-    return AgentRun(
-        text="COVERAGE: lines 85→92%",
-        final="COVERAGE: lines 85→92%",
-        cost_usd=0.05,
-        num_turns=1,
-        is_error=False,
-        tools=[],
-        input_tokens=900,
-        output_tokens=200,
-    )
-
-
-test_engineer.run_agent = _fake_te_agent
-store_te = PerTicketArtifactStore()
-store_te.put(ba)
-
-res_te = asyncio.run(
-    test_engineer.ensure_coverage(tk, app, cfg, store=store_te, build_artifact=ba)
-)
-
-chk("ensure_coverage() returns a TestEngineerResult",
-    isinstance(res_te, TestEngineerResult))
-chk("test-engineer prompt injects FILES CHANGED from BuildArtifact",
-    "orchestrator/contracts.py" in te_prompt_cap.get("p", ""))
-chk("ensure_coverage() publishes a TestEngineerArtifact into store.test",
-    isinstance(store_te.test, TestEngineerArtifact))
-chk("TestEngineerArtifact.ok is True (successful run)",
-    store_te.test is not None and store_te.test.ok is True)
-chk("TestEngineerArtifact.coverage_pct parsed from 'lines 85→92%'",
-    store_te.test is not None and store_te.test.coverage_pct == 92.0,
-    repr(store_te.test.coverage_pct if store_te.test else None))
-
-# EU-96 (iter-4): _parse_coverage_pct narrowing — a trailing "(was …%)" prior-coverage clause must
-# NOT be mistaken for the current ("after") value by the last-match heuristic.
-_pcp = test_engineer._parse_coverage_pct
-chk("_parse_coverage_pct: plain '91%' -> 91.0", _pcp("91%") == 91.0, repr(_pcp("91%")))
-chk("_parse_coverage_pct: 'lines 82→91%' -> 91.0 (after value)", _pcp("lines 82→91%") == 91.0,
-    repr(_pcp("lines 82→91%")))
-chk("_parse_coverage_pct: 'n/a (pytest counts only)' -> None", _pcp("n/a (pytest counts only)") is None,
-    repr(_pcp("n/a (pytest counts only)")))
-chk("_parse_coverage_pct: 'now n/a (was 95%)' -> None (before-% stripped)",
-    _pcp("now n/a (was 95%)") is None, repr(_pcp("now n/a (was 95%)")))
-chk("_parse_coverage_pct: '91% (was 80%)' -> 91.0 (after, not the before-%)",
-    _pcp("91% (was 80%)") == 91.0, repr(_pcp("91% (was 80%)")))
-chk("_parse_coverage_pct: empty string -> None", _pcp("") is None, repr(_pcp("")))
 
 
 # =================== (4) token_burn accumulation for two officer keys ======== #

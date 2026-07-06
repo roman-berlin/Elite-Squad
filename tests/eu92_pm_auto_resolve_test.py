@@ -45,7 +45,7 @@ from orchestrator import pm as pm_mod
 from orchestrator import filing
 from orchestrator.config import Config, AppConfig
 from orchestrator.contracts import (
-    BuildResult, GateResult, Outcome, QualityIssue, ReviewResult, TestEngineerResult,
+    BuildResult, GateResult, Outcome, QualityIssue, ReviewResult,
     Ticket, Verdict,
 )
 
@@ -183,7 +183,6 @@ def _make_cfg(dry_run: bool = True, max_iterations: int = 1,
         dry_run=dry_run,
         max_iterations=max_iterations,
         pm_enabled=pm_enabled,
-        test_gate=False,
         use_worktree=False,
     )
 

@@ -40,7 +40,7 @@ import orchestrator.loop as loop
 from orchestrator import pm as pm_mod
 from orchestrator.config import Config, AppConfig
 from orchestrator.contracts import (
-    BuildResult, GateResult, QualityIssue, ReviewResult, TestEngineerResult,
+    BuildResult, GateResult, QualityIssue, ReviewResult,
     Ticket, Verdict,
 )
 from orchestrator.pm import FindingsTriage
@@ -187,8 +187,7 @@ async def _stub_pm_triage(cfg, app_name, ticket_id, **_):
 
 pm_mod.triage = _stub_pm_triage
 
-# Skip the Test Engineer gate (prevents an Opus call and simplifies the mock surface).
-# We set test_gate=False on every Config below.
+# (There is no Test Engineer stage — the deterministic gate runs the Builder-written tests.)
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +233,13 @@ def _install_capture_hooks():
 
 
 def _make_cfg(dry_run: bool, max_iterations: int = 1) -> Config:
-    """Build a Config with PM exhaustion triage disabled and test_gate off."""
+    """Build a Config with PM exhaustion triage disabled."""
     return Config(
         apps=[app_cfg],
         audit_path=str(tmp / "audit.jsonl"),
         dry_run=dry_run,
         max_iterations=max_iterations,
         pm_enabled=False,       # skip PM exhaustion triage → cleaner mock surface
-        test_gate=False,        # skip Test Engineer
         use_worktree=False,
     )
 

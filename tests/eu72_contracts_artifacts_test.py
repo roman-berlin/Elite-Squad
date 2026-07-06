@@ -14,7 +14,6 @@ from orchestrator.contracts import (
     PerTicketArtifactStore,
     ReviewVerdict,
     SpecArtifact,
-    TestEngineerArtifact,
     Verdict,
 )
 
@@ -82,25 +81,11 @@ check("ReviewVerdict blocking list", verdict_fail.blocking == ["missing test cov
 
 
 # ------------------------------------------------------------------ #
-# TestEngineerArtifact — EU-96
-# ------------------------------------------------------------------ #
-te_art = TestEngineerArtifact(files_added=["tests/foo_test.py"], coverage_pct=87.5, ok=True)
-check("TestEngineerArtifact.files_added list", te_art.files_added == ["tests/foo_test.py"])
-check("TestEngineerArtifact.coverage_pct float", te_art.coverage_pct == 87.5)
-check("TestEngineerArtifact.ok bool", te_art.ok is True)
-
-te_no_pct = TestEngineerArtifact(files_added=[], coverage_pct=None, ok=False)
-check("TestEngineerArtifact allows coverage_pct=None", te_no_pct.coverage_pct is None)
-check("TestEngineerArtifact.ok=False valid", te_no_pct.ok is False)
-
-
-# ------------------------------------------------------------------ #
 # PerTicketArtifactStore — initial state
 # ------------------------------------------------------------------ #
 store = PerTicketArtifactStore()
 check("store.spec starts None", store.spec is None)
 check("store.build starts None", store.build is None)
-check("store.test starts None", store.test is None)
 check("store.review starts None", store.review is None)
 check("store.token_burn starts as empty dict", store.token_burn == {})
 
@@ -115,20 +100,14 @@ check("put(SpecArtifact) leaves review None", store.review is None)
 
 store.put(build)
 check("put(BuildArtifact) -> store.build", store.build is build)
-check("put(BuildArtifact) leaves test None", store.test is None)
 check("put(BuildArtifact) leaves review None", store.review is None)
-
-store.put(te_art)
-check("put(TestEngineerArtifact) -> store.test", store.test is te_art)
-check("put(TestEngineerArtifact) leaves build untouched", store.build is build)
-check("put(TestEngineerArtifact) leaves review None", store.review is None)
 
 store.put(verdict_fail)
 check("put(ReviewVerdict) -> store.review", store.review is verdict_fail)
 
 # all slots now populated
-check("all slots filled after four puts",
-      store.spec is spec and store.build is build and store.test is te_art
+check("all slots filled after three puts",
+      store.spec is spec and store.build is build
       and store.review is verdict_fail)
 
 

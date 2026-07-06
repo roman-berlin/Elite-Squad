@@ -4,7 +4,7 @@ instead of hardcoding cfg.reviewer_model / cfg.builder_model.
 Covers both wiring shapes:
   • recon-caller officers (scout/provost/quartermaster/pm/scrum) that pass `model=` into
     recon.run_officer, and
-  • ClaudeAgentOptions officers (provost.gate, adjutant, drillmaster, squad, test_engineer).
+  • ClaudeAgentOptions officers (adjutant, drillmaster, squad).
 
 Asserts the contract, not a specific model id:
   - auto_model OFF -> the configured ceiling, unchanged (pins/off-switch honored).
@@ -22,7 +22,7 @@ sdk.__getattr__ = lambda n: _D
 sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
-from orchestrator import models, scout, provost, test_engineer, recon
+from orchestrator import models, scout, provost, recon
 from orchestrator.config import Config, AppConfig
 from orchestrator.contracts import Ticket
 
@@ -67,21 +67,6 @@ app = make_cfg(True).app("automatixy")
 app.workdir = str(d)
 check("provost.gate removed (Phase-2 §2); provost.inspect survives",
       not hasattr(provost, "gate") and hasattr(provost, "inspect"))
-
-# --- test_engineer: a code-writing officer under the *builder* ceiling -------------------------- #
-te_model = {}
-async def fake_agent_te(prompt, options, tag=""):
-    te_model["m"] = getattr(options, "model", None); return RR("COVERAGE: ok")
-test_engineer.run_agent = fake_agent_te
-tk = Ticket(id="AUTO-1", key="AUTO-1", summary="x", description="y", acceptance_criteria=["a"])
-
-te_model.clear(); asyncio.run(test_engineer.ensure_coverage(tk, app, make_cfg(False)))
-check("test_engineer: auto OFF -> builder ceiling unchanged",
-      te_model["m"] == make_cfg(False).builder_model, te_model.get("m"))
-
-te_model.clear(); asyncio.run(test_engineer.ensure_coverage(tk, app, make_cfg(True)))
-check("test_engineer: auto ON -> routed through ladder (floor stays Sonnet for code)",
-      te_model["m"] in models.LADDER and te_model["m"] != models.HAIKU, te_model.get("m"))
 
 print("\n================ OFFICER-LADDER QA (EU-52) ================")
 passed = sum(1 for _, ok, _ in results if ok)

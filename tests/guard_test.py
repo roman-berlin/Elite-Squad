@@ -226,11 +226,9 @@ chk("hooks_config matcher includes Read (hook fires on secret reads)", "Read" in
 from pathlib import Path
 b = Path("./orchestrator/builder.py").read_text()
 s = Path("./orchestrator/squad.py").read_text()
-te = Path("./orchestrator/test_engineer.py").read_text()
 # EU-188: the write-capable worktree officers attach the guard WITH their workdir (confinement on).
 chk("builder attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(workdir)" in b)
 chk("soldier attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(cwd)" in s)
-chk("test-engineer attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(workdir)" in te)
 
 # --- EU-2 F7: fail LOUD when the guard isn't installed ---
 chk("is_installed() True when SDK supports hooks", guard.is_installed() is True)

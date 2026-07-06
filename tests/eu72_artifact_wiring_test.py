@@ -7,10 +7,9 @@ pipeline. This harness proves the live wiring at three levels:
      Decisions/Open-questions sections out of the builder summary.
   B. the REAL officers publish/consume via the store (stubbed run_agent, no models):
        • builder.build  reads the SpecArtifact and publishes a BuildArtifact;
-       • test_engineer.ensure_coverage reads the BuildArtifact as primary context;
        • reviewer.review reads the BuildArtifact and publishes a typed ReviewVerdict.
   C. end-to-end _attempt — one store per ticket, SpecArtifact derived from the ticket, files_changed
-     stamped by the loop, the BuildArtifact handed to the Test Engineer + Reviewer, and the
+     stamped by the loop, the BuildArtifact handed to the Reviewer, and the
      ReviewVerdict landing back in the store.
 """
 import sys, types, asyncio
@@ -32,7 +31,7 @@ def chk(n, c, d=""):
 from orchestrator import builder
 from orchestrator.contracts import (BuildArtifact, BuildResult, PerTicketArtifactStore,
                                      ReviewResult, ReviewVerdict, SpecArtifact,
-                                     TestEngineerResult, Ticket, TicketReport, Outcome,
+                                     Ticket, TicketReport, Outcome,
                                      GateResult, Verdict)
 
 chk("_digest passes short text through unchanged", builder._digest("a short summary") == "a short summary")
@@ -59,10 +58,9 @@ chk("_build_artifact diff_digest is bounded", len(_art.diff_digest) <= 500)
 
 
 # ============================ B. real officers publish/consume ============================ #
-from orchestrator import agent as agent_mod, reviewer, test_engineer
+from orchestrator import agent as agent_mod, reviewer
 from orchestrator.agent import AgentRun
 from orchestrator.config import Config, AppConfig
-from orchestrator.contracts import TestEngineerArtifact
 
 
 def mkcfg(**kw):
@@ -97,47 +95,9 @@ chk("build() artifact carries the parsed decisions", store_b.build.decisions == 
 chk("build() with store=None does not raise (back-compat)",
     asyncio.run(builder.build(BuildRequest(ticket=tk, branch="b", iteration=1), app, cfg)).ok)
 
-# -- test_engineer.ensure_coverage: consumes the BuildArtifact as primary context ------------ #
+# -- reviewer.review: consumes the BuildArtifact, publishes a typed ReviewVerdict ------------ #
 ba = BuildArtifact(files_changed=["orchestrator/zzz.py"], diff_digest="DIGEST_TOKEN",
                    decisions=[], open_questions=["OQ_TOKEN"])
-te_prompt = {}
-async def fake_te_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
-    te_prompt["p"] = prompt
-    return AgentRun(text="COVERAGE: lines 80→90", final="COVERAGE: lines 80→90",
-                    cost_usd=0.1, num_turns=1, is_error=False, tools=[])
-test_engineer.run_agent = fake_te_agent
-store_te = PerTicketArtifactStore(); store_te.put(ba)
-res_te = asyncio.run(test_engineer.ensure_coverage(tk, app, cfg, store=store_te, build_artifact=ba))
-chk("ensure_coverage returns a TestEngineerResult", isinstance(res_te, TestEngineerResult))
-chk("ensure_coverage leads with the builder's changed files", "orchestrator/zzz.py" in te_prompt.get("p", ""))
-chk("ensure_coverage surfaces the builder's diff digest", "DIGEST_TOKEN" in te_prompt.get("p", ""))
-chk("ensure_coverage does not churn the review/build slots",
-    store_te.review is None and store_te.build is ba)
-# EU-96: Test Engineer now publishes a TestEngineerArtifact into the test slot.
-chk("ensure_coverage publishes a TestEngineerArtifact into store.test",
-    isinstance(store_te.test, TestEngineerArtifact))
-chk("TestEngineerArtifact.ok matches run success", store_te.test.ok is True)
-# The fake agent returns "COVERAGE: lines 80→90" — no '%' so coverage_pct is None.
-chk("TestEngineerArtifact.coverage_pct is None when no % in COVERAGE line",
-    store_te.test.coverage_pct is None)
-# A COVERAGE line with a percentage parses correctly.
-async def fake_te_pct(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None):
-    return AgentRun(text="COVERAGE: lines 82→91%", final="COVERAGE: lines 82→91%",
-                    cost_usd=0.0, num_turns=1, is_error=False, tools=[])
-test_engineer.run_agent = fake_te_pct
-store_pct = PerTicketArtifactStore(); store_pct.put(ba)
-asyncio.run(test_engineer.ensure_coverage(tk, app, cfg, store=store_pct, build_artifact=ba))
-chk("TestEngineerArtifact.coverage_pct parsed from 'lines 82→91%'",
-    store_pct.test is not None and store_pct.test.coverage_pct == 91.0)
-# Restore original fake for fallback test.
-test_engineer.run_agent = fake_te_agent
-# falls back to store.build when no explicit artifact is passed
-te_prompt.clear()
-asyncio.run(test_engineer.ensure_coverage(tk, app, cfg, store=store_te))
-chk("ensure_coverage falls back to store.build when build_artifact arg omitted",
-    "orchestrator/zzz.py" in te_prompt.get("p", ""))
-
-# -- reviewer.review: consumes the BuildArtifact, publishes a typed ReviewVerdict ------------ #
 r_prompt = {}
 async def fake_review_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None,
                             routing_tier=None):
@@ -190,11 +150,6 @@ class WiringBuilder:
             store.put(BuildArtifact(files_changed=[], diff_digest="did the thing",
                                     decisions=["used a dataclass"], open_questions=["persist?"]))
         return BuildResult(ok=True, summary="did the thing", cost_usd=0.0, num_turns=1, raw="", tools=[])
-class WiringTE:
-    @staticmethod
-    async def ensure_coverage(ticket, app, cfg, store=None, build_artifact=None):
-        cap["te_artifact"] = build_artifact
-        return TestEngineerResult(ok=True, coverage="lines 80→90")
 class WiringReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
@@ -204,7 +159,6 @@ class WiringReviewer:
         return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=0.0)
 
 loop.builder_mod = WiringBuilder
-loop.test_engineer_mod = WiringTE
 loop.reviewer_mod = WiringReviewer
 
 icfg = mkcfg(max_iterations=3, pm_enabled=False)
@@ -224,8 +178,6 @@ chk("_attempt derives a SpecArtifact from the ticket and hands it to the builder
 chk("the store's spec slot is the SpecArtifact passed to the builder", cap["store"].spec is cap["spec"])
 chk("the loop stamps the authoritative files_changed onto the published BuildArtifact",
     cap["store"].build is not None and cap["store"].build.files_changed == ["orchestrator/contracts.py"])
-chk("the Test Engineer receives the builder's BuildArtifact as primary context",
-    cap.get("te_artifact") is cap["store"].build)
 chk("the Reviewer receives the builder's BuildArtifact as primary context",
     cap.get("review_artifact") is cap["store"].build)
 chk("the Reviewer's ReviewVerdict lands back in the store",

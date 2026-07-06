@@ -81,7 +81,7 @@ os.close(_aud_fd)
 _cfg = Config(
     apps=[_APP], audit_path=_aud_path,
     use_worktree=False, delegation_enabled=True,
-    pm_enabled=False, test_gate=False,
+    pm_enabled=False,
     merge_to_dev=True, dry_run=False, max_iterations=2,
 )
 
@@ -89,7 +89,7 @@ _cfg = Config(
 _cfg_auto = Config(
     apps=[_APP], audit_path=_aud_path,
     use_worktree=False, delegation_enabled=True, auto_mode=True,
-    pm_enabled=False, test_gate=False,
+    pm_enabled=False,
     merge_to_dev=True, dry_run=False, max_iterations=2,
 )
 
@@ -364,11 +364,6 @@ async def _fake_review(diff, ticket, app, cfg, iteration, store=None, build_arti
     return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=0.0, summary="LGTM")
 
 
-async def _fake_te(ticket, app, cfg, store=None, build_artifact=None):
-    from orchestrator.contracts import TestEngineerResult
-    return TestEngineerResult(ok=True, coverage="100%")
-
-
 def _fake_land(ticket, app, cfg, git, backlog, audit, branch,
                iteration, cost, build, review, security_block=None, coverage=""):
     _land_calls.append((ticket.id, iteration))
@@ -379,13 +374,11 @@ _orig_land = loop._land
 _orig_notify = loop._notify
 _orig_gate = loop.run_gate
 _orig_reviewer = loop.reviewer_mod
-_orig_te = loop.test_engineer_mod
 
 loop._land = _fake_land
 loop._notify = lambda *a, **k: None
 loop.run_gate = lambda *a, **k: GateResult(passed=True, report="ok")
 loop.reviewer_mod = types.SimpleNamespace(review=_fake_review)
-loop.test_engineer_mod = types.SimpleNamespace(ensure_coverage=_fake_te)
 
 _squad_calls.clear()
 _audit = _Audit()
@@ -428,7 +421,6 @@ finally:
     loop._notify = _orig_notify
     loop.run_gate = _orig_gate
     loop.reviewer_mod = _orig_reviewer
-    loop.test_engineer_mod = _orig_te
     squad.build_delegated = _orig_build_delegated
 
 

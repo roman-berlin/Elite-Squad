@@ -47,7 +47,7 @@ import orchestrator.loop as loop                       # noqa: E402
 from orchestrator.config import Config, AppConfig      # noqa: E402
 from orchestrator.contracts import (                   # noqa: E402
     BuildArtifact, BuildResult, GateResult, Outcome, ReviewResult, ReviewVerdict,
-    TestEngineerResult, Ticket, TicketReport, Verdict,
+    Ticket, TicketReport, Verdict,
 )
 
 results: list[tuple[str, bool, str]] = []
@@ -263,12 +263,6 @@ class _StubBuilder:
         return BuildResult(ok=True, summary="built", cost_usd=0.1, num_turns=2)
 
 
-class _StubTE:
-    @staticmethod
-    async def ensure_coverage(ticket, app, cfg, store=None, build_artifact=None):
-        return TestEngineerResult(ok=True, coverage="all green", cost_usd=0.0)
-
-
 class _StubReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None):
@@ -282,10 +276,9 @@ def _fake_land(tk, app, cfg, git, backlog, audit, branch, iteration, cost, build
     return TicketReport(tk.id, Outcome.MERGED, iteration, cost, app.name, branch)
 
 
-_orig = (loop.builder_mod, loop.test_engineer_mod, loop.reviewer_mod,
+_orig = (loop.builder_mod, loop.reviewer_mod,
          loop.run_gate, loop._land, loop._notify)
 loop.builder_mod = _StubBuilder
-loop.test_engineer_mod = _StubTE
 loop.reviewer_mod = _StubReviewer
 loop._land = _fake_land
 loop._notify = lambda c, t: None
@@ -294,7 +287,7 @@ loop._notify = lambda c, t: None
 def _mkcfg(**kw) -> Config:
     d = Path(tempfile.mkdtemp())
     base = dict(apps=[_APP], audit_path=str(d / "audit.jsonl"), use_worktree=False,
-                pm_enabled=False, test_gate=False, max_iterations=2)
+                pm_enabled=False, max_iterations=2)
     base.update(kw)
     return Config(**base)
 
@@ -398,7 +391,7 @@ try:
     chk("deterministic stage: the failure report masks the secret",
         all(RAW_KEY not in json.dumps(e) for e in det_events), "raw secret leaked into audit")
 finally:
-    (loop.builder_mod, loop.test_engineer_mod, loop.reviewer_mod,
+    (loop.builder_mod, loop.reviewer_mod,
      loop.run_gate, loop._land, loop._notify) = _orig
 
 # ══════════════════════════════════════════════════════════════════════════════

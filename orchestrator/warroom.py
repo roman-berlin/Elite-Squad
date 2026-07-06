@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from . import dashboard as D
 from .officers import display as _display
-from .phases import BUILD, GATE, LAND, PHASES, REVIEW, TESTS
+from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
@@ -666,7 +666,7 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     reached = 0
     if has_build:          # build done → the Gate runs next
         reached = GATE
-    if has_review:         # reviewed → Build, Gate and Tests are all behind it; Land runs next
+    if has_review:         # reviewed → Build, Gate and Review are all behind it; Land runs next
         reached = LAND
     if merged:             # reviewed and landed → every phase complete
         reached = len(PHASES)
@@ -685,12 +685,12 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         else:
             failed_phase = LAND                                # passed review, broke at Land
     # EU-55 / F12 audit: phases.py is the single source of truth. Ordering confirmed:
-    #   PHASES[BUILD]="Build", PHASES[GATE]="Gate", PHASES[TESTS]="Tests",
-    #   PHASES[REVIEW]="Review", PHASES[LAND]="Land".  (Phase-2 §2: Security phase removed.)
-    # TESTS (idx 2) has no distinct audit signal today — the bar stays at Gate until
-    # a review verdict is recorded. LAND (idx 4) is not used as a "reached" value;
-    # len(PHASES) marks all phases complete after merge (same effect as LAND+1). ✓
-    _EXPECTED = ("Build", "Gate", "Tests", "Review", "Land")
+    #   PHASES[BUILD]="Build", PHASES[GATE]="Gate", PHASES[REVIEW]="Review",
+    #   PHASES[LAND]="Land".  (Phase-2 §2: the Security and Tests phases were removed.)
+    # The bar stays at Gate until a review verdict is recorded. LAND (idx 3) is not used
+    # as a "reached" value; len(PHASES) marks all phases complete after merge (same effect
+    # as LAND+1). ✓
+    _EXPECTED = ("Build", "Gate", "Review", "Land")
     if PHASES != _EXPECTED:
         raise AssertionError(
             f"phases.py PHASES order drifted from index constants — "
