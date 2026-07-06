@@ -26,15 +26,17 @@ throwaway port 8797 with no `.env` (no poller, no creds).
 | **1 — Local (Mac)** | 🟡 Yellow | Dead launchd scheduling (EU-181) fires into deleted scripts, err logs growing | `patrol/smalltalk/sync` loaded, **exit 127**; `run-*.sh` MISSING (deleted `bf1ce92`); `council/sync.err.log` 5429 B, mtime 2026-07-06 10:59 |
 | **2 — Server (VPS)** | 🟡 Yellow | systemd `Restart=always` with **no start-limit** → a bad `main` deploy crash-loops unbounded | `general.service` logged **~864 restarts** 19:34–19:35 on 07-05 (UnboundLocalError `AuditLog`, fixed by `ce7aad6`); now stable 10 h; no `StartLimitBurst` in unit file |
 | **3 — Telegram** | 🟡 Yellow | **Two `getUpdates` consumers on one bot token** (VPS 24/7 + any Mac `serve`) fight the offset → split/lost commands; volatile alert dedup (EU-183) | VPS `general.service` runs `decisions.poll_loop` (`server.py:2669`); Mac `serve` starts the same thread when `.env` present; both read `TELEGRAM_BOT_TOKEN` (`notify.py:112`) |
-| **4 — Cockpit** | 🟢 Green* | All 59 routes 200-OK on relocated `state/`; cold `/tickets` 3.3 s & `/usage` 4.8 s (Jira + `claude -p` probe) then cached; **ghost-'Working' (EU-175) reproduced** | EU-139 emitted `ticket_start` with **no `run_start`/`run_end`**; audit has **14 `run_start` vs 12 `run_end`** = 2 unclosed runs |
+| **4 — Cockpit** | 🟢 Green* | All 59 routes 200-OK on relocated `state/`; cold `/tickets` 3.3 s & `/usage` 4.8 s (Jira + `claude -p` probe) then cached; **ghost-'Working' (EU-175) risk lives in the kill/crash path** | **19 `autopilot_start` vs 9 `autopilot_stop`** (10 sessions SIGKILL'd before their stop, all around the 07-01 crash) + **14 `run_start` vs 12 `run_end`**; the recent supervised EU-139 run *did* close cleanly (`run_start 22:18:20 → run_end 22:33:14`, $1.48) |
 
 \* Green on availability/correctness after the `state/` move; the open EU-129/136/175 UX complaints are real but non-breaking (§2).
 
 **Combat-readiness verdict:** the build loop itself is **proven healthy** — EU-139 ran clean in **~15 min, one
-Sonnet pass** (`ticket_start 22:18:21 → build → gate → test_engineer → review → pr_opened →
-token_burn_report 22:33:14`), stopped correctly at `pr_opened` (no auto-merge; PR #4 still open), and fired
-its `token_burn_report`. The gating defects for scale-up are **operational** (run-boundary closure, single
-Telegram poller, server crash-loop backstop), not in the builder.
+Sonnet pass**, fully bracketed (`run_start 22:18:20 → ticket_start 22:18:21 → build → gate → test_engineer →
+review → pr_opened → token_burn_report → run_end 22:33:14`, $1.48), stopped correctly at `pr_opened` (no
+auto-merge; PR #4 still open), and fired its `token_burn_report`. **The graceful path closes its run
+boundary correctly.** The gating defects for scale-up are **operational** — the ghost-'Working' risk (EU-175)
+is the **kill/crash path** (`autopilot_stop` not in a `finally`, so 10 of 19 autopilot sessions never wrote a
+stop), plus the single-Telegram-poller and server crash-loop backstop — not in the builder.
 
 ---
 
@@ -59,7 +61,7 @@ Telegram poller, server crash-loop backstop), not in the builder.
 |---|---|---|
 | **EU-181** (Mac sync dead) | **Confirmed, worse than filed.** [first-hand] | `patrol/smalltalk/sync` launchd agents loaded, **last exit 127**; `run-council/patrol/smalltalk/sync.sh` all MISSING (deleted `bf1ce92`, EU-56, 06-26); `council/sync.err.log` **5429 B**, mtime **2026-07-06 10:59** (still growing today); `patrol.err.log` 182 B mtime 07-06 09:00; `smalltalk.err.log` 94 B mtime 07-06 11:00; `council` agent not even loaded. A 5th agent `com.roman.general-autopull` → `~/bin/general-autopull.sh` exits 0 (harmless). **VPS cron is the real scheduler; these Mac agents are pure error-log spam.** |
 | **EU-183** (Opus-pin from transient 429; volatile dedup) | **Confirmed direction.** [auditor-reported] | Auditors located ~8 alert dedup flags held only in process memory (re-fire after every restart) and the Opus-pin arming path that records **no audit event**. Full alert table is §5 below (the input the proposal §7 asked for). Re-confirm the exact file:lines before coding — verifiers were cut off. |
-| **EU-175** (ghost 'Working' cards) | **Reproduced, mechanism confirmed.** [first-hand] | EU-139 emitted `ticket_start` with **no `run_start`/`run_end`**; audit totals **14 `run_start` vs 12 `run_end`** = 2 structurally-unclosed runs. Cockpit-invoked runs (`/api/run`, `/api/run-selected`) and `decisions.py` resume path invoke the loop without a run boundary → the active-run card can't clear. |
+| **EU-175** (ghost 'Working' cards) | **Mechanism confirmed — it's the kill/crash path, not the graceful one.** [first-hand] | Audit totals **19 `autopilot_start` vs 9 `autopilot_stop`** (10 sessions with no stop) and **14 `run_start` vs 12 `run_end`** (2 unclosed), **all clustered on the 2026-07-01 SIGKILL crash** (matches proposal §0 ghost-sessions). The recent supervised EU-139 run *did* bracket cleanly (`run_start 22:18:20 → run_end 22:33:14`). Root cause: `autopilot_stop` (`autopilot.py:800`) is not inside a `finally`, so a hard-killed process leaves the active-run card stuck. Fix = Wave 1 (§7). |
 | **EU-136** (phase pip no backward transition) | Fix exists on `autodev/EU-136-*` (not re-fetched this pass — Verify was cut off). | Carry forward; validate the branch applies onto `0ae0b4b` before merge. |
 | **EU-129** (global-not-per-project `/needs`; re-parse per render) | **Partially reproduced.** [first-hand] | `/needs` is **not** one-row-per-ticket: EU-174 occupies rows 1–4, EU-173 rows 5–6 (measured from live HTML). Cold `/` render 0.10–0.16 s against a **2,571-line** `state/audit.jsonl`; warm 0.10 s (there is caching). Cost is modest now but scales with audit size. |
 | EU-129/136/141/154/157–161 | Not individually re-verified (Verify phase truncated). | Branch inventory deferred — `git ls-remote`/fetch of `autodev/*` was in the truncated slice; re-run the branch-inventory slice next pass. |
@@ -141,9 +143,11 @@ combination (silent, expensive, repeatable). This is the top item for the §7 ev
 
 ### 6.1 Raise `max_tickets_per_run` (currently 1)
 **NO-GO** until run boundaries are closed. **Preconditions (all required):**
-1. **Run-boundary fix (Phase-2 §7.5):** bracket every loop-invoking call site (`server.py` `/api/run`,
-   `/api/run-selected`; `decisions.py` resume) with `run_start`/`run_end`; move `autopilot_stop` into a
-   `finally`. Verify: one supervised **2-ticket** drain shows `run_start == run_end`, **0 unclosed**.
+1. **Run-boundary fix (Phase-2 §7.5):** move `autopilot_stop` (`autopilot.py:800`) into a `finally` (the
+   proven gap — 10 of 19 sessions never wrote a stop after the 07-01 kill), and bracket every loop-invoking
+   call site (`server.py` `/api/run`, `/api/run-selected`; `decisions.py` resume) with `run_start`/`run_end`.
+   Verify: one supervised **2-ticket** drain shows `run_start == run_end` and `autopilot_start == stop`,
+   **0 unclosed**, and a deliberate mid-run kill leaves no ghost card.
 2. **Budgets hold under back-to-back tickets:** `token_burn_report` fires per ticket; no silent
    continuation past 3M/30min. (EU-139 proved this for one ticket.)
 3. **N1 server backstop landed** (so a mid-drain crash can't loop).
@@ -214,8 +218,10 @@ untouched; z.ai stays commented; effort tier is Roman's to set.
 
 ## 8. Verification performed this session
 - **dev sync:** `dev` == `origin/dev` == `0ae0b4b`, 0 ahead / 0 behind, tree clean — **synchronized**.
-- **Build loop:** EU-139 replay from `state/audit.jsonl` — clean one-pass run, budget report fired, correct
-  stop at `pr_opened`. The **one "not all good"** it surfaced (missing run boundary, EU-175) is fixed in
-  Wave 1.
+- **Build loop:** EU-139 replay from `state/audit.jsonl` — clean one-pass run, **fully bracketed**
+  (`run_start 22:18:20 → run_end 22:33:14`, $1.48), budget report fired, correct stop at `pr_opened`. The
+  graceful path is healthy. The **"not all good"** is historical: 10 of 19 autopilot sessions and 2 of 14
+  runs never closed — the 2026-07-01 SIGKILL crash path (`autopilot_stop` not in `finally`) = EU-175, fixed
+  in Wave 1.
 - **No live ticket was run** — that is the money/`Jira`-mutating, previously-forbidden action; held for the
   Commander's explicit mode choice (inspect-only vs dry-run vs one supervised live run).
