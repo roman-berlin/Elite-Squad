@@ -75,7 +75,11 @@ DOC_DIRS = [ROOT, ROOT / "Documentation"]
 #    log files — records, not scheduler instructions.
 DOC_ALLOW = {"Documentation/SYSTEM_OVERVIEW.md", "Documentation/UNIT_REVIEW_2026-06-25.md",
              "Documentation/Development_Status.md",
-             "Documentation/RESTRUCTURE_PROPOSAL_2026-07-05.md"}
+             "Documentation/RESTRUCTURE_PROPOSAL_2026-07-05.md",
+             # Point-in-time audit/postmortem (same class as UNIT_REVIEW / RESTRUCTURE_PROPOSAL):
+             # it DOCUMENTS the EU-181 dead-launchd-agent finding and recommends `launchctl bootout`
+             # to REMOVE them — a record of the retirement, not an instruction to run the scheduler.
+             "Documentation/SYSTEM_AUDIT_2026-07-06.md"}
 DOC_NEEDLES = ("com.roman.general", "launchctl", "LaunchAgents",
                "run-autopilot.sh", "run-council.sh", "run-patrol.sh", "run-smalltalk.sh", "run-sync.sh")
 doc_offenders = []
