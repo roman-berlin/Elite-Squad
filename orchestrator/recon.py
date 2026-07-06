@@ -136,7 +136,7 @@ async def run_officer(*, officer: str, label: str, system: str, task: str, cfg: 
     except Exception:  # noqa: BLE001 - planning hiccup => solo
         slices = []
     if len(slices) < 2:
-        return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer, cfg=cfg)
+        return await _solo(system, task, cwd, model, soldier_tools, max_turns, effort, empty, officer, cfg=cfg, audit=audit)
 
     print(f"  {officer} · squad of {len(slices)}: " + ", ".join(s.area for s in slices), flush=True)
     # EU-123: provider/model come from the planning run
