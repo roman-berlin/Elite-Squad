@@ -168,9 +168,8 @@ combination (silent, expensive, repeatable). This is the top item for the §7 ev
 3. Commander explicitly drives the first activation (per standing rule).
 
 ### 6.3 Let the unit drain the verified backlog
-**NO-GO for the EU (self-development) backlog until N9/EU-188 (worktree isolation leak) is fixed** — proven
-live this session: EU-182 false-escalated because the builder edited the main tree. Until then every EU ticket
-risks a false "no changes" + main-tree contamination. **CONDITIONAL-GO for a single supervised ticket** (with
+**~~NO-GO~~ → N9/EU-188 is now FIXED + validated end-to-end** (`850b94c`; EU-182 re-run landed in one pass
+with isolation held). The self-development blocker is cleared. Remaining gates below still stand. **CONDITIONAL-GO for a single supervised ticket** (with
 a before/after main-tree `git status` isolation check) after §6.1 preconditions 1–3 **and** EU-188; **NO-GO for
 autonomous multi-ticket drain** until §7 waves 1–2 land. **Preconditions:** EU-188 fixed + isolation regression
 test green; clean `dev` base (Phase-2 §3 `51cc9e8` red-base short-circuit); 1–2 day observation with **median
@@ -243,3 +242,9 @@ untouched; z.ai stays commented; effort tier is Roman's to set.
   underlying pipeline defect is filed as EU-188 (code fix is pipeline-core, out of audit scope).
 - **Filed:** EU-184 (N1), EU-185 (N2), EU-186 (N3), EU-187 (N4), **EU-188 (N9, the headline)**; sharpened
   EU-181, EU-175, EU-129, EU-183, EU-182.
+- **N9/EU-188 FIXED + VALIDATED END-TO-END (Commander-authorized).** Fix landed on `dev` (`850b94c`):
+  `guard.hooks_config(workdir)` now confines every officer write to its worktree; full suite 254/254.
+  Re-ran EU-182 live (13:01–13:14, $3.40): the builder again tried to `Edit` the MAIN `recon.py`, the guard
+  **denied it**, the builder **recovered into the worktree**, and EU-182 **merged to `dev` in one pass**
+  (`f6e53f8`) — main tree stayed clean (only the EU-41 auto-changelog), `run_start`/`run_end` matched. The
+  self-development isolation leak is closed and proven.
