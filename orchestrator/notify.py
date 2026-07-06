@@ -1,4 +1,4 @@
-# Telegram notifications — send messages and receive updates from the Commander's ops chat and EU-65 liaison channels.
+# Telegram notifications — send messages and receive updates from the Commander's ops chat.
 """Telegram notifications.
 
 Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment to enable.
@@ -106,10 +106,9 @@ def send(text: str, chat_id: str | int | None = None) -> bool:
 
     By default the message goes to the Commander's ops chat (TELEGRAM_CHAT_ID), so every
     existing caller — ops reports, escalations, council summaries — stays pinned to the ops
-    chat and is NEVER auto-broadcast to an external chat. EU-65: pass ``chat_id`` explicitly to
-    target a specific chat (e.g. an outward liaison reply to an allied unit); the liaison slice
-    is the ONLY path that supplies one, keeping the two channels isolated. An explicit
-    ``chat_id`` needs only the bot token — it does not require TELEGRAM_CHAT_ID to be set."""
+    chat. ``chat_id`` may target a specific chat explicitly (needs only the bot token, not
+    TELEGRAM_CHAT_ID); since the EU-65 liaison channel's deletion (Phase-2 §2) no production
+    path supplies one."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     target = str(chat_id) if chat_id is not None else os.environ.get("TELEGRAM_CHAT_ID")
     if not (token and target):
@@ -277,15 +276,11 @@ def reset_dual_low_watermark_alert(provider: str | None = None) -> None:
 def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:
     """Extract ``(update_id, text, origin)`` for text messages we accept.
 
-    ``origin`` is ``"ops"`` for the Commander's operations chat (TELEGRAM_CHAT_ID) or
-    ``"external"`` for a configured EU-65 liaison chat (an allied unit). The ops chat is always
-    accepted exactly as before. External chats are accepted ONLY when ``cfg`` is supplied and the
-    liaison channel is active (master flag on AND at least one external id configured); with no
-    ``cfg`` — or while the liaison channel is inert — behaviour is byte-identical to today (ops
-    only). The origin tag lets downstream routing branch so an outward liaison chat is never fed
-    to the Commander's command handler."""
+    Only the Commander's operations chat (TELEGRAM_CHAT_ID) is accepted; any other chat id is
+    ignored. ``origin`` is always ``"ops"`` — the 3-tuple shape (and the ``cfg`` parameter) are
+    kept for caller compatibility from the EU-65 liaison era; that outward channel was DELETED
+    in Phase-2 §2 (2026-07-06), so no external chat can ever reach the command router."""
     chat = os.environ.get("TELEGRAM_CHAT_ID")
-    liaison_on = bool(cfg is not None and cfg.liaison_active())
     out: list[tuple[int, str, str]] = []
     for u in updates:
         msg = u.get("message") or u.get("edited_message") or {}
@@ -295,7 +290,5 @@ def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:
         cid = str((msg.get("chat") or {}).get("id", ""))
         if not chat or not cid or cid == str(chat):   # ops chat (unchanged acceptance)
             out.append((u.get("update_id"), text, "ops"))
-        elif liaison_on and cfg.is_liaison_chat(cid):  # EU-65 allied/external liaison chat
-            out.append((u.get("update_id"), text, "external"))
-        # else: a foreign chat we don't talk to -> ignored
+        # else: any other chat -> ignored (the EU-65 external channel no longer exists)
     return out

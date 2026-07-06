@@ -75,7 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
-    sub.add_parser("liaison", help="Mayor: show the inter-unit liaison channel status (config + today's token budget)")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
     mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the CTO decides)")
     mtg.add_argument("--topic", required=True, help="what the meeting is about")
@@ -493,13 +492,6 @@ async def _main(argv: list[str]) -> int:
         from . import roster
         p = await roster.refresh(cfg, AuditLog(cfg.audit_path))
         print(f"roster → {p}")
-        return 0
-
-    if args.command == "liaison":
-        # Read-only: print how the isolated inter-unit (Mayor) channel is wired. No model, no
-        # outward post — the Mayor only ever speaks on its own channel via decisions.poll_once.
-        from . import liaison
-        print(liaison.status(cfg))
         return 0
 
     if args.command == "memory":
