@@ -324,6 +324,12 @@ class Config:
     # state never mingles with source. Keep OUTSIDE every target repo.
     audit_path: str = "./state/audit.jsonl"
 
+    # EU-185 (Wave 0): single-Telegram-poller election. Telegram getUpdates+offset is
+    # single-consumer, so two hosts polling one bot token split/lose the Commander's messages. Only
+    # the host whose sync host id (GENERAL_HOST_ID, else hostname) matches this value runs the
+    # poller; every other host runs cockpit-only. Override per-host with GENERAL_TELEGRAM_POLLER=1/0.
+    telegram_poller_host: str = "server"
+
     @staticmethod
     def load(path: str | Path) -> "Config":
         import yaml

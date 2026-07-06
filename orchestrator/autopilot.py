@@ -416,9 +416,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
 
         # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
-        if notify.configured():
-            from . import decisions
+        # EU-185 (Wave 0): only the elected poller host polls, so an autopilot run on a non-poller
+        # host doesn't fight the VPS poller over the one bot token (getUpdates is single-consumer).
+        from . import decisions
+        _ap_poll, _ap_why = decisions.should_poll_telegram(cfg)
+        if _ap_poll:
             threading.Thread(target=decisions.poll_loop, args=(cfg, audit), daemon=True).start()
+        elif notify.configured():
+            print(f"  · Telegram listener OFF — {_ap_why}", flush=True)
 
         scope = app_name or "all backlog apps"
         notify.send(f"🛸 Autopilot {mode} online — working {scope}")

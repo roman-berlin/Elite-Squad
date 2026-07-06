@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -561,6 +562,34 @@ def poll_once(cfg, audit) -> int:
         if route_message(cfg, audit, text):
             handled += 1
     return handled
+
+
+def should_poll_telegram(cfg) -> tuple[bool, str]:
+    """EU-185 (Wave 0): decide whether THIS host should run the Telegram poller, returning
+    (poll, reason). Telegram getUpdates+offset is single-consumer — two hosts polling one bot
+    token split/lose the Commander's messages (the VPS's always-on poller + any Mac `./general
+    serve` with `.env`). The hosts only share state via periodic git sync, so a live lock file
+    can't give real-time mutual exclusion; we elect ONE poller host instead.
+
+    Rules, in order:
+      1. Not configured (no bot token / chat id) → don't poll.
+      2. Explicit env GENERAL_TELEGRAM_POLLER (1/true/yes ↔ 0/false/no) → honour it (the escape
+         hatch for a single-host dev box).
+      3. Else poll iff this host's sync id == cfg.telegram_poller_host (default "server").
+    """
+    from . import notify
+    if not notify.configured():
+        return False, "telegram not configured"
+    override = os.environ.get("GENERAL_TELEGRAM_POLLER")
+    if override is not None and override.strip() != "":
+        on = override.strip().lower() in ("1", "true", "yes", "on")
+        return on, f"GENERAL_TELEGRAM_POLLER={override.strip()}"
+    from . import sync
+    hid = sync.host_id(cfg)
+    poller = getattr(cfg, "telegram_poller_host", "server")
+    if hid == poller:
+        return True, f"host '{hid}' is the elected poller"
+    return False, f"host '{hid}' is not the poller ('{poller}' owns it; set GENERAL_TELEGRAM_POLLER=1 to override)"
 
 
 def poll_loop(cfg, audit, interval: int = 5) -> None:
