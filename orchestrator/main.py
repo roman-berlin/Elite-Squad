@@ -80,7 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
     mtg.add_argument("--topic", required=True, help="what the meeting is about")
     mtg.add_argument("--officers", help="comma-separated officer names/keys to attend (default: all relevant)")
     mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
-    sub.add_parser("smalltalk", help="a corridor exchange between two officers (flavor; sometimes a real insight)")
     sub.add_parser("sync", help="exchange the audit log with the other machine (Mac<->server) so both cockpits agree")
     pmp = sub.add_parser("pm", help="Product Manager (S-5): decide a product/IA question, or escalate a critical one to you")
     pmp.add_argument("app")
@@ -444,11 +443,6 @@ async def _main(argv: list[str]) -> int:
                                               rounds=getattr(args, "rounds", None),
                                               audit=AuditLog(cfg.audit_path))
         print("\n" + decision)
-        return 0
-
-    if args.command == "smalltalk":
-        from . import council
-        print(await council.small_talk(cfg, audit=AuditLog(cfg.audit_path)))
         return 0
 
     if args.command == "sync":

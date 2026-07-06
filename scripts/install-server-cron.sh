@@ -4,7 +4,7 @@
 # Installs, idempotently:
 #   - self-update (auto-deploy main)          every 15 min, offset :05/:20/:35/:50
 #   - Mac->server state sync (pull-only)       every 15 min
-#   - daily muster (council + stand-up)        06:30  (the unit's ONE daily council — the Mac's launchd
+#   (Phase-2 §2: the 06:30 council muster and 11/14/16 corridor small-talk crons were RETIRED —
 #                                                      council is retired; this is the single source)
 #   - one freshening sync just before it       06:30
 #   - corridor small-talk (jittered)           11:00 / 14:30-ish / 16:00-ish
@@ -25,8 +25,6 @@ CRON_TZ=Asia/Jerusalem
 5,20,35,50 * * * * cd $HOME/General && bash scripts/self-update.sh
 */15 * * * * cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1
 30 6 * * * cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1
-30 6 * * * cd $HOME/General && ./general council >> council/cron.log 2>&1
-0 11,14,16 * * * bash -c 'sleep $((RANDOM % 2100)); cd $HOME/General && ./general smalltalk >> council/cron.log 2>&1'
 0 9 * * 1 cd $HOME/General && ./general patrol >> council/cron.log 2>&1
 # SWE-bench Verified weekly benchmark — Mon 04:00 (off-peak), deterministic sample via --weekly seed
 0 4 * * 1 cd $HOME/General && python3 scripts/swebench_builder.py --weekly --sample 20 >> council/cron.log 2>&1

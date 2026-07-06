@@ -51,9 +51,10 @@ chk("no orchestrator/scripts source references the retired launchd scheduler",
 cron = (SCRIPTS / "install-server-cron.sh")
 chk("live scheduler scripts/install-server-cron.sh still present", cron.exists())
 cron_text = cron.read_text(encoding="utf-8") if cron.exists() else ""
-chk("single source still schedules the daily council 06:30", "30 6 * * *" in cron_text
-    and "./general council" in cron_text)
-chk("single source still schedules corridor small-talk", "./general smalltalk" in cron_text)
+# Phase-2 §2 (2026-07-06): the ceremony crons were RETIRED — councils/small-talk are
+# on-demand only. The single source must NOT quietly re-schedule them.
+chk("ceremonies de-cronned: no scheduled council muster", "./general council" not in cron_text)
+chk("ceremonies de-cronned: no scheduled corridor small-talk", "./general smalltalk" not in cron_text)
 chk("single source still schedules the weekly patrol (Mon)", "0 9 * * 1" in cron_text
     and "./general patrol" in cron_text)
 

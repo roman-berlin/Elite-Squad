@@ -38,12 +38,7 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(d), base_branch="D
              audit_path=str(d / "audit.jsonl"), use_worktree=False)
 OPUS = cfg.builder_model
 
-# --- models: small-talk on Haiku, never Opus ---
-captured.clear()
-asyncio.run(council.small_talk(cfg))
-st = [m for m, t in captured if t == "smalltalk"]
-check("small-talk runs on Haiku", bool(st) and all(m == cfg.smalltalk_model for m in st), str(st))
-check("small-talk never touches Opus", all(m != OPUS for m, _ in captured))
+# (Phase-2 §2: corridor small-talk was deleted — its Haiku-only frugality pin went with it.)
 
 # --- daily muster = council + stand-up merged, one briefing, all on Sonnet ---
 captured.clear(); sent.clear()
