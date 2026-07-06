@@ -52,15 +52,16 @@ def chk(name, cond):
 
 # --- 1) Single source of truth -----------------------------------------------------------------
 PH = phases.PHASES
-chk("PHASES is the exact pipeline order", PH == ("Build", "Gate", "Tests", "Review", "Security", "Land"))
+# Phase-2 §2 (2026-07-06): the LLM per-diff Security phase was removed — 5 phases now.
+chk("PHASES is the exact pipeline order", PH == ("Build", "Gate", "Tests", "Review", "Land"))
 chk("loop._bar derives from the shared PHASES (identity)", loop.PHASES is phases.PHASES)
 chk("warroom bar derives from the shared PHASES (identity)", warroom.PHASES is phases.PHASES)
 
-# --- 2) Test Engineer + Security phases present, and between the right neighbours ----------------
+# --- 2) Test Engineer 'Tests' phase present, between the right neighbours ------------------------
 chk("Test Engineer 'Tests' phase present", "Tests" in PH)
-chk("Security phase present", "Security" in PH)
+chk("Security phase removed (Phase-2 §2)", "Security" not in PH)
 chk("Tests runs between Gate and Review", PH.index("Gate") < PH.index("Tests") < PH.index("Review"))
-chk("Security runs between Review and Land", PH.index("Review") < PH.index("Security") < PH.index("Land"))
+chk("Review runs just before Land", PH.index("Review") < PH.index("Land"))
 
 # --- 3) Both bars render the SAME ordered phases from that one constant --------------------------
 # Web bar: active_run hands the template list(PHASES).
@@ -75,21 +76,21 @@ with redirect_stdout(buf):
     loop._bar(loop.BUILD, active=loop.BUILD)
 term = buf.getvalue()
 chk("terminal bar prints every phase name", all(p in term for p in PH))
-chk("terminal bar prints Tests and Security", "Tests" in term and "Security" in term)
+chk("terminal bar prints Tests (and no Security)", "Tests" in term and "Security" not in term)
 chk("terminal bar phase order matches PHASES",
     [term.index(p) for p in PH] == sorted(term.index(p) for p in PH))
 
-# --- 4) reached / failed_phase indices match the new 6-phase order (drift guard) ----------------
+# --- 4) reached / failed_phase indices match the new 5-phase order (drift guard) ----------------
 # build done + live -> we've reached the Gate (next phase = index 1).
 chk("has_build (live) -> reached == Gate index", web["reached"] == PH.index("Gate"))
 
-# reviewed + live -> Build, Gate, Tests, Review behind us; Security is next (index 4).
+# reviewed + live -> Build, Gate, Tests, Review behind us; Land is next.
 reviewed = _run([dict(event="ticket_start", ticket_id="AUTO-2", app="automatixy", branch="b", ts=ts),
                  dict(event="build", ticket_id="AUTO-2", app="automatixy", iteration=1, tools=["Edit"],
                       summary="built", ts=ts),
                  dict(event="review", ticket_id="AUTO-2", iteration=1, verdict="PASS", summary="ok", ts=ts)],
                 live=True)
-chk("has_review (live) -> reached == Security index", reviewed["reached"] == PH.index("Security"))
+chk("has_review (live) -> reached == Land index", reviewed["reached"] == PH.index("Land"))
 
 # merged -> every phase complete (reached == len), nothing failed.
 merged = _run([dict(event="ticket_start", ticket_id="AUTO-3", app="automatixy", branch="b", ts=ts),

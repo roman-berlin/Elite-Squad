@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from . import dashboard as D
 from .officers import display as _display
-from .phases import BUILD, GATE, LAND, PHASES, REVIEW, SECURITY, TESTS
+from .phases import BUILD, GATE, LAND, PHASES, REVIEW, TESTS
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
@@ -666,9 +666,9 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     reached = 0
     if has_build:          # build done → the Gate runs next
         reached = GATE
-    if has_review:         # reviewed → Build, Gate and Tests are all behind it; Security runs next
-        reached = SECURITY
-    if merged:             # security passed and landed → every phase complete
+    if has_review:         # reviewed → Build, Gate and Tests are all behind it; Land runs next
+        reached = LAND
+    if merged:             # reviewed and landed → every phase complete
         reached = len(PHASES)
     # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
     # the phases behind it as cleanly-done. Derive the phase the run died at so the bar shows where
@@ -683,14 +683,14 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         elif "FAIL" in verdict or "REJECT" in verdict:
             failed_phase = REVIEW                              # review verdict was a rejection
         else:
-            failed_phase = SECURITY                            # passed review, broke at Security/Land
+            failed_phase = LAND                                # passed review, broke at Land
     # EU-55 / F12 audit: phases.py is the single source of truth. Ordering confirmed:
     #   PHASES[BUILD]="Build", PHASES[GATE]="Gate", PHASES[TESTS]="Tests",
-    #   PHASES[REVIEW]="Review", PHASES[SECURITY]="Security", PHASES[LAND]="Land".
+    #   PHASES[REVIEW]="Review", PHASES[LAND]="Land".  (Phase-2 §2: Security phase removed.)
     # TESTS (idx 2) has no distinct audit signal today — the bar stays at Gate until
-    # a review verdict is recorded. LAND (idx 5) is not used as a "reached" value;
+    # a review verdict is recorded. LAND (idx 4) is not used as a "reached" value;
     # len(PHASES) marks all phases complete after merge (same effect as LAND+1). ✓
-    _EXPECTED = ("Build", "Gate", "Tests", "Review", "Security", "Land")
+    _EXPECTED = ("Build", "Gate", "Tests", "Review", "Land")
     if PHASES != _EXPECTED:
         raise AssertionError(
             f"phases.py PHASES order drifted from index constants — "

@@ -119,46 +119,11 @@ finally:
     recon.run_agent = _orig_recon_run
 
 
-# ================================ provost.gate (reads the attacker diff) ================================
-class _App:
-    workdir = "/work"
-    repo_path = "/work"
-    base_branch = "DEV"
-
-
-class _GateCfg:
-    reviewer_model = "model-rev"
-
-
-_gate_warns = []
-_orig_warn2 = guard.warn_if_absent
-guard.warn_if_absent = lambda officer="officer": _gate_warns.append(officer) or False
-
-
-async def _gate_run_agent(prompt, options, tag=None, **kw):  # noqa: ANN001
-    _gate_run_agent.captured = options
-    r = _FakeRun()
-    r.final = "SECURITY GATE: PASS — no findings."
-    r.text = r.final
-    return r
-
-
-_orig_provost_run = provost.run_agent
-provost.run_agent = _gate_run_agent
-try:
-    passed, report = asyncio.run(provost.gate(_GateCfg(), _App(), "diff --git a/x b/x\n+ console.log(1)"))
-    opts_gate = _gate_run_agent.captured
-    chk("provost.gate runs under bypassPermissions", opts_gate.permission_mode == "bypassPermissions")
-    chk("provost.gate keeps Bash for audit", "Bash" in opts_gate.allowed_tools)
-    chk("provost.gate ATTACHES the guard hook", _matcher_names(opts_gate) is not None,
-        str(getattr(opts_gate, "hooks", None)))
-    chk("provost.gate guard matcher fires on Bash+Read", (_matcher_names(opts_gate) or "").count("Bash") == 1
-        and "Read" in (_matcher_names(opts_gate) or ""))
-    chk("provost.gate calls warn_if_absent('provost-gate')", "provost-gate" in _gate_warns, str(_gate_warns))
-    chk("provost.gate still returns a verdict tuple", passed is True and "PASS" in report)
-finally:
-    guard.warn_if_absent = _orig_warn2
-    provost.run_agent = _orig_provost_run
+# Phase-2 §2 (2026-07-06): the provost per-diff GATE (provost.gate) was DELETED — its attacker-diff
+# guard-wiring pins went with it. The read-only recon path above (recon._opts) still carries the
+# guard and is the surviving EU-47 coverage; the deterministic gate.py scan replaced the gate.
+chk("provost.gate is gone (Phase-2 §2 — recon path above is the surviving guard coverage)",
+    not hasattr(provost, "gate"))
 
 
 print("\n============== EU-47 RECON/GATE GUARD WIRING ==============")

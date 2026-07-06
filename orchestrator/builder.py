@@ -52,13 +52,10 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
   add the missing test(s) if it is not. (Bun's test runner is light — unlike Vitest below it does not
   need worker bounding — but still scope it to the package you touched, not the whole monorepo.)
-- SECURITY — Pre-handoff Security Countersignature (officers/builder.md § Pre-handoff Security
-  Countersignature): fill in the three-section block below verbatim and paste it into your summary:
-    §1-secrets:    <grep output — e.g. grep -rE '(sk-|api_key=|password=)' src/ → 0 matches>
-    §2-authz:      <route | guard | middleware position — e.g. POST /api/leads guarded by require_auth() at middleware/auth.py:15>
-    §3-injection:  <call-site | parameterization mechanism — e.g. ORM parameterised at leads/repo.py:34; no raw SQL>
-  Each field must have a real answer — never leave blank or use a placeholder. For a pure
-  config/docs ticket with no secret-adjacent changes: state that explicitly per field.
+- SECURITY: never commit a secret (API key, token, password, private key, connection string).
+  Keep queries parameterised and new routes behind their auth guard. (Phase-2 §2: the §1/§2/§3
+  countersignature block was retired with the LLM security gate — a deterministic secret/dep scan
+  runs on your diff now, so just don't introduce the problem.)
 Report the outcome of all gates in your final summary (passed, or what you had to fix to make them
 pass) so it is auditable that they ran before Reviewer saw the diff.
 

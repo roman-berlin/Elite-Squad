@@ -60,8 +60,8 @@ use_worktree: true          # run each app in a dedicated linked git worktree ba
                             # Auto-falls back to in-tree if the repo has no origin remote.
 sync_base_after_merge: true # after a green live merge, bring <base> in your main checkout up to date for QA
                             # (ff if you're on <base> & clean, else advance the ref; never clobbers dirty work)
-security_gate: false        # true = the Provost Marshal reviews each diff before merge; a CRITICAL/HIGH security
-                            # finding (secrets, tenant-isolation, authz, injection) opens a PR instead of landing
+# (Phase-2 §2: the LLM per-diff security gate was removed; secret/dep checks are deterministic in
+#  gate.py now, and the weekly `general provost` security recon still runs. `security_gate` is gone.)
 red_base_check: true        # Phase-2 §3.1 (the EU-174 killer): before the FIRST build pass, gate the CLEAN base
                             # tree; a red base BLOCKS the ticket (Telegram + Needs-you) instead of billing builds
                             # for a failure that predates the diff. Cached per base sha (state/red_base_cache.json)

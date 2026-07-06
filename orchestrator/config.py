@@ -281,7 +281,8 @@ class Config:
     worktree_dir: Optional[str] = None  # parent dir for worktrees; default: <repo_parent>/.general-worktrees/<app>
     worktree_setup_cmd: Optional[str] = None  # run ONCE when a worktree is first created (e.g. "bun install")
     sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
-    security_gate: bool = False         # the Security Engineer reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
+    # (Phase-2 §2, 2026-07-06: `security_gate` removed with the deleted LLM per-diff security gate —
+    #  its secret/dep scan is now deterministic in gate.py; a stale yaml key is dropped harmlessly.)
     test_gate: bool = True              # ARMED: Test Engineer runs after build, before review — adds happy-path + regression tests and owns the PR coverage artifact
     # Phase-2 §3.1 (the EU-174 killer, Commander-approved 2026-07-06): before the FIRST build pass,
     # run the gate against the clean base tree; a red base BLOCKS the ticket immediately (Telegram +

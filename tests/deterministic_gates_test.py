@@ -294,7 +294,7 @@ loop._notify = lambda c, t: None
 def _mkcfg(**kw) -> Config:
     d = Path(tempfile.mkdtemp())
     base = dict(apps=[_APP], audit_path=str(d / "audit.jsonl"), use_worktree=False,
-                security_gate=False, pm_enabled=False, test_gate=False, max_iterations=2)
+                pm_enabled=False, test_gate=False, max_iterations=2)
     base.update(kw)
     return Config(**base)
 

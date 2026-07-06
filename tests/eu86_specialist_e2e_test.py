@@ -81,7 +81,7 @@ os.close(_aud_fd)
 _cfg = Config(
     apps=[_APP], audit_path=_aud_path,
     use_worktree=False, delegation_enabled=True,
-    pm_enabled=False, test_gate=False, security_gate=False,
+    pm_enabled=False, test_gate=False,
     merge_to_dev=True, dry_run=False, max_iterations=2,
 )
 
@@ -89,7 +89,7 @@ _cfg = Config(
 _cfg_auto = Config(
     apps=[_APP], audit_path=_aud_path,
     use_worktree=False, delegation_enabled=True, auto_mode=True,
-    pm_enabled=False, test_gate=False, security_gate=False,
+    pm_enabled=False, test_gate=False,
     merge_to_dev=True, dry_run=False, max_iterations=2,
 )
 

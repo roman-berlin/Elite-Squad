@@ -53,18 +53,13 @@ check("backend/config tickets exempt from a11y scan",
 check("all gate outcomes reported in the summary",
       "report the outcome of all gates" in low)
 
-# ---- EU-97: security countersignature gate ----
-check("security gate documented in BUILDER_SYSTEM",
-      "§1-secrets" in P and "§2-authz" in P and "§3-injection" in P)
-check("security gate references officers/builder.md section by name",
-      "officers/builder.md" in P and "pre-handoff security countersignature" in low)
-check("security gate has literal field names (verbatim template)",
-      "§1-secrets:" in P and "§2-authz:" in P and "§3-injection:" in P)
-check("officers/builder.md exists and contains the countersignature section",
-      __import__('pathlib').Path("officers/builder.md").exists() and
-      "§1-secrets" in __import__('pathlib').Path("officers/builder.md").read_text())
-check("officers/builder.md has example rows for copy-paste",
-      "example" in __import__('pathlib').Path("officers/builder.md").read_text().lower())
+# ---- Phase-2 §2 (2026-07-06): the EU-97 §1/§2/§3 security COUNTERSIGNATURE was retired with the
+# LLM security gate that consumed it. The builder prompt keeps a plain security reminder (don't
+# commit secrets, parameterise, guard routes); the deterministic secret/dep scan (gate.py) now
+# enforces the mechanical half.
+check("builder prompt keeps a security reminder", "security" in low)
+check("builder prompt no longer carries the retired §1/§2/§3 countersignature template",
+      "§1-secrets" not in P and "§2-authz" not in P and "§3-injection" not in P)
 
 # ---- the section is in the prompt the Builder actually receives ----
 from orchestrator.contracts import BuildRequest, Ticket

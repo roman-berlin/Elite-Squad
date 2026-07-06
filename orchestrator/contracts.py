@@ -283,39 +283,9 @@ import re as _re
 _PLACEHOLDER_RE = _re.compile(r"^\s*<[^>]+>\s*$")
 
 
-@dataclass
-class SecurityArtifact:
-    """Written by the Security Engineer; consumed by the orchestrator gate.
-
-    Carries the three mandatory sign-off sections (§1 secrets, §2 authz,
-    §3 injection) plus an explicit boolean that the Security Engineer must
-    set to True.  The gate calls ``is_signed()`` — returning True only when
-    all three prose fields have been genuinely filled in and ``signed`` is
-    set — so a half-filled template or a forgotten ``signed=True`` both fail
-    the gate cleanly.
-    """
-    s1_secrets: str    # §1 — secrets / credential findings
-    s2_authz: str      # §2 — authorisation / route-guard findings
-    s3_injection: str  # §3 — injection / parameterisation findings
-    signed: bool = False
-
-    def is_signed(self) -> bool:
-        """Return True only when the artifact is complete and countersigned.
-
-        A field fails the check if it is:
-        - empty / whitespace-only, OR
-        - still a template placeholder (matches the ``<…>`` angle-bracket
-          pattern the builder.md template uses).
-
-        All three fields must pass AND ``signed`` must be True.
-        """
-        for field_value in (self.s1_secrets, self.s2_authz, self.s3_injection):
-            stripped = field_value.strip()
-            if not stripped:
-                return False
-            if _PLACEHOLDER_RE.match(stripped):
-                return False
-        return self.signed
+# Phase-2 §2 (2026-07-06): SecurityArtifact (the §1/§2/§3 countersignature the deleted provost
+# security gate produced) was removed with that gate. The deterministic secret/dep scan in
+# gate.py plus a Reviewer checklist section replace it.
 
 
 @dataclass
@@ -333,19 +303,18 @@ class PerTicketArtifactStore:
     without parsing raw ledger files.
 
     ``stage_costs`` is the USD mirror of ``token_burn`` for stages whose (ok, report)-style
-    return can't carry a cost (today: the provost security gate). The 2026-07-05 EU-139-run
-    telemetry audit found the gate's spend never reached the ticket report, so run_end's
-    total_cost_usd under-reported the ledger-true run cost; the loop reads the delta from here.
+    return can't carry a cost. The 2026-07-05 EU-139-run telemetry audit found such a stage's
+    spend never reached the ticket report, so run_end's total_cost_usd under-reported the
+    ledger-true run cost; the loop reads the delta from here.
     """
     spec: Optional[SpecArtifact] = None
     build: Optional[BuildArtifact] = None
     test: Optional[TestEngineerArtifact] = None
     review: Optional[ReviewVerdict] = None
-    security: Optional[SecurityArtifact] = None
     token_burn: dict[str, int] = field(default_factory=dict)
     stage_costs: dict[str, float] = field(default_factory=dict)
 
-    def put(self, artifact: SpecArtifact | BuildArtifact | TestEngineerArtifact | ReviewVerdict | SecurityArtifact) -> None:
+    def put(self, artifact: SpecArtifact | BuildArtifact | TestEngineerArtifact | ReviewVerdict) -> None:
         """Store *artifact* in the correct slot (determined by type).
 
         Raises TypeError for unknown artifact types so callers discover
@@ -359,20 +328,8 @@ class PerTicketArtifactStore:
             self.test = artifact
         elif isinstance(artifact, ReviewVerdict):
             self.review = artifact
-        elif isinstance(artifact, SecurityArtifact):
-            self.security = artifact
         else:
             raise TypeError(f"Unknown artifact type: {type(artifact)!r}")
-
-    def get_security(self) -> Optional[SecurityArtifact]:
-        """Typed getter for the security slot.
-
-        Returns the SecurityArtifact if the Security Engineer has published
-        one, or None if that stage hasn't run yet.  Prefer this over
-        accessing ``.security`` directly so callers get a typed return
-        annotation rather than ``Optional[Any]``.
-        """
-        return self.security
 
 
 @dataclass

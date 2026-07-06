@@ -184,7 +184,6 @@ def _make_cfg(dry_run: bool = True, max_iterations: int = 1,
         max_iterations=max_iterations,
         pm_enabled=pm_enabled,
         test_gate=False,
-        security_gate=False,
         use_worktree=False,
     )
 

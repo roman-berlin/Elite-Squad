@@ -242,7 +242,6 @@ def _make_cfg(dry_run: bool, max_iterations: int = 1) -> Config:
         max_iterations=max_iterations,
         pm_enabled=False,       # skip PM exhaustion triage → cleaner mock surface
         test_gate=False,        # skip Test Engineer
-        security_gate=False,
         use_worktree=False,
     )
 

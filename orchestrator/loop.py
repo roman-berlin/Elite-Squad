@@ -18,7 +18,6 @@ from pathlib import Path
 from . import builder as builder_mod
 from . import decisions
 from . import notify
-from . import provost as provost_mod
 from . import reviewer as reviewer_mod
 from . import test_engineer as test_engineer_mod
 from .audit import AuditLog
@@ -30,7 +29,7 @@ from .gate import base_gate_check, gate_fingerprint, run_deterministic_checks, r
 from . import jira_adapter as jira_commenter
 from .git_ops import Git, GitError
 from .officers import display
-from .phases import BUILD, GATE, LAND, PHASES, REVIEW, SECURITY, TESTS
+from .phases import BUILD, GATE, LAND, PHASES, REVIEW, TESTS
 
 # Get the module reference for explicit subprocess access
 import sys as _sys
@@ -167,12 +166,12 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
 
 
 def _bar(done: int, active: int = -1, fail: int = -1) -> None:
-    """A phase progress checklist:  ✓ Build  ✓ Gate  ✓ Tests  ⏳ Review  ○ Security  ○ Land.
+    """A phase progress checklist:  ✓ Build  ✓ Gate  ✓ Tests  ⏳ Review  ○ Land.
 
     Phases come from the shared ``PHASES`` constant (EU-55) so this terminal bar and the
     War Room web bar derive from one source and can never drift apart again. ``done`` is the
     count of completed phases; ``active``/``fail`` are PHASES indices — pass them by name
-    (BUILD/GATE/TESTS/REVIEW/SECURITY/LAND) so the call sites can't drift if the order changes.
+    (BUILD/GATE/TESTS/REVIEW/LAND) so the call sites can't drift if the order changes.
     """
     cells = []
     for i, name in enumerate(PHASES):
@@ -1183,60 +1182,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 print(f"  ■ {ticket.id}: stopped before merge by Commander — DEV untouched.", flush=True)
                 return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name, branch,
                                              notes="stopped by Commander before merge"))
-            security_block = None
-            if getattr(cfg, "security_gate", False):
-                _bar(SECURITY, active=SECURITY)
-                print("  security · Security Engineer gating the diff…", flush=True)
-                _sec_cost_before = float(store.stage_costs.get("provost", 0.0) or 0.0)
-                # 2026-07-05 telemetry audit: ticket_id stamps the gate's ledger row with the
-                # ticket key ("k") so per-ticket burn slicing counts the gate spend.
-                sec_ok, sec_report = await provost_mod.gate(cfg, app, diff, store=store,
-                                                            ticket_id=ticket.id)
-                # 2026-07-05 telemetry audit: the gate's own agent call never reached `cost`, so
-                # run_end's total_cost_usd (sum of per-ticket report costs) under-reported the
-                # ledger-true run cost (EU-139: $1.481 vs $2.156). gate() keeps its (ok, report)
-                # contract; the spend arrives via store.stage_costs, delta-read around the call.
-                _sec_cost_spent = float(store.stage_costs.get("provost", 0.0) or 0.0) - _sec_cost_before
-                if _sec_cost_spent > 0:
-                    cost += _sec_cost_spent
-                    budget.add(_sec_cost_spent)
-                # Countersignature gate: even when the verdict is PASS, the §1/§2/§3
-                # sign-off artifact must be fully populated and marked signed=True.
-                # An incomplete or missing artifact fails closed — the pipeline never
-                # reaches Land with an unsigned countersignature.
-                if sec_ok:
-                    _sa = store.get_security()
-                    if _sa is None or not _sa.is_signed():
-                        sec_ok = False
-                        sec_report = (
-                            "SECURITY GATE: BLOCK — countersignature artifact is missing or "
-                            "incomplete (§1/§2/§3 sections not fully filled in); failing closed."
-                        )
-                if not sec_ok:
-                    _bar(SECURITY, fail=SECURITY)
-                    print("  security · Security Engineer BLOCK (CRITICAL/HIGH) → PR for you, DEV untouched", flush=True)
-                    # EU-153: Post security block comment
-                    sec_comment = commenter.summarize_gate_event(
-                        "Security", "BLOCKED",
-                        (sec_report or "Security gate failed - CRITICAL/HIGH finding")[:2000],
-                        ticket.id
-                    )
-                    if sec_comment and backlog and not ticket.ephemeral:
-                        commenter.post_comment(backlog, ticket.key, sec_comment)
-                    _notify(cfg, f"🛡️ {ticket.id} — Security Engineer blocked the merge (security).\n\n{sec_report[:1200]}")
-                    audit.record("security_block", ticket_id=ticket.id, iteration=iteration,
-                                 reason=(sec_report or "")[:2500])
-                    security_block = sec_report
-                else:
-                    print("  security · Security Engineer PASS ✓", flush=True)
+            # Phase-2 §2 (2026-07-06): the LLM per-diff security gate was deleted (off by default;
+            # its secret/dep half is now the deterministic gate.py scan, its judgment half a
+            # Reviewer checklist section). A review that ships now lands directly.
             import inspect
             _land_sig = inspect.signature(_land)
             if "commenter" in _land_sig.parameters:
                 result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review, security_block=security_block, coverage=coverage_artifact, commenter=commenter)
+                               review, coverage=coverage_artifact, commenter=commenter)
             else:
                 result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review, security_block=security_block, coverage=coverage_artifact)
+                               review, coverage=coverage_artifact)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
             return _resolve(result)
@@ -1336,7 +1292,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
-          security_block=None, coverage="", commenter=None) -> TicketReport:
+          coverage="", commenter=None) -> TicketReport:
     if commenter is None:
         commenter = jira_commenter.TicketCommenter(
             cfg,
@@ -1349,8 +1305,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     temp = f"{app.branch_prefix}/_trial"
     merge_msg = f"Merge {branch} into {app.base_branch} ({ticket.id})"
     print(f"  land · trial-merging into {app.base_branch} (throwaway branch — DEV untouched)…", flush=True)
-    if not security_block:           # a security block already lit Security red — don't claim Land active
-        _bar(LAND, active=LAND)
+    _bar(LAND, active=LAND)
 
     clean = bool(cfg.merge_to_dev) and git.trial_merge(branch, temp, merge_msg)
     gate = run_gate(app, git.changed_paths()) if clean else None  # gate runs on the trial branch, not on DEV (EU-19: per-app)
@@ -1367,12 +1322,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         reason = "could not merge cleanly into dev" if cfg.merge_to_dev else "merge_to_dev disabled"
     elif not green:
         reason = "dev gate fails after merge"
-    elif security_block:
-        reason = "Security Engineer blocked — CRITICAL/HIGH security finding"
     else:
         reason = ""
-    # The phase a failure lights red: a security block stops at Security, anything else at Land.
-    fail_idx = SECURITY if security_block else LAND
+    # Any failure lights Land red (the deleted security gate used to stop earlier at Security).
+    fail_idx = LAND
 
     # DRY-RUN: previewed only — DEV is never touched.
     if cfg.dry_run:
