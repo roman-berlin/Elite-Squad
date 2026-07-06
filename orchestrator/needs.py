@@ -11,13 +11,11 @@ Streams in ``rows`` (everything the badge counts — count == len(rows) == total
   • pr         — runs that ended with a PR opened and need Commander review
   • approval   — officer recommendations awaiting a decision (drill / adjutant reports)
   • proposal   — queued ticket batches awaiting approve/deny
-  • specialist — specialist-provisioning rosters awaiting approve/decline
 
 The same items are ALSO exposed under their original keys (``decisions``, ``approvals``,
-``proposals``, ``specialist_approvals``, ``tasks``) so server.py can render each section with its
-bespoke action form.  EU-102 (iter-3): ``specialist_approvals`` are now folded into ``rows`` too, so
-there is exactly ONE number everywhere — ``count() == len(rows) == total`` — and no stream can raise
-the badge without also rendering in the inbox.
+``proposals``, ``tasks``) so server.py can render each section with its bespoke action form. There
+is exactly ONE number everywhere — ``count() == len(rows) == total`` — and no stream can raise the
+badge without also rendering in the inbox.
 
 Dedup: a ticket in blocked_tickets.json yields exactly ONE row, category ``parked`` (autopilot is
 skipping it), even when its latest run also errored — the errored/PR loop skips blocked ticket ids.
@@ -36,7 +34,7 @@ def summary(cfg: Config) -> dict:
     """Unified inbox: a flat ``rows`` list (typed, with category + why) plus backward-compat keys.
 
     Each row is a copy of the source item extended with:
-      ``category`` — one of: decision | errored | parked | pr | approval | proposal | specialist
+      ``category`` — one of: decision | errored | parked | pr | approval | proposal
       ``why``      — one-line human reason string (question text, note, or fallback label)
 
     ``total`` == ``len(rows)`` == ``count()`` — one number for every Needs-you surface (EU-102).
@@ -134,13 +132,12 @@ def summary(cfg: Config) -> dict:
             "why": str(t.get("note") or "blocked — autopilot skipping"),
         })
 
-    # ── 5. Officer recommendations + 6. ticket proposals + 7. specialist rosters ──
-    # All three need the Commander, so all three ARE part of the unified inbox (rows + badge count).
-    # EU-102 (iter-3): specialist_approvals are now folded into ``rows`` as well, so total == count
-    # == len(rows) everywhere and a pending roster can never raise the badge without rendering a row.
+    # ── 5. Officer recommendations + 6. ticket proposals ──
+    # Both need the Commander, so both ARE part of the unified inbox (rows + badge count), so
+    # total == count == len(rows) everywhere and a pending item can never raise the badge without
+    # rendering a row.
     approvals_items: list[dict] = []
     proposal_items: list[dict] = []
-    specialist_approval_items: list[dict] = []
     try:
         from . import approvals as _ap
         approvals_items = _ap.pending(cfg) or []
@@ -149,11 +146,6 @@ def summary(cfg: Config) -> dict:
     try:
         from . import approvals as _ap
         proposal_items = _ap.pending_proposals(cfg) or []
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from . import hr as _hr
-        specialist_approval_items = _hr.pending_specialist_approvals(cfg) or []
     except Exception:  # noqa: BLE001
         pass
 
@@ -170,23 +162,12 @@ def summary(cfg: Config) -> dict:
             "category": "proposal",
             "why": str(p.get("source") or f"{_n} ticket(s) to file"),
         })
-    for sp in specialist_approval_items:
-        _tid = str(sp.get("ticket_id") or "")
-        _dom = str(sp.get("domain") or "")
-        rows.append({
-            **sp,
-            "category": "specialist",
-            "why": (f"Provision {_dom} specialist squad for {_tid}".strip()
-                    if (_dom or _tid) else "specialist roster awaiting approval"),
-        })
-
     return {
         "rows": rows,
         # Per-stream keys — server.py /needs renders each section with its own action form.
         "decisions": decisions_items,
         "approvals": approvals_items,
         "proposals": proposal_items,
-        "specialist_approvals": specialist_approval_items,
         "tasks": task_items,
         # ONE number everywhere: count == len(rows) == total (the badge invariant). Every stream that
         # raises ``total`` also appends a row, so the badge can never point at an empty inbox (EU-102).
@@ -196,6 +177,6 @@ def summary(cfg: Config) -> dict:
 
 def count(cfg: Config) -> int:
     """Badge number — the unified inbox row count (decisions + errored + parked + PRs +
-    officer approvals + ticket proposals + specialist rosters).  count == len(summary()['rows'])
+    officer approvals + ticket proposals).  count == len(summary()['rows'])
     == summary()['total'], always."""
     return len(summary(cfg)["rows"])

@@ -1402,7 +1402,6 @@ def create_app(cfg: Config):
             ".nbadge.err{background:#2a1010;color:#f87171}"    # errored    — red
             ".nbadge.prk{background:#1f1600;color:#fbbf24}"    # parked     — amber
             ".nbadge.opr{background:#0c1f20;color:#34d399}"    # open PR    — teal
-            ".nbadge.spc{background:#0c1a2a;color:#60a5fa}"    # specialist — blue
             "</style>")
         # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
         _m = _state.pop("last_msg", "") or ""
@@ -1578,53 +1577,6 @@ def create_app(cfg: Config):
                     "<form method=post action=/api/deny-proposals class=nrow style='margin:6px 0 0'>"
                     f"<input type=hidden name=batch value=\"{bid}\">"
                     "<button class='nbtn no'>Deny &mdash; discard</button></form></div>")
-            out.append("</div>")
-
-        # ── Specialist rosters — provisioning awaiting approve/decline (EU-102 iter-3) ──
-        # Folded into rows/count, so they MUST render here too — otherwise a non-zero badge would
-        # point at an empty inbox (the specialist-only dead-end this iteration fixes). Approve/decline
-        # route through /api/answer → decisions.handle_reply → hr.resolve_specialist_approval_reply,
-        # which reads 'approve' / 'decline' (no new endpoint needed).
-        if s.get("specialist_approvals"):
-            _specs = s["specialist_approvals"]
-            out.append(f"<div class=nsec><h3>&#129513; Specialist rosters &middot; {len(_specs)}</h3>")
-            for sp in _specs:
-                tid = html.escape(str(sp.get("ticket_id") or ""))
-                dom = html.escape(str(sp.get("domain") or ""))
-                sapp = html.escape(str(sp.get("app_name") or sp.get("app") or ""))
-                tsum = html.escape(str(sp.get("ticket_summary") or ""))
-                roster = ""
-                charters = sp.get("charters") or []
-                if charters:
-                    lis = "".join(
-                        f"<li>{html.escape(str(c.get('name') or c.get('lane_key') or 'specialist'))}"
-                        + (f" <span class=ptype>&middot; {html.escape(str(c.get('lane_key')))}</span>"
-                           if c.get('lane_key') else "")
-                        + "</li>"
-                        for c in charters if isinstance(c, dict))
-                    if lis:
-                        roster = ("<ul style='margin:8px 0 2px 18px;padding:0;color:#c3cad6;"
-                                  f"font-size:13px'>{lis}</ul>")
-                out.append(
-                    "<div class=ncard>"
-                    f"<div class=q><span class='nbadge spc'>Specialist</span>"
-                    f"Provision a {dom or 'specialist'} squad to build {tid}"
-                    + (f" &mdash; {tsum}" if tsum else "")
-                    + "</div>"
-                    f"<div class=meta>{tid}{(' &middot; ' + sapp) if sapp else ''}</div>"
-                    + roster +
-                    "<div class=nrow>"
-                    "<form method=post action=/api/answer style='margin:0'>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    f"<input type=hidden name=app value='{sapp}'>"
-                    "<input type=hidden name=text value='approve'>"
-                    "<button class='nbtn ok'>&#9989; Approve &amp; provision</button></form>"
-                    "<form method=post action=/api/answer style='margin:0'>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    f"<input type=hidden name=app value='{sapp}'>"
-                    "<input type=hidden name=text value='decline'>"
-                    "<button class='nbtn no'>Decline &mdash; solo build</button></form>"
-                    "</div></div>")
             out.append("</div>")
 
         return _wrap("Needs you", "".join(out))

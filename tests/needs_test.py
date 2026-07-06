@@ -52,10 +52,10 @@ check("side panel links to the inbox", "/needs" in side and "Open inbox" in side
 
 # --- EU-93: count == len(items) invariant ---
 # needs.count() must equal the number of rows the panel will render — the single source of truth.
-# All five streams (decisions + approvals + proposals + specialist_approvals + tasks) must sum to
-# the same number that the KPI badge and the side-panel header badge both show.
+# All streams (decisions + approvals + proposals + tasks) must sum to the same number that the
+# KPI badge and the side-panel header badge both show.
 all_items = (s.get("decisions", []) + s.get("approvals", []) + s.get("proposals", [])
-             + s.get("specialist_approvals", []) + s.get("tasks", []))
+             + s.get("tasks", []))
 check("EU-93: count() == len(panel items)", needs.count(cfg) == len(all_items),
       f"count={needs.count(cfg)} items={len(all_items)}")
 

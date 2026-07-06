@@ -321,16 +321,6 @@ def handle_reply(cfg, audit, text: str) -> bool:
     ticket_id, answer = parse_reply(text)
     resolved = resolve(cfg, answer, ticket_id)
     if not resolved:
-        # EU-88: also check pending specialist-provisioning approvals (separate state file).
-        # The Commander's reply "AUTO-90: approve" may target a parked specialist roster even
-        # when there is no entry in pending_decisions.json for that ticket.
-        if ticket_id:
-            try:
-                from . import hr as _hr_mod
-                if _hr_mod.resolve_specialist_approval_reply(cfg, audit, ticket_id, answer):
-                    return True
-            except Exception:  # noqa: BLE001 — reply handler must never crash
-                pass
         return False
     notify.send(f"▶️ Resuming {resolved['id']} with your decision: {answer}")
     audit.record("decision_resumed", ticket_id=resolved["id"], answer=answer)
