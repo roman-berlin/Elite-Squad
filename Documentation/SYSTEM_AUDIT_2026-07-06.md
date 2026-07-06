@@ -38,6 +38,13 @@ boundary correctly.** The gating defects for scale-up are **operational** — th
 is the **kill/crash path** (`autopilot_stop` not in a `finally`, so 10 of 19 autopilot sessions never wrote a
 stop), plus the single-Telegram-poller and server crash-loop backstop — not in the builder.
 
+**Live-run update (this session):** a supervised `./general --live ticket Elite-Unit EU-182` run confirmed the
+CLI path brackets cleanly (`run_start 11:36:50 → run_end 11:47:00`, $1.63, budget held) — **but surfaced a
+CRITICAL blocker (N9 / EU-188): the worktree isolation leak.** The builder produced the correct fix yet edited
+the *main* tree, so the gate saw "no changes" and false-escalated. Net: the graceful *plumbing* is healthy, but
+**the unit cannot yet reliably self-implement EU tickets** until EU-188 is fixed. The auditor restored the main
+tree to clean and preserved the correct diff.
+
 ---
 
 ## 2. Risk-ranked findings
@@ -46,6 +53,7 @@ stop), plus the single-Telegram-poller and server crash-loop backstop — not in
 
 | # | Sev | Finding | Evidence | Blast radius | Fix direction |
 |---|---|---|---|---|---|
+| **N9** | **🔴 HIGH (CRITICAL for self-dev)** | **Worktree isolation leaks on self-development tickets → builder edits the MAIN tree → false "no changes".** Reproduced live this session (EU-182). [first-hand] → filed **EU-188** | Supervised `./general --live ticket Elite-Unit EU-182` (2026-07-06 11:36–11:47): loop set up `isolated worktree → .general-worktrees/Elite-Unit`, but builder `Edit /Users/romanberlin/Projects/General/orchestrator/recon.py` (MAIN); main-tree `git status` clean→`M recon.py, M recon_test.py`; worktree empty → `no_changes 11:47:00` → false Needs-Human. The fix it produced was *correct* (`audit=audit` at `recon.py:139`) but stranded in main. 2nd instance after EU-174 (proposal Appx B); EU-139 didn't hit it → non-deterministic | The unit **cannot reliably self-implement EU tickets** — affected runs false-escalate, land nothing, bill ~$1.6/2-pass, and can mutate the live orchestrator tree it runs from (data-integrity, worse on a shared host) | Make the worktree the only writable root for self-dev builds (deny main-repo writes when a worktree is active) + carry `cwd`/`hooks`/`disallowed_tools` through every retry/`_solo` clone (proposal §6 defect 1); regression test: a self-dev build leaves main tree clean |
 | N1 | **HIGH** | **VPS crash-loop has no backstop.** `Restart=always`/`RestartSec=5` with no `StartLimitIntervalSec`/`StartLimitBurst`: a `main` deploy that crashes on startup restarts forever. [first-hand] | `/etc/systemd/system/general.service` has `Restart=always`, `RestartSec=5`, no start-limit; journal shows **~864** `Started general.service` between 19:34–19:35 on 07-05 while HEAD was `da5c10b` (pre-`ce7aad6`); `cron.log` has 6 `UnboundLocalError: … 'AuditLog'` tracebacks | Any bad `origin/main` = the 24/7 box pegs CPU and self-heals only if the *next* self-update happens to carry the fix (it did, at 19:35) | Add `StartLimitIntervalSec=300` + `StartLimitBurst=5` and an `ExecStartPre` import-smoke-check; make `self-update.sh` smoke-test the new HEAD **before** `systemctl restart` |
 | N2 | **HIGH** | **Two Telegram pollers race one bot token.** VPS `general.service` runs `poll_loop` 24/7; any Mac `./general serve` with `.env` starts a second `poll_loop` on the **same** token. Telegram `getUpdates`+offset is single-consumer. [first-hand + auditor-reported] | `server.py:2669` starts `threading.Thread(target=decisions.poll_loop…)` when `notify.configured()`; token from `notify.py:112-113` (`TELEGRAM_BOT_TOKEN`); no cross-host lock | Inbound `/unblock`, approvals, decision replies split randomly between hosts; offset advances on whichever consumed → "weird"/lost messages | One-poller rule: a lock file / host-election so only the VPS polls; Mac `serve` runs cockpit-only unless it owns the poller lease |
 | N3 | **MEDIUM** | **VPS `patrol` cron is broken every week.** `./general patrol` requires a positional `app`; the cron omits it. [first-hand] | `crontab -l`: `0 9 * * 1 … ./general patrol`; `cron.log`: `general patrol: error: the following arguments are required: app`; usage line `general patrol [-h] … app` | Weekly security patrol never runs; silent gap in the one scheduled security sweep | Pin an app (`./general patrol <app>`) or make `app` optional/all-apps; or drop the cron if patrol is retired |
@@ -160,10 +168,13 @@ combination (silent, expensive, repeatable). This is the top item for the §7 ev
 3. Commander explicitly drives the first activation (per standing rule).
 
 ### 6.3 Let the unit drain the verified backlog
-**CONDITIONAL-GO for a single supervised ticket** after §6.1 preconditions 1–3; **NO-GO for autonomous
-multi-ticket drain** until §7 waves 1–2 land. **Preconditions:** clean `dev` base (deterministic gate green
-against BASE — Phase-2 §3 `51cc9e8` already ships the red-base short-circuit), 1–2 day observation window
-with **median ticket < 25 min, < 3M tokens, 0 unclosed runs**.
+**NO-GO for the EU (self-development) backlog until N9/EU-188 (worktree isolation leak) is fixed** — proven
+live this session: EU-182 false-escalated because the builder edited the main tree. Until then every EU ticket
+risks a false "no changes" + main-tree contamination. **CONDITIONAL-GO for a single supervised ticket** (with
+a before/after main-tree `git status` isolation check) after §6.1 preconditions 1–3 **and** EU-188; **NO-GO for
+autonomous multi-ticket drain** until §7 waves 1–2 land. **Preconditions:** EU-188 fixed + isolation regression
+test green; clean `dev` base (Phase-2 §3 `51cc9e8` red-base short-circuit); 1–2 day observation with **median
+ticket < 25 min, < 3M tokens, 0 unclosed runs, 0 isolation leaks**.
 
 ---
 
@@ -223,5 +234,12 @@ untouched; z.ai stays commented; effort tier is Roman's to set.
   graceful path is healthy. The **"not all good"** is historical: 10 of 19 autopilot sessions and 2 of 14
   runs never closed — the 2026-07-01 SIGKILL crash path (`autopilot_stop` not in `finally`) = EU-175, fixed
   in Wave 1.
-- **No live ticket was run** — that is the money/`Jira`-mutating, previously-forbidden action; held for the
-  Commander's explicit mode choice (inspect-only vs dry-run vs one supervised live run).
+- **One supervised live run performed** (Commander-authorized): `./general --live ticket Elite-Unit EU-182`,
+  2026-07-06 11:36–11:47, $1.63, 2 passes. Launched only into a verified-clear `run_all` window (host has a
+  concurrent session looping suites). Result: clean run boundaries + budget, **but surfaced N9/EU-188** (the
+  isolation leak). The builder's fix was correct but stranded in the main tree; auditor preserved the diff
+  (`scratchpad/EU-182-correct-fix.patch`) and restored the main tree to clean. Stray branch/worktree pruned.
+  **This is the "not all good — fix it" outcome:** the immediate breakage (dirty main tree) was fixed; the
+  underlying pipeline defect is filed as EU-188 (code fix is pipeline-core, out of audit scope).
+- **Filed:** EU-184 (N1), EU-185 (N2), EU-186 (N3), EU-187 (N4), **EU-188 (N9, the headline)**; sharpened
+  EU-181, EU-175, EU-129, EU-183, EU-182.
