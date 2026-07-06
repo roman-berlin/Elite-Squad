@@ -22,11 +22,10 @@ import threading
 import time
 from pathlib import Path
 
-from . import events, intake, locking, notify, usage
+from . import intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
-from .gate import prebuild_gate
 from .loop import run as run_loop
 
 # PID file — single source of truth for "is the daemon actually running?"
@@ -417,9 +416,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         mode = "DRY-RUN" if cfg.dry_run else ("LIVE · automode" if getattr(cfg, "auto_mode", False) else "LIVE")
 
         # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
-        if notify.configured():
-            from . import decisions
+        # EU-185 (Wave 0): only the elected poller host polls, so an autopilot run on a non-poller
+        # host doesn't fight the VPS poller over the one bot token (getUpdates is single-consumer).
+        from . import decisions
+        _ap_poll, _ap_why = decisions.should_poll_telegram(cfg)
+        if _ap_poll:
             threading.Thread(target=decisions.poll_loop, args=(cfg, audit), daemon=True).start()
+        elif notify.configured():
+            print(f"  · Telegram listener OFF — {_ap_why}", flush=True)
 
         scope = app_name or "all backlog apps"
         notify.send(f"🛸 Autopilot {mode} online — working {scope}")
@@ -713,7 +717,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     idle_state = state
                 if once:
                     break
-                await events.after_cycle(cfg, [], audit, blocked)   # quiet cycle — room for life
+                # Phase-2 §2: the events.py autonomy layer (auto-convened smalltalk/meetings on
+                # quiet cycles) was deleted — ceremonies are on-demand only now.
                 _sleep(max(5, interval), stop_event)
                 continue
             idle_state = None   # work again → re-announce next time the queue empties
@@ -721,18 +726,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             ids = ", ".join(t.id for _, t in worklist)
             print(f"  · taking {ids}", flush=True)
 
-            # EU-107: Run pre-build gate (Senior PM triage) to filter tickets that can be
-            # resolved without a build (ANSWER, CLOSE, REFILE) before reaching the Builder.
-            worklist = await prebuild_gate(cfg, worklist, audit)
-
-            # Only proceed to build if tickets remain after triage
-            if not worklist:
-                print("  · all tickets resolved by pre-build gate — nothing to build", flush=True)
-                await events.after_cycle(cfg, [], audit, blocked)
-                if once:
-                    break
-                _sleep(max(5, interval), stop_event)
-                continue
+            # Phase-2 §2 (2026-07-06): the EU-107 Senior PM pre-build triage gate is DELETED —
+            # it was off by default since 2026-06-29 (it closed [Feature] tickets as "answered"),
+            # and its ANSWER/CLOSE/REFILE verdicts move into the Planner's single per-ticket
+            # decision. The conservative overrides (AC / [Feature] / [Bug] ⇒ always build) become
+            # deterministic pre-checks on that verdict when the Planner lands.
 
             reports = await run_loop(cfg, worklist, audit)
 
@@ -783,7 +781,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 notify.send("⏸️ Parked (need you): " + ", ".join(newly)
                             + "\nReply /unblock <id> once handled and I'll retry it.")
             _learn_from_cycle(cfg, reports, audit)   # fold this cycle's lessons into memory (free)
-            await events.after_cycle(cfg, reports, audit, blocked)   # the unit may convene itself
+            # Phase-2 §2: events.after_cycle (the auto-convene reactor) deleted — on-demand only.
 
             # EU-128: In dry-run mode, track processed tickets so they're not re-picked in
             # subsequent cycles. This prevents continuous+dry-run from re-processing the same

@@ -55,6 +55,9 @@ def chk(name: str, condition: bool, detail: str = ""):
 
 ns = types.SimpleNamespace
 tmp = Path(tempfile.mkdtemp())
+# The real autopilot() runs below write their PID file. Keep it off the machine-global
+# /tmp/general-autopilot.pid, which is shared with a live daemon and every other checkout's suite.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 
 APP = AppConfig(
     name="eu",
@@ -97,7 +100,6 @@ def _run_cycle():
     async def _after_cycle(c, reports, audit, blocked):
         return
 
-    autopilot.events.after_cycle = _after_cycle
     autopilot.notify.configured = lambda: False
     autopilot.notify.send = lambda *a, **k: None
     asyncio.run(autopilot.autopilot(cfg, once=True))
@@ -158,7 +160,6 @@ def _run_error_cycle():
     async def _after_cycle(c, reports, audit, blocked):
         return
 
-    autopilot.events.after_cycle = _after_cycle
     autopilot.notify.configured = lambda: False
     autopilot.notify.send = lambda *a, **k: None
     asyncio.run(autopilot.autopilot(cfg, once=True))

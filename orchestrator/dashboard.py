@@ -232,10 +232,17 @@ def load_dismissed(audit_path: str | Path) -> dict[str, str]:
 
 def dismiss(audit_path: str | Path, ticket_id: str) -> None:
     import time
-    d = load_dismissed(audit_path)
-    d[str(ticket_id)] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    from . import locking
+
+    # 2026-07-05 audit §7.4: two concurrent /api/dismiss handlers (Flask runs threaded) did a
+    # bare load→mutate→write_text, so the second write dropped the first ticket's dismissal and
+    # its needs-you card silently reappeared. locked_rmw makes the read-modify-write atomic.
+    def _mut(d):
+        d = d if isinstance(d, dict) else {}
+        d[str(ticket_id)] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        return d
     try:
-        _dismissed_file(audit_path).write_text(json.dumps(d), encoding="utf-8")
+        locking.locked_rmw(_dismissed_file(audit_path), _mut, default={}, corrupt_to_default=True)
     except OSError:
         pass
 

@@ -60,6 +60,11 @@ from orchestrator.config import AppConfig, Config
 
 # ── shared config / Flask test client (TWO apps, so parallelism is testable) ───
 _TMP = Path(tempfile.mkdtemp())
+# get_autopilot_status() / _control_bar() OR in a liveness probe of the machine-global autopilot
+# PID file (/tmp/general-autopilot.pid). A live daemon — or another checkout's suite running the
+# real autopilot() — flips 'on' True in the unpatched sections below (the 2026-07-06 flake).
+# Probe a per-harness path instead.
+_ap_mod._PID_FILE = _TMP / "general-autopilot.pid"
 _CFG = Config(
     apps=[
         AppConfig(name="automatixy", repo_path=str(_TMP), base_branch="DEV",
@@ -89,7 +94,10 @@ _started_apps: list = []
 
 async def _fake_autopilot(cfg, app_name=None, once=False, interval=60, stop_event=None):
     _started_apps.append(app_name)
-    for _ in range(250):  # ~5s cap so a buggy test can never hang the suite
+    # The cap is a hang-guard only (the threads are daemonic; a buggy test can never hang the
+    # suite). It must be generous: the old ~5s cap expired under full-suite load, the loop
+    # returned early, and _bg's finally flipped autopilot_on off under the asserts.
+    for _ in range(3000):  # ~60s
         if _release.is_set() or (stop_event is not None and stop_event.is_set()):
             return
         time.sleep(0.02)
@@ -101,7 +109,10 @@ _ap_mod.autopilot = _fake_autopilot
 def _drain_threads() -> None:
     """Release the fake loops and wait for the per-app run-state to clear, then reset."""
     _release.set()
-    for _ in range(60):
+    # Wait for every _bg worker to run its finally (release_run) BEFORE resetting the run-state:
+    # a straggler releasing after the reset would clear the NEXT section's freshly-claimed run.
+    # The fakes poll every 20ms, so this exits almost immediately; the deadline is a hang-guard.
+    for _ in range(1500):   # ~30s
         if cockpit_state.active_run_count() == 0:
             break
         time.sleep(0.02)

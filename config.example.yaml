@@ -5,12 +5,15 @@
 # ===========================================================================
 
 # --- the two officers (role asymmetry: a strong reviewer is worth it) ---
-builder_model: "claude-sonnet-4-6"
+builder_model: "claude-sonnet-5"
 reviewer_model: "claude-opus-4-8"
 
 builder_effort: "high"            # low | medium | high | max (thinking depth)
 reviewer_effort: "high"
-escalate_effort_on_retry: true    # bump the Builder's effort when a pass is rejected (low->medium->high->max)
+escalate_effort_on_retry: false   # OFF (2026-07-05 audit): 135/135 round-2+ review objections were NEW — effort
+                                  # escalation on retry bought context bloat, not convergence. Retry keeps the
+                                  # pass-1 effort and turn budget; the Sonnet->Opus MODEL ladder on retry is a
+                                  # separate, intended mechanism and stays on.
 
 # --- loop bounds / cost ---
 max_iterations: 2            # build<->review cycles before escalating to you (hard-clamped to 2 in loop.py)
@@ -39,10 +42,11 @@ out_of_scope_autofile: false  # false = PROPOSE-FIRST: a finding outside the tic
                               # (de-duped) but NOT auto-filed into the backlog. Flip true to let filing.py
                               # open backlog tickets for out-of-scope findings automatically.
 
-# --- autonomy defaults (decided + documented, EU-42) ---
-# Both kept OFF: they incur extra cost/noise and are opt-in only.
+# --- opt-in extras (both OFF: extra cost/noise) ---
 # scout_after_merge: false    # OFF: don't smoke-test DEV after each merge (extra QA-Engineer cost)
 # meeting_autospawn: false    # OFF: meetings may PROPOSE tickets but never auto-file them (review-first)
+# (Phase-2 §2: the events.py autonomy layer — auto-convened meetings/small-talk — was deleted;
+#  ceremonies are on-demand only, so the old autonomy_* flags no longer exist.)
 
 # --- safety ---
 dry_run: true               # full loop incl. a trial merge, but NO push / merge / Jira writes
@@ -56,8 +60,11 @@ use_worktree: true          # run each app in a dedicated linked git worktree ba
                             # Auto-falls back to in-tree if the repo has no origin remote.
 sync_base_after_merge: true # after a green live merge, bring <base> in your main checkout up to date for QA
                             # (ff if you're on <base> & clean, else advance the ref; never clobbers dirty work)
-security_gate: false        # true = the Provost Marshal reviews each diff before merge; a CRITICAL/HIGH security
-                            # finding (secrets, tenant-isolation, authz, injection) opens a PR instead of landing
+# (Phase-2 §2: the LLM per-diff security gate was removed; secret/dep checks are deterministic in
+#  gate.py now, and the weekly `general provost` security recon still runs. `security_gate` is gone.)
+red_base_check: true        # Phase-2 §3.1 (the EU-174 killer): before the FIRST build pass, gate the CLEAN base
+                            # tree; a red base BLOCKS the ticket (Telegram + Needs-you) instead of billing builds
+                            # for a failure that predates the diff. Cached per base sha (state/red_base_cache.json)
 
 # --- post-merge safety net (Sentinel) ---
 sentinel_enabled: true      # ARMED: after a feature lands on <base>, Sentinel runs that app's `postmerge_commands`
@@ -91,6 +98,10 @@ apps:
       # worker PER CPU CORE -> it can OOM/freeze the box; pin --pool=forks + a low maxForks. Keep it
       # FAST + STABLE (a slow/flaky gate stalls or bounces every build):
       - "npx vitest run --pool=forks --poolOptions.forks.maxForks=2"
+    # Phase-2 §3.3: fast lint/format DETERMINISTIC gate — runs after the test gate and before
+    # any LLM reviewer; failures feed the Builder as plain text. Keep it fast (seconds).
+    # Python repos: ["ruff check ."]. Empty/omitted = no lint gate for this app.
+    lint_commands: []
     # --- MONOREPO: per-app gates (EU-19) ---------------------------------------------------
     # If this repo is a monorepo (apps/<x>/, packages/<x>/), set per-app gate commands here.
     # The gate detects which apps/packages a ticket's diff touched and runs ONLY their gates

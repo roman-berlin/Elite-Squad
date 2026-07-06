@@ -32,6 +32,27 @@ for p in ["src/app.tsx", "package.json", "backend/main.py", "README.md",
           ".env.example", "apps/web/.env.sample", "config.template", "k.pem.example"]:
     chk(f"allow write {p}", not blocked("Write", file_path=p), p)
 
+# --- EU-188: worktree confinement — a WRITE outside the officer's workdir is blocked (the EU-182 leak) ---
+import os, tempfile
+_wt = tempfile.mkdtemp(prefix="eu188_wt_")
+_out = tempfile.mkdtemp(prefix="eu188_out_")
+def _bwd(tool, wd, **inp): return guard.is_dangerous(tool, inp, wd)[0]
+# BLOCK: the exact EU-182 leak — builder Edits the MAIN tree by ABSOLUTE path, outside its worktree
+chk("EU-188 BLOCK Edit outside worktree (the leak)", _bwd("Edit", _wt, file_path=os.path.join(_out, "orchestrator/recon.py")))
+chk("EU-188 BLOCK Write outside worktree", _bwd("Write", _wt, file_path=os.path.join(_out, "x.py")))
+chk("EU-188 BLOCK MultiEdit to an absolute system path", _bwd("MultiEdit", _wt, file_path="/etc/hosts"))
+chk("EU-188 BLOCK NotebookEdit outside worktree", _bwd("NotebookEdit", _wt, notebook_path=os.path.join(_out, "n.ipynb")))
+# ALLOW: writes inside the worktree — relative (resolved against workdir) and absolute-inside
+chk("EU-188 ALLOW relative write inside worktree", not _bwd("Edit", _wt, file_path="orchestrator/recon.py"))
+chk("EU-188 ALLOW absolute write inside worktree", not _bwd("Write", _wt, file_path=os.path.join(_wt, "orchestrator/recon.py")))
+chk("EU-188 ALLOW write to a new nested dir inside worktree", not _bwd("Write", _wt, file_path=os.path.join(_wt, "tests/new_test.py")))
+# Reads are NOT confined (the builder may read outside for reference) — only writes are
+chk("EU-188 Read outside worktree is NOT confined", not _bwd("Read", _wt, file_path=os.path.join(_out, "ref.py")))
+# Backward compat: with NO workdir, confinement is OFF (prior behavior for callers that don't pass one)
+chk("EU-188 no-workdir → confinement off (backward compat)", not guard.is_dangerous("Edit", {"file_path": os.path.join(_out, "x.py")})[0])
+# Compose with the secret rule: a secret path is blocked even when it's inside the worktree
+chk("EU-188 secret path still blocked inside worktree", _bwd("Write", _wt, file_path=os.path.join(_wt, ".env")))
+
 # --- MUST BLOCK: destructive shell ---
 for c in ["rm -rf /", "rm -rf ~", "rm -rf .", "sudo rm -rf $HOME",
           # F9: recursive delete of an ABSOLUTE path (the repo root, or anything outside the worktree)
@@ -205,8 +226,9 @@ chk("hooks_config matcher includes Read (hook fires on secret reads)", "Read" in
 from pathlib import Path
 b = Path("./orchestrator/builder.py").read_text()
 s = Path("./orchestrator/squad.py").read_text()
-chk("builder attaches the guard", "hooks=guard.hooks_config()" in b)
-chk("soldier attaches the guard", "hooks=guard.hooks_config()" in s)
+# EU-188: the write-capable worktree officers attach the guard WITH their workdir (confinement on).
+chk("builder attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(workdir)" in b)
+chk("soldier attaches the guard + workdir (EU-188)", "hooks=guard.hooks_config(cwd)" in s)
 
 # --- EU-2 F7: fail LOUD when the guard isn't installed ---
 chk("is_installed() True when SDK supports hooks", guard.is_installed() is True)
@@ -215,21 +237,19 @@ chk("builder calls warn_if_absent", "guard.warn_if_absent(" in b)
 chk("soldier calls warn_if_absent", "guard.warn_if_absent(" in s)
 
 # --- EU-47: the READ-ONLY recon officers must attach the guard too (drift-guard the wiring) ---
-# provost/scout/quartermaster recon all funnel through recon._opts; the provost security GATE builds its
-# own inline options. Both run bypassPermissions with Bash allowed (for npm/bun audit), so the hard
-# denylist — deny-by-content (cat .env / exfil), NOT removing Bash — must be wired on these paths, and
-# warn_if_absent must fire loud if it's ever absent. Pin it so the wiring can't silently regress.
+# provost/scout/quartermaster recon all funnel through recon._opts, which runs bypassPermissions with
+# Bash allowed (for npm/bun audit), so the hard denylist — deny-by-content (cat .env / exfil), NOT
+# removing Bash — must be wired on that path, and warn_if_absent must fire loud if absent. Pin it so
+# the wiring can't silently regress. (Phase-2 §2: the provost per-diff GATE was deleted; only its
+# read-only recon path remains — the deterministic gate.py scan replaced the gate.)
 rc = Path("./orchestrator/recon.py").read_text()
-pv = Path("./orchestrator/provost.py").read_text()
 chk("recon._opts attaches the guard (provost/scout/quartermaster recon)", "hooks=guard.hooks_config()" in rc)
 chk("recon calls warn_if_absent", "guard.warn_if_absent(" in rc)
-chk("provost gate attaches the guard", "hooks=guard.hooks_config()" in pv)
-chk("provost gate calls warn_if_absent", "guard.warn_if_absent(" in pv)
 
 # simulate the guard vanishing (SDK too old / import failure -> hooks_config() returns None)
 import io, contextlib
 _orig = guard.hooks_config
-guard.hooks_config = lambda: None
+guard.hooks_config = lambda *a, **k: None
 try:
     chk("is_installed() False when hooks_config() is None", guard.is_installed() is False)
     buf = io.StringIO()

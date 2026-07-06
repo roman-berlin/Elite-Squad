@@ -52,13 +52,10 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
   add the missing test(s) if it is not. (Bun's test runner is light — unlike Vitest below it does not
   need worker bounding — but still scope it to the package you touched, not the whole monorepo.)
-- SECURITY — Pre-handoff Security Countersignature (officers/builder.md § Pre-handoff Security
-  Countersignature): fill in the three-section block below verbatim and paste it into your summary:
-    §1-secrets:    <grep output — e.g. grep -rE '(sk-|api_key=|password=)' src/ → 0 matches>
-    §2-authz:      <route | guard | middleware position — e.g. POST /api/leads guarded by require_auth() at middleware/auth.py:15>
-    §3-injection:  <call-site | parameterization mechanism — e.g. ORM parameterised at leads/repo.py:34; no raw SQL>
-  Each field must have a real answer — never leave blank or use a placeholder. For a pure
-  config/docs ticket with no secret-adjacent changes: state that explicitly per field.
+- SECURITY: never commit a secret (API key, token, password, private key, connection string).
+  Keep queries parameterised and new routes behind their auth guard. (Phase-2 §2: the §1/§2/§3
+  countersignature block was retired with the LLM security gate — a deterministic secret/dep scan
+  runs on your diff now, so just don't introduce the problem.)
 Report the outcome of all gates in your final summary (passed, or what you had to fix to make them
 pass) so it is auditable that they ran before Reviewer saw the diff.
 
@@ -173,7 +170,10 @@ def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     """(effort, human-readable reason) for this build pass.
 
     Base effort is sized from the ticket when adaptive_effort is on; otherwise the
-    configured default. A rejected pass then escalates one level per retry (capped)."""
+    configured default. Retry keeps the pass-1 effort (and with it the turn budget) unless
+    `escalate_effort_on_retry` is explicitly enabled — then a rejected pass escalates one
+    level per retry (capped). Default is OFF: the 2026-07-05 audit found 135/135 round-≥2
+    reviewer objections were new, so effort escalation bought bloat, not convergence."""
     if ticket is not None and getattr(cfg, "adaptive_effort", True):
         size, base, why = size_ticket(ticket)
         reason = f"sized {size} → {base} ({why})"
@@ -301,11 +301,12 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
         "ACCEPTANCE CRITERIA:",
         ac,
     ]
-    # EU-109: include the Architect's ADR if produced (provides approach, risk, touch-points, DoD)
+    # The up-front design brief (Phase-2 §2 Planner, or the Architect's ADR when the Planner is
+    # off). Both flow through req.adr — approach + testable AC + in-scope files / touch-points.
     if req.adr:
         parts += [
             "",
-            "ARCHITECT'S ADR (design upfront — follow this approach):",
+            "DESIGN BRIEF (produced up front — follow this approach):",
             req.adr,
         ]
     if spec is not None and spec.non_goals:
@@ -345,15 +346,24 @@ async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None,
     """
     from . import squad
     result: BuildResult | None = None
+    # 2026-07-05 telemetry audit: when delegation falls back to solo, the gap-detect + planner
+    # calls already burned real tokens with no BuildResult to carry them (the EU-139 run dropped
+    # $0.386 this way). build_delegated reports that burn here; the solo result absorbs it below.
+    sunk: dict = {}
     if squad.should_delegate(cfg, req):
         try:
-            delegated, n = await squad.build_delegated(req, app, cfg, audit=audit)
+            delegated, n = await squad.build_delegated(req, app, cfg, audit=audit, sunk=sunk)
             if delegated is not None and n >= 1:   # n=1: synthesis; n>=2: squad split
                 result = delegated
         except Exception as exc:  # noqa: BLE001 - delegation must never break a run
             print(f"  · delegation off ({str(exc).splitlines()[0][:80]}); building solo", flush=True)
     if result is None:
         result = await _solo_build(req, app, cfg, spec=spec)
+        if sunk:
+            result.cost_usd += float(sunk.get("cost_usd", 0.0) or 0.0)
+            result.num_turns += int(sunk.get("num_turns", 0) or 0)
+            result.input_tokens += int(sunk.get("input_tokens", 0) or 0)
+            result.output_tokens += int(sunk.get("output_tokens", 0) or 0)
     # EU-72: publish the typed BuildArtifact into the shared per-ticket pool. The loop stamps the
     # authoritative files_changed (it owns git); the full summary/raw stays on the result for digging.
     if store is not None:
@@ -383,7 +393,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         setting_sources=[],            # no settings files -> no ask/deny gate at any level
-        hooks=guard.hooks_config(),    # hard denylist: blocks secrets/.env/CI writes + destructive shell
+        hooks=guard.hooks_config(workdir),  # denylist + EU-188 worktree confinement (no writes outside workdir)
         max_turns=turns_for(cfg, eff),
         effort=eff,
     )

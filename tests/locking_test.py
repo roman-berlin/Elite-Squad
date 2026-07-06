@@ -164,6 +164,56 @@ locked_rmw(fresh_path, _capture, default={"seeded": True})
 chk("rmw/default: missing file yields the default value", seen.get("v") == {"seeded": True}, str(seen.get("v")))
 chk("rmw/default: new value written", json.loads(fresh_path.read_text(encoding="utf-8")) == {"ok": True})
 
+# --- (7) locked_rewrite: appenders race concurrent rewriters — nothing lost, nothing torn --------
+# 2026-07-05 audit §7.4: governor/usage pruned their JSONL files with an unlocked write_text while
+# locked_append writers were live — a row landing between read and rewrite was truncated away.
+# locked_rewrite flocks the DATA file's own inode (the one appenders lock), so the interleave gap
+# cannot exist. Seed rows are marked keep:false and must vanish; every appended keep:true row from
+# every thread must survive all rewrites intact.
+from orchestrator.locking import locked_rewrite
+
+rw_path = tmp / "rewrite.jsonl"
+for i in range(300):
+    locked_append(rw_path, json.dumps({"keep": False, "seed": i}))
+RW_THREADS, RW_ROWS, RW_PASSES = 8, 40, 5
+
+
+def _rw_appender(worker: int) -> None:
+    for i in range(RW_ROWS):
+        locked_append(rw_path, json.dumps({"keep": True, "w": worker, "s": i}))
+
+
+def _rw_rewriter() -> None:
+    for _ in range(RW_PASSES):
+        locked_rewrite(rw_path, lambda lines: [ln for ln in lines if '"keep": true' in ln])
+
+
+rw_threads = [threading.Thread(target=_rw_appender, args=(w,)) for w in range(RW_THREADS)] \
+    + [threading.Thread(target=_rw_rewriter) for _ in range(3)]
+for t in rw_threads:
+    t.start()
+for t in rw_threads:
+    t.join()
+# One deterministic final pass: rewriters may all have finished before the last appends landed,
+# but appended rows are keep:true so only the seed rows' fate depends on it.
+locked_rewrite(rw_path, lambda lines: [ln for ln in lines if '"keep": true' in ln])
+
+rw_lines = rw_path.read_text(encoding="utf-8").splitlines()
+rw_parsed, rw_bad = [], []
+for ln in rw_lines:
+    try:
+        rw_parsed.append(json.loads(ln))
+    except json.JSONDecodeError:
+        rw_bad.append(ln)
+chk("rewrite/threads: every surviving line parses (no torn rows)", not rw_bad,
+    f"{len(rw_bad)} corrupt of {len(rw_lines)}")
+chk("rewrite/threads: every appended row survived the concurrent rewrites",
+    {(r.get("w"), r.get("s")) for r in rw_parsed if r.get("keep")}
+    == {(w, s) for w in range(RW_THREADS) for s in range(RW_ROWS)},
+    f"{len(rw_parsed)} rows survived, want {RW_THREADS * RW_ROWS}")
+chk("rewrite/threads: seed rows filtered out", not any(not r.get("keep") for r in rw_parsed),
+    f"{sum(1 for r in rw_parsed if not r.get('keep'))} seed rows left")
+
 print("\n============= SHARED FILE-LOCK QA =============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

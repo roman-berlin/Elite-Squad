@@ -29,6 +29,12 @@ PLAN = ('Here is the split:\n```json\n'
 _mode = {"plan": PLAN, "raise_plan": False}
 async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, cfg=None,
                          routing_tier=None):
+    if tag == "gap-detect":
+        # 2026-07-05 telemetry fix: the classifier's own burn folds into the plan cost/tokens —
+        # explicit numbers here so the aggregation checks below pin the fold.
+        reply = '{"covered": true, "domain": "vanguard-fe"}'
+        return AgentRun(text=reply, final=reply, cost_usd=0.01, num_turns=1,
+                        is_error=False, tools=[], input_tokens=200, output_tokens=30)
     if tag == "squad-lead":
         if _mode["raise_plan"]:
             raise RuntimeError("planner exploded")
@@ -104,8 +110,8 @@ check("gate: tiny ticket -> no delegate",
 audit = FakeAudit()
 res, n = asyncio.run(squad.build_delegated(BuildRequest(mk(big_ac), "b", iteration=1), app, cfg, audit=audit))
 check("delegated: 3 soldiers dispatched", n == 3, str(n))
-check("delegated: cost aggregated (plan .10 + 3x .20)", abs(res.cost_usd - 0.70) < 1e-6, str(res.cost_usd))
-check("delegated: turns aggregated (3 + 3x5)", res.num_turns == 18, str(res.num_turns))
+check("delegated: cost aggregated (gap .01 + plan .10 + 3x .20)", abs(res.cost_usd - 0.71) < 1e-6, str(res.cost_usd))
+check("delegated: turns aggregated (1 + 3 + 3x5)", res.num_turns == 19, str(res.num_turns))
 check("delegated: tools aggregated", res.tools == ["Read", "Edit", "Edit", "Edit"], str(res.tools))
 # EU-96 (iter-4): the delegated BuildResult must carry BOTH the planner ('squad-lead') and the
 # soldiers' token burn so the loop's _burn("builder", build.input_tokens, build.output_tokens) records
@@ -113,8 +119,8 @@ check("delegated: tools aggregated", res.tools == ["Read", "Edit", "Edit", "Edit
 # eu96_artifact_contract_test.py skips by forcing delegation_enabled=False. The accumulator SEEDS from
 # the planner run (mirroring how cost/turns start from p_cost/p_turns) and adds each soldier's burn —
 # counting soldiers only under-reported the delegated build's real burn.
-check("delegated: input_tokens = planner + 3 soldiers (500 + 3x1000)", res.input_tokens == 3500, str(res.input_tokens))
-check("delegated: output_tokens = planner + 3 soldiers (120 + 3x250)", res.output_tokens == 870, str(res.output_tokens))
+check("delegated: input_tokens = gap + planner + 3 soldiers (200 + 500 + 3x1000)", res.input_tokens == 3700, str(res.input_tokens))
+check("delegated: output_tokens = gap + planner + 3 soldiers (30 + 120 + 3x250)", res.output_tokens == 900, str(res.output_tokens))
 check("delegated: ok=True", res.ok is True)
 check("delegated: summary names the squad", "Squad delegation" in res.summary and "Ordnance BE" in res.summary)
 check("delegated: audit has 1 delegation + 3 soldier_build",
@@ -130,9 +136,10 @@ _mode["plan"] = PLAN   # restore
 # ============================ detect_domain_gap ============================
 # Stub detect_domain_gap so these tests never hit a real LLM.
 _gap_mode = {"gap": False, "domain": None, "raise": False}
-async def fake_detect_domain_gap(ticket_text, sq):
+async def fake_detect_domain_gap(ticket_text, sq, **kw):
     if _gap_mode["raise"]:
         raise RuntimeError("classifier blew up")
+    # Legacy 2-tuple return (no burn dict) — _plan's defensive indexing must tolerate it.
     return _gap_mode["gap"], _gap_mode["domain"]
 squad.detect_domain_gap = fake_detect_domain_gap
 

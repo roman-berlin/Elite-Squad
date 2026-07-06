@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -550,28 +551,45 @@ def poll_once(cfg, audit) -> int:
         return 0
     last = _read_offset(cfg)
     updates = notify.get_updates(offset=(last + 1) if last is not None else None, timeout=0)
-    # Map each update to its originating chat so an external reply can target the exact chat it came
-    # from. We re-read it here (rather than widening notify.incoming_texts' tested 3-tuple) so the
-    # ops path stays byte-identical and the chat id only ever matters on the isolated liaison path.
-    chat_by_uid = {
-        u.get("update_id"): ((u.get("message") or u.get("edited_message") or {}).get("chat") or {}).get("id")
-        for u in updates
-    }
     handled = 0
     for uid, text, origin in notify.incoming_texts(updates, cfg):
         if uid is not None:
             _write_offset(cfg, uid)
         if origin != "ops":
-            # EU-65 HARD channel split: an external/liaison chat NEVER reaches the Commander's
-            # command router, the parked-decision store, or a build. It is handed to the liaison
-            # chat agent, which treats it as untrusted data and replies (cheap model, mention-gated,
-            # token-capped) only to that same external chat. See orchestrator/liaison.py.
-            from . import liaison
-            liaison.handle_external_message(cfg, audit, text, chat_by_uid.get(uid))
+            # Defensive only: incoming_texts emits nothing but "ops" since the EU-65 liaison
+            # channel was DELETED (Phase-2 §2, 2026-07-06). Anything else is dropped, never routed.
             continue
         if route_message(cfg, audit, text):
             handled += 1
     return handled
+
+
+def should_poll_telegram(cfg) -> tuple[bool, str]:
+    """EU-185 (Wave 0): decide whether THIS host should run the Telegram poller, returning
+    (poll, reason). Telegram getUpdates+offset is single-consumer — two hosts polling one bot
+    token split/lose the Commander's messages (the VPS's always-on poller + any Mac `./general
+    serve` with `.env`). The hosts only share state via periodic git sync, so a live lock file
+    can't give real-time mutual exclusion; we elect ONE poller host instead.
+
+    Rules, in order:
+      1. Not configured (no bot token / chat id) → don't poll.
+      2. Explicit env GENERAL_TELEGRAM_POLLER (1/true/yes ↔ 0/false/no) → honour it (the escape
+         hatch for a single-host dev box).
+      3. Else poll iff this host's sync id == cfg.telegram_poller_host (default "server").
+    """
+    from . import notify
+    if not notify.configured():
+        return False, "telegram not configured"
+    override = os.environ.get("GENERAL_TELEGRAM_POLLER")
+    if override is not None and override.strip() != "":
+        on = override.strip().lower() in ("1", "true", "yes", "on")
+        return on, f"GENERAL_TELEGRAM_POLLER={override.strip()}"
+    from . import sync
+    hid = sync.host_id(cfg)
+    poller = getattr(cfg, "telegram_poller_host", "server")
+    if hid == poller:
+        return True, f"host '{hid}' is the elected poller"
+    return False, f"host '{hid}' is not the poller ('{poller}' owns it; set GENERAL_TELEGRAM_POLLER=1 to override)"
 
 
 def poll_loop(cfg, audit, interval: int = 5) -> None:

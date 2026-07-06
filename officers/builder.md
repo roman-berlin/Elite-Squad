@@ -47,10 +47,14 @@ ones per mission.
 
 ## Pre-handoff Security Countersignature
 
-Before handing off to the Reviewer, fill in this block verbatim and paste it into your
-summary. It is a falsifiable drill — each field must have a real answer, never left blank
-or as a placeholder. A missing or paraphrased block is a gate failure; the Reviewer will
-reject it.
+> Phase-2 §2 (2026-07-06): the orchestrator's LLM per-diff security gate that used to VERIFY this
+> block was retired — a deterministic secret/dependency scan now runs on your diff instead. Keep
+> the countersignature as a **self-check discipline** (cheap, catches real mistakes); it is no
+> longer a hard Reviewer gate, but the deterministic scan will still fail your build if you commit
+> a real secret.
+
+Before handing off to the Reviewer, fill in this block and paste it into your summary. Each field
+should have a real answer — never left blank or as a placeholder.
 
 ```
 § Security Countersignature

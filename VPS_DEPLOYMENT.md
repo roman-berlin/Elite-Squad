@@ -1,16 +1,17 @@
 # Deploying the Elite Unit to a 24/7 server
 
-The goal: the unit's **brain-stem** lives on an always-on Linux box — Telegram, the cockpit, and the
-officers' discussions (council, stand-up, corridor small-talk, patrol) run around the clock, so you
-can talk to the General from your phone and the officers keep thinking while you sleep. Actual ticket
+The goal: the unit's **brain-stem** lives on an always-on Linux box — Telegram, the cockpit, and
+the weekly security patrol run around the clock, so you can talk to the General from your phone
+and reach the officers on demand while you sleep. Councils and meetings convene when you ask (CLI
+/ cockpit / Telegram) — Phase-2 §2 retired the auto-convened ceremonies. Actual ticket
 **implementation** stays on your Mac (it has the app repos + dev toolchain). MAIN is never touched on
 either machine.
 
 ```
   ┌─────────────────────────── VPS (always on) ────────────────────────────┐
   │  general serve  →  cockpit (localhost:8787) + Telegram two-way listener │
-  │  cron           →  10:00 council (+ stand-up), 3× corridor small-talk,  │
-  │                    weekly patrol                                        │
+  │  cron           →  weekly patrol + Mac<->server state sync (15 min)     │
+  │  councils/meetings → on demand (CLI / cockpit / Telegram)              │
   │  officers DISCUSS, file recommendations → Needs-you + Telegram          │
   └──────────────┬──────────────────────────────────────────────────────────┘
                  │  git (The-General repo) — shared state
@@ -164,6 +165,13 @@ sudo tee /etc/systemd/system/general.service >/dev/null <<EOF
 [Unit]
 Description=Elite Unit — cockpit + Telegram listener
 After=network-online.target
+# EU-184 (Wave 0): bound the restart storm. Without a start-limit, a main deploy that crashes on
+# startup restarts forever (Restart=always + RestartSec=5 → ~864 restarts/min was observed on
+# 2026-07-05). After StartLimitBurst restarts within StartLimitIntervalSec, systemd gives up and
+# leaves the unit 'failed' instead of pegging the box. self-update.sh's smoke-test-before-restart
+# is the first line of defence; this is the backstop for a RUNTIME crash the import test misses.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 User=$USER
@@ -176,23 +184,31 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl daemon-reload
+sudo systemctl daemon-reload                 # ALWAYS after editing the unit file (the audit found it edited without a reload)
 sudo systemctl enable --now general.service
 systemctl status general.service        # should be 'active (running)'
 ```
+
+> **Applying EU-184 to a box already running the old unit:** re-run the `tee` block above (it
+> overwrites the unit with the start-limit lines), then `sudo systemctl daemon-reload && sudo
+> systemctl restart general.service`. `scripts/self-update.sh` already smoke-tests each new `main`
+> before restarting and reverts a broken deploy — so the two together mean a bad push can neither
+> deploy (import break → reverted + Telegram alert) nor crash-loop the box (runtime break →
+> systemd stops after 5 tries).
 
 ## Step 5 — Schedule the discussions (cron)
 
 ```bash
 crontab -e
 ```
-Add (the council now runs the stand-up too; small-talk gets random jitter so it isn't clockwork):
+Prefer `bash scripts/install-server-cron.sh` — it installs exactly this set idempotently, so you
+never hand-maintain the crontab (and re-running it on a box that ran an OLDER installer drops the
+retired council/small-talk lines). If you do it by hand, Phase-2 §2 leaves only the weekly patrol
+and the state sync — the 06:30 council muster and the corridor small-talk crons are gone (councils
+and meetings run on demand now):
 ```cron
 # m  h  dom mon dow   command
- 30  6   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1  # freshen Mac state right before the muster
- 30  6   *   *   *    cd $HOME/General && ./general council   >> council/cron.log 2>&1   # daily muster (council + stand-up), off-peak
-  0 11,14,16 *  *  *  bash -c 'sleep $((RANDOM % 2100)); cd $HOME/General && ./general smalltalk >> council/cron.log 2>&1'
-  0  9   *   *   1    cd $HOME/General && ./general patrol    >> council/cron.log 2>&1
+  0  9   *   *   1    cd $HOME/General && ./general patrol    >> council/cron.log 2>&1   # weekly security patrol
 */15 *   *   *   *    cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1   # Mac<->server state sync (read-only)
 ```
 `GENERAL_SYNC_PULL_ONLY=1` tells this box (which has read-only git access) to pull the Mac's audit but

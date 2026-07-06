@@ -24,7 +24,14 @@ sys.modules["requests"] = req
 sys.path.insert(0, ".")
 
 from orchestrator import warroom, server, sync, cockpit_state
+from orchestrator import autopilot as _ap_mod
 from orchestrator.config import Config, AppConfig
+
+# get_autopilot_status()'s "on" ORs in a liveness probe of the machine-global autopilot PID file
+# (/tmp/general-autopilot.pid). A real daemon on this machine — or another checkout's suite running
+# the real autopilot() — flips it True mid-harness, and the immediate-Stop check below reads on=True
+# (the 2026-07-06 flake). Probe a per-harness path instead.
+_ap_mod._PID_FILE = Path(tempfile.mkdtemp()) / "general-autopilot.pid"
 
 results = []
 def chk(n, c, d=""):

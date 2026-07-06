@@ -81,7 +81,7 @@ os.close(_aud_fd)
 _cfg = Config(
     apps=[_APP], audit_path=_aud_path,
     use_worktree=False, delegation_enabled=True,
-    pm_enabled=False, test_gate=False, security_gate=False,
+    pm_enabled=False,
     merge_to_dev=True, dry_run=False, max_iterations=2,
 )
 
@@ -89,7 +89,7 @@ _cfg = Config(
 _cfg_auto = Config(
     apps=[_APP], audit_path=_aud_path,
     use_worktree=False, delegation_enabled=True, auto_mode=True,
-    pm_enabled=False, test_gate=False, security_gate=False,
+    pm_enabled=False,
     merge_to_dev=True, dry_run=False, max_iterations=2,
 )
 
@@ -287,7 +287,8 @@ hr.check_promote = lambda domain, cfg, *a, **k: False
 hr.ensure_no_charter_written = lambda charters, **kw: _ensure_calls.append(list(charters))
 
 
-async def _fake_detect_gap(ticket_text, sq):
+async def _fake_detect_gap(ticket_text, sq, **kw):
+    # Legacy 2-tuple return (no burn dict) — _plan's defensive indexing must tolerate it.
     return (True, "mql5")
 
 
@@ -349,10 +350,10 @@ _land_calls: list[tuple] = []
 _orig_build_delegated = squad.build_delegated
 
 
-async def _tracked_build_delegated(req, app, cfg, audit=None):
+async def _tracked_build_delegated(req, app, cfg, audit=None, **kw):
     """Thin wrapper that records calls before delegating to the real implementation."""
     _delegated_calls.append(req.iteration)
-    return await _orig_build_delegated(req, app, cfg, audit=audit)
+    return await _orig_build_delegated(req, app, cfg, audit=audit, **kw)
 
 
 squad.build_delegated = _tracked_build_delegated
@@ -361,11 +362,6 @@ squad.build_delegated = _tracked_build_delegated
 # Stubs for loop internals that aren't under test.
 async def _fake_review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
     return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=0.0, summary="LGTM")
-
-
-async def _fake_te(ticket, app, cfg, store=None, build_artifact=None):
-    from orchestrator.contracts import TestEngineerResult
-    return TestEngineerResult(ok=True, coverage="100%")
 
 
 def _fake_land(ticket, app, cfg, git, backlog, audit, branch,
@@ -378,13 +374,11 @@ _orig_land = loop._land
 _orig_notify = loop._notify
 _orig_gate = loop.run_gate
 _orig_reviewer = loop.reviewer_mod
-_orig_te = loop.test_engineer_mod
 
 loop._land = _fake_land
 loop._notify = lambda *a, **k: None
 loop.run_gate = lambda *a, **k: GateResult(passed=True, report="ok")
 loop.reviewer_mod = types.SimpleNamespace(review=_fake_review)
-loop.test_engineer_mod = types.SimpleNamespace(ensure_coverage=_fake_te)
 
 _squad_calls.clear()
 _audit = _Audit()
@@ -427,7 +421,6 @@ finally:
     loop._notify = _orig_notify
     loop.run_gate = _orig_gate
     loop.reviewer_mod = _orig_reviewer
-    loop.test_engineer_mod = _orig_te
     squad.build_delegated = _orig_build_delegated
 
 

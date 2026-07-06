@@ -30,7 +30,7 @@ import orchestrator.loop as loop                       # noqa: E402
 from orchestrator import jira_adapter                  # noqa: E402
 from orchestrator.config import Config, AppConfig      # noqa: E402
 from orchestrator.contracts import (Ticket, BuildResult, GateResult,   # noqa: E402
-                                    TestEngineerResult, Outcome)
+                                    Outcome)
 
 results = []
 def chk(n, c, d=""):
@@ -56,13 +56,8 @@ class OkBuilder:
         return BuildResult(ok=True, summary="did it", cost_usd=0.0, num_turns=1, raw="did it", tools=[])
 
 
-async def fake_te(ticket, app, cfg, **_):
-    return TestEngineerResult(ok=True, coverage="")
-
-
 loop._notify = lambda c, t: None
 loop.builder_mod = OkBuilder
-loop.test_engineer_mod.ensure_coverage = fake_te
 # The EU-173 trigger: the verification gate FAILS (that day: a pre-existing red base branch).
 loop.run_gate = lambda app, changed_paths=None, **_: GateResult(
     passed=False, report="✗ scheduler_single_source_test.py soft-tally FAIL: only 16/17")

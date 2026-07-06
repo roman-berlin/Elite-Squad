@@ -30,6 +30,12 @@ import orchestrator.autopilot as ap_mod
 import orchestrator.decisions as decisions
 from orchestrator.config import Config, AppConfig
 
+# The Start section below used to run against the REAL machine-global /tmp/general-autopilot.pid
+# (only the QW5 section further down swapped it): a live daemon — or another checkout's suite
+# running the real autopilot() — made daemon_is_external() refuse every Start, so no loop launched
+# (the 2026-07-06 flake). Probe a per-harness path for the whole harness instead.
+ap_mod._PID_FILE = Path(tempfile.mkdtemp()) / "general-autopilot.pid"
+
 results = []
 def chk(n, c, d=""):
     results.append((n, bool(c), d))
@@ -54,7 +60,9 @@ release = threading.Event()
 async def fake_autopilot(cfg, app_name=None, once=False, interval=60, stop_event=None):
     with starts_lock:
         starts.append(stop_event)
-    release.wait(3)
+    # Hang-guard only — the loop ends when the test sets `release`, and the thread is daemonic.
+    # The old 3s cap could expire under full-suite load, dropping the run-guard mid-assertions.
+    release.wait(60)
 ap_mod.autopilot = fake_autopilot
 
 app = srv.create_app(cfg)
@@ -70,7 +78,7 @@ threads = [threading.Thread(target=fire, args=(i,)) for i in range(N)]
 for t in threads: t.start()
 for t in threads: t.join(5)
 
-for _ in range(60):      # let the single accepted loop enter fake_autopilot
+for _ in range(600):     # let the single accepted loop enter fake_autopilot (30s cap under load)
     if starts:
         break
     time.sleep(0.05)
@@ -113,7 +121,7 @@ chk("a decision resume still runs while autopilot is live", started_resume is Tr
 
 # Release autopilot; the guard must clear when the loop exits.
 release.set()
-for _ in range(60):
+for _ in range(600):    # up to 30s under suite load; exits in ms normally
     if srv._state["active"] is False:
         break
     time.sleep(0.05)
@@ -122,7 +130,7 @@ chk("the run-guard clears once autopilot stands down", srv._state["active"] is F
 # With the guard free, even a /run|/drain starts and owns+clears the flag.
 started_free = decisions._run_bg(cfg, None, ["wl"], refuse_if_busy=True)
 chk("/run|/drain starts when the guard is free", started_free is True)
-for _ in range(60):
+for _ in range(600):    # up to 30s under suite load; exits in ms normally
     if srv._state["active"] is False:
         break
     time.sleep(0.05)

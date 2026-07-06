@@ -373,16 +373,14 @@ Last updated: 2026-06-20.
   `max`/`xhigh` only via an explicit `effort-max`/`effort-ultra` pin (or retry-escalation after
   a real rejection) — so a small ticket can't burn max effort over-exploring.
 
-- **Proactive autonomy (the unit acts on its own)** — between Autopilot cycles the officers
-  convene *themselves*, throttled by a cooldown so they never spam: a **security block** pulls
-  Provost + Field Engineer + Inspector into a huddle; **repeated parks** trigger a "why are we
-  stuck" meeting; on a quiet queue there's a configurable chance of a **spontaneous meeting** or
-  **corridor small-talk** (two officers, in character — flavour that sometimes lands a real
-  insight). Every outcome logs to Unit Memory. Knobs: `autonomy_enabled`, `autonomy_cooldown_min`,
-  `meeting_on_security_block`, `parks_meeting_threshold`, `smalltalk_prob`, `random_meeting_prob`.
-  Fires only under Autopilot (manual runs stay quiet); test on demand with `general smalltalk`.
+- **Proactive autonomy — RETIRED (Phase-2 §2, 2026-07-06).** The event reactor that
+  auto-convened officer ceremonies between Autopilot cycles (security-block huddles,
+  repeated-park meetings, spontaneous meetings, corridor small-talk) was deleted: the audit
+  measured *all* ceremony at <3% of tokens but ~100% of the org-chart noise. Councils and
+  meetings now convene **on demand only** (CLI / cockpit / Telegram); the `autonomy_*`,
+  `smalltalk_prob`, and `random_meeting_prob` knobs and the `general smalltalk` command are gone.
 
-- **Free-form council + ad-hoc meetings** — the council is now a real **multi-round debate**:
+- **Free-form council + ad-hoc meetings** — the council is a real **multi-round debate**:
   officers read each other and respond by name (agree / push back / add), can reply `PASS`,
   and the round-table converges early when no one has more to say (`council_rounds`, default 2).
   Any officer can request a focused **MEETING:** on a problem; you (or the General) convene one
@@ -427,7 +425,7 @@ Last updated: 2026-06-20.
   scoped by a **project switcher** in the header (multi-project). Updates **live over SSE**
   (≤0.5s, with a 5s-poll fallback). Detailed transcript table moved to `/tasks`.
 
-- **Autonomous pipeline** — build → gate → review → **security gate (Provost)** → land on DEV → QA, on an isolated git worktree; MAIN never touched.
+- **Autonomous pipeline** — build → gate (tests + deterministic secret/dep/lint scan) → review → land on DEV → QA, on an isolated git worktree; MAIN never touched. (Phase-2 §2 retired the separate LLM Provost security gate; the weekly `provost` security recon still runs.)
 - **Officers** — Adjutant (S-1/HR) · Field Engineer (Builder) · Inspector General (Reviewer) · Scout (S-2/QA) · Provost Marshal (Security) · Quartermaster (S-4/DevOps) · Sentinel (S-3/Integration & rollback) · Drillmaster (Doctrine) · Product Manager (S-5) — chaired by The General.
 - **Autopilot** — always-on worker: resume In Progress, else take top To Do (assignee-pinned to you), with a park-guard so it never spins on a stuck ticket; KeepAlive launchd.
 - **Daily council** — 10:00 muster, briefing to Telegram, transcript saved, escalates only Commander-level calls.

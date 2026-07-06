@@ -62,7 +62,7 @@ class _FakeGuard:
     @staticmethod
     def warn_if_absent(_): pass
     @staticmethod
-    def hooks_config(): return None
+    def hooks_config(workdir=None): return None   # EU-188: accepts the officer's worktree for confinement
 class _FakeModels:
     @staticmethod
     def for_builder(cfg, ticket, eff, it): return ("sonnet", "test-pin")

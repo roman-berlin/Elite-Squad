@@ -6,9 +6,13 @@ test suite would catch.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 from .config import AppConfig
 from .contracts import GateResult
@@ -197,159 +201,204 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
 
 
 # --------------------------------------------------------------------------- #
-# Pre-build gate integration (EU-107)
+# Phase-2 §3 — deterministic gates (2026-07-05 restructure, Commander-approved 2026-07-06).
+# Everything here is a script, not an LLM: failures feed the Builder as plain text (a free
+# review round) and no LLM reviewer runs until they are green.
 # --------------------------------------------------------------------------- #
 
-async def prebuild_gate(cfg, worklist, audit):
-    """Run the pre-build triage gate (Senior PM) before tickets reach the Builder.
+# Lines that carry the SIGNAL of a failure (which harness/command failed, which error class) —
+# everything else in a gate report is noise for identity purposes.
+_FAIL_LINE = re.compile(r"(?i)(\bFAILED\b|\bFAILURES?\b|✗|✘|\bERRORS?\b|Traceback|exit \d+|"
+                        r"AssertionError|\bFAIL\b)")
+# Volatile fragments that differ between two runs of the SAME failure: durations, hex addresses,
+# tmp paths, line numbers.
+_NOISE = re.compile(r"\b\d+(\.\d+)?s\b|\b0x[0-9a-f]+\b|/(?:tmp|var|private)/\S+|:\d+\b")
 
-    This gate filters tickets that can be resolved without a build:
-    - ANSWER: questions answerable from docs/context → reply and close
-    - CLOSE: invalid/duplicate tickets → close with reason
-    - REFILE: misrouted tickets → re-file as new tickets and close original
-    - CONTINUE: tickets that need a build → pass through to Builder
 
-    The gate also checks worktree locks to skip in-flight tickets.
+def gate_fingerprint(report: str) -> str:
+    """Stable identity of WHAT failed in a gate report — the EU-174 lever: the same red base
+    produced byte-different reports every pass (timings, tmp paths), so nothing could see that
+    4 max-effort builds were fighting one unchanged failure. Extracts only failure-signal lines,
+    strips volatile fragments, order-independent. '' when the report carries no failure signal
+    (callers must treat '' as non-comparable, never as 'identical')."""
+    lines: set[str] = set()
+    for ln in (report or "").splitlines():
+        if _FAIL_LINE.search(ln):
+            lines.add(_NOISE.sub("", " ".join(ln.lower().split()))[:200])
+    if not lines:
+        return ""
+    sig = "|".join(sorted(lines))[:8000]
+    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
 
-    Args:
-        cfg: Config object
-        worklist: List of (AppConfig, Ticket) tuples
-        audit: AuditLog object
 
-    Returns:
-        Filtered worklist with only tickets that need a build.
-    """
-    # EU-134: Check if gate is enabled; if not, pass all tickets through
-    if not cfg.prebuild_gate_enabled:
-        print("  · pre-build gate: disabled (prebuild_gate_enabled=False) — passing all tickets to Builder", flush=True)
-        return worklist
-    from . import loop, senior_pm
-    from .backlog.base import make_backlog
+# Deterministic secret patterns over ADDED diff lines — replaces the secrets half of the
+# per-diff Opus provost-gate call (161 calls / 8.0M tokens on the audited corpus). Matches are
+# MASKED in the report (provost doctrine: never print a real secret).
+_SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("secret key (sk-…)", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    ("assigned secret literal",
+     re.compile(r"(?i)\b(api[_-]?key|secret|token|passwd|password)\b\s*[:=]\s*[\"'][^\"'\s]{16,}[\"']")),
+]
 
-    filtered_worklist = []
-    triage_results = []
 
-    for app, ticket in worklist:
-        ticket_id = ticket.id or ticket.key or "unknown"
+def scan_diff_for_secrets(diff: str) -> list[str]:
+    """Scan a unified diff's ADDED lines for credential patterns. Returns masked findings
+    ('label: sk-abc…wxyz'); an empty list means clean. Deterministic and cheap — runs on every
+    pass before any LLM sees the diff.
 
-        # Check if worktree is locked (in-flight ticket)
-        worktree_path = loop._worktree_path(app, cfg)
-        if loop.is_worktree_locked(worktree_path):
-            print(f"  · {ticket_id}: skipping — worktree locked (build in progress)", flush=True)
-            audit.record("prebuild_skip", ticket_id=ticket_id, reason="worktree_locked")
+    A line carrying the pragma ``gate:allow-secret`` is exempt — the legitimate escape hatch for
+    test fixtures and docs that must contain credential-SHAPED strings (this repo builds itself,
+    so without it a fixture would deterministically red-gate every future ticket touching that
+    line — 2026-07-06 review). Prefer building fixtures by concatenation so the pattern never
+    appears contiguously in source at all; the pragma is for the cases that can't."""
+    hits: list[str] = []
+    for ln in (diff or "").splitlines():
+        if not ln.startswith("+") or ln.startswith("+++"):
             continue
+        if "gate:allow-secret" in ln:
+            continue
+        for label, pat in _SECRET_PATTERNS:
+            m = pat.search(ln)
+            if m:
+                tok = m.group(0)
+                masked = (tok[:6] + "…" + tok[-4:]) if len(tok) > 12 else "…masked…"
+                hits.append(f"{label}: {masked}")
+    return hits
 
-        # Run Senior PM triage
-        print(f"  · {ticket_id}: running pre-build triage...", flush=True)
+
+# manifest filename -> lockfile siblings that must move with it (only pairs with a real
+# lockfile convention; requirements.txt has none, so it is deliberately absent).
+_LOCKFILE_PAIRS: list[tuple[str, tuple[str, ...]]] = [
+    ("package.json", ("bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")),
+    ("pyproject.toml", ("uv.lock", "poetry.lock")),
+    ("Cargo.toml", ("Cargo.lock",)),
+    ("Gemfile", ("Gemfile.lock",)),
+]
+
+
+def lockfile_sanity(changed_paths: list[str], repo_root: str) -> list[str]:
+    """Detect manifest/lockfile drift in a diff: a dependency manifest changed while its sibling
+    lockfile — which EXISTS in the repo — did not. Returns human-readable problems ([] = clean).
+    Repos without a lockfile for that manifest are never flagged (nothing to drift against)."""
+    problems: list[str] = []
+    changed = {p.replace("\\", "/") for p in (changed_paths or [])}
+    for path in sorted(changed):
+        d, base = os.path.split(path)
+        for manifest, locks in _LOCKFILE_PAIRS:
+            if base != manifest:
+                continue
+            siblings = [(os.path.join(d, lk) if d else lk) for lk in locks]
+            existing = [s for s in siblings if os.path.exists(os.path.join(repo_root, s))]
+            if existing and not any(s in changed for s in existing):
+                problems.append(f"{path} changed but {existing[0]} did not — regenerate the lockfile "
+                                "in the same commit")
+    return problems
+
+
+def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:
+    """§3 items 3–5, in order: lint → secret scan → lockfile sanity. Runs AFTER the test gate is
+    green and BEFORE any LLM reviewer; a failure feeds the Builder as plain text. All three are
+    cheap relative to one review round, and none can hallucinate."""
+    reports: list[str] = []
+    if getattr(app, "lint_commands", None):
+        lint = run_commands(app, app.lint_commands)
+        if not lint.passed:
+            reports.append("LINT gate failed:\n" + lint.report)
+    hits = scan_diff_for_secrets(diff or "")
+    if hits:
+        reports.append("SECRET-LEAK gate failed — remove these from the diff (values masked):\n"
+                       + "\n".join(f"  · {h}" for h in hits))
+    problems = lockfile_sanity(changed_paths or [], app.workdir or app.repo_path)
+    if problems:
+        reports.append("LOCKFILE gate failed:\n" + "\n".join(f"  · {p}" for p in problems))
+    if reports:
+        return GateResult(passed=False, report="\n\n".join(reports))
+    return GateResult(passed=True, report="deterministic checks passed")
+
+
+_RED_BASE_CACHE_MAX = 40   # (repo@sha) entries kept
+_RED_BASE_RED_TTL_S = 30 * 60   # a cached RED is re-verified after this long (see below)
+
+
+def _base_gate_once(app: AppConfig, run) -> GateResult:
+    """One base-tree gate pass: the verification gate plus the base's own lint (a red LINT base
+    would otherwise burn every ticket's full pass budget at the deterministic stage — 2026-07-06
+    review). Secrets/lockfile need a diff, so on the clean base only lint applies."""
+    res = run(app, [])
+    if not res.passed:
+        return res
+    return run_deterministic_checks(app, [], "")
+
+
+def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, str]:
+    """§3 item 1 — the EU-174 killer. Run the verification gate (and the base's lint) against
+    the CLEAN base tree, BEFORE the first build pass. Returns (passed, fingerprint, report).
+
+    Flake honesty (2026-07-06 review; also this unit's own flaky-harness doctrine): a RED here
+    can halt the whole unit, so a red verdict must survive a CONFIRMATION re-run — one flaky red
+    never blocks. GREEN results are cached per (repo, base-sha) indefinitely (content-addressed;
+    a false green just restores the old behaviour). RED results are cached with a TTL so an
+    environmental red (venv missing from PATH, box under load) self-heals without the base
+    moving; deleting red_base_cache.json or red_base_check=false remain the manual overrides.
+
+    ``runner`` lets loop.py pass ITS run_gate symbol so existing harness monkeypatching keeps
+    working (tests stub loop.run_gate, and the base check must honor that stub)."""
+    run = runner or run_gate
+    sha = ""
+    try:
+        sha = (getattr(git, "current_sha", lambda: "")() or "").strip()
+    except Exception:  # noqa: BLE001 — a stub git without sha support just skips the cache
+        sha = ""
+    cache_path = Path(cfg.audit_path).with_name("red_base_cache.json")
+    key = f"{app.repo_path}@{sha}"
+
+    if sha:
         try:
-            pm_audit = await senior_pm.triage_async(cfg, ticket, auto_mode=cfg.auto_mode)
-            verdict = pm_audit.verdict
+            import json
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            hit = data.get(key)
+            if isinstance(hit, dict) and "passed" in hit:
+                fresh_red = (not hit["passed"]
+                             and time.time() - float(hit.get("ts", 0)) <= _RED_BASE_RED_TTL_S)
+                if hit["passed"] or fresh_red:
+                    return bool(hit["passed"]), str(hit.get("fp", "")), str(hit.get("report", ""))
+                # expired red → fall through and re-verify
+        except Exception:  # noqa: BLE001 — a missing/corrupt cache just re-runs the gate
+            pass
 
-            # Record the triage decision
-            audit.record("prebuild_triage",
-                        ticket_id=ticket_id,
-                        verdict=verdict,
-                        citations=pm_audit.citations,
-                        raw=pm_audit.raw)
+    res = _base_gate_once(app, run)
+    if not res.passed:
+        # Confirmation re-run: only a red that REPRODUCES blocks (a single timing flake on this
+        # box must never park the whole queue). A green confirm wins — old behaviour proceeds.
+        confirm = _base_gate_once(app, run)
+        if confirm.passed:
+            res = confirm
+    fp = "" if res.passed else gate_fingerprint(res.report or "")
+    report = "" if res.passed else (res.report or "")[:4000]
 
-            triage_results.append((ticket_id, verdict))
+    if sha:
+        try:
+            from . import locking
 
-            # EU-134: Conservative post-triage check — override to CONTINUE for tickets that need a build
-            # Tickets with acceptance criteria ALWAYS continue (never ANSWER/CLOSE/REFILE them).
-            # [Feature] or [Bug] labeled tickets ALWAYS continue (they require implementation).
-            if ticket.acceptance_criteria or any(label in ["Feature", "Bug"] for label in (ticket.labels or [])):
-                if verdict != "CONTINUE":
-                    print(f"  · {ticket_id}: overriding {verdict} → CONTINUE (ticket has AC or [Feature]/[Bug] tag)", flush=True)
-                    audit.record("prebuild_override", ticket_id=ticket_id, from_verdict=verdict, to_verdict="CONTINUE",
-                               reason="conservative: ticket with AC or Feature/Bug tag always continues")
-                    verdict = "CONTINUE"
+            def _put(data):
+                data = data if isinstance(data, dict) else {}
+                data[key] = {"passed": res.passed, "fp": fp, "report": report, "ts": time.time()}
+                if len(data) > _RED_BASE_CACHE_MAX:
+                    for old in sorted(data, key=lambda k: data[k].get("ts", 0))[:len(data) - _RED_BASE_CACHE_MAX]:
+                        data.pop(old, None)
+                return data
+            locking.locked_rmw(cache_path, _put, default={}, corrupt_to_default=True)
+        except Exception:  # noqa: BLE001 — cache write failure must never block the pipeline
+            pass
+    return res.passed, fp, report
 
-            # Act on the verdict
-            backlog = make_backlog(app)
 
-            if verdict == "ANSWER":
-                # Senior PM answered the question → close ticket (if auto_mode is on, else Needs-you)
-                if cfg.auto_mode:
-                    print(f"  · {ticket_id}: ANSWER → closing with answer", flush=True)
-                    backlog.add_comment(ticket, pm_audit.raw)
-                    backlog.set_status(ticket, "Done")
-                    audit.record("prebuild_close", ticket_id=ticket_id, reason="answered")
-                else:
-                    print(f"  · {ticket_id}: ANSWER → Needs-you (auto_mode off)", flush=True)
-                    backlog.add_comment(ticket, pm_audit.raw)
-                    backlog.set_status(ticket, "Needs you")
-                    audit.record("prebuild_needs_you", ticket_id=ticket_id, reason="answered_but_auto_mode_off")
-
-            elif verdict == "CLOSE":
-                # Invalid/duplicate → close with reason (if auto_mode is on, else Needs-you)
-                if cfg.auto_mode:
-                    print(f"  · {ticket_id}: CLOSE → closing", flush=True)
-                    backlog.add_comment(ticket, pm_audit.raw)
-                    backlog.set_status(ticket, "Done")
-                    audit.record("prebuild_close", ticket_id=ticket_id, reason="invalid")
-                else:
-                    print(f"  · {ticket_id}: CLOSE → Needs-you (auto_mode off)", flush=True)
-                    backlog.add_comment(ticket, pm_audit.raw)
-                    backlog.set_status(ticket, "Needs you")
-                    audit.record("prebuild_needs_you", ticket_id=ticket_id, reason="close_but_auto_mode_off")
-
-            elif verdict == "REFILE":
-                # Misrouted → re-file as new tickets and close original (if auto_mode is on, else Needs-you)
-                if cfg.auto_mode:
-                    print(f"  · {ticket_id}: REFILE → creating {len(pm_audit.refile_targets)} new ticket(s)", flush=True)
-                    backlog.add_comment(ticket, pm_audit.raw)
-
-                    # Create the new tickets
-                    filed_keys = []
-                    for new_ticket in pm_audit.refile_targets:
-                        try:
-                            new_key = backlog.create_task(
-                                summary=new_ticket.get("title", ""),
-                                description=new_ticket.get("body", ""),
-                                labels=["autodev", "refiled"],
-                                issue_type=new_ticket.get("type", "Task")
-                            )
-                            if new_key:
-                                filed_keys.append(new_key)
-                                audit.record("prebuild_refile",
-                                           ticket_id=ticket_id,
-                                           new_ticket_key=new_key,
-                                           title=new_ticket.get("title", ""))
-                        except Exception as e:
-                            print(f"  · {ticket_id}: failed to create refile ticket: {e}", flush=True)
-                            audit.record("prebuild_refile_failed",
-                                       ticket_id=ticket_id,
-                                       error=str(e))
-
-                    # Close the original ticket with reference to new tickets
-                    comment = pm_audit.raw
-                    if filed_keys:
-                        comment += f"\n\nRefiled as: {', '.join(filed_keys)}"
-                    backlog.add_comment(ticket, comment)
-                    backlog.set_status(ticket, "Done")
-                else:
-                    print(f"  · {ticket_id}: REFILE → Needs-you (auto_mode off)", flush=True)
-                    backlog.add_comment(ticket, pm_audit.raw)
-                    backlog.set_status(ticket, "Needs you")
-                    audit.record("prebuild_needs_you", ticket_id=ticket_id, reason="refile_but_auto_mode_off")
-
-            else:
-                # CONTINUE or unknown → pass through to Builder
-                print(f"  · {ticket_id}: {verdict} → continuing to build", flush=True)
-                filtered_worklist.append((app, ticket))
-
-        except Exception as e:
-            print(f"  · {ticket_id}: triage failed → continuing to build: {e}", flush=True)
-            audit.record("prebuild_error", ticket_id=ticket_id, error=str(e))
-            # On error, pass through to build rather than dropping the ticket
-            filtered_worklist.append((app, ticket))
-
-    # Log summary
-    if triage_results:
-        answered = sum(1 for _, v in triage_results if v == "ANSWER")
-        closed = sum(1 for _, v in triage_results if v == "CLOSE")
-        refiled = sum(1 for _, v in triage_results if v == "REFILE")
-        continued = sum(1 for _, v in triage_results if v not in ("ANSWER", "CLOSE", "REFILE"))
-        print(f"  · pre-build gate: {answered} answered, {closed} closed, {refiled} refiled, {continued} continuing", flush=True)
-
-    return filtered_worklist
+# Phase-2 §2 (2026-07-06): the EU-107/EU-134 Senior PM pre-build triage gate (prebuild_gate)
+# was DELETED here. Off by default since 2026-06-29 (it closed [Feature] tickets as "answered");
+# its ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with the
+# conservative overrides (AC / [Feature] / [Bug] ⇒ always build) as deterministic pre-checks.

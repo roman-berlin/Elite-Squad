@@ -75,13 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
-    sub.add_parser("liaison", help="Mayor: show the inter-unit liaison channel status (config + today's token budget)")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
     mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the CTO decides)")
     mtg.add_argument("--topic", required=True, help="what the meeting is about")
     mtg.add_argument("--officers", help="comma-separated officer names/keys to attend (default: all relevant)")
     mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
-    sub.add_parser("smalltalk", help="a corridor exchange between two officers (flavor; sometimes a real insight)")
     sub.add_parser("sync", help="exchange the audit log with the other machine (Mac<->server) so both cockpits agree")
     pmp = sub.add_parser("pm", help="Product Manager (S-5): decide a product/IA question, or escalate a critical one to you")
     pmp.add_argument("app")
@@ -447,11 +445,6 @@ async def _main(argv: list[str]) -> int:
         print("\n" + decision)
         return 0
 
-    if args.command == "smalltalk":
-        from . import council
-        print(await council.small_talk(cfg, audit=AuditLog(cfg.audit_path)))
-        return 0
-
     if args.command == "sync":
         from . import sync
         r = sync.git_sync(cfg)
@@ -493,13 +486,6 @@ async def _main(argv: list[str]) -> int:
         from . import roster
         p = await roster.refresh(cfg, AuditLog(cfg.audit_path))
         print(f"roster → {p}")
-        return 0
-
-    if args.command == "liaison":
-        # Read-only: print how the isolated inter-unit (Mayor) channel is wired. No model, no
-        # outward post — the Mayor only ever speaks on its own channel via decisions.poll_once.
-        from . import liaison
-        print(liaison.status(cfg))
         return 0
 
     if args.command == "memory":

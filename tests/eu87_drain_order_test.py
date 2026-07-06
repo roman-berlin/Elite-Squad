@@ -66,6 +66,9 @@ def chk(name: str, condition: bool, detail: str = "") -> None:
 
 ns = types.SimpleNamespace
 tmp = Path(tempfile.mkdtemp())
+# The real autopilot() run below writes its PID file. Keep it off the machine-global
+# /tmp/general-autopilot.pid, which is shared with a live daemon and every other checkout's suite.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 
 # Need room for 4 tickets; the default cap is 1, so raise it explicitly.
 APP = AppConfig(name="eu", repo_path=".", base_branch="dev", protected_branch="main", backlog_backend="none")
@@ -127,7 +130,6 @@ def _run_cycle() -> None:
     async def _after_cycle(c, reports, audit, blocked):  # noqa: ANN001
         return None
 
-    autopilot.events.after_cycle = _after_cycle
     autopilot.notify.configured = lambda: False
     autopilot.notify.send = lambda *a, **k: None
 

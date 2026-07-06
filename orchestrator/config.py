@@ -9,9 +9,27 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields
 from pathlib import Path
 from typing import Any, Optional
+
+
+def _known_only(cls, data: dict, *, where: str) -> dict:
+    """Drop YAML keys the dataclass no longer declares, warning loudly for each.
+
+    A dataclass ``__init__`` raises ``TypeError`` on an unexpected keyword, so passing a raw
+    config dict straight in means ANY retired field still present in a deployed config.yaml
+    (the Mac/VPS files are hand-maintained and self-update from main) would BRICK the process at
+    startup. The Phase-2 §2 collapse retires several fields (autonomy_*, smalltalk_prob,
+    prebuild_gate_enabled, liaison_*), so unknown keys are dropped-with-a-warning instead — a
+    typo stays visible in the log, but a since-removed key never stops the unit from booting."""
+    known = {f.name for f in _dc_fields(cls)}
+    if not isinstance(data, dict):
+        return {}
+    unknown = [k for k in data if k not in known]
+    for k in unknown:
+        print(f"  ⚠ config: ignoring unknown {where} key '{k}' (retired or misspelled)", flush=True)
+    return {k: v for k, v in data.items() if k in known}
 
 # Re-export the officer name map so the rest of the unit can import the single source of truth
 # straight from config (the hub everything already imports). Defined in officers.py.
@@ -47,47 +65,6 @@ def normalize_effort(value: Any, default: str = "high") -> str:
     return _EFFORT_ALIASES.get(v, default)
 
 
-def parse_external_chat_ids(raw: Any) -> list[str]:
-    """Parse the EU-65 liaison external chat ids from an env value (or any string).
-
-    Accepts a comma / whitespace / newline-separated list (e.g.
-    ``TELEGRAM_EXTERNAL_CHAT_IDS="-100123, -100456"``) and returns a de-duped,
-    order-preserving list of non-empty chat-id strings. None / blank -> ``[]`` so
-    that with nothing configured the liaison channel stays empty and inert. These
-    are deliberately kept SEPARATE from the ops ``TELEGRAM_CHAT_ID`` (notify.py):
-    the liaison channel is an isolated OUTWARD chat to an allied unit and must
-    never reuse the ops chat id.
-    """
-    if not raw:
-        return []
-    seen: dict[str, None] = {}
-    for tok in str(raw).replace(",", " ").split():
-        tok = tok.strip()
-        if tok and tok not in seen:
-            seen[tok] = None
-    return list(seen)
-
-
-def _env_external_chat_ids() -> list[str]:
-    """Default factory: the liaison external chat ids parsed from the environment."""
-    return parse_external_chat_ids(os.environ.get("TELEGRAM_EXTERNAL_CHAT_IDS"))
-
-
-def parse_mention_handles(raw: Any) -> list[str]:
-    """Parse the bot @handles that count as an @mention on the liaison channel.
-
-    Same comma/whitespace/newline tokenising as the chat ids, but each token is
-    normalised to a bare, lower-case handle (leading ``@`` stripped) so ``@AlliedBot``
-    in a message matches the configured ``AlliedBot``. Empty -> ``[]`` which means the
-    liaison NEVER auto-replies (it only ever speaks when explicitly addressed)."""
-    return [tok.lstrip("@").lower() for tok in parse_external_chat_ids(raw)]
-
-
-def _env_bot_handles() -> list[str]:
-    """Default factory: the liaison mention handles parsed from TELEGRAM_BOT_USERNAME."""
-    return parse_mention_handles(os.environ.get("TELEGRAM_BOT_USERNAME"))
-
-
 def effort_step_index(effort: str) -> int:
     """Index of an effort on the escalation ladder. xhigh sits with 'high' (it falls
     back to high off-Opus), so a retry from xhigh climbs toward max."""
@@ -119,6 +96,10 @@ class AppConfig:
     gate_shared_packages: dict[str, list[str]] = field(default_factory=dict)
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
+    # Phase-2 §3.3: fast lint/format commands run as a deterministic gate AFTER the test gate and
+    # BEFORE any LLM reviewer (e.g. ["ruff check orchestrator/"], ["bun run lint"]). Failures feed
+    # the Builder as plain text. Empty = no lint gate for this app.
+    lint_commands: list[str] = field(default_factory=list)
     # EU-54 health check: modules the gate's python interpreter MUST be able to import. Checked once
     # before the suite runs (and by the doctor); a missing one fails the gate fast with a clear venv
     # hint instead of a cryptic mid-suite `ModuleNotFoundError`. Empty = no check (e.g. a Bun app).
@@ -171,7 +152,7 @@ class Config:
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
     # always-on box stays light against the Max limit and never competes with your own Opus coding.
-    discussion_model: str = "claude-sonnet-4-6"            # council / stand-up / meetings / group / General chat
+    discussion_model: str = "claude-sonnet-5"              # council / stand-up / meetings / group / General chat (upgraded 2026-07-05)
     smalltalk_model: str = "claude-haiku-4-5-20251001"     # corridor small-talk — cheapest
 
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
@@ -179,7 +160,12 @@ class Config:
     reviewer_effort: str = "high"
     builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
-    escalate_effort_on_retry: bool = True   # bump the Builder's effort when a pass is rejected
+    escalate_effort_on_retry: bool = False  # OFF by default (2026-07-05 audit): 135/135 round-≥2 reviewer
+                                            # objections were textually NEW, so bumping effort on retry (and the
+                                            # turn budget with it — turns_for scales off effort) bought context
+                                            # bloat, not convergence. Retry keeps pass-1 effort/turns; the
+                                            # cheap-first MODEL ladder (Sonnet→Opus, models.for_builder) still
+                                            # escalates on retry — that one is intended.
     auto_model: bool = True                 # ON by default: cheapest model that fits each task, escalating to the
                                             # ceiling on retry (<=ceiling, Sonnet floor for code). Fleet-wide econ;
                                             # set false to pin every officer to its configured model. See models.py.
@@ -197,7 +183,6 @@ class Config:
                                             # so arming it costs nothing until an app opts a command in.
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
-    prebuild_gate_enabled: bool = False     # EU-134: ARMED by default (when False, gate is skipped; flip True only after conservative logic is verified)
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
     postmortem_after: int = 3               # auto-write a post-mortem once a ticket has failed this many times (0 = off); see forensics.py
 
@@ -220,11 +205,18 @@ class Config:
     #     Scrum Master split when the design exceeds thresholds. ---
     architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
 
-    # --- Senior PM pre-build triage gate (EU-107). OFF by default (2026-06-29): the gate was over-eager
-    #     — it closed [Feature] tickets (EU-118/EU-120) as "answered" instead of building them. Re-enable
-    #     only once the triage is conservative (CONTINUE by default; CLOSE only exact dupes; never an
-    #     acceptance-criteria ticket) — see the prebuild-gate best-practice fix ticket. ---
-    prebuild_gate_enabled: bool = False
+    # --- Planner (Phase-2 §2 centerpiece): ONE Opus design call/ticket before the build that
+    #     absorbs the Architect ADR + squad-lead planning + Scrum split decision. Produces the
+    #     design brief + TESTABLE acceptance criteria (the Builder writes tests against them) +
+    #     in-scope file list. When on, it runs INSTEAD of the Architect. OFF by default — arm it
+    #     once proven live, which then unlocks retiring the separate Test Engineer coverage pass. ---
+    planner_enabled: bool = False
+
+    # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
+    #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
+    #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as
+    #     deterministic pre-checks there. (The flag was off since 2026-06-29 — the gate closed
+    #     [Feature] tickets as "answered" — and the field was accidentally declared twice.) ---
 
     # --- Product Manager officer: when the Builder halts on a product/IA blocker, consult the PM first
     #     — it either DECIDES (the build resumes with its decision) or ESCALATES one recommendation to
@@ -266,13 +258,10 @@ class Config:
     glm_low_watermark_tokens: Optional[int] = None          # e.g. 100_000 for ~1 ticket
     glm_low_watermark_pct: Optional[float] = None           # e.g. 0.05 for 5%
 
-    # --- autonomy (officers convene themselves between autopilot cycles) ---
-    autonomy_enabled: bool = True
-    autonomy_cooldown_min: int = 45         # min minutes between auto-convened sessions (anti-spam)
-    meeting_on_security_block: bool = True   # a security block -> Security Engineer + Dev Team Lead + Code Reviewer huddle
-    parks_meeting_threshold: int = 3         # this many parked tickets -> a "why are we stuck" meeting
-    smalltalk_prob: float = 0.15             # chance of corridor small-talk on a quiet cycle
-    random_meeting_prob: float = 0.06        # chance of a spontaneous meeting on a quiet cycle
+    # --- autonomy layer (events.py auto-convene): DELETED in Phase-2 §2 (2026-07-06). The
+    #     event reactor auto-convened meetings/small-talk between autopilot cycles (<3% of tokens
+    #     but ~100% of the org-chart noise, per the audit). Ceremonies are now ON-DEMAND ONLY
+    #     (CLI / cockpit / Telegram); the 6 autonomy flags went with it. ---
     meeting_autospawn: bool = False          # a meeting may FILE the tickets it proposes (de-duped); drills/hires stay proposal-only
     scout_after_merge: bool = False          # after a live merge, the QA Engineer smoke-tests DEV (extra cost; off by default)
 
@@ -299,9 +288,14 @@ class Config:
     worktree_dir: Optional[str] = None  # parent dir for worktrees; default: <repo_parent>/.general-worktrees/<app>
     worktree_setup_cmd: Optional[str] = None  # run ONCE when a worktree is first created (e.g. "bun install")
     sync_base_after_merge: bool = True  # after a live merge, bring <base> in your main checkout up to date (QA-ready)
-    security_gate: bool = False         # the Security Engineer reviews each diff before merge; a CRITICAL/HIGH finding opens a PR instead of landing
-    test_gate: bool = True              # ARMED: Test Engineer runs after build, before review — adds happy-path + regression tests and owns the PR coverage artifact
-    test_engineer_effort: str = "medium"  # thinking depth for the Test Engineer's coverage pass
+    # (Phase-2 §2, 2026-07-06: `security_gate` removed with the deleted LLM per-diff security gate —
+    #  its secret/dep scan is now deterministic in gate.py; a stale yaml key is dropped harmlessly.)
+    # Phase-2 §3.1 (the EU-174 killer, Commander-approved 2026-07-06): before the FIRST build pass,
+    # run the gate against the clean base tree; a red base BLOCKS the ticket immediately (Telegram +
+    # Needs-you) instead of billing up to HARD_MAX_PASSES max-effort builds for a failure that
+    # predates the diff. Cached per base sha (state/red_base_cache.json) so the suite runs once per
+    # base commit, not once per ticket. ARMED by default — EU-174 alone burned 15.5M tokens on this.
+    red_base_check: bool = True
 
     # --- safety ---
     dry_run: bool = False               # default LIVE (build + merge to DEV); set dry_run: true in config.yaml for a no-changes preview (there is no --dry CLI flag)
@@ -309,36 +303,9 @@ class Config:
     # --- notifications ---
     notify_verbose: bool = False        # also Telegram on implemented / verdict / pushed (not just key events)
 
-    # --- EU-65 inter-unit liaison channel (additive foundation; OFF + empty by default) ---
-    # An isolated OUTWARD Telegram chat to an ALLIED unit, kept strictly separate from the ops
-    # TELEGRAM_CHAT_ID (notify.py). With nothing configured every value below is empty / disabled,
-    # so behaviour is byte-identical to today — the channel stays inert until the Commander opts in.
-    # Liaison replies run on the CHEAP model under a per-day TOKEN cap so an outward chat can never
-    # compete with the unit's own coding spend. Other EU-65 slices import these.
-    liaison_enabled: bool = False                  # master flag; even when on, a no-op unless chat ids are set
-    # External / social chat ids the liaison may talk to. Parsed from TELEGRAM_EXTERNAL_CHAT_IDS by
-    # default (comma/space/newline separated); may also be set explicitly in config.yaml. Empty => inert.
-    liaison_external_chat_ids: list[str] = field(default_factory=_env_external_chat_ids)
-    liaison_model: str = "claude-haiku-4-5-20251001"   # cheap model for liaison replies (never Opus/Sonnet)
-    liaison_effort: str = "low"                    # minimal reasoning depth for an outward small-talk reply
-    liaison_daily_token_budget: int = 200_000      # per-day token ceiling for liaison replies; 0 = off (no cap)
-    liaison_max_reply_chars: int = 800             # bound a single outward reply (cost + don't over-share)
-    # Bot @handles that count as being addressed. The liaison replies ONLY when @mentioned, so with
-    # no handle configured it never speaks (safe default). Parsed from TELEGRAM_BOT_USERNAME by default.
-    liaison_mention_handles: list[str] = field(default_factory=_env_bot_handles)
-
-    def liaison_active(self) -> bool:
-        """True only when the liaison channel is BOTH flagged on AND has at least one external chat
-        id configured. Every other slice gates on this so an unconfigured unit behaves exactly as today."""
-        return bool(self.liaison_enabled and self.liaison_external_chat_ids)
-
-    def is_liaison_chat(self, chat_id: Any) -> bool:
-        """True if ``chat_id`` is one of the configured external liaison chats. Compared as strings so
-        an int env/update id and a YAML string id match. Always False for the ops TELEGRAM_CHAT_ID
-        unless it was (mistakenly) also listed — callers keep the two channels isolated."""
-        if chat_id is None:
-            return False
-        return str(chat_id) in set(self.liaison_external_chat_ids)
+    # --- EU-65/EU-66 inter-unit liaison channel: DELETED in Phase-2 §2 (2026-07-06). It was
+    #     dead by default (master flag off + empty chat-id list = doubly inert) and §2's verdict
+    #     was DELETE (zero calls ever). notify.incoming_texts now accepts the ops chat only. ---
 
     # --- run logs (EU-106) ---
     # log_folder: root directory for per-run log files written by run_logger.py.
@@ -355,12 +322,19 @@ class Config:
     # state never mingles with source. Keep OUTSIDE every target repo.
     audit_path: str = "./state/audit.jsonl"
 
+    # EU-185 (Wave 0): single-Telegram-poller election. Telegram getUpdates+offset is
+    # single-consumer, so two hosts polling one bot token split/lose the Commander's messages. Only
+    # the host whose sync host id (GENERAL_HOST_ID, else hostname) matches this value runs the
+    # poller; every other host runs cockpit-only. Override per-host with GENERAL_TELEGRAM_POLLER=1/0.
+    telegram_poller_host: str = "server"
+
     @staticmethod
     def load(path: str | Path) -> "Config":
         import yaml
         data = yaml.safe_load(Path(path).read_text()) or {}
-        apps = [AppConfig(**a) for a in data.pop("apps", [])]
-        cfg = Config(apps=apps, **data)
+        apps = [AppConfig(**_known_only(AppConfig, a, where="apps[]"))
+                for a in data.pop("apps", [])]
+        cfg = Config(apps=apps, **_known_only(Config, data, where="config"))
         cfg.validate()
         return cfg
 

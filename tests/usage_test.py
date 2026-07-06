@@ -223,6 +223,39 @@ chk("Pre-flight check passes with healthy budget", pre["go"] is True)
 chk("Pre-flight includes provider", pre["provider"] == "claude")
 chk("Pre-flight includes remaining", pre["remaining"] > 0)
 
+# --- 2026-07-05 audit §6: routed-call truthfulness (env-routed GLM behind a claude-* id) ---
+# When the base URL is flipped to z.ai while options.model stays "claude-*", agent.py passes
+# provider="GLM" from its live sniff. The row must (a) carry the full model id in "mid",
+# (b) land provider="glm" so the GLM gauges count it, (c) keep "m" family semantics untouched.
+routed_dir = Path(tempfile.mkdtemp())
+routed_audit = routed_dir / "audit.jsonl"
+usage.configure(str(routed_audit))
+
+usage.record("claude-opus-4-8", 4000, 1000, 0.0, "builder", provider="GLM")       # routed
+usage.record("claude-opus-4-8", 700, 300, 0.0, "builder", provider="Anthropic")   # native
+routed_rows = [json.loads(ln) for ln in usage._path().read_text(encoding="utf-8").splitlines()]
+r_glm, r_native = routed_rows[0], routed_rows[1]
+chk("routed row: full model id recorded in mid", r_glm.get("mid") == "claude-opus-4-8", str(r_glm))
+chk("routed row: provider param lands as provider=glm", r_glm.get("provider") == "glm", str(r_glm))
+chk("routed row: 'm' family unchanged (opus)", r_glm.get("m") == "opus", str(r_glm))
+chk("routed row: prv kept for backward compat", r_glm.get("prv") == "GLM", str(r_glm))
+chk("native row: no provider key (Claude default)", "provider" not in r_native, str(r_native))
+chk("native row: mid recorded too", r_native.get("mid") == "claude-opus-4-8", str(r_native))
+
+cfg_routed = Config(apps=[], audit_path=str(routed_audit), use_worktree=False)
+chk("routed tokens count toward the GLM gauge",
+    usage._glm_tokens_today(cfg_routed) == 4000 + 1000, str(usage._glm_tokens_today(cfg_routed)))
+chk("routed tokens excluded from the Claude gauge",
+    usage._claude_tokens_today(cfg_routed) == 700 + 300, str(usage._claude_tokens_today(cfg_routed)))
+
+# rollup stays shape-stable with the additive fields present (still keyed by short family)
+r_today = usage.rollup(None, usage._day_start())
+chk("rollup by_model unaffected by mid/provider fields",
+    set(r_today["by_model"]) == {"opus"} and r_today["by_model"]["opus"]["in"] == 4700,
+    str(r_today["by_model"]))
+
+usage.configure(str(glm_audit))   # restore the dual-provider ledger for the sections below
+
 # Test pre-flight check when budget is low (simulate by setting low cap)
 cfg_low = Config(
     apps=[],
@@ -288,6 +321,49 @@ pre_no_cfg = usage.pre_flight_check(None)
 chk("Pre-flight with no config defaults to go", pre_no_cfg["go"] is True)
 grace_no_cfg = usage.graceful_stop_check(None)
 chk("Graceful stop with no config doesn't trigger", grace_no_cfg["should_stop"] is False)
+
+# --- 2026-07-05 audit §7.4: prune races record() — every live row survives the locked rewrite ---
+# prune() runs on every CLI start while the serve process appends; the old unlocked write_text
+# dropped rows landing between its read and write (understating burn for the budget monitors).
+import threading as _th
+
+prune_dir = Path(tempfile.mkdtemp())
+usage.configure(str(prune_dir / "audit.jsonl"))
+led_p = usage._path()
+old_t = time.time() - 60 * 86400          # older than keep_days=35 → must be pruned
+with led_p.open("w", encoding="utf-8") as f:
+    for _ in range(9000):                  # pushes the file past prune's 400KB gate
+        f.write(json.dumps({"t": old_t, "m": "opus", "i": 1, "o": 1, "c": 0.0, "g": "old"}) + "\n")
+chk("prune race: seed ledger exceeds the size gate", led_p.stat().st_size > 400_000,
+    str(led_p.stat().st_size))
+
+N_LIVE = 30
+_bar = _th.Barrier(N_LIVE + 1)
+
+
+def _live_rec(i):
+    _bar.wait()
+    usage.record("claude-opus-4-8", 10, 5, 0.0, f"live-{i}")
+
+
+def _pruner():
+    _bar.wait()
+    usage.prune(None)
+
+
+_race = [_th.Thread(target=_live_rec, args=(i,)) for i in range(N_LIVE)] + [_th.Thread(target=_pruner)]
+for t in _race:
+    t.start()
+for t in _race:
+    t.join()
+_after = [json.loads(ln) for ln in led_p.read_text(encoding="utf-8").splitlines()]
+_live_tags = {r["g"] for r in _after if str(r.get("g", "")).startswith("live-")}
+chk("prune race: every concurrent record survives the locked rewrite",
+    _live_tags == {f"live-{i}" for i in range(N_LIVE)},
+    f"{len(_live_tags)} of {N_LIVE} survived")
+chk("prune race: expired rows were actually pruned", not any(r.get("g") == "old" for r in _after),
+    f"{sum(1 for r in _after if r.get('g') == 'old')} old rows left")
+usage.configure(str(audit))   # restore the suite's ledger
 
 print("\n=============== COST GOVERNOR v2 QA ===============")
 passed = sum(1 for _, ok, _ in results if ok)

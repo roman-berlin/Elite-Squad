@@ -141,6 +141,65 @@ try:
 except Exception as exc:  # noqa: BLE001 - summary pulls other streams; don't let them sink this slice
     chk("needs.summary integration", False, f"raised: {exc}")
 
+# === 6) 2026-07-06 review fixes: approval notify, filing-window dedup, stale-claim recovery == #
+# (a) approve sends the '✅ Approved & filed' notification — the two-phase refactor briefly
+#     referenced a renamed variable and the NameError was swallowed, silencing EVERY approval.
+import orchestrator.notify as _notify_mod
+_sent: list[str] = []
+_notify_mod.send = lambda *a, **k: (_sent.append(a[0] if a else ""), True)[1]
+cfg6 = _cfg([_app("automatixy")])
+bid6 = approvals.enqueue_proposals(cfg6, app_name="automatixy", officer_label="council",
+                                   source="council/notify-pin", report=REPORT)
+filing.make_backlog = lambda a: StubBacklog()
+res6 = approvals.approve_proposals(cfg6, bid6)
+chk("approve sends the 'Approved & filed' notification (NameError regression pin)",
+    res6 is not None and any("Approved & filed" in m and "council/notify-pin" in m for m in _sent),
+    str(_sent))
+_notify_mod.send = lambda *a, **k: None
+
+# (b) re-enqueuing the identical report while its batch is mid-claim ('filing') must reuse the
+#     batch, not append a duplicate id that can never be approved, denied, or trimmed.
+cfg7 = _cfg([_app("automatixy")])
+bid7 = approvals.enqueue_proposals(cfg7, app_name="automatixy", officer_label="council",
+                                   source="council/daily", report=REPORT)
+import time as _time
+
+
+def _mark_filing(items):
+    for b in items:
+        if b.get("id") == bid7:
+            b["status"] = "filing"
+            b["claim_ts"] = _time.time()          # fresh claim — someone is filing right now
+    return items
+
+
+approvals._mutate_proposals(cfg7, _mark_filing)
+bid7_again = approvals.enqueue_proposals(cfg7, app_name="automatixy", officer_label="council",
+                                         source="council/daily", report=REPORT)
+chk("re-enqueue during the 'filing' window reuses the batch (no duplicate id)",
+    bid7_again == bid7 and sum(1 for b in approvals._load_proposals(cfg7)
+                               if b.get("id") == bid7) == 1,
+    str(approvals._load_proposals(cfg7)))
+chk("a FRESH 'filing' claim is not actionable (concurrent approve sees it as taken)",
+    approvals.approve_proposals(cfg7, bid7) is None and not approvals.pending_proposals(cfg7))
+
+# (c) a STALE 'filing' claim (dead process) recovers: visible as pending, approvable again.
+def _age_claim(items):
+    for b in items:
+        if b.get("id") == bid7:
+            b["claim_ts"] = _time.time() - approvals._FILING_STALE_S - 1
+    return items
+
+
+approvals._mutate_proposals(cfg7, _age_claim)
+chk("a STALE 'filing' claim resurfaces in pending_proposals (crash can't hide a batch)",
+    [b.get("id") for b in approvals.pending_proposals(cfg7)] == [bid7])
+stub7 = StubBacklog()
+filing.make_backlog = lambda a: stub7
+res7 = approvals.approve_proposals(cfg7, bid7)
+chk("a STALE 'filing' claim is approvable again (recovery path files the tickets)",
+    res7 is not None and res7.filed_n == 2, str(res7 and res7.filed))
+
 passed = sum(1 for _, c, _ in results if c)
 for n, c, d in results:
     print(f"  {'✓' if c else '✗'} {n}" + (f"  [{d}]" if (not c and d) else ""))

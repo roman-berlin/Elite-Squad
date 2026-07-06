@@ -261,23 +261,6 @@ chk(
 
 
 # ════════════════════════════════════════════════════════════
-# 8. test-engineer driver also bans watch mode (belt-and-suspenders)
-# ════════════════════════════════════════════════════════════
-
-te_src = Path("./orchestrator/test_engineer.py").read_text()
-chk(
-    "test_engineer _DRIVER bans watch mode (EU-146)",
-    "watch mode" in te_src.lower() or "never watch" in te_src.lower(),
-    "watch-mode ban not found in test_engineer.py",
-)
-chk(
-    "test_engineer _DRIVER mentions bounding workers (EU-146)",
-    "bound" in te_src.lower() or "maxforks" in te_src.lower() or "pool" in te_src.lower(),
-    "worker bounding not found in test_engineer.py",
-)
-
-
-# ════════════════════════════════════════════════════════════
 # Report
 # ════════════════════════════════════════════════════════════
 

@@ -22,7 +22,7 @@ import orchestrator.loop as loop
 from orchestrator import reviewer as reviewer_mod
 from orchestrator.config import Config, AppConfig
 from orchestrator.contracts import (Ticket, BuildResult, ReviewResult, GateResult,
-                                     TestEngineerResult, Verdict, Outcome, TicketReport)
+                                     Verdict, Outcome, TicketReport)
 
 results = []
 def chk(n, c, d=""):
@@ -48,9 +48,6 @@ class Git:
 loop._notify = lambda c, t: None
 loop.run_gate = lambda app, changed_paths=None, **_: GateResult(passed=True, report="")
 loop._land = lambda *a, **k: TicketReport("AUTO-14", Outcome.MERGED, 1, 0.0, "automatixy", "b")
-async def fake_te(ticket, app, cfg, **_):   # EU-72: absorb store=/build_artifact= kwargs
-    return TestEngineerResult(ok=True, coverage="lines 80%→85%")
-loop.test_engineer_mod.ensure_coverage = fake_te
 
 built = []
 class FakeBuilder:

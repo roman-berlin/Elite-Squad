@@ -79,6 +79,13 @@ calls.clear()
 out = call(officer="scout", label="Scout")
 chk("officer chooses SOLO when armed -> solo", out == "SOLO REPORT" and calls == ["scout-lead", "scout"], str(calls))
 
+# ---- EU-182: fewer than 2 slices under delegation must still audit the solo fallback ----
+plan["reply"] = "SOLO"
+calls.clear(); aud = Audit()
+out = call(officer="scout", label="Scout", audit=aud)
+chk("delegation armed + SOLO fallback -> officer_recon audit entry present",
+    any(e.get("event") == "officer_recon" and e.get("officer") == "scout" for e in aud.events), str(aud.events))
+
 # ---- fail-safe: a planning hiccup degrades to solo, never errors ----
 async def boom(prompt, options, tag=""):
     calls.append(tag)

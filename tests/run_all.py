@@ -19,6 +19,7 @@ judged purely on their exit code, exactly as before. See ``_verdict``.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -26,6 +27,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent          # the General repo root
 TESTS = sorted(p for p in (ROOT / "tests").glob("*_test.py"))
+
+# EU-139 gate incident (2026-07-05 22:24): a ticket run's gate executes this suite as a child of the
+# orchestrator, so harnesses inherit its live credentials — and a harness that stubbed the SDK but not
+# `orchestrator.notify` (eu108_sonnet_fallback_test) sent a REAL "Sonnet weekly cap hit" Telegram alert
+# to the ops chat mid-gate. The suite's contract is "no network, no real models": strip outbound
+# messaging credentials from every harness's environment so no test can page the Commander, no matter
+# which process spawns the suite. A harness that tests notify sets its own fake env in-process.
+_CHILD_ENV = {k: v for k, v in os.environ.items()
+              if k not in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
 
 
 def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
@@ -62,7 +72,8 @@ def main() -> int:
     red: list[str] = []
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     for t in TESTS:
-        r = subprocess.run([sys.executable, str(t)], cwd=str(ROOT), capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(t)], cwd=str(ROOT), capture_output=True, text=True,
+                           env=_CHILD_ENV)
         ok, checks, line, reason = _verdict(r.stdout, r.returncode)
         total_checks += checks
         if ok:

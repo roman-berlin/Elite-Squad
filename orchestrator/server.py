@@ -2663,12 +2663,17 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
     import sys
     if not isinstance(sys.stdout, _Tee):
         sys.stdout = _Tee(sys.stdout)
-    # Two-way decisions: watch Telegram for replies that resume paused tickets.
+    # Two-way decisions: watch Telegram for replies that resume paused tickets. EU-185 (Wave 0):
+    # only the ELECTED poller host polls — a second poller on the same bot token splits/loses the
+    # Commander's messages (getUpdates is single-consumer). A non-poller host runs cockpit-only.
     from . import decisions, notify
-    if notify.configured():
+    _poll, _why = decisions.should_poll_telegram(cfg)
+    if _poll:
         threading.Thread(target=decisions.poll_loop, args=(cfg, AuditLog(cfg.audit_path)),
                          daemon=True).start()
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
+    elif notify.configured():
+        print(f"  decision listener: OFF — {_why} (cockpit-only on this host)")
     print(f"★ War Room: http://{host}:{port}   (Ctrl-C to stop)")
     print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
     # threaded: the SSE stream holds a long-lived request — without this it would block the cockpit.

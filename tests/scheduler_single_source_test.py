@@ -51,9 +51,10 @@ chk("no orchestrator/scripts source references the retired launchd scheduler",
 cron = (SCRIPTS / "install-server-cron.sh")
 chk("live scheduler scripts/install-server-cron.sh still present", cron.exists())
 cron_text = cron.read_text(encoding="utf-8") if cron.exists() else ""
-chk("single source still schedules the daily council 06:30", "30 6 * * *" in cron_text
-    and "./general council" in cron_text)
-chk("single source still schedules corridor small-talk", "./general smalltalk" in cron_text)
+# Phase-2 §2 (2026-07-06): the ceremony crons were RETIRED — councils/small-talk are
+# on-demand only. The single source must NOT quietly re-schedule them.
+chk("ceremonies de-cronned: no scheduled council muster", "./general council" not in cron_text)
+chk("ceremonies de-cronned: no scheduled corridor small-talk", "./general smalltalk" not in cron_text)
 chk("single source still schedules the weekly patrol (Mon)", "0 9 * * 1" in cron_text
     and "./general patrol" in cron_text)
 
@@ -74,7 +75,11 @@ DOC_DIRS = [ROOT, ROOT / "Documentation"]
 #    log files — records, not scheduler instructions.
 DOC_ALLOW = {"Documentation/SYSTEM_OVERVIEW.md", "Documentation/UNIT_REVIEW_2026-06-25.md",
              "Documentation/Development_Status.md",
-             "Documentation/RESTRUCTURE_PROPOSAL_2026-07-05.md"}
+             "Documentation/RESTRUCTURE_PROPOSAL_2026-07-05.md",
+             # Point-in-time audit/postmortem (same class as UNIT_REVIEW / RESTRUCTURE_PROPOSAL):
+             # it DOCUMENTS the EU-181 dead-launchd-agent finding and recommends `launchctl bootout`
+             # to REMOVE them — a record of the retirement, not an instruction to run the scheduler.
+             "Documentation/SYSTEM_AUDIT_2026-07-06.md"}
 DOC_NEEDLES = ("com.roman.general", "launchctl", "LaunchAgents",
                "run-autopilot.sh", "run-council.sh", "run-patrol.sh", "run-smalltalk.sh", "run-sync.sh")
 doc_offenders = []

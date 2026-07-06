@@ -38,15 +38,14 @@ remote control (`orchestrator/notify.py`, `orchestrator/decisions.py`).
 
 The council roster is defined in `orchestrator/council.py:59-101`; duties + model mapping in
 `orchestrator/roster.py:19-40`. **Model is always Opus for implementation** (`config.py:92-93`);
-council/chat discussion runs on Sonnet (`discussion_model`, `config.py:98`) and corridor small-talk
-on Haiku (`smalltalk_model`, `config.py:99`).
+council/chat discussion runs on Sonnet (`discussion_model`, `config.py:98`) and the cheap tier
+(roster status line, notify distillation) on Haiku (`smalltalk_model`, `config.py:99`).
 
 | Officer (army name) | Staff role | What it does | When invoked | Model · effort | Input → Output |
 |---|---|---|---|---|---|
 | **The CTO** | Orchestrator | Owns git + the loop; chairs the council; talks 1:1 with the Commander | Always (the loop) + every council/chat | Loop = Python; chair = Sonnet (`council.py:312-316`) | worklist → `TicketReport`s; briefings |
 | **Dev Team Lead** | Builder | Implements one ticket on the feature branch; can split a big ticket across engineers | Step 1 of every build iteration (`loop.py:329`) | **Opus** (`builder_model`) · sized XS→`low`…`high`, escalates on retry (`builder.py:140-156`) | `BuildRequest` → `BuildResult` (`contracts.py:46-61`) |
 | **Code Reviewer** | Reviewer | Adversarial read-only review of the diff: spec conformance + quality | Step 3 of every iteration (`loop.py:412`) | **Opus** (`reviewer_model`) · `reviewer_effort`=high, read-only (`reviewer.py:84-97`) | diff+ticket → `ReviewResult` (PASS/FAIL, issues, `needs_human`) |
-| **Security Engineer** | Security | Read-only security gate on the diff (secrets, tenant-isolation, authz, injection, deps) | Pre-merge, when `security_gate` on (`loop.py:452-462`); also `provost`/patrol | **Opus** (`reviewer_model`) · effort high, `max_turns=18` (`provost.py:80-92`) | diff → `(passed, report)` via `SECURITY GATE: BLOCK/PASS` |
 | **Product Manager** | S-5 · Product | Decides the everyday product/IA calls so the build resumes; escalates only critical/irreversible ones | On a deliberate Builder halt (`loop.py:291-304, 347-371`) | **Opus** (`reviewer_model`) · effort high (`pm.py:98-104`) | halt report → `{verdict: DECIDE\|ESCALATE, body}` |
 | **SRE** | S-3 · Integration & rollback | Runs the heavier post-merge suite on landed DEV; forward-only `git revert` if red | After a live merge, if `should_run` (`loop.py:547-549`, `sentinel.py:18-20`) | **No model** — deterministic (`sentinel.py`) | `postmerge_commands` → green / reverted |
 | **QA Engineer** | S-2 · Recon / QA | Smoke-tests the *running* app on DEV (flows + a11y); files findings as tickets | `scout` CLI, `scout_after_merge` (`loop.py:582-597`), patrol | **Opus** (`reviewer_model`, `scout.py:57`) — note ⚠ below | app → recon report (+filed tickets) |
@@ -142,10 +141,9 @@ Driven by `orchestrator/loop.py`. Per ticket: `process_ticket` (`loop.py:252`) �
    - Not ship-ready (`verdict!=PASS`, spec gap, or blocker/major issue — `contracts.py:101-106`) →
      **retry** with `required_changes` (`loop.py:469-473`).
    - **Ship-ready** → continue.
-7. **Security gate** *(owner: Security Engineer, opt-in `security_gate`, **on** in live config)*. `provost.gate`
-   inspects the diff (`loop.py:452-462`). A `BLOCK` sets `security_block`, which makes `_land` open a PR
-   instead of landing — **DEV untouched** (`loop.py:503-504`, `loop.py:562-579`).
-8. **Land** *(owner: `git_ops.py`)*. `_land` (`loop.py:487`) commits, then **trial-merges on a throwaway
+   *(Phase-2 §2, 2026-07-06: the LLM per-diff Security gate that used to run here was deleted —
+   secret/dep checks are deterministic in `gate.py` now, and the weekly `provost` recon still runs.)*
+7. **Land** *(owner: `git_ops.py`)*. `_land` (`loop.py:487`) commits, then **trial-merges on a throwaway
    branch** and re-runs the gate on it — DEV is never touched until validated (`loop.py:497-498`). If
    clean+green+not-blocked → `land_trial` **ff-pushes `origin/<base>`** (the one moment DEV changes,
    `git_ops.py:215-229`), retires the feature branch, and `sync_main_base` brings the Mac's local DEV
@@ -178,9 +176,7 @@ flowchart TD
   F -->|"pass"| R{"REVIEW · Code Reviewer · Opus"}
   R -->|"needs_human"| P3["PARK: decision"]
   R -->|"FAIL"| D
-  R -->|"PASS + spec met + no blockers"| S{"SECURITY gate · Security Engineer (opt-in)"}
-  S -->|"BLOCK"| PR1["PR into DEV · DEV untouched"]
-  S -->|"PASS / disabled"| L["trial-merge on throwaway branch"]
+  R -->|"PASS + spec met + no blockers"| L["trial-merge on throwaway branch"]
   L --> G2{"trial gate green?"}
   G2 -->|"no"| PR1
   G2 -->|"yes"| LAND["LAND: ff-push origin/DEV · move ticket to QA"]
@@ -286,7 +282,6 @@ buttons short-circuit with a banner if unhealthy (`server.py:617-619, 656-658`).
 | **Never lands on MAIN autonomously** | `AppConfig.validate` rejects base==protected (`config.py:76-78`); `Git.__init__` same (`git_ops.py:21`); `_guard` + `merge_no_ff` + `land_trial` all refuse the protected branch (`git_ops.py:55-57, 142, 219`); the autonomous land only ff-pushes `origin/<base>` i.e. DEV (`git_ops.py:222`). | **No** for the loop/autopilot/Telegram. The **only** MAIN pushes are the cockpit buttons `sync.promote` (the CTO's own dev→main) and `sync.promote_app` (an app's DEV→MAIN) — both gated by `can_promote()` and human-confirmed (`sync.py:261-291, 336-382`). |
 | **Isolated git worktrees** | Each app runs in a dedicated linked worktree on a detached `origin/<base>` (`use_worktree`, on in live config; `git_ops.setup`, `git_ops.py:60-84`; `loop._make_git`, `loop.py:119-139`). An exclusive `flock` per app stops two runs resetting each other's tree (`loop.py:158-207`). | Falls back to in-tree only if `origin/<base>` can't resolve (`loop.py:134-137`). |
 | **Tool-call guardrail** | A `PreToolUse` hook on every write-capable officer (`guard.hooks_config`, wired in `builder.py:233`, `squad.py:175`) denies, in code, writes to secret paths and a denylist of destructive shell (`guard.py:23-65`). | **Best-effort denylist, not a sandbox.** See §7.1. |
-| **Security gate** | `provost.gate` blocks a CRITICAL/HIGH diff before merge (`loop.py:452-462`, `provost.py:80-100`). On in live config. | Parses a substring `SECURITY GATE: BLOCK` and otherwise **passes** — a misformatted reply lands (see §7.1). |
 | **Readiness gate** | Deterministic check hands back under-specified tickets before any build (`readiness.assess`, `readiness.py:12-28`). | Opt-in; **off** in live config. |
 | **Cost / token governor + auto-pause** | Autopilot checks `usage.budget_status` each cycle and pauses when over the daily ceiling (`autopilot.py:104-120`). | Armed when `daily_token_budget > 0`; **armed by default** (`100_000_000` tokens/day, `config.py:131`) so a runaway loop auto-pauses — tune to your Max headroom (`usage.py:120-134`). The in-loop USD `Budget` is still a no-op on the Max plan (`max_cost_usd: 0`). |
 
@@ -354,8 +349,9 @@ cheap Haiku status line (`roster.py:165-198`).
 - **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, group chat, the CTO's
   chair/1:1, the Technical Writer. Also the **floor for all code** (Builder/Reviewer/engineers/
   Test Engineer never drop below Sonnet — a too-weak coder just fails review and burns more on retries).
-- **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — corridor small-talk and the roster
-  status line. **Pinned** — small-talk never routes through the ladder.
+- **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — the cheap-model tier for the roster
+  status line and notification distillation. **Pinned** — never routes through the ladder.
+  (The knob keeps its `smalltalk_model` name from the retired corridor small-talk; Phase-2 §2.)
 
 **The economical model ladder** (`orchestrator/models.py`) — `auto_model` is **on by default**
 (`config.py:123`). When on, no role is hard-pinned to Opus; each picks the cheapest model that fits its
@@ -495,7 +491,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `builder_model` | `claude-opus-4-8` | **Ceiling** for Builder + engineers + build-squad planner (Sonnet-first, climbs here on retry when `auto_model` is on) |
 | `reviewer_model` | `claude-opus-4-8` | **Ceiling** for Reviewer + PM + Security Engineer/QA Engineer/Release Manager recon + Engineering Manager/Engineering Coach (diff-/effort-sized under the ladder) |
 | `discussion_model` | `claude-sonnet-4-6` | Council / stand-up / meetings / chair / Technical Writer |
-| `smalltalk_model` | `claude-haiku-4-5-…` | Corridor small-talk + roster status line |
+| `smalltalk_model` | `claude-haiku-4-5-…` | Cheap-model tier: roster status line + notify distillation (name kept from retired small-talk) |
 | `builder_effort` / `reviewer_effort` | `high` | Base effort when sizing is off |
 | `builder_max_turns` | `60` | Base build turn budget (scaled by effort) |
 | `adaptive_effort` | `true` | Size the Builder's effort from the ticket |
@@ -512,12 +508,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `usage_cap_per_hour` | `40` | Cap discretionary officer chatter / hour (0 = off) |
 | `daily_token_budget` | `100_000_000` | Tokens/day ceiling for autopilot auto-pause (runaway guard; 0 = off — tune to Max headroom) |
 | `budget_alert_pct` | `0.8` | Telegram heads-up at this fraction of the ceiling |
-| `autonomy_enabled` | `true` | Officers may auto-convene between cycles |
-| `autonomy_cooldown_min` | `45` | Min minutes between auto-convened sessions |
-| `meeting_on_security_block` | `true` | A security block → Security Engineer+Dev Team Lead+Code Reviewer huddle |
-| `parks_meeting_threshold` | `3` | This many parked tickets → a "why are we stuck" meeting |
-| `smalltalk_prob` / `random_meeting_prob` | `0.15` / `0.06` | Quiet-cycle chatter probabilities |
-| `meeting_autospawn` | `false` | Meetings may file the tickets they propose |
+| `meeting_autospawn` | `false` | A (human-convened) meeting may file the tickets it proposes |
 | `scout_after_merge` | `false` | QA Engineer smoke-tests DEV after a live merge |
 | `max_iterations` | `4` | Build/review passes per ticket |
 | `max_cost_usd` | `0.0` | USD cost cap (0 = no cap; for API billing only) |
@@ -528,7 +519,6 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `use_worktree` | `true` | Isolated linked worktree per app |
 | `worktree_setup_cmd` | `None` | Run once when a worktree is first created (e.g. `bun install`) |
 | `sync_base_after_merge` | `true` | Bring the Mac's local base up to date after a merge |
-| `security_gate` | `false` | Security Engineer gates each diff (**`true` in live config**) |
 | `dry_run` | `false` | LIVE by default; `--dry`/`--live` flips it |
 | `notify_verbose` | `false` | Telegram on every beat, not just key events |
 | `audit_path` | `./audit.jsonl` | Where audit + sibling state files live |

@@ -196,7 +196,8 @@ squad.run_agent = _tracking_run_agent  # type: ignore[attr-defined]
 _orig_detect = squad.detect_domain_gap
 
 
-async def _no_gap(ticket_text, sq):
+async def _no_gap(ticket_text, sq, **kw):
+    # Legacy 2-tuple return (no burn dict) — _plan's defensive indexing must tolerate it.
     return False, None
 
 

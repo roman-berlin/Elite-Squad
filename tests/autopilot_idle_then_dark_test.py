@@ -30,6 +30,9 @@ def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 tmp = Path(tempfile.mkdtemp())
+# The real autopilot() run below writes its PID file. Keep it off the machine-global
+# /tmp/general-autopilot.pid, which is shared with a live daemon and every other checkout's suite.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
 
 AUTH_MSG = ("Jira auth failed for app 'Elite-Unit' (X-Seraph-LoginReason=AUTHENTICATED_FAILED) - the "
@@ -40,7 +43,6 @@ autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used"
 autopilot.intake.from_drain = lambda c, app, n: []          # worklist stays empty the whole run...
 autopilot.intake.LAST_DRAIN_ERRORS.clear()                  # ...and the board starts REACHABLE (queue truly clear)
 async def _ac(c, reports, audit, blocked): return None
-autopilot.events.after_cycle = _ac
 autopilot.notify.configured = lambda: False
 sent = []
 autopilot.notify.send = lambda *a, **k: sent.append(a[0] if a else "")

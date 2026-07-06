@@ -57,9 +57,7 @@ _OFFICER_RULES = (
     "Most days there is none. Do not write or edit files.\n"
     "This is a real round-table: in later rounds you will see what your fellow officers said — "
     "RESPOND to them, by name, when it touches your lens: agree and build, or push back with a "
-    "reason. If you have nothing to add this round, reply with exactly 'PASS'. If a specific "
-    "problem genuinely needs a focused cross-officer huddle, end with a line prefixed exactly "
-    "'MEETING:' naming the topic and which officers should attend."
+    "reason. If you have nothing to add this round, reply with exactly 'PASS'."
 )
 
 COUNCIL = [
@@ -392,28 +390,9 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     return briefing
 
 
-_MEETING_REQ = re.compile(r"^\s*MEETING:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
-
-
-def extract_meeting_requests(text: str) -> list[str]:
-    """Pull officer-raised 'MEETING: <topic>' requests out of a transcript (trimmed, de-duped)."""
-    out: list[str] = []
-    for m in _MEETING_REQ.finditer(text or ""):
-        topic = m.group(1).strip()
-        topic = re.split(r"\b(attendees?|officers?)\s*:", topic, maxsplit=1, flags=re.IGNORECASE)[0]
-        topic = topic.strip().rstrip(" ,.;:—-").strip()
-        if len(topic) > 4 and topic.lower() not in (t.lower() for t in out):
-            out.append(topic)
-    return out
-
-
-def pending_meeting_requests(cfg: Config) -> tuple[str, list[str]]:
-    """(latest council/meeting file, the MEETING: topics raised in it). ('', []) when none."""
-    hist = history(cfg, limit=1)
-    if not hist:
-        return "", []
-    f = hist[0]["file"]
-    return f, extract_meeting_requests(transcript_text(cfg, f))
+# Phase-2 §2 (2026-07-06): the officer-raised 'MEETING:' request pipeline
+# (extract_meeting_requests / pending_meeting_requests) was deleted with the events.py autonomy
+# layer — its only consumer. Meetings are convened on demand (CLI / cockpit / Telegram) only.
 
 
 def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None, *,
@@ -549,76 +528,9 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     return decision
 
 
-_SMALLTALK_SYSTEM = (
-    "You are an officer of an elite autonomous software unit, caught in a brief CORRIDOR "
-    "exchange with a fellow officer — not a formal meeting. Speak in character, 1–3 sentences, "
-    "informal but professional. React to what's actually going on in the unit's record; be wry "
-    "or human if it fits, and if a genuinely useful observation surfaces, land it plainly. No "
-    "headers, no markdown — just talk. Do not write or edit files."
-)
-
-
-async def small_talk(cfg: Config, audit=None) -> str:
-    """A light, in-character corridor exchange between two officers — flavor, occasionally a real
-    insight. Cheap (two short turns). Saved like a council so it shows up in history."""
-    import random
-    from . import governor
-    if not governor.under_budget(cfg):
-        print("  · corridor small-talk skipped (hourly usage cap reached)", flush=True)
-        return ""
-    pair = random.sample(COUNCIL, 2)
-    digest = format_signals(collect_signals(cfg))
-    cwd = _general_root()
-    convo: list[tuple[str, str]] = []
-    for i, (rank, lens_role, voice) in enumerate(pair):
-        if i == 0:
-            prompt = "\n".join([
-                f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
-                f"You run into the {pair[1][0]} in the corridor. Open with a casual remark about how "
-                "things are going — something real from the record.",
-            ])
-        else:
-            prompt = "\n".join([
-                f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
-                f'The {pair[0][0]} just said: "{convo[0][1]}"', "",
-                "Reply in kind — a sentence or two. Banter is welcome; land a real point if you have one.",
-                "",
-                "If — and ONLY if — this exchange surfaced a genuinely useful, actionable idea worth the "
-                "Commander's attention, add a final line starting exactly 'INSIGHT:' with a one-sentence "
-                "summary. Most corridor chats won't have one — that's fine, leave it off.",
-            ])
-        run = await run_agent(prompt, ClaudeAgentOptions(
-            model=cfg.smalltalk_model, system_prompt=memory.preamble() + _SMALLTALK_SYSTEM, cwd=cwd,
-            permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
-            max_turns=4, effort="low"), tag="smalltalk")
-        convo.append((rank, (run.final or run.text or "…").strip()))
-    governor.note_call(cfg, len(convo))
-    insight = _corridor_insight(convo)
-    saved = _save_transcript(cfg, f"corridor: {pair[0][0]} & {pair[1][0]}", digest, convo,
-                             f"(corridor small-talk — {'insight surfaced' if insight else 'no decision'})")
-    if insight:
-        # Most corridor chats are flavor; when a real idea lands, ping the Commander on Telegram.
-        notify.send(f"💡 *Corridor insight* — {pair[0][0]} & {pair[1][0]}:\n{insight}")
-    if audit is not None:
-        audit.record("smalltalk", officers=[p[0] for p in pair], transcript=saved.name,
-                     insight=bool(insight))
-    print(f"  · corridor: {pair[0][0]} & {pair[1][0]}" + ("  💡 insight → Telegram" if insight else ""),
-          flush=True)
-    return "\n".join(f"{who}: {what}" for who, what in convo)
-
-
-def _corridor_insight(convo: list[tuple[str, str]]) -> str:
-    """Pull a single actionable 'INSIGHT: …' if the corridor exchange produced one — tolerant of
-    the marker on its own line or inline. Returns the text up to the end of that line."""
-    for _who, what in convo:
-        idx = what.upper().rfind("INSIGHT:")
-        if idx != -1:
-            rest = what[idx + len("INSIGHT:"):]
-            first = rest.splitlines()[0] if rest.strip() else ""
-            return first.strip()
-    return ""
-
+# Phase-2 §2 (2026-07-06): corridor small-talk (small_talk/_corridor_insight) was DELETED —
+# the audit's verdict: zero delivery function. Its cron slots and the events.py quiet-cycle roll
+# went with it; nothing convenes officers for flavor anymore.
 
 _TICKET_KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")
 
