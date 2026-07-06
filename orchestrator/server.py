@@ -787,12 +787,21 @@ def create_app(cfg: Config):
             ev = threading.Event()
             st["stop_event"] = ev
             errored = False
+            reports = []
+            # EU-175: bracket this cockpit-initiated run_loop with run_start/run_end (mirroring main.py's
+            # CLI path) so a hard-killed or exception-exiting worker still closes its run boundary —
+            # run_end fires from the finally, same as run_start fires before the run begins. Without it a
+            # ghost session leaves an unpaired boundary and a phantom "Working" card on the cockpit.
+            if audit is not None:
+                audit.record("run_start", mode=("DRY-RUN" if rcfg.dry_run else "LIVE"), tickets=len(worklist or []))
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
+                reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
                 st["last_msg"] = str(exc)
             finally:
+                if audit is not None:
+                    audit.record("run_end", tickets=len(reports or []))
                 # EU-106: close the run log before releasing the run slot.
                 try:
                     from . import run_logger as _rl
@@ -870,12 +879,21 @@ def create_app(cfg: Config):
             ev = threading.Event()
             st["stop_event"] = ev
             errored = False
+            reports = []
+            # EU-175: bracket this cockpit-initiated run_loop with run_start/run_end (mirroring main.py's
+            # CLI path) so a hard-killed or exception-exiting worker still closes its run boundary —
+            # run_end fires from the finally, same as run_start fires before the run begins. Without it a
+            # ghost session leaves an unpaired boundary and a phantom "Working" card on the cockpit.
+            if audit is not None:
+                audit.record("run_start", mode=("DRY-RUN" if rcfg.dry_run else "LIVE"), tickets=len(worklist or []))
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
+                reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
                 st["last_msg"] = str(exc)
             finally:
+                if audit is not None:
+                    audit.record("run_end", tickets=len(reports or []))
                 # EU-106: close the run log before releasing the run slot.
                 try:
                     from . import run_logger as _rl

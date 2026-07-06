@@ -388,6 +388,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     run_key = app_name or None
     owns_run_state = False    # set True only once claim_run succeeds; gates release in the finally
     run_state = None
+    started = False           # EU-175: gates autopilot_stop so a setup failure BEFORE autopilot_start
+                              # never records an UNPAIRED stop (the mirror image of the ghost-session bug).
     try:
         # Write the PID file FIRST, inside the try, so the finally's _remove_pid() always runs — even
         # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
@@ -433,6 +435,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                   "Use --live for continuous processing, or --once for a single dry test.", flush=True)
 
         audit.record("autopilot_start", mode=mode, app=app_name, once=once)
+        started = True   # EU-175: from here on, every stand-down MUST record the paired autopilot_stop
         budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
         budget_alerted = False
         # EU-118: plan-limit pause flag
@@ -470,7 +473,6 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         repos_announced: frozenset[str] = frozenset()
 
         while True:
-            print("  DEBUG: Loop iteration started", flush=True)
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
@@ -615,10 +617,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # Apps with missing repos are already skipped by from_drain, so they don't appear in the worklist.
             # We only announce apps that haven't been announced yet in this run.
             missing_repos = dict(intake.MISSING_REPO_ERRORS)
-            print(f"  DEBUG: missing_repos={missing_repos}, repos_announced={repos_announced}", flush=True)
             if missing_repos:
                 newly_missing = frozenset(missing_repos.keys()) - repos_announced
-                print(f"  DEBUG: newly_missing={newly_missing}", flush=True)
                 if newly_missing:
                     repos = sorted(newly_missing)
                     msgs = [f"{name} — {missing_repos[name]}" for name in repos]
@@ -816,4 +816,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # above (signal.signal() raises ValueError off the main thread, e.g. the cockpit _bg path).
         if _on_main_thread and _orig_sigterm is not None:
             signal.signal(signal.SIGTERM, _orig_sigterm)
-    audit.record("autopilot_stop")
+        # EU-175: record the terminal stop FROM INSIDE finally so it fires on EVERY stand-down —
+        # a non-KeyboardInterrupt exception out of the loop, a budget halt, or a hard kill mid-teardown.
+        # Previously this sat AFTER the finally, so any exit that wasn't a graceful return/KeyboardInterrupt
+        # skipped it, leaving an unpaired autopilot_start and a phantom "Working" card (the Jul-1 signature).
+        # Gated on `started`: a setup failure BEFORE autopilot_start must NOT record an unpaired stop
+        # (the mirror-image invariant break the 2026-07-06 review caught).
+        if started:
+            audit.record("autopilot_stop")

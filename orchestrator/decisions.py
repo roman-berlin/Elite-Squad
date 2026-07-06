@@ -376,11 +376,19 @@ def _run_bg(cfg, audit, worklist, *, refuse_if_busy: bool = False) -> bool:
         return False
 
     def _bg():
+        reports = []
+        # EU-175: bracket this Telegram/decision-resume run_loop with run_start/run_end so a hard-killed
+        # or exception-exiting worker still closes its run boundary (mirroring main.py's CLI path) —
+        # otherwise this ghost session leaves an unpaired boundary the audit trail can't close.
+        if audit is not None:
+            audit.record("run_start", mode=("DRY-RUN" if cfg.dry_run else "LIVE"), tickets=len(worklist or []))
         try:
-            asyncio.run(run_loop(cfg, worklist, audit))
+            reports = asyncio.run(run_loop(cfg, worklist, audit))
         except Exception as exc:  # noqa: BLE001
             notify.send(f"⚠️ run failed: {exc}")
         finally:
+            if audit is not None:
+                audit.record("run_end", tickets=len(reports or []))
             if owns_guard:
                 cockpit_state.release_run(run_key)
     threading.Thread(target=_bg, daemon=True).start()
