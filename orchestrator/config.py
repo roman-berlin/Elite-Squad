@@ -206,7 +206,6 @@ class Config:
                                             # so arming it costs nothing until an app opts a command in.
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
-    prebuild_gate_enabled: bool = False     # EU-134: ARMED by default (when False, gate is skipped; flip True only after conservative logic is verified)
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
     postmortem_after: int = 3               # auto-write a post-mortem once a ticket has failed this many times (0 = off); see forensics.py
 
@@ -229,11 +228,11 @@ class Config:
     #     Scrum Master split when the design exceeds thresholds. ---
     architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
 
-    # --- Senior PM pre-build triage gate (EU-107). OFF by default (2026-06-29): the gate was over-eager
-    #     — it closed [Feature] tickets (EU-118/EU-120) as "answered" instead of building them. Re-enable
-    #     only once the triage is conservative (CONTINUE by default; CLOSE only exact dupes; never an
-    #     acceptance-criteria ticket) — see the prebuild-gate best-practice fix ticket. ---
-    prebuild_gate_enabled: bool = False
+    # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
+    #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
+    #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as
+    #     deterministic pre-checks there. (The flag was off since 2026-06-29 — the gate closed
+    #     [Feature] tickets as "answered" — and the field was accidentally declared twice.) ---
 
     # --- Product Manager officer: when the Builder halts on a product/IA blocker, consult the PM first
     #     — it either DECIDES (the build resumes with its decision) or ESCALATES one recommendation to

@@ -26,7 +26,6 @@ from . import events, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
-from .gate import prebuild_gate
 from .loop import run as run_loop
 
 # PID file — single source of truth for "is the daemon actually running?"
@@ -721,18 +720,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             ids = ", ".join(t.id for _, t in worklist)
             print(f"  · taking {ids}", flush=True)
 
-            # EU-107: Run pre-build gate (Senior PM triage) to filter tickets that can be
-            # resolved without a build (ANSWER, CLOSE, REFILE) before reaching the Builder.
-            worklist = await prebuild_gate(cfg, worklist, audit)
-
-            # Only proceed to build if tickets remain after triage
-            if not worklist:
-                print("  · all tickets resolved by pre-build gate — nothing to build", flush=True)
-                await events.after_cycle(cfg, [], audit, blocked)
-                if once:
-                    break
-                _sleep(max(5, interval), stop_event)
-                continue
+            # Phase-2 §2 (2026-07-06): the EU-107 Senior PM pre-build triage gate is DELETED —
+            # it was off by default since 2026-06-29 (it closed [Feature] tickets as "answered"),
+            # and its ANSWER/CLOSE/REFILE verdicts move into the Planner's single per-ticket
+            # decision. The conservative overrides (AC / [Feature] / [Bug] ⇒ always build) become
+            # deterministic pre-checks on that verdict when the Planner lands.
 
             reports = await run_loop(cfg, worklist, audit)
 
