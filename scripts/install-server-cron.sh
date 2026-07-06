@@ -4,11 +4,10 @@
 # Installs, idempotently:
 #   - self-update (auto-deploy main)          every 15 min, offset :05/:20/:35/:50
 #   - Mac->server state sync (pull-only)       every 15 min
-#   (Phase-2 §2: the 06:30 council muster and 11/14/16 corridor small-talk crons were RETIRED —
-#                                                      council is retired; this is the single source)
-#   - one freshening sync just before it       06:30
-#   - corridor small-talk (jittered)           11:00 / 14:30-ish / 16:00-ish
 #   - weekly patrol                            Mon 09:00
+# Phase-2 §2 (2026-07-06): the 06:30 council muster and the 11/14/16 corridor small-talk crons
+# were RETIRED — councils/meetings convene on demand (CLI / cockpit / Telegram) now. Re-run this
+# script on a box that installed an older crontab to drop those lines.
 #
 # All times are LOCAL via CRON_TZ=Asia/Jerusalem, so 06:30 = the Commander's 06:30 (and follows DST)
 # even though the VPS system clock is UTC.
@@ -24,7 +23,6 @@ cat >> "$TMP" <<'CRON'
 CRON_TZ=Asia/Jerusalem
 5,20,35,50 * * * * cd $HOME/General && bash scripts/self-update.sh
 */15 * * * * cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1
-30 6 * * * cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general sync >> council/cron.log 2>&1
 0 9 * * 1 cd $HOME/General && ./general patrol >> council/cron.log 2>&1
 # SWE-bench Verified weekly benchmark — Mon 04:00 (off-peak), deterministic sample via --weekly seed
 0 4 * * 1 cd $HOME/General && python3 scripts/swebench_builder.py --weekly --sample 20 >> council/cron.log 2>&1

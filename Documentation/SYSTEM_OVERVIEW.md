@@ -38,8 +38,8 @@ remote control (`orchestrator/notify.py`, `orchestrator/decisions.py`).
 
 The council roster is defined in `orchestrator/council.py:59-101`; duties + model mapping in
 `orchestrator/roster.py:19-40`. **Model is always Opus for implementation** (`config.py:92-93`);
-council/chat discussion runs on Sonnet (`discussion_model`, `config.py:98`) and corridor small-talk
-on Haiku (`smalltalk_model`, `config.py:99`).
+council/chat discussion runs on Sonnet (`discussion_model`, `config.py:98`) and the cheap tier
+(roster status line, notify distillation) on Haiku (`smalltalk_model`, `config.py:99`).
 
 | Officer (army name) | Staff role | What it does | When invoked | Model · effort | Input → Output |
 |---|---|---|---|---|---|
@@ -354,8 +354,9 @@ cheap Haiku status line (`roster.py:165-198`).
 - **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, group chat, the CTO's
   chair/1:1, the Technical Writer. Also the **floor for all code** (Builder/Reviewer/engineers/
   Test Engineer never drop below Sonnet — a too-weak coder just fails review and burns more on retries).
-- **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — corridor small-talk and the roster
-  status line. **Pinned** — small-talk never routes through the ladder.
+- **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — the cheap-model tier for the roster
+  status line and notification distillation. **Pinned** — never routes through the ladder.
+  (The knob keeps its `smalltalk_model` name from the retired corridor small-talk; Phase-2 §2.)
 
 **The economical model ladder** (`orchestrator/models.py`) — `auto_model` is **on by default**
 (`config.py:123`). When on, no role is hard-pinned to Opus; each picks the cheapest model that fits its
@@ -495,7 +496,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `builder_model` | `claude-opus-4-8` | **Ceiling** for Builder + engineers + build-squad planner (Sonnet-first, climbs here on retry when `auto_model` is on) |
 | `reviewer_model` | `claude-opus-4-8` | **Ceiling** for Reviewer + PM + Security Engineer/QA Engineer/Release Manager recon + Engineering Manager/Engineering Coach (diff-/effort-sized under the ladder) |
 | `discussion_model` | `claude-sonnet-4-6` | Council / stand-up / meetings / chair / Technical Writer |
-| `smalltalk_model` | `claude-haiku-4-5-…` | Corridor small-talk + roster status line |
+| `smalltalk_model` | `claude-haiku-4-5-…` | Cheap-model tier: roster status line + notify distillation (name kept from retired small-talk) |
 | `builder_effort` / `reviewer_effort` | `high` | Base effort when sizing is off |
 | `builder_max_turns` | `60` | Base build turn budget (scaled by effort) |
 | `adaptive_effort` | `true` | Size the Builder's effort from the ticket |
@@ -512,12 +513,7 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `usage_cap_per_hour` | `40` | Cap discretionary officer chatter / hour (0 = off) |
 | `daily_token_budget` | `100_000_000` | Tokens/day ceiling for autopilot auto-pause (runaway guard; 0 = off — tune to Max headroom) |
 | `budget_alert_pct` | `0.8` | Telegram heads-up at this fraction of the ceiling |
-| `autonomy_enabled` | `true` | Officers may auto-convene between cycles |
-| `autonomy_cooldown_min` | `45` | Min minutes between auto-convened sessions |
-| `meeting_on_security_block` | `true` | A security block → Security Engineer+Dev Team Lead+Code Reviewer huddle |
-| `parks_meeting_threshold` | `3` | This many parked tickets → a "why are we stuck" meeting |
-| `smalltalk_prob` / `random_meeting_prob` | `0.15` / `0.06` | Quiet-cycle chatter probabilities |
-| `meeting_autospawn` | `false` | Meetings may file the tickets they propose |
+| `meeting_autospawn` | `false` | A (human-convened) meeting may file the tickets it proposes |
 | `scout_after_merge` | `false` | QA Engineer smoke-tests DEV after a live merge |
 | `max_iterations` | `4` | Build/review passes per ticket |
 | `max_cost_usd` | `0.0` | USD cost cap (0 = no cap; for API billing only) |
