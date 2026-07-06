@@ -121,29 +121,28 @@ def _prompt(ticket: Ticket) -> str:
     return "\n".join(parts)
 
 
+_DECODER = json.JSONDecoder()
+
+
 def _first_json_object(text: str) -> dict | None:
-    """Pull the first balanced {...} JSON object out of a reply (tolerant of prose / code fences).
-    Returns the parsed dict, or None if none parses."""
+    """Pull the first JSON object out of a reply (tolerant of prose / code fences around it).
+
+    Uses ``json.JSONDecoder.raw_decode`` from each ``{`` position — the decoder respects string
+    literals and escapes, so braces INSIDE a string value (e.g. an ``approach`` that describes code
+    like ``"wrap in a try { … }"``) don't break the scan. Naive brace-counting did (2026-07-06
+    review, HIGH): such a plan silently fell back to an empty BUILD and the design brief was lost.
+    Returns the first parsed dict, or None if none parses."""
     if not text:
         return None
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start != -1:
-                    chunk = text[start:i + 1]
-                    try:
-                        obj = json.loads(chunk)
-                        if isinstance(obj, dict):
-                            return obj
-                    except json.JSONDecodeError:
-                        start = -1  # keep scanning for the next balanced object
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, _end = _DECODER.raw_decode(text, i)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        i = text.find("{", i + 1)
     return None
 
 

@@ -70,6 +70,18 @@ chk("parse: in_scope_files list", p.in_scope_files == ["orchestrator/deploy.py"]
 WRAPPED = "Here's the plan:\n```json\n" + CLEAN + "\n```\nDone."
 chk("parse: tolerates prose + fences", planner.parse_plan(WRAPPED).approach == p.approach)
 
+# 2026-07-06 review (HIGH): braces INSIDE a string value must not break the scan — an approach
+# that describes code ("wrap in a try { … }") is common and must still parse, not silently
+# fall back to an empty BUILD that loses the whole design brief.
+BRACEY = ('{"verdict": "BUILD", "approach": "wrap the body in a try { } block and log in the } arm",'
+          ' "testable_ac": ["error path logs once"], "in_scope_files": ["a.py"]}')
+pb = planner.parse_plan(BRACEY)
+chk("parse: braces inside a string value don't break parsing (HIGH fix)",
+    pb.verdict == "BUILD" and "try {" in pb.approach and pb.testable_ac == ["error path logs once"],
+    str(pb))
+chk("parse: bracey plan is NOT lost to the fail-safe (brief survives)",
+    pb.as_builder_brief() != "" and "a.py" in pb.as_builder_brief())
+
 # comma-string list coerced
 COMMA = '{"verdict":"BUILD","in_scope_files":"a.py, b.py","testable_ac":"x"}'
 pc = planner.parse_plan(COMMA)
@@ -246,8 +258,11 @@ try:
     chk("loop: Planner ran once (planner_enabled)", _plan_calls["n"] == 1, str(_plan_calls))
     chk("loop: design brief injected into the Builder (req.adr)",
         _captured_req.get("adr") and "bounded retry" in _captured_req["adr"], str(_captured_req.get("adr"))[:80])
-    chk("loop: testable AC sharpened the SpecArtifact the Builder reads",
-        _captured_req.get("spec_ac") == ["3 fails → abort", "first success → no retry"],
+    chk("loop: testable AC ride in the brief (not a spec.acceptance overwrite — builder/reviewer "
+        "stay on ONE contract, 2026-07-06 review)",
+        "3 fails → abort" in (_captured_req.get("adr") or ""), str(_captured_req.get("adr"))[:120])
+    chk("loop: store.spec.acceptance left as the ticket AC (not overwritten by the Planner)",
+        _captured_req.get("spec_ac") == ["deploy retries up to 3×", "gives up after 3"],
         str(_captured_req.get("spec_ac")))
     chk("loop: 'planner' audit event recorded", any(e["event"] == "planner" for e in au.events))
     chk("loop: ticket built + landed", rep.outcome == Outcome.MERGED, str(rep.outcome))

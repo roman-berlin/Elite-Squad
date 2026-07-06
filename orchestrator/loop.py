@@ -764,11 +764,16 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     print(f"  · Scrum Master couldn't split ({sp.get('error')}) — building instead.", flush=True)
                 except Exception as exc:  # noqa: BLE001 — a split failure falls through to a normal build
                     print(f"  · Planner-triggered split crashed: {exc} — building instead.", flush=True)
+            # The design brief (approach + testable AC + in-scope files) flows to the Builder via
+            # the adr channel; the Planner's testable AC are rendered in it as "write a test for
+            # EACH", so they drive test-writing (the deterministic gate then runs those tests)
+            # WITHOUT replacing the ticket's acceptance_criteria. Overwriting store.spec.acceptance
+            # here desynced the Builder (built against the sharpened AC) from the Reviewer (still
+            # judges ticket.acceptance_criteria) — two officers, different contracts (2026-07-06
+            # review). Keep ONE contract: the ticket AC; the testable AC are the test-writing lens.
             brief = _pres.as_builder_brief()
             if brief:
                 adr = brief
-            if _pres.testable_ac and store.spec is not None:
-                store.spec.acceptance = list(_pres.testable_ac)   # sharpen the AC the Builder reads
             if _pres.verdict not in ("BUILD", "SPLIT"):
                 audit.record("planner_nonbuild_verdict", ticket_id=ticket.id,
                              verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
