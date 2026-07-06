@@ -9,9 +9,27 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields
 from pathlib import Path
 from typing import Any, Optional
+
+
+def _known_only(cls, data: dict, *, where: str) -> dict:
+    """Drop YAML keys the dataclass no longer declares, warning loudly for each.
+
+    A dataclass ``__init__`` raises ``TypeError`` on an unexpected keyword, so passing a raw
+    config dict straight in means ANY retired field still present in a deployed config.yaml
+    (the Mac/VPS files are hand-maintained and self-update from main) would BRICK the process at
+    startup. The Phase-2 §2 collapse retires several fields (autonomy_*, smalltalk_prob,
+    prebuild_gate_enabled, liaison_*), so unknown keys are dropped-with-a-warning instead — a
+    typo stays visible in the log, but a since-removed key never stops the unit from booting."""
+    known = {f.name for f in _dc_fields(cls)}
+    if not isinstance(data, dict):
+        return {}
+    unknown = [k for k in data if k not in known]
+    for k in unknown:
+        print(f"  ⚠ config: ignoring unknown {where} key '{k}' (retired or misspelled)", flush=True)
+    return {k: v for k, v in data.items() if k in known}
 
 # Re-export the officer name map so the rest of the unit can import the single source of truth
 # straight from config (the hub everything already imports). Defined in officers.py.
@@ -302,8 +320,9 @@ class Config:
     def load(path: str | Path) -> "Config":
         import yaml
         data = yaml.safe_load(Path(path).read_text()) or {}
-        apps = [AppConfig(**a) for a in data.pop("apps", [])]
-        cfg = Config(apps=apps, **data)
+        apps = [AppConfig(**_known_only(AppConfig, a, where="apps[]"))
+                for a in data.pop("apps", [])]
+        cfg = Config(apps=apps, **_known_only(Config, data, where="config"))
         cfg.validate()
         return cfg
 
