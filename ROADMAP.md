@@ -425,7 +425,7 @@ Last updated: 2026-06-20.
   scoped by a **project switcher** in the header (multi-project). Updates **live over SSE**
   (≤0.5s, with a 5s-poll fallback). Detailed transcript table moved to `/tasks`.
 
-- **Autonomous pipeline** — build → gate → review → **security gate (Provost)** → land on DEV → QA, on an isolated git worktree; MAIN never touched.
+- **Autonomous pipeline** — build → gate (tests + deterministic secret/dep/lint scan) → review → land on DEV → QA, on an isolated git worktree; MAIN never touched. (Phase-2 §2 retired the separate LLM Provost security gate; the weekly `provost` security recon still runs.)
 - **Officers** — Adjutant (S-1/HR) · Field Engineer (Builder) · Inspector General (Reviewer) · Scout (S-2/QA) · Provost Marshal (Security) · Quartermaster (S-4/DevOps) · Sentinel (S-3/Integration & rollback) · Drillmaster (Doctrine) · Product Manager (S-5) — chaired by The General.
 - **Autopilot** — always-on worker: resume In Progress, else take top To Do (assignee-pinned to you), with a park-guard so it never spins on a stuck ticket; KeepAlive launchd.
 - **Daily council** — 10:00 muster, briefing to Telegram, transcript saved, escalates only Commander-level calls.

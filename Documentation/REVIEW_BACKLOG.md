@@ -17,7 +17,7 @@ Each item is **ticket-ready**: paste it into Jira, or run e.g.
 
 | ID | Title | Pri | Effort | Files |
 |---|---|---|---|---|
-| F2 | Provost security gate must fail **closed** | P0 | XS | `provost.py`, `loop.py` |
+| F2 | Provost security gate must fail **closed** | ~~P0~~ **OBSOLETE** | — | gate deleted (Phase-2 §2) |
 | F1 | Guard: deny secret **reads** + exfil patterns | P0 | M | `guard.py`, `tests/guard_test.py` |
 | F5 | Telegram `/run` must not mutate shared `Config` | P1 | XS | `decisions.py` |
 | F4 | Arm the daily token budget (auto-pause) | P1 | XS | `config.yaml` (+ doc) |
@@ -41,15 +41,11 @@ number). Phase 2 = F1, F7, F8, F6, F3 (need tests + tuning). Phase 3 = F9–F16 
 
 ## Phase 1 — Safety trio (do first; ~half a day; one reviewable PR)
 
-### F2 — Provost security gate must fail closed · **P0 · XS**
-- **Problem:** Block is decided by `"SECURITY GATE: BLOCK" in report.upper()` ([provost.py:99](../orchestrator/provost.py)). An empty, truncated, or misformatted Provost reply — or a raised exception at the call site ([loop.py:455](../orchestrator/loop.py)) — is treated as PASS and lands on DEV. `security_gate: true` is on in live config, so this is the boundary you rely on, failing silently in the unsafe direction.
-- **Fix:** Require an explicit `SECURITY GATE: PASS` to pass; treat absence / `BLOCK` / empty / parse-uncertainty as **block**. Wrap `provost.gate` so an exception also blocks (→ open PR), not errors the ticket.
-- **Acceptance criteria:**
-  - A report containing neither marker → `passed == False`.
-  - A report with `SECURITY GATE: PASS` → `passed == True`; with `BLOCK` → `False`.
-  - An exception inside `gate()` results in a blocked merge (PR opened), with the reason logged to audit.
-  - Unit test covers all four cases (pass / block / empty / exception).
-- **Trade-off:** A Provost that forgets the exact PASS line now false-blocks a clean diff into a PR (safe, occasionally noisy).
+### F2 — Provost security gate must fail closed · **OBSOLETE (Phase-2 §2, 2026-07-06)**
+- The LLM per-diff Provost security gate was **DELETED** (`provost.gate` removed; `security_gate`
+  flag gone). Its fail-open risk no longer exists. Secret/dependency checks are now deterministic
+  in `gate.py` (secret scan over the diff + dep/lockfile sanity), which cannot fail open the way a
+  parsed LLM verdict could; the weekly `provost` security **recon** still runs. No action needed.
 
 ### F5 — Telegram `/run` must not mutate the shared `Config` · **P1 · XS**
 - **Problem:** `handle_command` does `cfg.dry_run = not live` ([decisions.py:177](../orchestrator/decisions.py)) on the same `Config` the autopilot loop + its Telegram poller share ([autopilot.py:82](../orchestrator/autopilot.py)). A `/run`/`/drain` without `--live` flips the live autopilot into dry-run → it re-picks the same ticket forever.
