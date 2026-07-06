@@ -61,6 +61,9 @@ Everything under `Documentation/` (these are the only files there — keep this 
   Commander's approval.
 - `Documentation/OFFICER_NAMING.md` — canonical old→new officer-name map and the policy for what
   stays army-themed by design (EU-57).
+- `Documentation/SYSTEM_AUDIT_2026-07-06.md` — the 2026-07-06 four-surface full-system audit (Local /
+  Server / Telegram / Cockpit), risk-ranked findings, the alert table, the scale-up go/no-go, and the
+  wave-sequenced combat-readiness implementation plan.
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them
