@@ -404,13 +404,24 @@ def handle_command(cfg, audit, text: str) -> bool:
     arg = (parts[1].strip() if len(parts) > 1 else "")
 
     if cmd in ("help", "start"):
-        notify.send("Commands:\n/standup — daily report\n/status — recent tasks\n"
-                    "/drill — train the unit\n/council [topic] — convene the daily council\n"
+        notify.send("Commands:\n/daily — quick daily stand-up (cheap)\n/standup — deterministic report\n"
+                    "/status — recent tasks\n"
+                    "/drill — train the unit\n/council [topic] — deep WEEKLY council\n"
                     "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
                     "/unblock <id> — retry a parked (escalated) ticket\n"
                     "Reply  TICKET: <decision>  to answer a question, or send any note and "
                     "I'll log it as standing guidance for the unit.")
+    elif cmd == "daily":
+        notify.send("🫡 Daily stand-up…")
+
+        def _dly():
+            try:
+                from . import council
+                asyncio.run(council.daily_brief(cfg, audit=audit))
+            except Exception as exc:  # noqa: BLE001
+                notify.send(f"⚠️ daily failed: {exc}")
+        threading.Thread(target=_dly, daemon=True).start()
     elif cmd == "standup":
         notify.send(D.standup(cfg))
     elif cmd == "status":

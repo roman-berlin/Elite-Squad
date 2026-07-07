@@ -51,10 +51,17 @@ chk("no orchestrator/scripts source references the retired launchd scheduler",
 cron = (SCRIPTS / "install-server-cron.sh")
 chk("live scheduler scripts/install-server-cron.sh still present", cron.exists())
 cron_text = cron.read_text(encoding="utf-8") if cron.exists() else ""
-# Phase-2 §2 (2026-07-06): the ceremony crons were RETIRED — councils/small-talk are
-# on-demand only. The single source must NOT quietly re-schedule them.
-chk("ceremonies de-cronned: no scheduled council muster", "./general council" not in cron_text)
-chk("ceremonies de-cronned: no scheduled corridor small-talk", "./general smalltalk" not in cron_text)
+# 2026-07-07: best-practice ceremony split. The LIGHT daily stand-up (`general daily`) is scheduled
+# every morning; the DEEP multi-officer council (`general council`) is scheduled WEEKLY (Mon), not
+# daily. Corridor small-talk stays RETIRED. The single source must reflect exactly that.
+_cron_cmds = [l for l in cron_text.splitlines() if not l.strip().startswith("#") and "./general" in l]
+_council = [l for l in _cron_cmds if "./general council" in l]
+_daily = [l for l in _cron_cmds if "./general daily" in l]
+chk("light daily stand-up is scheduled every day (general daily)",
+    len(_daily) == 1 and _daily[0].split()[4] == "*", str(_daily))
+chk("deep council is scheduled WEEKLY (Mon dow=1), not daily",
+    len(_council) == 1 and _council[0].split()[4] == "1", str(_council))
+chk("ceremonies: corridor small-talk stays de-cronned", "./general smalltalk" not in cron_text)
 chk("single source still schedules the weekly patrol (Mon)", "0 9 * * 1" in cron_text
     and "./general patrol" in cron_text)
 

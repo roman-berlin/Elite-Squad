@@ -118,6 +118,18 @@ _CHAIR_SYSTEM = (
     "question per line ending in '?', or write 'None.' Never invent questions to fill space."
 )
 
+_DAILY_SYSTEM = (
+    "You are THE CTO writing the Elite Unit's DAILY stand-up — it lands on Roman's phone, so keep the "
+    "WHOLE thing skimmable in ~10 seconds, under ~55 words. You are given the unit's record and the "
+    "deterministic stand-up already computed (what shipped, what needs him). Do NOT restate those "
+    "lines. Output exactly this markdown and nothing else:\n\n"
+    "**FOCUS** — one line: the single most important thing the unit should push today.\n\n"
+    "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product direction, business/"
+    "strategy, or an irreversible call with no safe default); NOT a technical/process choice the unit "
+    "should make itself. Hold a HIGH bar — most days this is 'None.' One question per line ending in "
+    "'?', or write 'None.' Never invent a question to fill space."
+)
+
 _MEETING_CHAIR_SYSTEM = (
     "You are THE CTO, chairing a focused meeting of the Elite Unit on a single topic. You "
     "have heard the officers debate. Produce a SHORT decision record — it lands on Roman's phone, so "
@@ -973,6 +985,51 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
     # deterministic brief) keeps every one as a tight '•' line — no model call, no truncate-and-punt.
     return (f"🫡 *Daily stand-up* — {len(rows)} officer(s) reported.\n\n"
             f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
+
+
+async def daily_brief(cfg: Config, audit=None) -> str:
+    """The LIGHT daily stand-up (best-practice: fast daily, deep weekly).
+
+    A deterministic digest — what shipped, what needs the Commander, what awaits a decision
+    (dashboard.standup, NO model call) — plus ONE short CTO synthesis: today's focus and, at a high
+    bar, the single decision that is genuinely the Commander's. That is ~1 model call, versus the ~8
+    of the deep multi-officer council (hold_council), which is now a WEEKLY ceremony. Sends one
+    skimmable phone ping; surfaces any Commander decision as a separate 'needs your call'."""
+    from . import dashboard, governor
+    facts = dashboard.standup(cfg)                     # deterministic — no model call
+    digest = format_signals(collect_signals(cfg))      # the record, context for the synthesis
+    notes = recent_commander_notes(cfg)
+    cwd = _general_root()
+    prompt = "\n".join([
+        "The unit's record:", "", digest, "",
+        *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
+        "Today's deterministic stand-up (already going to the Commander — do not repeat it):",
+        "", facts, "",
+        "Now write the daily brief.",
+    ])
+    run = await run_agent(prompt, ClaudeAgentOptions(
+        model=cfg.discussion_model,
+        system_prompt=memory.preamble() + _DAILY_SYSTEM, cwd=cwd,
+        permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        max_turns=3, effort="low"), tag="the-general")
+    synth = (run.final or run.text or "").strip()
+    governor.note_call(cfg, 1)
+    questions = _commander_questions(synth)
+
+    # One skimmable phone ping: the deterministic facts + the CTO's focus/decision.
+    notify.send(f"{facts}\n\n{synth}")
+    if questions:
+        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                    + "\n\nReply here and I'll log it as standing guidance.")
+    try:
+        _save_transcript(cfg, "daily", digest, [("CTO", synth)], synth)
+    except OSError:
+        pass
+    if audit is not None:
+        audit.record("daily_brief", questions=len(questions),
+                     provider=run.provider, model=run.model_version)
+    return synth
 
 
 async def hold_standup(cfg: Config, audit=None) -> str:
