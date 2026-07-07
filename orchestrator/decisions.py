@@ -410,8 +410,8 @@ def handle_command(cfg, audit, text: str) -> bool:
                     "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
                     "/unblock <id> — retry a parked (escalated) ticket\n"
-                    "Reply  TICKET: <decision>  to answer a question, or send any note and "
-                    "I'll log it as standing guidance for the unit.")
+                    "Reply  TICKET: <decision>  to answer a question, or just reply in plain "
+                    "words — I'll act on it and open a ticket if it's work.")
     elif cmd == "daily":
         notify.send("🫡 Daily stand-up…")
 
