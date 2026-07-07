@@ -51,8 +51,9 @@ For a BUILD verdict, produce:
   • approach — the design the Builder should follow: the chosen approach and the key decisions,
     grounded in files you actually read (cite file paths). A few sentences to a short paragraph.
   • testable_ac — 2–6 acceptance criteria, each INDEPENDENTLY VERIFIABLE and phrased the way a
-    test would check it (a concrete input → observable output/behaviour). These are the contract
-    the Builder writes tests against. Sharpen the ticket's own AC; don't just echo them.
+    test would check it (a concrete input → observable output/behaviour). These are the contract the
+    Builder writes a FAILING test against first (fail-first): phrase each so a test can go RED when
+    the behaviour is absent. Sharpen the ticket's own AC; don't just echo them.
   • in_scope_files — the repo files the build should create or edit (paths). Keep it tight; this
     scopes the change. Empty is acceptable if you genuinely can't tell.
 
@@ -95,7 +96,7 @@ class PlannerResult:
         if self.approach.strip():
             parts += ["APPROACH (follow this design):", self.approach.strip()]
         if self.testable_ac:
-            parts += ["", "TESTABLE ACCEPTANCE CRITERIA (write a test for EACH before you finish):",
+            parts += ["", "TESTABLE ACCEPTANCE CRITERIA (write a FAILING test for EACH first, then implement until it passes):",
                       "\n".join(f"  {i+1}. {c}" for i, c in enumerate(self.testable_ac))]
         if self.in_scope_files:
             parts += ["", "IN-SCOPE FILES (keep the change to these unless you find a real reason):",

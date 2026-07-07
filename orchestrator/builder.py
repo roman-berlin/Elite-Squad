@@ -35,7 +35,14 @@ Approach, in order:
    libraries). Do NOT refactor unrelated code or expand scope.
 4. PRESERVE: do not break existing behaviour, public APIs, types, RTL/layout, or other
    features.
-5. TEST: add or adjust ONLY the tests for what you changed.
+5. TEST — FAIL-FIRST (mandatory): for EACH testable acceptance criterion, write the test FIRST,
+   run it against the UNCHANGED code, and confirm it FAILS for the right reason — the behaviour is
+   genuinely missing, not an import error or a typo in the test. THEN implement until it passes. A
+   test you never watched fail can be green for the wrong reason (vacuous), so it has NO TEETH: if a
+   test cannot be made to fail without your change, fix the test until it can. When a test is
+   genuinely test-after — you changed the code before writing it, or you are adjusting an existing
+   test — MUTATION-CHECK it instead: revert your change (or move the asserted line), confirm the
+   test goes RED, then restore. Add or adjust ONLY the tests for what you changed.
 
 PRE-SUBMIT GATES (mandatory — run these BEFORE you write your summary / hand off to Reviewer).
 These checks are the unit's biggest Reviewer friction sources; the Reviewer will bounce the diff if
@@ -50,8 +57,10 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   surface have nothing to scan — say so in your summary instead of running it.)
 - TESTS + COVERAGE: run `bun test --coverage` for the package you changed and require it to pass with
   NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
-  add the missing test(s) if it is not. (Bun's test runner is light — unlike Vitest below it does not
-  need worker bounding — but still scope it to the package you touched, not the whole monorepo.)
+  add the missing test(s) if it is not. Every test you add must have been RED before your change
+  (fail-first — step 5): a test that stays green on the unchanged code is not covering your change.
+  (Bun's test runner is light — unlike Vitest below it does not need worker bounding — but still
+  scope it to the package you touched, not the whole monorepo.)
 - SECURITY: never commit a secret (API key, token, password, private key, connection string).
   Keep queries parameterised and new routes behind their auth guard. (Phase-2 §2: the §1/§2/§3
   countersignature block was retired with the LLM security gate — a deterministic secret/dep scan
