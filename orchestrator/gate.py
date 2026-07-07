@@ -281,11 +281,12 @@ _LOCKFILE_PAIRS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-def lockfile_sanity(changed_paths: list[str], repo_root: str) -> list[str]:
-    """Detect manifest/lockfile drift in a diff: a dependency manifest changed while its sibling
-    lockfile — which EXISTS in the repo — did not. Returns human-readable problems ([] = clean).
-    Repos without a lockfile for that manifest are never flagged (nothing to drift against)."""
-    problems: list[str] = []
+def _lockfile_candidates(changed_paths: list[str], repo_root: str) -> list[tuple[str, str]]:
+    """Static manifest/lockfile drift candidates: ``(manifest_path, existing_lock_relpath)`` for each
+    changed dependency manifest whose sibling lockfile EXISTS in the repo but did NOT change — each
+    resolved against the manifest's OWN directory (monorepo-safe). Manifests with no lockfile in the
+    repo are never flagged (nothing to drift against)."""
+    out: list[tuple[str, str]] = []
     changed = {p.replace("\\", "/") for p in (changed_paths or [])}
     for path in sorted(changed):
         d, base = os.path.split(path)
@@ -295,9 +296,64 @@ def lockfile_sanity(changed_paths: list[str], repo_root: str) -> list[str]:
             siblings = [(os.path.join(d, lk) if d else lk) for lk in locks]
             existing = [s for s in siblings if os.path.exists(os.path.join(repo_root, s))]
             if existing and not any(s in changed for s in existing):
-                problems.append(f"{path} changed but {existing[0]} did not — regenerate the lockfile "
-                                "in the same commit")
-    return problems
+                out.append((path, existing[0]))
+    return out
+
+
+def _lockfile_problem(manifest_path: str, lock_relpath: str) -> str:
+    return f"{manifest_path} changed but {lock_relpath} did not — regenerate the lockfile in the same commit"
+
+
+def lockfile_sanity(changed_paths: list[str], repo_root: str) -> list[str]:
+    """Detect manifest/lockfile drift in a diff: a dependency manifest changed while its sibling
+    lockfile — which EXISTS in the repo — did not. Returns human-readable problems ([] = clean). This
+    is a STATIC heuristic; ``run_deterministic_checks`` confirms REAL drift (``_lock_drift_confirmed``)
+    before failing, so a lock-consistent manifest change (scripts edit, already-locked dep) is not a
+    false failure."""
+    return [_lockfile_problem(m, lk) for m, lk in _lockfile_candidates(changed_paths, repo_root)]
+
+
+# Package managers whose manifest/lock consistency is verified NON-MUTATINGLY: --dry-run skips the
+# node_modules write and the network; --ignore-scripts skips the project's OWN lifecycle scripts
+# (preinstall/postinstall) — WITHOUT it bun still runs the manifest-under-review's scripts, so a
+# hostile or buggy package.json in the diff could execute arbitrary shell in the worktree during the
+# gate. The check still exits non-zero ONLY when the lock genuinely does not satisfy the manifest, so
+# real-drift detection is unchanged. A manifest change that leaves it passing is not drift. Only bun is
+# listed — other managers (npm/pnpm/yarn) keep the conservative static flag rather than shell out an
+# installer we have not proven side-effect-free.
+_LOCK_VERIFY: dict[str, str] = {
+    "bun.lock": "bun install --frozen-lockfile --dry-run --ignore-scripts",
+    "bun.lockb": "bun install --frozen-lockfile --dry-run --ignore-scripts",
+}
+
+
+def _lock_drift_confirmed(app: AppConfig, candidates: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Keep only the lockfile-drift candidates that are REAL. ``lockfile_sanity`` is a static heuristic
+    that CANNOT be satisfied when a package.json change leaves the lock consistent (a scripts edit, or
+    a dep already in the lock) — it false-fails and deadlocks a legitimate ticket (found live on
+    AUTO-57). For a manifest whose lock has a verifier, run the manager's NON-MUTATING ``--dry-run``
+    frozen check IN THE MANIFEST'S OWN DIRECTORY (monorepo-safe) via ``run_commands`` (shared timeout /
+    process-group-kill / gate_env): passing → the lock is consistent → drop the flag; failing, a
+    missing tool, or no verifier → keep it (conservative — REAL drift still fails, and nested drift in
+    a sub-package is probed in that sub-package, never masked by a consistent repo root)."""
+    if not candidates:
+        return candidates
+    root = app.workdir or app.repo_path
+    verified: dict[tuple[str, str], bool] = {}   # (manifest_dir, lock_basename) -> consistent
+    kept: list[tuple[str, str]] = []
+    for manifest_path, lock_relpath in candidates:
+        lock_base = os.path.basename(lock_relpath)
+        cmd = _LOCK_VERIFY.get(lock_base)
+        mdir = os.path.dirname(manifest_path)
+        key = (mdir, lock_base)
+        if cmd is None:
+            kept.append((manifest_path, lock_relpath))   # no verifier → conservative keep
+            continue
+        if key not in verified:
+            verified[key] = run_commands(app, [cmd], cwd=(os.path.join(root, mdir) if mdir else root)).passed
+        if not verified[key]:
+            kept.append((manifest_path, lock_relpath))   # the manager rejects the lock → REAL drift
+    return kept
 
 
 def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:
@@ -313,9 +369,10 @@ def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str
     if hits:
         reports.append("SECRET-LEAK gate failed — remove these from the diff (values masked):\n"
                        + "\n".join(f"  · {h}" for h in hits))
-    problems = lockfile_sanity(changed_paths or [], app.workdir or app.repo_path)
-    if problems:
-        reports.append("LOCKFILE gate failed:\n" + "\n".join(f"  · {p}" for p in problems))
+    candidates = _lockfile_candidates(changed_paths or [], app.workdir or app.repo_path)
+    drift = _lock_drift_confirmed(app, candidates)   # verify REAL drift before failing (false-positive guard)
+    if drift:
+        reports.append("LOCKFILE gate failed:\n" + "\n".join(f"  · {_lockfile_problem(m, lk)}" for m, lk in drift))
     if reports:
         return GateResult(passed=False, report="\n\n".join(reports))
     return GateResult(passed=True, report="deterministic checks passed")
