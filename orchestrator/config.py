@@ -169,9 +169,6 @@ class Config:
     auto_model: bool = True                 # ON by default: cheapest model that fits each task, escalating to the
                                             # ceiling on retry (<=ceiling, Sonnet floor for code). Fleet-wide econ;
                                             # set false to pin every officer to its configured model. See models.py.
-    opus_fallback_on_sonnet_cap: bool = True   # EU-108: ON by default. When Sonnet weekly cap hits but All-models
-                                                # still has headroom, escalate to Opus and keep building. Trades
-                                                # faster All-models burn for continuity during Sonnet sub-limit exhaustion.
     sentinel_enabled: bool = True           # ARMED by default: the SRE runs an app's postmerge_commands after a
                                             # land and auto-reverts (forward-only) if red. Still a NO-OP for any app
                                             # without a `postmerge_commands:` suite (see sentinel.should_run), so
@@ -193,12 +190,11 @@ class Config:
     builder_feedback_max_chars: int = 6000  # ...and at most this many total chars of feedback
     builder_preamble_max_chars: int = 4000  # bound the unit-memory preamble fed into the builder system prompt
 
-    # --- squad delegation: ONE switch arms both the Dev Team Lead's build squad AND the recon
-    #     officers' read-only squads (QA Engineer / Security Engineer / Release Manager each decide
-    #     per-task whether to recruit engineers or run solo). See squad.py (build) and recon.py (recon). ---
-    delegation_enabled: bool = False        # OFF by default — flip true to arm all squad delegation
-    delegation_min_ac: int = 3              # Dev Team Lead: delegate if >= this many AC (or size L/XL)
-    delegation_max_soldiers: int = 4        # cap engineers per ticket (build) / per inspection (recon)
+    # --- recon delegation: arms the recon officers' read-only squads. The QA / Security / Release
+    #     officers each decide per-task whether to recruit engineers or run solo. The Dev Team Lead's
+    #     build-delegation squad was removed (Phase-2 §2); the Builder builds solo. See recon.py. ---
+    delegation_enabled: bool = False        # OFF by default — flip true to arm recon delegation
+    delegation_max_soldiers: int = 4        # cap engineers per recon inspection
 
     # --- Architect officer: produces lightweight ADRs for feature/large tickets before the build
     #     — decides whether to produce an ADR (feature/large) or skip (bug/small), and triggers

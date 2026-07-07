@@ -1,4 +1,4 @@
-"""Roster QA: deterministic structure (officers + soldiers + chain-of-command chart from the code),
+"""Roster QA: deterministic structure (officers + chain-of-command chart from the code),
 duties, model column (auto-aware), the cheap daily status line, write/read round-trip, cockpit view."""
 import sys, types, tempfile, asyncio
 from pathlib import Path
@@ -13,7 +13,6 @@ sys.path.insert(0, ".")
 
 from orchestrator import roster
 from orchestrator.config import Config, AppConfig
-from orchestrator.squad import SQUAD
 
 results = []
 def chk(n, c, d=""):
@@ -27,8 +26,6 @@ for officer in ["CTO", "Engineering Manager", "Product Manager", "Dev Team Lead"
                 "Test Engineer", "QA Engineer", "Security Engineer", "Release Manager", "SRE",
                 "Engineering Coach", "Scrum Master", "Mayor"]:
     chk(f"doc lists {officer}", officer in doc)
-chk("doc lists every soldier from squad.SQUAD",
-    all(label in doc for label, _ in SQUAD.values()), str(list(SQUAD)))
 chk("doc carries the status line", "Shipped 3 tickets to DEV today." in doc)
 chk("doc dated 'As of'", "_As of" in doc)
 
@@ -37,7 +34,6 @@ mer = roster.mermaid_chart()
 chk("chart is mermaid flowchart", mer.startswith("```mermaid") and "flowchart TD" in mer)
 chk("chart roots at the Commander -> CTO", "Commander · Roman" in mer and "G[CTO" in mer)
 chk("chart hangs every officer off the General", mer.count("G --> ") == 12)   # 13 officers minus the General (EU-66 adds the Mayor / liaison; EU-110 adds Scrum Master)
-chk("chart hangs soldiers off the Field Engineer", mer.count("FE --> S") == len(SQUAD))
 
 # --- model column is auto-aware ---
 fixed = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, builder_model="claude-opus-4-8")
@@ -71,7 +67,6 @@ for _name in _recon_src:
 html = roster.html_view(cfg, "all quiet")
 chk("html view renders the tree", "Chain of command" in html and "CTO" in html)
 chk("html view renders the officer table", "Officers &amp; duties" in html and "Security Engineer" in html)
-chk("html view renders engineers", "Frontend Engineer" in html and "Software Engineer" in html)  # SQUAD labels — renamed by the code-strings fragment
 chk("html view shows the status", "all quiet" in html)
 chk("html view escapes (no raw angle injection)", "<script>" not in roster.html_view(cfg, "<script>x"))
 
@@ -99,7 +94,7 @@ from orchestrator import cockpit_views, sync as _sync
 _sync.can_promote = lambda: False   # keep the bar off git/network
 bar = cockpit_views._control_bar(scfg, "automatixy")
 chk("Roster button present in the top nav bar", 'href="/roster-doc"' in bar, "missing /roster-doc link")
-chk("Roster nav link carries the descriptive title", "Officers, soldiers" in bar, "missing title attr")
+chk("Roster nav link carries the descriptive title", "Officers" in bar, "missing title attr")
 
 print("\n================== ROSTER QA ==================")
 passed = sum(1 for _, ok, _ in results if ok)

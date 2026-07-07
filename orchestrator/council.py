@@ -118,6 +118,18 @@ _CHAIR_SYSTEM = (
     "question per line ending in '?', or write 'None.' Never invent questions to fill space."
 )
 
+_DAILY_SYSTEM = (
+    "You are THE CTO writing the Elite Unit's DAILY stand-up — it lands on Roman's phone, so keep the "
+    "WHOLE thing skimmable in ~10 seconds, under ~55 words. You are given the unit's record and the "
+    "deterministic stand-up already computed (what shipped, what needs him). Do NOT restate those "
+    "lines. Output exactly this markdown and nothing else:\n\n"
+    "**FOCUS** — one line: the single most important thing the unit should push today.\n\n"
+    "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product direction, business/"
+    "strategy, or an irreversible call with no safe default); NOT a technical/process choice the unit "
+    "should make itself. Hold a HIGH bar — most days this is 'None.' One question per line ending in "
+    "'?', or write 'None.' Never invent a question to fill space."
+)
+
 _MEETING_CHAIR_SYSTEM = (
     "You are THE CTO, chairing a focused meeting of the Elite Unit on a single topic. You "
     "have heard the officers debate. Produce a SHORT decision record — it lands on Roman's phone, so "
@@ -371,7 +383,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     notify.send(f"{header}\n\n{await notify.report_brief(cfg, briefing)}")
     if questions:
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
-                    + "\n\nReply here and I'll log it as standing guidance.")
+                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     if audit is not None:
         audit.record("council", topic=topic or "daily", provider=chair_provider, model=chair_model,
                      officers=[r for r, _, _ in COUNCIL], questions=len(questions), transcript=saved.name)
@@ -467,7 +479,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     notify.send(f"🎖️ *Meeting — {topic}*\n\n{await notify.report_brief(cfg, decision)}")
     if questions:
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
-                    + "\n\nReply here and I'll log it as standing guidance.")
+                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     if audit is not None:
         audit.record("meeting", topic=topic, provider=chair_provider, model=chair_model,
                      officers=[o[0] for o in roster], questions=len(questions), transcript=saved.name)
@@ -705,10 +717,60 @@ def recent_thread_context(cfg: Config, ticket_ref: str | None = None,
     return "\n\n".join(parts)
 
 
+_COMMANDER_TICKET_RULE = (
+    "\n\nOPENING WORK: if — and ONLY if — the Commander is telling you to BUILD or FIX something "
+    "concrete, or approving a proposed action that needs implementation (e.g. 'yes, do the revert-on-"
+    "red check', 'add a copy-invite button to team settings', 'fix the login 500'), then IN ADDITION "
+    "to your short reply, append ONE ticket block (the filing format below) so it becomes real work "
+    "the unit will build — and tell him in your reply that you have opened it. Hold a HIGH bar: a "
+    "question, a greeting, a vague direction, an FYI, or anything already tracked → NO ticket block. "
+    "One ticket per genuinely-actionable ask; never invent work to look busy. Tickets you already "
+    "opened appear in your standing guidance / thread as '[opened] <KEY>' and open items are in the "
+    "board/Needs-you state above — if this ask is already one of them, do NOT open a duplicate; just "
+    "say it's already tracked."
+)
+
+
+def _app_for_reply(cfg: Config, msg_refs: list[str]):
+    """Which product a Commander-reply ticket files to: the app whose Jira project key matches a
+    referenced ticket ('EU-136' → the EU product), else the primary app (apps[0]); None if no apps."""
+    apps = getattr(cfg, "apps", None) or []
+    if not apps:
+        return None
+    if msg_refs:
+        prefix = str(msg_refs[0]).split("-")[0].upper()
+        for a in apps:
+            pk = str((getattr(a, "backlog", None) or {}).get("project_key", "") or "").upper()
+            if pk and pk == prefix:
+                return a
+    return apps[0]
+
+
+def _file_commander_ticket(cfg: Config, msg_refs: list[str], answer: str):
+    """If the CTO's reply carried a ticket block, file it (DEDUPED) to the right product. Returns the
+    FilingResult, or None when there's nothing to file (or filing failed). Roman 2026-07-07: a reply
+    that implies work opens a ticket, so his answer becomes work — not just a standing-guidance note.
+
+    Crash-safe: filing.file_findings builds the backlog via make_backlog() BEFORE its per-finding
+    guard, and make_backlog raises on an absent/unknown backend (no Jira creds). That must never sink
+    the Commander's reply, so a construction failure degrades to None here."""
+    from . import filing
+    proposals, _ = filing.parse_tickets(answer)
+    if not proposals:
+        return None
+    app = _app_for_reply(cfg, msg_refs)
+    if app is None:
+        return None
+    try:
+        return filing.file_findings(app, "commander", answer)
+    except Exception:  # noqa: BLE001 — a backlog/creds/backend failure must not crash the reply
+        return None
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The CTO answers a message from the Commander (a reply to a council question, or
-    any question) directly in Telegram, grounded on the latest council + record, and logs
-    the exchange as standing guidance for the unit."""
+    any question) directly in Telegram, grounded on the latest council + record, logs the exchange
+    as standing guidance, and — when the reply implies concrete work — opens a deduped ticket."""
     append_chat(cfg, "Q", message)   # show the Commander's message in the cockpit chat right away
     latest = history(cfg, limit=1)
     context = transcript_text(cfg, latest[0]["file"]) if latest else format_signals(collect_signals(cfg))
@@ -772,19 +834,34 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         f"The Commander says: {message}", "",
         "Reply like a colleague — short and natural.",
     ])
+    from . import filing
     run = await run_agent(prompt, ClaudeAgentOptions(
-        model=cfg.discussion_model, system_prompt=memory.preamble() + system, cwd=_general_root(),
+        model=cfg.discussion_model,
+        system_prompt=memory.preamble() + system + _COMMANDER_TICKET_RULE + filing.TICKET_BLOCK_RULE,
+        cwd=_general_root(),
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
         # Room to glance at a few files before replying — 6 was too tight and errored out when the
         # Commander's message invited a quick look ("investigate…"), so the CTO couldn't answer.
         max_turns=14, effort="low"), tag="the-general")
     answer = (run.final or run.text or "(the CTO had no answer)").strip()
-    notify.send(f"🎖️ {await notify.report_brief(cfg, answer)}")
+    # Roman 2026-07-07: a reply that implies work opens a DEDUPED ticket. Split the ticket block out
+    # so the phone reply stays clean, file it to the right product, and tell him what opened.
+    _proposals, clean_answer = filing.parse_tickets(answer)
+    # A reply may be ONLY a ticket block (no prose) — never send a bare "🎖️ " or log an empty answer.
+    reply_text = clean_answer or ("Opened a ticket for that." if _proposals else answer)
+    notify.send(f"🎖️ {await notify.report_brief(cfg, reply_text)}")
+    res = _file_commander_ticket(cfg, _msg_refs, answer)   # crash-safe: returns None on any failure
+    if res is not None and res.lines:
+        notify.send("🎫 " + "\n".join(res.lines))
+        if res.filed:   # keep filed keys in the thread so a later paraphrased nudge sees it's tracked
+            add_commander_note(cfg, f"[opened] {', '.join(res.filed)}")
+    elif _proposals:     # the CTO wanted to file, but the backlog was unavailable — don't fail silently
+        notify.send("⚠️ couldn't open the ticket right now — your message is logged.")
     # Log compactly — a colleague chat, not a briefing to be replayed verbatim into future prompts.
-    add_commander_note(cfg, f"Q: {message[:120]} → A: {answer[:200]}")
-    append_chat(cfg, "A", answer)    # full reply to the cockpit chat (not only Telegram)
-    return answer
+    add_commander_note(cfg, f"Q: {message[:120]} → A: {reply_text[:200]}")
+    append_chat(cfg, "A", reply_text)    # full reply to the cockpit chat (not only Telegram)
+    return reply_text
 
 
 # --------------------------------------------------------------------------- #
@@ -973,6 +1050,51 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
     # deterministic brief) keeps every one as a tight '•' line — no model call, no truncate-and-punt.
     return (f"🫡 *Daily stand-up* — {len(rows)} officer(s) reported.\n\n"
             f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
+
+
+async def daily_brief(cfg: Config, audit=None) -> str:
+    """The LIGHT daily stand-up (best-practice: fast daily, deep weekly).
+
+    A deterministic digest — what shipped, what needs the Commander, what awaits a decision
+    (dashboard.standup, NO model call) — plus ONE short CTO synthesis: today's focus and, at a high
+    bar, the single decision that is genuinely the Commander's. That is ~1 model call, versus the ~8
+    of the deep multi-officer council (hold_council), which is now a WEEKLY ceremony. Sends one
+    skimmable phone ping; surfaces any Commander decision as a separate 'needs your call'."""
+    from . import dashboard, governor
+    facts = dashboard.standup(cfg)                     # deterministic — no model call
+    digest = format_signals(collect_signals(cfg))      # the record, context for the synthesis
+    notes = recent_commander_notes(cfg)
+    cwd = _general_root()
+    prompt = "\n".join([
+        "The unit's record:", "", digest, "",
+        *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
+        "Today's deterministic stand-up (already going to the Commander — do not repeat it):",
+        "", facts, "",
+        "Now write the daily brief.",
+    ])
+    run = await run_agent(prompt, ClaudeAgentOptions(
+        model=cfg.discussion_model,
+        system_prompt=memory.preamble() + _DAILY_SYSTEM, cwd=cwd,
+        permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        max_turns=3, effort="low"), tag="the-general")
+    synth = (run.final or run.text or "").strip()
+    governor.note_call(cfg, 1)
+    questions = _commander_questions(synth)
+
+    # One skimmable phone ping: the deterministic facts + the CTO's focus/decision.
+    notify.send(f"{facts}\n\n{synth}")
+    if questions:
+        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
+    try:
+        _save_transcript(cfg, "daily", digest, [("CTO", synth)], synth)
+    except OSError:
+        pass
+    if audit is not None:
+        audit.record("daily_brief", questions=len(questions),
+                     provider=run.provider, model=run.model_version)
+    return synth
 
 
 async def hold_standup(cfg: Config, audit=None) -> str:

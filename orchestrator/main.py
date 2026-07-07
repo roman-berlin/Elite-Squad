@@ -71,7 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     dr = sub.add_parser("drill", help="Engineering Coach: review the unit's record, propose officer upgrades")
     dr.add_argument("--telegram", action="store_true", help="also send a summary to Telegram")
     dr.add_argument("--apply", action="store_true", help="EXECUTE the approved drill (writes the officer/squad edits; originals backed up first)")
-    cnl = sub.add_parser("council", help="hold the Elite Unit's daily council (officers muster, brief you)")
+    sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
+    cnl = sub.add_parser("council", help="deep WEEKLY council (officers muster, brief you) — for the daily use `daily`")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
@@ -428,10 +429,19 @@ async def _main(argv: list[str]) -> int:
             notify.send("🎖️ Engineering Coach report ready:\n\n" + report[:1500])
         return 0
 
+    if args.command == "daily":
+        from . import council
+        audit = AuditLog(cfg.audit_path)
+        # The LIGHT daily: deterministic digest + one CTO synthesis (~1 model call). The deep
+        # multi-officer muster (council) is now weekly.
+        brief = await council.daily_brief(cfg, audit=audit)
+        print("\n" + brief)
+        return 0
+
     if args.command == "council":
         from . import council
         audit = AuditLog(cfg.audit_path)
-        # The daily muster IS council + stand-up merged into one (see council.hold_council).
+        # The DEEP weekly council: officers muster (Yesterday/Today/Blockers) + the CTO's briefing.
         briefing = await council.hold_council(cfg, topic=getattr(args, "topic", None), audit=audit)
         print("\n" + briefing)
         return 0

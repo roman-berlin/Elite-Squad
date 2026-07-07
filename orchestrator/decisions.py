@@ -321,16 +321,6 @@ def handle_reply(cfg, audit, text: str) -> bool:
     ticket_id, answer = parse_reply(text)
     resolved = resolve(cfg, answer, ticket_id)
     if not resolved:
-        # EU-88: also check pending specialist-provisioning approvals (separate state file).
-        # The Commander's reply "AUTO-90: approve" may target a parked specialist roster even
-        # when there is no entry in pending_decisions.json for that ticket.
-        if ticket_id:
-            try:
-                from . import hr as _hr_mod
-                if _hr_mod.resolve_specialist_approval_reply(cfg, audit, ticket_id, answer):
-                    return True
-            except Exception:  # noqa: BLE001 — reply handler must never crash
-                pass
         return False
     notify.send(f"▶️ Resuming {resolved['id']} with your decision: {answer}")
     audit.record("decision_resumed", ticket_id=resolved["id"], answer=answer)
@@ -386,11 +376,19 @@ def _run_bg(cfg, audit, worklist, *, refuse_if_busy: bool = False) -> bool:
         return False
 
     def _bg():
+        reports = []
+        # EU-175: bracket this Telegram/decision-resume run_loop with run_start/run_end so a hard-killed
+        # or exception-exiting worker still closes its run boundary (mirroring main.py's CLI path) —
+        # otherwise this ghost session leaves an unpaired boundary the audit trail can't close.
+        if audit is not None:
+            audit.record("run_start", mode=("DRY-RUN" if cfg.dry_run else "LIVE"), tickets=len(worklist or []))
         try:
-            asyncio.run(run_loop(cfg, worklist, audit))
+            reports = asyncio.run(run_loop(cfg, worklist, audit))
         except Exception as exc:  # noqa: BLE001
             notify.send(f"⚠️ run failed: {exc}")
         finally:
+            if audit is not None:
+                audit.record("run_end", tickets=len(reports or []))
             if owns_guard:
                 cockpit_state.release_run(run_key)
     threading.Thread(target=_bg, daemon=True).start()
@@ -406,13 +404,24 @@ def handle_command(cfg, audit, text: str) -> bool:
     arg = (parts[1].strip() if len(parts) > 1 else "")
 
     if cmd in ("help", "start"):
-        notify.send("Commands:\n/standup — daily report\n/status — recent tasks\n"
-                    "/drill — train the unit\n/council [topic] — convene the daily council\n"
+        notify.send("Commands:\n/daily — quick daily stand-up (cheap)\n/standup — deterministic report\n"
+                    "/status — recent tasks\n"
+                    "/drill — train the unit\n/council [topic] — deep WEEKLY council\n"
                     "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
                     "/unblock <id> — retry a parked (escalated) ticket\n"
-                    "Reply  TICKET: <decision>  to answer a question, or send any note and "
-                    "I'll log it as standing guidance for the unit.")
+                    "Reply  TICKET: <decision>  to answer a question, or just reply in plain "
+                    "words — I'll act on it and open a ticket if it's work.")
+    elif cmd == "daily":
+        notify.send("🫡 Daily stand-up…")
+
+        def _dly():
+            try:
+                from . import council
+                asyncio.run(council.daily_brief(cfg, audit=audit))
+            except Exception as exc:  # noqa: BLE001
+                notify.send(f"⚠️ daily failed: {exc}")
+        threading.Thread(target=_dly, daemon=True).start()
     elif cmd == "standup":
         notify.send(D.standup(cfg))
     elif cmd == "status":

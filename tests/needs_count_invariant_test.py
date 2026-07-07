@@ -1,18 +1,18 @@
 """Invariant tests for needs.count() == len(needs.summary()['rows']) == summary()['total'].
 
 EU-102 (iter-3): count() is the length of the flat ``rows`` list, and EVERY Commander-inbox
-stream is folded into ``rows`` — decisions, errored/PR runs, parked tickets, officer approvals,
-ticket proposals AND specialist rosters.  There is exactly ONE number everywhere:
+stream is folded into ``rows`` — decisions, errored/PR runs, parked tickets, officer approvals
+and ticket proposals.  There is exactly ONE number everywhere:
 ``count() == len(rows) == total``.  No stream can raise the badge without rendering a row.
+(Phase-2 §2: the specialist-roster stream was removed with hr.py — the build squad it provisioned
+is gone.)
 
-Seven test groups:
+Test groups:
   1. count() == len(rows) for a typical mixed state (decision + errored).
   2. A dismissed run item is excluded from both count() and summary() tasks list.
   3. A resolved/answered decision is excluded from count() and decisions list.
   4. A stale/phantom dismissed item does not increment count().
-  5. specialist_approvals ARE folded into rows/count() AND keep total == count == len(rows)
-     (the single-source design — a non-zero badge always points at a real row).
-  6. All four category types (decision | errored | parked | pr) each contribute
+  5. All four category types (decision | errored | parked | pr) each contribute
      exactly one row when seeded individually — count() == len(rows) in each case.
   7. Dedup regression: a blocked ticket whose latest run outcome == 'errored' yields exactly
      ONE row, category 'parked', and NO 'errored' row (with a realistic outcome, not None).
@@ -266,70 +266,6 @@ def test_phantom_dismissed_item_not_counted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — specialist_approvals are folded into rows/count (single-source design)
-# ---------------------------------------------------------------------------
-
-def test_specialist_approvals_folded_into_rows_count() -> None:
-    """EU-102 (iter-3) single-source design: a pending specialist roster contributes a row
-    (category 'specialist'), is counted by count(), and keeps total == count == len(rows).
-
-    This is the fix for the specialist-only dead-end: with only a specialist approval pending the
-    badge is non-zero AND the inbox has a real row — never a non-zero badge over an empty inbox.
-    """
-    tmp = Path(tempfile.mkdtemp())
-    cfg = _make_cfg(tmp)
-
-    # Write a pending specialist-approval entry to the file hr.pending_specialist_approvals reads.
-    spec_approvals_file = tmp / "pending_specialist_approvals.json"
-    spec_approvals_file.write_text(json.dumps({
-        "AUTO-10::security": {
-            "status": "pending",
-            "ticket_id": "AUTO-10",
-            "domain": "security",
-            "requested_at": "2026-06-28T09:00:00",
-        }
-    }), encoding="utf-8")
-
-    # No tasks or decisions; only the specialist approval is pending.
-    dashboard.load_tasks = lambda _p: []
-    dashboard.load_dismissed = lambda _p: {}
-
-    s = needs.summary(cfg)
-    rows = s.get("rows", [])
-
-    chk(
-        "5a. specialist_approvals stream still present in summary() (bespoke action form)",
-        len(s.get("specialist_approvals", [])) == 1,
-        f"specialist_approvals={s.get('specialist_approvals')}",
-    )
-    chk(
-        "5b. rows contains exactly one row, category 'specialist'",
-        len(rows) == 1 and rows[0].get("category") == "specialist",
-        f"rows={rows}",
-    )
-    chk(
-        "5c. count() is 1 — the specialist roster contributes to the rows badge",
-        needs.count(cfg) == 1,
-        f"count={needs.count(cfg)}",
-    )
-    chk(
-        "5d. count() == len(rows) invariant holds with a specialist row present",
-        needs.count(cfg) == len(rows),
-        f"count={needs.count(cfg)}  len(rows)={len(rows)}",
-    )
-    chk(
-        "5e. summary()['total'] == len(rows) == count() — single number, no inflation",
-        s["total"] == len(rows) == needs.count(cfg),
-        f"total={s['total']}  len(rows)={len(rows)}  count={needs.count(cfg)}",
-    )
-    chk(
-        "5f. the specialist row carries a non-empty 'why'",
-        bool(str(rows[0].get("why", "")).strip()),
-        f"why={rows[0].get('why') if rows else None!r}",
-    )
-
-
-# ---------------------------------------------------------------------------
 # Test 6 — all four category types contribute to count() / rows individually
 # ---------------------------------------------------------------------------
 
@@ -477,7 +413,6 @@ test_count_equals_summary_len_invariant()
 test_dismissed_run_excluded_from_count_and_tasks()
 test_resolved_decision_excluded_from_count_and_decisions()
 test_phantom_dismissed_item_not_counted()
-test_specialist_approvals_folded_into_rows_count()
 test_all_four_category_types_in_rows_invariant()
 test_blocked_errored_dedup_single_parked_row()
 

@@ -185,32 +185,22 @@ async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=N
 
 
 class _Cfg:
-    opus_fallback_on_sonnet_cap = True
+    pass
 
 
 _orig_run_agent = agent_mod.run_agent
 agent_mod.run_agent = _fake_run_agent
 try:
-    # The successful probe ARMS the weekly fallback and persists it beside cfg.audit_path.
-    # That path must be an ISOLATED directory — a bare mkstemp lands the state file in the
-    # shared $TMPDIR, where every other mkstemp-configured harness (eu91 etc.) reads it and
-    # goes Opus-pinned — and the state must be reset afterwards regardless.
+    # The one-shot Opus retry no longer arms or persists anything — the EU-108 weekly-Opus pin was
+    # deleted (Phase-2 Task 2). This section just verifies the two legs carry the right routing_tier:
+    # the Sonnet leg keeps the caller's tier, the Opus retry runs UNROUTED (really tests Anthropic Opus).
     import tempfile
     from pathlib import Path as _P
-    from orchestrator import models as _models
-    from orchestrator import notify as _notify
     _cfg = _Cfg()
     _cfg.audit_path = str(_P(tempfile.mkdtemp()) / "audit.jsonl")
-    _orig_send = _notify.send
-    _notify.send = lambda *a, **k: True
-    try:
-        asyncio.run(agent_mod.run_agent_with_fallback(
-            "p", _Options(model="claude-sonnet-4-6"), tag="builder", cfg=_cfg,
-            routing_tier="cloud"))
-    finally:
-        _notify.send = _orig_send
-        _models.reset_sonnet_fallback(_cfg)
-        _models.reset_sonnet_fallback_notification(_cfg)
+    asyncio.run(agent_mod.run_agent_with_fallback(
+        "p", _Options(model="claude-sonnet-5"), tag="builder", cfg=_cfg,
+        routing_tier="cloud"))
 finally:
     agent_mod.run_agent = _orig_run_agent
 

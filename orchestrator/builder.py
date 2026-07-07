@@ -35,7 +35,14 @@ Approach, in order:
    libraries). Do NOT refactor unrelated code or expand scope.
 4. PRESERVE: do not break existing behaviour, public APIs, types, RTL/layout, or other
    features.
-5. TEST: add or adjust ONLY the tests for what you changed.
+5. TEST — FAIL-FIRST (mandatory): for EACH testable acceptance criterion, write the test FIRST,
+   run it against the UNCHANGED code, and confirm it FAILS for the right reason — the behaviour is
+   genuinely missing, not an import error or a typo in the test. THEN implement until it passes. A
+   test you never watched fail can be green for the wrong reason (vacuous), so it has NO TEETH: if a
+   test cannot be made to fail without your change, fix the test until it can. When a test is
+   genuinely test-after — you changed the code before writing it, or you are adjusting an existing
+   test — MUTATION-CHECK it instead: revert your change (or move the asserted line), confirm the
+   test goes RED, then restore. Add or adjust ONLY the tests for what you changed.
 
 PRE-SUBMIT GATES (mandatory — run these BEFORE you write your summary / hand off to Reviewer).
 These checks are the unit's biggest Reviewer friction sources; the Reviewer will bounce the diff if
@@ -50,8 +57,10 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   surface have nothing to scan — say so in your summary instead of running it.)
 - TESTS + COVERAGE: run `bun test --coverage` for the package you changed and require it to pass with
   NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
-  add the missing test(s) if it is not. (Bun's test runner is light — unlike Vitest below it does not
-  need worker bounding — but still scope it to the package you touched, not the whole monorepo.)
+  add the missing test(s) if it is not. Every test you add must have been RED before your change
+  (fail-first — step 5): a test that stays green on the unchanged code is not covering your change.
+  (Bun's test runner is light — unlike Vitest below it does not need worker bounding — but still
+  scope it to the package you touched, not the whole monorepo.)
 - SECURITY: never commit a secret (API key, token, password, private key, connection string).
   Keep queries parameterised and new routes behind their auth guard. (Phase-2 §2: the §1/§2/§3
   countersignature block was retired with the LLM security gate — a deterministic secret/dep scan
@@ -328,42 +337,17 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
 async def build(req: BuildRequest, app: AppConfig, cfg: Config, audit=None,
                 *, store: PerTicketArtifactStore | None = None,
                 spec: SpecArtifact | None = None) -> BuildResult:
-    """Implement the ticket. For a sized-big ticket on its first pass (and only when delegation is
-    armed), the Dev Team Lead splits it across sized soldiers; otherwise a single focused builder
-    pass. Delegation is fail-safe — a thin plan or any hiccup falls back to the solo build.
+    """Implement the ticket with a single focused builder pass.
+
+    Phase-2 §2 (2026-07-06): the Dev Team Lead's build-delegation path (squad-lead planner +
+    soldiers + ephemeral-specialist synthesis) was removed; the Builder always builds solo.
 
     EU-72: ``spec`` is the upstream SpecArtifact (primary context — the builder reads its acceptance
     criteria / non-goals, falling back to the raw ticket when None). After the build, the typed
-    BuildArtifact is published into ``store`` so the Test Engineer + Reviewer read a tight handoff
-    instead of re-deriving from the full diff. Both default to None so direct/CLI callers are
-    unaffected.
-
-    ``n`` from ``build_delegated`` encodes the flow used:
-      0   → thin plan or synthesis stub not ready → fall through to solo.
-      1   → synthesis flow produced a result (EU-69 domain gap, single specialist).
-      ≥2  → normal squad delegation with n soldiers.
-    All three cases keep the fail-safe: any exception → solo build.
+    BuildArtifact is published into ``store`` so the Reviewer reads a tight handoff instead of
+    re-deriving from the full diff. Both default to None so direct/CLI callers are unaffected.
     """
-    from . import squad
-    result: BuildResult | None = None
-    # 2026-07-05 telemetry audit: when delegation falls back to solo, the gap-detect + planner
-    # calls already burned real tokens with no BuildResult to carry them (the EU-139 run dropped
-    # $0.386 this way). build_delegated reports that burn here; the solo result absorbs it below.
-    sunk: dict = {}
-    if squad.should_delegate(cfg, req):
-        try:
-            delegated, n = await squad.build_delegated(req, app, cfg, audit=audit, sunk=sunk)
-            if delegated is not None and n >= 1:   # n=1: synthesis; n>=2: squad split
-                result = delegated
-        except Exception as exc:  # noqa: BLE001 - delegation must never break a run
-            print(f"  · delegation off ({str(exc).splitlines()[0][:80]}); building solo", flush=True)
-    if result is None:
-        result = await _solo_build(req, app, cfg, spec=spec)
-        if sunk:
-            result.cost_usd += float(sunk.get("cost_usd", 0.0) or 0.0)
-            result.num_turns += int(sunk.get("num_turns", 0) or 0)
-            result.input_tokens += int(sunk.get("input_tokens", 0) or 0)
-            result.output_tokens += int(sunk.get("output_tokens", 0) or 0)
+    result = await _solo_build(req, app, cfg, spec=spec)
     # EU-72: publish the typed BuildArtifact into the shared per-ticket pool. The loop stamps the
     # authoritative files_changed (it owns git); the full summary/raw stays on the result for digging.
     if store is not None:
@@ -399,7 +383,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     )
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
-    # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    # Sonnet-cap → one-shot Opus retry for this pass (per-call, no weekly pin — see run_agent_with_fallback)
     # EU-174: determine routing tier based on task characteristics
     routing_tier = None
     try:

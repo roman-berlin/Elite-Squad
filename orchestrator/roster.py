@@ -1,7 +1,7 @@
 """The living roster — who's in the unit and what each one does.
 
-A once-a-day, INFO-ONLY document: the chain of command, every officer and their duty, and the soldiers
-each squad commands — plus a short "state of the unit today" line written by the cheapest model (it's
+A once-a-day, INFO-ONLY document: the chain of command and every officer and their duty — plus a short
+"state of the unit today" line written by the cheapest model (it's
 just a status blurb, not a decision). The structure and duties are DETERMINISTIC (read straight from the
 code, so the doc can never drift from reality); only the one-line daily status uses a model, and even
 that is best-effort — if it fails the doc still generates.
@@ -29,8 +29,8 @@ _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
     ("pm", "S-5 · Product", "Makes the product / IA / scope calls the Builder can't make "
      "alone, so the unit keeps shipping; escalates only the critical, irreversible ones.", "reviewer_model"),
     ("scrum", "S-6 · Scrum Master", scrum.__doc__.split("\n\n")[0].strip(), "reviewer_model"),
-    ("field_engineer", "Builder", "Implements each ticket on an isolated worktree; for a big ticket, "
-     "splits the work across its squad of engineers.", "builder_model"),
+    ("field_engineer", "Builder", "Implements each ticket solo on an isolated worktree, writing the "
+     "tests for the change against the plan's acceptance criteria.", "builder_model"),
     ("inspector", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
      "guards the standard before anything merges.", "reviewer_model"),
     ("test_engineer", "Tests & coverage gate", "Owns the test suite — writes a happy-path and a "
@@ -55,14 +55,6 @@ _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
 # (officers.OFFICER_NAMES) so a rename is genuinely one edit there. Order = chain of command.
 _OFFICERS = [(display(key), role, duty, mattr) for key, role, duty, mattr in _OFFICER_ROWS]
 
-# soldiers a squad can field (read from squad.SQUAD so this can't drift)
-def _soldiers() -> list[tuple[str, str]]:
-    try:
-        from .squad import SQUAD
-        return [(label, focus) for (label, focus) in SQUAD.values()]
-    except Exception:  # noqa: BLE001
-        return []
-
 
 def _model_for(cfg: Config, attr: str | None) -> str:
     if not attr:
@@ -84,8 +76,6 @@ def mermaid_chart() -> str:
         if key == "general":
             continue
         lines.append(f"  G --> {short[key]}[{display(key)} · {role}]")
-    for i, (label, _focus) in enumerate(_soldiers(), 1):
-        lines.append(f"  FE --> S{i}([{label}])")
     lines.append("```")
     return "\n".join(lines)
 
@@ -100,15 +90,6 @@ def build_doc(cfg: Config, status: str = "") -> str:
             "| Officer | Role | Model | Duty |", "|---|---|---|---|"]
     for name, role, duty, mattr in _OFFICERS:
         out.append(f"| **{name}** | {role} | {_model_for(cfg, mattr)} | {duty} |")
-    sol = _soldiers()
-    if sol:
-        out += ["", "## Engineers — the Dev Team Lead's squad (and recon squads)", "",
-                "Fielded on demand: a big ticket is split across the relevant engineers; the read-only "
-                "recon officers (QA Engineer · Security Engineer · Release Manager) can field their own "
-                "engineers too.", "",
-                "| Engineer | Lane |", "|---|---|"]
-        for label, focus in sol:
-            out.append(f"| **{label}** | {focus} |")
     out += ["", "_Living document — regenerated daily after the council. Structure & duties are read "
             "from the code, so they can't drift; the status line is info-only._", ""]
     return "\n".join(out)
@@ -130,7 +111,7 @@ def latest_status(cfg: Config) -> str:
 
 
 def html_view(cfg: Config, status: str = "") -> str:
-    """The roster rendered for the cockpit: a chain-of-command tree + officer duties + soldiers.
+    """The roster rendered for the cockpit: a chain-of-command tree + officer duties.
     Pure function of the deterministic structure (+ optional status line)."""
     import html as _h
     esc = _h.escape
@@ -154,18 +135,11 @@ def html_view(cfg: Config, status: str = "") -> str:
     for i, (key, role, _d, _m) in enumerate(offs):
         elbow = "   └─" if i == len(offs) - 1 else "   ├─"
         tree.append(f'<br>{elbow} <span class=off>{esc(display(key))}</span> · {esc(role)}')
-        if key == "field_engineer":
-            sol = _soldiers()
-            for j, (label, _f) in enumerate(sol):
-                send = "      └─" if j == len(sol) - 1 else "      ├─"
-                bar = "   " if i == len(offs) - 1 else "   │"
-                tree.append(f'<br>{bar}{send} <span class=sol>{esc(label)}</span>')
     tree.append('</div>')
 
     rows = "".join(
         f'<tr><td class=nm>{esc(n)}</td><td class=rl>{esc(r)}</td><td class=md>{esc(_model_for(cfg, m))}</td>'
         f'<td>{esc(d)}</td></tr>' for n, r, d, m in _OFFICERS)
-    sol_rows = "".join(f'<tr><td class=nm>{esc(l)}</td><td>{esc(f)}</td></tr>' for l, f in _soldiers())
     parts = [css, '<div class=rdoc>']
     if status:
         parts.append(f'<div class=rstatus>📋 {esc(status)}</div>')
@@ -173,9 +147,6 @@ def html_view(cfg: Config, status: str = "") -> str:
     parts.append("".join(tree))
     parts.append('<div class=rsec>Officers &amp; duties</div>')
     parts.append(f'<table class=rtbl><tr><th>Officer</th><th>Role</th><th>Model</th><th>Duty</th></tr>{rows}</table>')
-    if sol_rows:
-        parts.append('<div class=rsec>Engineers — fielded on demand by the Dev Team Lead (and recon squads)</div>')
-        parts.append(f'<table class=rtbl><tr><th>Engineer</th><th>Lane</th></tr>{sol_rows}</table>')
     parts.append('</div>')
     return "".join(parts)
 
@@ -210,7 +181,7 @@ async def refresh(cfg: Config, audit=None) -> Path:
     try:
         p.write_text(build_doc(cfg, status), encoding="utf-8")
         if audit is not None:
-            audit.record("roster_refresh", officers=len(_OFFICERS), soldiers=len(_soldiers()))
+            audit.record("roster_refresh", officers=len(_OFFICERS))
     except OSError:
         pass
     return p

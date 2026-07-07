@@ -107,8 +107,8 @@ chk("failsafe: invalid verdict → BUILD",
 # ══════════════════════════════════════════════════════════════════════════════
 brief = p.as_builder_brief()
 chk("brief: carries approach", "APPROACH" in brief and "retry loop" in brief, brief[:80])
-chk("brief: carries testable AC with 'write a test for EACH'", "write a test for EACH" in brief.upper()
-    or "TESTABLE ACCEPTANCE" in brief, brief[:120])
+chk("brief: carries testable AC under a fail-first label (write a FAILING test for each)",
+    "TESTABLE ACCEPTANCE CRITERIA" in brief and "FAILING test" in brief, brief[:120])
 chk("brief: lists in-scope files", "orchestrator/deploy.py" in brief)
 chk("brief: EMPTY for a non-BUILD verdict", planner.parse_plan(ANS).as_builder_brief() == "")
 chk("brief: EMPTY for an empty BUILD plan", planner.parse_plan("").as_builder_brief() == "")
