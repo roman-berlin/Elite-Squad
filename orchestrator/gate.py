@@ -281,11 +281,32 @@ _LOCKFILE_PAIRS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+def _nearest_lock(manifest_dir: str, lock_names: tuple[str, ...], repo_root: str) -> str | None:
+    """Repo-relative path of the nearest existing lockfile at or ABOVE ``manifest_dir``, walking up to
+    the repo root; ``None`` if none of ``lock_names`` exists anywhere in that ancestry. This makes drift
+    detection WORKSPACE-AWARE: a bun/npm/pnpm/yarn monorepo hoists ONE lock to the repo root while each
+    app keeps its own package.json, so an app-manifest change must be validated against the ROOT lock —
+    a sibling-only lookup silently missed it and passed a broken build LIVE on AUTO-57 (a dep added to
+    an app's package.json with the root bun.lock never regenerated). A nested package that vendors its
+    OWN lock binds to that nearer lock first, so sub-package drift is never masked by a consistent root."""
+    d = manifest_dir
+    while True:
+        for lk in lock_names:
+            rel = os.path.join(d, lk) if d else lk
+            if os.path.exists(os.path.join(repo_root, rel)):
+                return rel
+        parent = os.path.dirname(d)
+        if parent == d:   # fixed point — "" for a relative path, "/" or a drive root for an absolute
+            return None    # one; terminates the walk regardless of whether the input was relative
+        d = parent
+
+
 def _lockfile_candidates(changed_paths: list[str], repo_root: str) -> list[tuple[str, str]]:
     """Static manifest/lockfile drift candidates: ``(manifest_path, existing_lock_relpath)`` for each
-    changed dependency manifest whose sibling lockfile EXISTS in the repo but did NOT change — each
-    resolved against the manifest's OWN directory (monorepo-safe). Manifests with no lockfile in the
-    repo are never flagged (nothing to drift against)."""
+    changed dependency manifest whose governing lockfile EXISTS in the repo but did NOT change. The lock
+    is resolved to the NEAREST one at or above the manifest's directory (``_nearest_lock``) — the sibling
+    when a package vendors its own lock, else the hoisted workspace-root lock. Manifests with no lockfile
+    anywhere in their ancestry are never flagged (nothing to drift against)."""
     out: list[tuple[str, str]] = []
     changed = {p.replace("\\", "/") for p in (changed_paths or [])}
     for path in sorted(changed):
@@ -293,10 +314,9 @@ def _lockfile_candidates(changed_paths: list[str], repo_root: str) -> list[tuple
         for manifest, locks in _LOCKFILE_PAIRS:
             if base != manifest:
                 continue
-            siblings = [(os.path.join(d, lk) if d else lk) for lk in locks]
-            existing = [s for s in siblings if os.path.exists(os.path.join(repo_root, s))]
-            if existing and not any(s in changed for s in existing):
-                out.append((path, existing[0]))
+            lock = _nearest_lock(d, locks, repo_root)
+            if lock is not None and lock not in changed:
+                out.append((path, lock))
     return out
 
 

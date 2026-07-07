@@ -183,6 +183,45 @@ chk("lockfile verify: an unknown manager (package-lock.json) keeps the static fl
         AppConfig(name="n", repo_path=str(repo), backlog_backend="none"),
         ["apps/web/package.json"], "+x = 1\n").passed)
 
+# monorepo ROOT-HOISTED lock (AUTO-57 false-NEGATIVE fix, 2026-07-07): a bun/npm/pnpm/yarn workspace
+# keeps ONE lock at the repo ROOT while each app keeps its OWN package.json (no per-app lock). An
+# app-manifest change with the root lock UNCHANGED is REAL drift — but the sibling-only lookup found no
+# lock next to the app manifest and emitted no candidate, so the frozen check never ran and the gate
+# PASSED a broken build LIVE on AUTO-57 (added @vitest/coverage-v8 to an app's package.json, never
+# regenerated the root bun.lock → `bun install --frozen-lockfile` fails every CI run). The candidate
+# scan now walks UP to the nearest ancestor lock.
+_ws = Path(tempfile.mkdtemp())
+(_ws / "package.json").write_text("{}", encoding="utf-8")            # workspace root manifest
+(_ws / "bun.lock").write_text("# root lock", encoding="utf-8")       # the ONE hoisted lock
+(_ws / "apps" / "crm").mkdir(parents=True)
+(_ws / "apps" / "crm" / "package.json").write_text("{}", encoding="utf-8")  # app manifest, NO sibling lock
+chk("lockfile: app manifest vs ROOT-hoisted lock — drift flagged (walks up to the workspace-root lock)",
+    gate_mod.lockfile_sanity(["apps/crm/package.json"], str(_ws)) != [])
+chk("lockfile: app manifest + root lock BOTH changed → clean (the root lock was regenerated)",
+    gate_mod.lockfile_sanity(["apps/crm/package.json", "bun.lock"], str(_ws)) == [])
+chk("lockfile: app manifest with NO lock of its kind in the tree → never flagged (pyproject vs a bun.lock)",
+    gate_mod.lockfile_sanity(["apps/crm/pyproject.toml"], str(_ws)) == [])
+# end-to-end: the root-hoisted drift now reaches the frozen verifier — run IN THE APP DIR (not the repo
+# root), and a failing frozen check flags LOCKFILE. This is the exact chain that must have caught AUTO-57.
+_ws_app = AppConfig(name="ws", repo_path=str(_ws), backlog_backend="none")
+_cap_ws: dict = {}
+gate_mod.run_commands = _rc_stub(False, _cap_ws)                      # frozen --dry-run FAILS = real drift
+try:
+    _ws_drift = gate_mod.run_deterministic_checks(_ws_app, ["apps/crm/package.json"], "+x = 1\n")
+finally:
+    gate_mod.run_commands = _orig_rc
+chk("lockfile: root-hoisted drift flags LOCKFILE via the frozen verifier (the AUTO-57 chain)",
+    not _ws_drift.passed and "LOCKFILE" in _ws_drift.report, _ws_drift.report[:160])
+chk("lockfile: root-hoisted frozen check runs in the APP dir (apps/crm), never the repo root",
+    (_cap_ws.get("cwd") or "").endswith(os.path.join("apps", "crm")), str(_cap_ws.get("cwd")))
+# robustness (adversarial-fleet finding, 2026-07-07): the ancestor walk must TERMINATE on an ABSOLUTE
+# manifest_dir too. os.path.dirname("/") == "/" is a fixed point, so a `while not d` guard would spin
+# forever on an absolute path whose ancestry has no lock — unreachable from the git-relative live caller,
+# but a module-public helper must never hang. The walk now stops at any dirname fixed point ("" or "/").
+chk("lockfile: absolute manifest path with no lock in its ancestry terminates (no hang) → None",
+    gate_mod._nearest_lock(os.path.join(tempfile.gettempdir(), "nope", "apps", "web"),
+                           ("bun.lock",), os.path.join(tempfile.gettempdir(), "nope")) is None)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. base_gate_check — per-sha cache
 # ══════════════════════════════════════════════════════════════════════════════
