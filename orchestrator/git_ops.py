@@ -418,9 +418,58 @@ class Git:
         self._run("commit", "-m", message)
         return self.current_sha()
 
+    # Substrings git prints when a push is refused because the remote ref carries commits our
+    # local branch lacks — a diverged prior-run WIP on the SAME throwaway branch (not auth/network).
+    _NON_FF_MARKERS = ("non-fast-forward", "fetch first", "[rejected]", "behind its remote")
+
     def push(self, branch: str) -> None:
-        self._guard(branch)
-        self._run("push", "-u", "origin", branch)
+        """Push the unit-owned throwaway ``autodev/<ticket>`` feature branch to origin.
+
+        Divergence tolerance (2026-07-07, AUTO-57): when a ticket is RE-RUN after a prior run
+        already pushed this branch, the fresh local branch (cut from ``origin/<base>``) shares no
+        ancestry with the stale remote WIP, so a plain push is rejected non-fast-forward ("tip of
+        your current branch is behind its remote counterpart"). This branch is a throwaway the unit
+        solely owns and each run's WIP supersedes the last, so on a *non-fast-forward* rejection we
+        overwrite the stale prior-run WIP with ``--force-with-lease``.
+
+        The lease is pinned to the remote tip we OBSERVE via ``ls-remote`` right before pushing
+        (``--force-with-lease=<branch>:<observed>``), so if the ref moves between that read and the
+        push the force is refused ("stale info") rather than clobbering the newcomer. NB this is a
+        genuine lease — NOT a bare ``--force-with-lease`` after a ``fetch`` of the same ref, which
+        would move the lease basis to the live tip and silently degrade to a plain ``--force``. Any
+        OTHER push failure (auth, network, server hook) surfaces unchanged.
+
+        Scope of the guarantee: the re-run intentionally overwrites the *prior run's* disposable WIP
+        on this unit-owned scratch branch — that IS the fix. The lease narrows, but does not
+        eliminate, the window in which a concurrent writer to the SAME throwaway branch could be
+        overwritten; a clobbered commit is recoverable from the remote reflog. The force path can
+        NEVER reach ``base`` or the protected branch — ``_guard`` refuses the protected branch before
+        any push, and ``base`` is refused before the force below — so only an ``autodev/*`` feature
+        branch is ever force-pushed."""
+        self._guard(branch)                       # never even a plain push to the protected branch
+        code, _, err = self._run_code("push", "-u", "origin", branch)
+        if code == 0:
+            return
+        if not any(m in err.lower() for m in self._NON_FF_MARKERS):
+            raise GitError(f"git push -u origin {branch} failed:\n{err}")
+        # A genuine non-fast-forward: the diverged tip is a prior run's WIP on this throwaway branch.
+        if branch == self.base:
+            raise GitError(f"refusing to force-push the base branch '{self.base}'")
+        # Observe the exact remote tip we are about to overwrite (ls-remote is read-only) and lease
+        # against it, so the force keeps its teeth — it refuses if origin/<branch> advances before
+        # our push lands. If we can't read the tip, fail safe (raise) rather than blind-force.
+        rc, ls_out, _ = self._run_code("ls-remote", "origin", branch)
+        observed = ls_out.split()[0] if (rc == 0 and ls_out.split()) else ""
+        if not observed:
+            raise GitError(
+                f"git push origin {branch}: could not read the remote tip to lease a safe "
+                f"force-push after a non-fast-forward rejection:\n{err}")
+        code2, _, err2 = self._run_code(
+            "push", f"--force-with-lease={branch}:{observed}", "-u", "origin", branch)
+        if code2 != 0:
+            raise GitError(
+                f"git push --force-with-lease origin {branch} refused or failed after a "
+                f"non-fast-forward rejection (did the remote advance concurrently?):\n{err2}")
 
     # -- merge into base (dev), keeping it green --------------------------- #
     def prepare_base(self) -> str:
