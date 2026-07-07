@@ -169,9 +169,6 @@ class Config:
     auto_model: bool = True                 # ON by default: cheapest model that fits each task, escalating to the
                                             # ceiling on retry (<=ceiling, Sonnet floor for code). Fleet-wide econ;
                                             # set false to pin every officer to its configured model. See models.py.
-    opus_fallback_on_sonnet_cap: bool = True   # EU-108: ON by default. When Sonnet weekly cap hits but All-models
-                                                # still has headroom, escalate to Opus and keep building. Trades
-                                                # faster All-models burn for continuity during Sonnet sub-limit exhaustion.
     sentinel_enabled: bool = True           # ARMED by default: the SRE runs an app's postmerge_commands after a
                                             # land and auto-reverts (forward-only) if red. Still a NO-OP for any app
                                             # without a `postmerge_commands:` suite (see sentinel.should_run), so

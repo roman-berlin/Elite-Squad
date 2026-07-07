@@ -10,14 +10,13 @@ Then, within those bounds: a small ticket runs cheaper than a big one, and when 
 is tight the tier drops a notch to stretch what's left. Off by default (`auto_model: false`) — when off,
 every officer uses exactly the model it always did.
 
-EU-108 Sonnet-cap fallback:
-  When the Sonnet weekly bucket exhausts while All-models still has headroom, the unit escalates
-  to Opus (which only draws from All-models) and keeps building. The fallback stays active until
-  the weekly reset (Fri 09:00 UTC). This is the inverse of auto_model's Opus→Sonnet cost-saving drop.
+Sonnet-cap fallback (per call, no persistence):
+  When a Sonnet call hits its weekly bucket while All-models still has headroom, the unit retries
+  that ONE unit of work on Opus so it can finish, then goes straight back to cheap-first — it never
+  pins a week of Opus (the EU-108 weekly pin was deleted in Phase-2 Task 2). The retry lives in
+  agent.run_agent_with_fallback; an All-models cap surfaces as is_plan_limit → EU-82 pause.
 """
 from __future__ import annotations
-
-import time
 
 # canonical model strings, cheapest → dearest
 HAIKU = "claude-haiku-4-5-20251001"
@@ -126,19 +125,10 @@ def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]
     ticket — including auto-sized 'high' effort — attempts Sonnet first and escalates to Opus only
     if that pass is rejected. Only an *explicit* top-end pin ('max'/'maximum'/'ultra' effort) starts
     on Opus from pass one. Floor = Sonnet (never Haiku for code). A tight budget pins it to Sonnet to
-    keep shipping rather than hard-pausing.
-
-    EU-108: When Sonnet weekly cap is hit and opus_fallback_on_sonnet_cap is enabled, Sonnet
-    calls automatically redirect to Opus for the rest of the weekly window."""
+    keep shipping rather than hard-pausing."""
     ceiling = getattr(cfg, "builder_model", OPUS)
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
-
-    # EU-108: If Sonnet-cap fallback is active, use Opus (skip the cheap-first ladder)
-    if sonnet_fallback_active(cfg):
-        reset_str = fallback_reset_time_str()
-        reason = f"Sonnet cap hit → Opus fallback (resets {reset_str})" if reset_str else "Sonnet cap hit → Opus fallback"
-        return OPUS, f"Opus ({reason})"
 
     base = 2 if (effort or "").lower() in _HEAVY_EFFORT else 1   # explicit max pin→Opus, else Sonnet-first
     return _escalating(ceiling, base_tier=base, iteration=iteration,
@@ -166,198 +156,11 @@ def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | N
 def for_reviewer(cfg, diff: str = "", iteration: int = 1) -> tuple[str, str]:
     """The Reviewer's model. Off: the configured ceiling. On: sized by the diff — a small diff is
     reviewed on Sonnet, a large/complex one on Opus — escalating on re-review and conserving under a
-    tight budget. Floor = Sonnet. EU-108: Sonnet-cap fallback overrides to Opus when active."""
+    tight budget. Floor = Sonnet."""
     ceiling = getattr(cfg, "reviewer_model", OPUS)
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
 
-    # EU-108: If Sonnet-cap fallback is active, use Opus (skip the cheap-first ladder)
-    if sonnet_fallback_active(cfg):
-        reset_str = fallback_reset_time_str()
-        reason = f"Sonnet cap hit → Opus fallback (resets {reset_str})" if reset_str else "Sonnet cap hit → Opus fallback"
-        return OPUS, f"Opus ({reason})"
-
     big = len(diff or "") >= 12000 or (diff or "").count("\n") >= 300   # large/complex diff → Opus
     return _escalating(ceiling, base_tier=2 if big else 1, iteration=iteration,
                        budget_pct=_budget_pct(cfg), floor_tier=1, why="large diff" if big else "small diff")
-
-
-# ── EU-108: Sonnet-cap fallback state ───────────────────────────────────────────────────────────────
-# When the Sonnet weekly bucket hits but All-models still has headroom, we escalate to Opus and
-# keep building. This state tracks the fallback window (active until the weekly reset).
-#
-# PERSISTENCE: the state is stored in a JSON file beside audit.jsonl so it survives process
-# restarts (daemon relaunches, subprocess exits). Without persistence the in-process flags reset
-# to False on every launch, causing re-detection and re-notification on every single build.
-# The file is written atomically (tmp → rename) to avoid partial reads on the next startup.
-
-import json as _json
-import os as _os
-from pathlib import Path as _Path
-
-_sonnet_cap_fallback_active: bool = False
-_fallback_until: float = 0.0     # epoch when fallback expires (next Friday 09:00 UTC)
-_fallback_notified: bool = False  # one-shot Telegram notification (survives via disk)
-_fallback_state_loaded: bool = False  # have we read the state file yet this process?
-
-# Resolved lazily from cfg.audit_path; falls back to /tmp when cfg is unavailable.
-_STATE_FILE_NAME = "sonnet_fallback_state.json"
-
-
-def _state_file(cfg=None) -> _Path:
-    """Path to the persistent fallback state file."""
-    if cfg is not None:
-        try:
-            return _Path(cfg.audit_path).with_name(_STATE_FILE_NAME)
-        except Exception:  # noqa: BLE001
-            pass
-    return _Path("/tmp") / _STATE_FILE_NAME
-
-
-def _load_state(cfg=None) -> None:
-    """Read the persisted fallback state from disk (called once per process on first access)."""
-    global _sonnet_cap_fallback_active, _fallback_until, _fallback_notified, _fallback_state_loaded
-    if _fallback_state_loaded:
-        return
-    _fallback_state_loaded = True
-    try:
-        p = _state_file(cfg)
-        if not p.exists():
-            return
-        data = _json.loads(p.read_text(encoding="utf-8"))
-        _sonnet_cap_fallback_active = bool(data.get("active", False))
-        _fallback_until = float(data.get("until", 0.0))
-        _fallback_notified = bool(data.get("notified", False))
-    except Exception:  # noqa: BLE001 — never break a run on state-read failure
-        pass
-
-
-def _save_state(cfg=None) -> None:
-    """Atomically write current fallback state to disk."""
-    try:
-        p = _state_file(cfg)
-        payload = _json.dumps({
-            "active": _sonnet_cap_fallback_active,
-            "until": _fallback_until,
-            "notified": _fallback_notified,
-        })
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.replace(p)
-    except Exception:  # noqa: BLE001 — never break a run on state-write failure
-        pass
-
-
-def sonnet_fallback_active(cfg) -> bool:
-    """Check if Sonnet→Opus fallback is currently active.
-
-    Returns True only when:
-      1. Config flag `opus_fallback_on_sonnet_cap` is True
-      2. Fallback was activated (Sonnet cap hit, Opus succeeded) — persisted across restarts
-      3. Current time is before the weekly reset
-
-    Auto-clears the fallback state after the reset time passes.
-    """
-    global _sonnet_cap_fallback_active, _fallback_until, _fallback_notified
-
-    _load_state(cfg)  # no-op after first call per process
-
-    if not _sonnet_cap_fallback_active:
-        return False
-
-    # Check if the config knob is still enabled
-    if not getattr(cfg, "opus_fallback_on_sonnet_cap", True):
-        _sonnet_cap_fallback_active = False
-        _fallback_until = 0.0
-        _fallback_notified = False
-        _save_state(cfg)
-        return False
-
-    # Check if we've passed the reset time
-    import time
-    if time.time() >= _fallback_until:
-        _sonnet_cap_fallback_active = False
-        _fallback_until = 0.0
-        _fallback_notified = False
-        _save_state(cfg)
-        return False
-
-    return True
-
-
-def activate_sonnet_fallback(until_epoch: float, cfg=None) -> None:
-    """Activate Sonnet→Opus fallback until the weekly reset.
-
-    Persists to disk so the fallback survives process restarts.
-
-    Args:
-        until_epoch: Epoch timestamp when the fallback should expire (usually weekly reset).
-        cfg: Config object (used to locate the state file next to audit.jsonl).
-    """
-    global _sonnet_cap_fallback_active, _fallback_until
-    _load_state(cfg)
-    _sonnet_cap_fallback_active = True
-    _fallback_until = until_epoch
-    _save_state(cfg)
-
-
-def reset_sonnet_fallback(cfg=None) -> None:
-    """Clear the Sonnet fallback state (e.g. at midnight or after manual reset)."""
-    global _sonnet_cap_fallback_active, _fallback_until, _fallback_notified
-    _sonnet_cap_fallback_active = False
-    _fallback_until = 0.0
-    _fallback_notified = False
-    _save_state(cfg)
-
-
-def _get_next_friday_0900_utc() -> float:
-    """Calculate the epoch timestamp for the next Friday 09:00 UTC.
-
-    Anthropic's weekly buckets reset on Friday 09:00 UTC. This helper computes the next reset.
-    """
-    import time
-    from datetime import datetime, timedelta, timezone
-
-    now = time.time()
-    utc_now = datetime.fromtimestamp(now, tz=timezone.utc)
-
-    # Find Friday (weekday=4 in Python)
-    days_ahead = 4 - utc_now.weekday()
-    if days_ahead <= 0:  # Today is Friday or later in the week
-        days_ahead += 7  # Next Friday
-
-    next_friday = utc_now + timedelta(days=days_ahead)
-    reset_time = next_friday.replace(hour=9, minute=0, second=0, microsecond=0)
-    return reset_time.timestamp()
-
-
-def fallback_reset_time_str() -> str:
-    """Human-readable reset time for the fallback (e.g. 'Fri 09:00 UTC')."""
-    from datetime import datetime, timezone
-    ts = _fallback_until if _sonnet_cap_fallback_active else 0.0
-    if ts <= 0:
-        return ""
-    try:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        return dt.strftime("%a %H:%M UTC")
-    except (ValueError, OSError):
-        return ""
-
-
-def sonnet_fallback_notification_sent() -> bool:
-    """Check if we've already sent the fallback activation notification (survives restarts)."""
-    return _fallback_notified
-
-
-def mark_sonnet_fallback_notified(cfg=None) -> None:
-    """Mark that the fallback notification has been sent and persist to disk (one-time flag)."""
-    global _fallback_notified
-    _fallback_notified = True
-    _save_state(cfg)
-
-
-def reset_sonnet_fallback_notification(cfg=None) -> None:
-    """Clear the notification flag (e.g. at midnight or after weekly reset)."""
-    global _fallback_notified
-    _fallback_notified = False
-    _save_state(cfg)

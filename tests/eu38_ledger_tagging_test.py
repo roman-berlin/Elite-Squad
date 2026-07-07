@@ -66,21 +66,9 @@ class _FakeGuard:
 class _FakeModels:
     @staticmethod
     def for_builder(cfg, ticket, eff, it): return ("sonnet", "test-pin")
-    # EU-108: stub the new fallback exports so run_agent_with_fallback can import them
-    SONNET = "claude-sonnet-4-6"
+    # run_agent_with_fallback imports OPUS from models; provide the constants it reads.
+    SONNET = "claude-sonnet-5"
     OPUS = "claude-opus-4-8"
-    @staticmethod
-    def activate_sonnet_fallback(until_epoch): pass
-    @staticmethod
-    def _get_next_friday_0900_utc(): return 0
-    @staticmethod
-    def sonnet_fallback_notification_sent(): return False
-    @staticmethod
-    def mark_sonnet_fallback_notified(): pass
-    @staticmethod
-    def fallback_reset_time_str(): return ""
-    @staticmethod
-    def sonnet_fallback_active(cfg): return False
 
 # EU-108: patch run_agent_with_fallback in builder to avoid real async iteration
 builder.run_agent_with_fallback = capture_run_agent

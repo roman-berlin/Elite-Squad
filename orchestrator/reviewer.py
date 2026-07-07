@@ -133,7 +133,7 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
         max_turns=30,
         effort=normalize_effort(cfg.reviewer_effort),
     )
-    # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    # Sonnet-cap → one-shot Opus retry for this pass (per-call, no weekly pin — see run_agent_with_fallback)
     # EU-174: determine routing tier based on task characteristics
     routing_tier = None
     try:

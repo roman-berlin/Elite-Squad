@@ -383,7 +383,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     )
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
-    # EU-108: use run_agent_with_fallback to handle Sonnet-cap → Opus fallback
+    # Sonnet-cap → one-shot Opus retry for this pass (per-call, no weekly pin — see run_agent_with_fallback)
     # EU-174: determine routing tier based on task characteristics
     routing_tier = None
     try:

@@ -282,13 +282,14 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                     provider=provider, model_version=model_version, duration_s=duration_s)
 
 
-# ── EU-108: Sonnet-cap fallback detection ────────────────────────────────────────────────────────────
-# When Sonnet hits a CAP-classified plan-limit error, we retry with Opus to distinguish between:
-#   • Sonnet sub-limit (Opus succeeds cleanly) → activate fallback
-#   • All-models cap (Opus also fails) → pause (existing behavior)
-# Transient rate limits (per-minute 429, 529 overload) get one backoff retry on Sonnet instead —
-# they must never arm the weekly fallback (2026-07-05 fake cap alert).
-# This is a thin wrapper around run_agent that adds the retry logic.
+# ── Sonnet-cap → one-shot Opus retry ─────────────────────────────────────────────────────────────────
+# When Sonnet hits a CAP-classified plan-limit error, we retry the CURRENT work once with Opus to
+# distinguish between:
+#   • Sonnet sub-limit (Opus succeeds cleanly) → return the Opus result, persist nothing
+#   • All-models cap (Opus also fails) → pause (return the is_plan_limit result; EU-82)
+# Transient rate limits (per-minute 429, 529 overload) get one backoff retry on Sonnet instead.
+# This is a thin wrapper around run_agent that adds the retry logic. The EU-108 weekly-Opus PIN was
+# deleted (Phase-2 Task 2): a Sonnet cap must never pin a week of the most expensive tier.
 
 # Backoff before the single Sonnet retry on a transient rate limit. Module-level so tests
 # (and an operator in a pinch) can zero it out.
@@ -298,17 +299,19 @@ _TRANSIENT_RETRY_BACKOFF_S = 5.0
 async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag: str = "",
                                    ticket_id: str | None = None, pass_number: int | None = None,
                                    cfg=None, routing_tier: str | None = None) -> AgentRun:
-    """Run an agent with Sonnet→Opus fallback on plan-limit errors.
+    """Run a Sonnet agent with a per-call, one-shot Opus fallback on a Sonnet weekly cap.
 
-    When a Sonnet call errors AND the config flag is enabled:
+    When a Sonnet call hits a plan-limit:
       1. Transient rate limit (per-minute 429 / 529 overload) → back off once and retry
-         Sonnet; never probe Opus, never arm the weekly fallback
-      2. Cap-classified error ("usage limit reached" etc.) → retry once with Opus
-      3. If Opus succeeds cleanly (is_error False) → activate Sonnet-cap fallback
-         (stay on Opus until weekly reset)
-      4. If Opus also hits a limit → it's the All-models cap (existing pause behavior);
-         if the Opus probe fails for any other reason (auth/network), that proves
-         nothing about the cap — return the Sonnet error without arming
+         Sonnet; never probe Opus.
+      2. Cap-classified error ("usage limit reached" etc.) → retry once with Opus so the
+         CURRENT unit of work can finish if Opus still has headroom.
+      3. If Opus succeeds cleanly (is_error False) → return the Opus result, persisting NOTHING.
+         The next call starts cheap on Sonnet again. (The EU-108 weekly-Opus pin was deleted in
+         Phase-2 Task 2 — a Sonnet cap must never pin a week of the most expensive tier.)
+      4. If Opus also hits a limit → it's the All-models cap: return the original is_plan_limit
+         result so autopilot's proactive poll pauses (EU-82). If the Opus probe fails for any other
+         reason (auth/network), that proves nothing about the cap — return the Sonnet error.
 
     Args:
         prompt: The agent prompt
@@ -316,26 +319,21 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
         tag: Tag for usage ledger (e.g. "builder", "reviewer")
         ticket_id: Optional ticket ID for per-pass tracking
         pass_number: Optional pass number for per-pass tracking
-        cfg: Config object (needed to check opus_fallback_on_sonnet_cap flag)
+        cfg: Config object (passed through for ledger/audit context)
 
     Returns:
-        AgentRun with the result (either from Sonnet or Opus fallback)
+        AgentRun with the result (either from Sonnet or the one-shot Opus retry)
     """
-    from .models import SONNET, OPUS, activate_sonnet_fallback, _get_next_friday_0900_utc, \
-                      sonnet_fallback_notification_sent, mark_sonnet_fallback_notified, \
-                      fallback_reset_time_str
-
-    # Check if fallback is enabled in config
-    fallback_enabled = cfg and getattr(cfg, "opus_fallback_on_sonnet_cap", True)
+    from .models import OPUS
 
     # Get the configured model
     model = getattr(options, "model", "") or ""
 
-    # Only apply fallback logic for Sonnet with config enabled
+    # The Sonnet-cap → one-shot-Opus fallback only applies to Sonnet calls.
     is_sonnet = model and "sonnet" in model.lower()
 
-    if not is_sonnet or not fallback_enabled:
-        # Not Sonnet or fallback disabled — run normally
+    if not is_sonnet:
+        # Not Sonnet — nothing to fall back from; run normally.
         return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id, pass_number=pass_number, routing_tier=routing_tier)
 
     # Try Sonnet first
@@ -346,8 +344,7 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
         return result
 
     # Transient rate limit (per-minute 429, 529 overload) — not a quota exhaustion. Back off
-    # and retry Sonnet once; arming the WEEKLY Opus fallback here would lock in ~1.7x pricing
-    # until Friday 09:00 UTC over a blip (the 2026-07-05 fake cap alert).
+    # and retry Sonnet once; probing Opus over a blip would burn the expensive tier needlessly.
     if result.plan_limit_kind != "cap":
         if _TRANSIENT_RETRY_BACKOFF_S > 0:
             import asyncio
@@ -366,41 +363,27 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     opus_options = copy.copy(options)
     opus_options.model = OPUS
 
-    # Try Opus once. Deliberately NOT passing routing_tier: the probe's whole point is to test
-    # Anthropic Opus — routing it (CLOUD would rewrite the model to glm-5.2) re-runs the routed
-    # model instead and could arm a week of Opus fallback off a GLM result (2026-07-06 review).
+    # Try Opus once. Deliberately NOT passing routing_tier: the retry's whole point is to run on
+    # Anthropic Opus — routing it (CLOUD would rewrite the model to glm-5.2) would re-run the routed
+    # model instead of the Opus retry we intend (2026-07-06 review).
     opus_result = await run_agent(prompt, opus_options, tag=tag, ticket_id=ticket_id, pass_number=pass_number)
 
     if opus_result.is_plan_limit:
-        # Opus also hit a limit — this is the All-models cap, not just Sonnet
-        # Return the original Sonnet error (existing EU-82 pause behavior)
+        # Opus also hit a limit — this is the All-models cap, not just Sonnet.
+        # Return the original Sonnet error so autopilot's proactive poll pauses (EU-82).
         return result
 
     if opus_result.is_error:
-        # The probe itself failed (auth, network, …) — that proves nothing about the Sonnet
-        # cap, so don't arm a week of Opus-only off a broken probe. Surface the original
-        # Sonnet plan-limit error so upstream handling (EU-82 pause) still sees it.
+        # The retry itself failed (auth, network, …) — that proves nothing about the Sonnet
+        # cap. Surface the original Sonnet plan-limit error so upstream handling (EU-82 pause)
+        # still sees it.
         return result
 
-    # Opus succeeded — it was a Sonnet sub-limit hit!
-    # Activate the fallback state (stay on Opus until weekly reset)
-    reset_at = _get_next_friday_0900_utc()
-    activate_sonnet_fallback(reset_at, cfg=cfg)
-
-    # Send one-time notification if not already sent
-    if not sonnet_fallback_notification_sent() and cfg:
-        try:
-            from . import notify
-            reset_str = fallback_reset_time_str()
-            message = f"⚠️ Sonnet weekly cap hit → Opus fallback active (resets {reset_str})"
-            notify.send(message)
-            mark_sonnet_fallback_notified(cfg=cfg)
-
-            # Also log to cockpit
-            print(f"  · {message}", flush=True)
-        except Exception:  # noqa: BLE001 — notification must never break a run
-            pass
-
-    # Return Opus result (successful) with Opus provider info
-    # The opus_result already has provider="Anthropic" and model_version from run_agent
+    # Opus succeeded where Sonnet was capped — a Sonnet-tier sub-limit, not an All-models cap.
+    # Return the Opus result so THIS unit of work completes. Persist NOTHING: the EU-108 weekly-Opus
+    # pin was deleted (Phase-2 Task 2) because pinning the most expensive tier for a week is
+    # anti-economics. The next call starts cheap on Sonnet again; if Sonnet is still capped it
+    # independently retries Opus per-call, and an All-models cap surfaces above as is_plan_limit →
+    # EU-82 pause. Never a week of pinned Opus.
+    print(f"  · Sonnet cap on {tag or model} — this pass ran on Opus (no weekly pin)", flush=True)
     return opus_result
