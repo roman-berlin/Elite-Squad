@@ -75,9 +75,19 @@ def _audit_paths(audit_path: str | Path) -> list[Path]:
     branch); the bare shared/ form is accepted too so tests / any local-only layout work without it."""
     p = Path(audit_path)
     paths: list[Path] = [p]
-    for shared in (p.parent / ".unit-state" / "shared", p.parent / "shared"):
-        if shared.is_dir():
-            paths += sorted(shared.glob("*.jsonl"))
+    # The state clone lives at the REPO ROOT: sync._repo_root strips a ``state/`` subdir, so when
+    # audit.jsonl is under ``state/`` the synced shared/ is ``<root>/.unit-state/shared`` — NOT
+    # ``<state>/.unit-state/shared``. Probe the state-stripped root too, or peer/server audits never
+    # merge into the view (the cockpit silently shows nothing from other hosts).
+    root = p.parent
+    if root.name == "state":
+        root = root.parent
+    seen: set[Path] = set()
+    for shared in (root / ".unit-state" / "shared", p.parent / ".unit-state" / "shared", p.parent / "shared"):
+        if shared in seen or not shared.is_dir():
+            continue
+        seen.add(shared)
+        paths += sorted(shared.glob("*.jsonl"))
     return paths
 
 

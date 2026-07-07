@@ -464,8 +464,12 @@ async def _main(argv: list[str]) -> int:
         ll = sync.pull_server_state(cfg)   # Mac-side: pull the server's living log over SSH
         if ll["attempted"]:
             line += f"  livelog={'ok' if ll['pulled'] else 'fail'}"
+        sa = sync.pull_server_audit(cfg)   # EU-181: pull the server's audit so the Mac cockpit mirrors it
+        if sa["attempted"]:
+            line += f"  server-audit={'ok' if sa['pulled'] else 'fail'}"
         print(line + (f"  error: {r['error']}" if r["error"] else "")
-              + (f"  livelog-error: {ll['error']}" if ll.get("error") else ""))
+              + (f"  livelog-error: {ll['error']}" if ll.get("error") else "")
+              + (f"  server-audit-error: {sa['error']}" if sa.get("error") else ""))
         return 0 if not r["error"] else 1
 
     if args.command == "pm":

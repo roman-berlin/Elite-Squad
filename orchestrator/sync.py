@@ -45,11 +45,17 @@ STATE_BRANCH = "unit-state"      # orphan branch: carries only shared/, never co
 _CLONE_DEPTH = "50"              # shallow — we only ever need the tip of the state branch
 
 
+def _safe_host(raw: str) -> str:
+    """Filesystem-safe host token: alnum / - / _ only, lowercased; every other char (space, '/', '.')
+    becomes '-'. Never empty. Used for every ``shared/<host>.jsonl`` token so a token can never contain
+    a path separator (escaping shared/) or whitespace (breaking the whitespace-split exclude guard)."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in (raw or "")).strip("-_").lower()
+    return safe or "host"
+
+
 def host_id(cfg: Config | None = None) -> str:
     """Stable, filesystem-safe id for THIS machine's shared file."""
-    raw = (os.environ.get("GENERAL_HOST_ID") or socket.gethostname() or "host").strip()
-    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in raw).strip("-_").lower()
-    return safe or "host"
+    return _safe_host((os.environ.get("GENERAL_HOST_ID") or socket.gethostname() or "host").strip())
 
 
 def pull_only() -> bool:
@@ -187,12 +193,15 @@ def git_sync(cfg: Config) -> dict[str, Any]:
             out["pushed"] = None
             return out
 
-        # 2) Publish our own audit and stage it.
+        # 2) Publish our own audit and stage ONLY it. Single-writer: a host owns exactly
+        #    shared/<its-host>.jsonl — never `git add shared` (which would stage a peer/server file we
+        #    pulled in over SSH, e.g. pull_server_audit's shared/<server>.jsonl, and push it back,
+        #    breaking the single-writer invariant and making that host read its own audit doubled).
         publish(cfg, sd)
         out["hosts"] = [p.stem for p in shared_files(cfg)]
-        _git(sd, "add", "shared")
-        if not _git(sd, "status", "--porcelain").stdout.strip():
-            out["pushed"] = True   # nothing changed since last sync — already in step with remote
+        _git(sd, "add", f"shared/{host_id(cfg)}.jsonl")
+        if _git(sd, "diff", "--cached", "--quiet").returncode == 0:
+            out["pushed"] = True   # nothing staged since last sync — already in step with remote
             return out
 
         # 3) Commit + push. On a race, rebase our single commit onto the remote tip and retry once.
@@ -228,6 +237,51 @@ def pull_server_state(cfg: Config) -> dict[str, Any]:
     dst = _repo_root(cfg) / "memory" / "UNIT.live.md"
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
+        r = subprocess.run(
+            ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", src, str(dst)],
+            capture_output=True, text=True, timeout=60)
+        out["pulled"] = r.returncode == 0
+        if r.returncode != 0:
+            out["error"] = (r.stderr or r.stdout or "scp failed").strip()[:200]
+    except (subprocess.SubprocessError, OSError) as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+def pull_server_audit(cfg: Config) -> dict[str, Any]:
+    """Mac-side server→Mac AUDIT bridge over SSH: scp the server's live ``audit.jsonl`` down so the Mac
+    cockpit MIRRORS the server's runs (EU-181).
+
+    The server runs sync pull-only (no git push credentials), so it never publishes its own audit to the
+    ``unit-state`` git branch — without this the Mac never sees the server and the two cockpits diverge.
+    We pull it over the SAME SSH bridge as ``UNIT.live.md`` (``pull_server_state``) and land it in the
+    machine-LOCAL ``<audit-dir>/shared/<server>.jsonl`` — NOT the git-tracked state clone. That path is
+    read by ``dashboard._audit_paths`` (the ``<audit-dir>/shared`` probe) and gitignored, so the pulled
+    server audit shows in the Mac cockpit but can NEVER be re-published to the shared git branch (which
+    would break the single-writer invariant and make the server double-count its own audit). Keeping it
+    out of the git clone entirely sidesteps every tracking / reset --hard / exclude hazard.
+
+    No-op unless ``GENERAL_SERVER_SSH`` is set and we are not the server (``GENERAL_SYNC_PULL_ONLY``).
+    ``GENERAL_SERVER_REPO`` (default ``General``) + ``GENERAL_SERVER_AUDIT`` (default
+    ``state/audit.jsonl``, relative to the repo) locate the remote file; ``GENERAL_SERVER_HOST_ID``
+    (default ``server``, sanitised) names the local file. Best-effort — any hiccup is reported, never fatal."""
+    out: dict[str, Any] = {"attempted": False, "pulled": False, "host": None, "error": None}
+    host = os.environ.get("GENERAL_SERVER_SSH", "").strip()
+    if not host or pull_only():
+        return out
+    out["attempted"] = True
+    server_host = _safe_host(os.environ.get("GENERAL_SERVER_HOST_ID", "").strip() or "server")
+    out["host"] = server_host
+    remote_repo = os.environ.get("GENERAL_SERVER_REPO", "General").strip() or "General"
+    rel = os.environ.get("GENERAL_SERVER_AUDIT", "").strip() or "state/audit.jsonl"
+    src = f"{host}:{remote_repo}/{rel}"
+    # Land it beside the LOCAL audit.jsonl (gitignored, NOT the .unit-state git clone) — the cockpit
+    # reads <audit-dir>/shared/*.jsonl; nothing here ever touches the shared git branch.
+    dst = Path(cfg.audit_path).parent / "shared" / f"{server_host}.jsonl"
+    try:
+        # All filesystem writes are INSIDE the guard — a permission/FS hiccup must degrade to a
+        # reported error, never raise into the `general sync` command.
+        dst.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
             ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", src, str(dst)],
             capture_output=True, text=True, timeout=60)
