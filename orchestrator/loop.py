@@ -15,6 +15,7 @@ from collections import deque
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from . import backends
 from . import builder as builder_mod
 from . import decisions
 from . import notify
@@ -369,6 +370,23 @@ def _worktree_lock(worktree_path: str):
 
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
               audit: AuditLog, stop_event=None) -> list[TicketReport]:
+    # EU-189: pin THIS run's model backend (Opus vs GLM) for every officer SDK call. set_backend
+    # writes a run-scoped contextvar that agent._run_agent_unrouted reads at the single SDK seam,
+    # so all officers inherit the choice with no per-call plumbing. Each run executes in its own
+    # asyncio.run() context (its own thread), so concurrent runs with different backends never
+    # bleed; reset in finally keeps a reused context tidy. This MUST wrap the whole run and set the
+    # var before awaiting the body — the body is one pure await-chain with no task/thread boundary,
+    # so the value reaches every officer call (a future create_task/run_in_executor added *before*
+    # this set would not inherit it — keep the set first).
+    _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE))
+    try:
+        return await _run_inner(cfg, worklist, audit, stop_event)
+    finally:
+        backends.reset_backend(_bk_token)
+
+
+async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
+                     audit: AuditLog, stop_event=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     gits: dict[str, Git] = {}

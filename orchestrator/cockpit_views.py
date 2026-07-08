@@ -321,6 +321,41 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
+def backend_select(cfg, name: str = "backend", style: str = "flex:1") -> str:
+    """EU-189: the model-backend <select> — Opus (default) plus GLM only when it's configured.
+
+    The GLM option is withheld until GLM_AUTH_TOKEN is present, so the operator can never select an
+    unconfigured backend. Pre-selects the run's effective default (``cfg.model_backend``)."""
+    from . import backends as _bk
+    glm_ok = _bk.available("glm")
+    cur = _bk.normalize(getattr(cfg, "model_backend", "opus"))
+    if cur == _bk.GLM and not glm_ok:
+        cur = _bk.NATIVE
+    opts = f"<option value='opus' {'selected' if cur == _bk.NATIVE else ''}>backend: Opus (Claude)</option>"
+    if glm_ok:
+        opts += (f"<option value='glm' {'selected' if cur == _bk.GLM else ''} "
+                 f'title="Sends this run&#39;s prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
+                 f"backend: GLM (Z.ai)</option>")
+    # Attributes are escaped as defence-in-depth (both call sites pass hardcoded values today).
+    name_a = html.escape(name, quote=True)
+    style_attr = f' style="{html.escape(style, quote=True)}"' if style else ""
+    return f'<select name="{name_a}" title="model backend"{style_attr}>{opts}</select>'
+
+
+def glm_hint() -> str:
+    """A one-line hint under the run form. Presence-only — never renders the token value.
+
+    When GLM is configured it doubles as a data-egress notice (EU-189 security review): choosing
+    GLM sends the run's prompts to a third party, and the operator should see that at the point of
+    choice."""
+    from . import backends as _bk
+    if _bk.available("glm"):
+        return ("<div style='font-size:11px;color:#5c6573;margin:2px 0 0'>GLM sends this run&#39;s "
+                "prompts — code, tickets, diffs — to Z.ai (a third-party provider).</div>")
+    return ("<div style='font-size:11px;color:#5c6573;margin:2px 0 0'>GLM backend: not configured "
+            "&mdash; set GLM_AUTH_TOKEN in .env to enable</div>")
+
+
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
                  is_mac: bool = False) -> str:
     """Render the cockpit's top control bar.
@@ -640,7 +675,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         <div class=row>
           <select name=app title=project style="flex:1">{apps}</select>
           <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
+          {backend_select(cfg)}
         </div>
+        {glm_hint()}
         <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
         <button {run_dis}>&#9654; Run</button>
       </form>

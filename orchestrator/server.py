@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from . import backends
 from . import dashboard as D
 from . import health
 from . import intake
@@ -54,6 +55,8 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _dual_provider_gauge,
+    backend_select,
+    glm_hint,  # noqa: F401 — EU-189 helpers (backend_select used by the tickets run form)
     _group_inner,
     _result_banner,
     _wrap,
@@ -97,6 +100,26 @@ def _first_shippable(cfg) -> str:
     except Exception:  # noqa: BLE001
         pass
     return cfg.apps[0].name if getattr(cfg, "apps", None) else ""
+
+
+def _apply_backend_choice(rcfg) -> None:
+    """EU-189: apply the cockpit's model-backend pick (Opus/GLM) to a per-run cfg.
+
+    Guarded: only overrides when the run form actually carries a ``backend`` field, so a form
+    without the picker — and any ``model_backend:`` fleet default from config.yaml carried on the
+    ``copy.copy(cfg)`` — is preserved. Coerces GLM→Opus if GLM isn't configured (defence in depth;
+    the picker already withholds the option and ``backends.apply()`` fails closed at call time)."""
+    try:
+        from flask import request as _request
+        raw = _request.form.get("backend")
+    except Exception:  # noqa: BLE001 — outside a request context there is nothing to apply
+        return
+    if raw is None:
+        return
+    bk = backends.normalize(raw)
+    if bk == backends.GLM and not backends.available("glm"):
+        bk = backends.NATIVE
+    rcfg.model_backend = bk
 
 
 def create_app(cfg: Config):
@@ -729,6 +752,7 @@ def create_app(cfg: Config):
                     '<div class=trun>'
                     '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
                     f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
+                    f'{backend_select(cfg)}'
                     f'<button>&#9654; {html.escape(btn_label)}</button>'
                     '<span class=hint>default builds + merges to DEV — tick "dry run" to build only</span>'
                     '</div></form>')
@@ -762,6 +786,7 @@ def create_app(cfg: Config):
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False
+        _apply_backend_choice(rcfg)   # EU-189: honour the cockpit model-backend picker for this run
         try:
             worklist = intake.from_tickets(rcfg, app_name, keys)
         except Exception as exc:  # noqa: BLE001
@@ -845,6 +870,7 @@ def create_app(cfg: Config):
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
+        _apply_backend_choice(rcfg)   # EU-189: honour the cockpit model-backend picker for this run
         try:
             if kind == "task" and ttype == "bug":
                 worklist = intake.from_text(rcfg, app_name, _bug_title(text), [],
@@ -2585,6 +2611,7 @@ def create_app(cfg: Config):
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
         st["dry_run"] = rcfg.dry_run
+        _apply_backend_choice(rcfg)   # EU-189: honour the cockpit model-backend picker for this run
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
         try:

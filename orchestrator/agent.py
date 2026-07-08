@@ -122,6 +122,14 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     # with unset-aware semantics. The 2026-07-05 audit (§6 defect 2) found the old restore was
     # skipped entirely when ANTHROPIC_BASE_URL was originally unset — one LOCAL-tier call
     # permanently pointed the whole process at Ollama — and no exception path restored anything.
+    # EU-189: GLM backend is applied per-call via options.env inside _run_agent_unrouted and is
+    # mutually exclusive with EU-174 tier routing (which mutates process-global env). When GLM is
+    # the run's backend, bypass routing entirely and go straight to the single seam.
+    from . import backends as _backends
+    if _backends.current() == _backends.GLM:
+        return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
+                                         pass_number=pass_number)
+
     if not routing_tier:
         return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
                                          pass_number=pass_number)
@@ -202,10 +210,16 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     is_plan_limit = False
     plan_limit_kind = ""
 
-    # EU-123: capture provider info from the model configuration
+    # EU-189: point THIS call at the run's chosen backend (Opus/GLM) via options.env just before
+    # the SDK query. No-op for Opus; for GLM it writes the z.ai endpoint + bearer into options.env
+    # (per-subprocess only — zero process-global mutation) and overrides options.model. Returns the
+    # backend actually applied (fail-closed to Opus if GLM is unconfigured).
+    from . import backends as _backends
+    effective_backend = _backends.apply(options)
+    # EU-123: capture provider info — label from the backend actually applied, not a global sniff.
     from . import provider as _provider
     model = getattr(options, "model", "") or ""
-    provider, model_version = _provider.get_provider_info(model)
+    provider, model_version = _provider.get_provider_info(model, backend=effective_backend)
 
     import time as _time
     _t0 = _time.monotonic()
@@ -325,6 +339,23 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
         AgentRun with the result (either from Sonnet or the one-shot Opus retry)
     """
     from .models import OPUS
+    from . import backends as _backends
+
+    # EU-189: under a GLM run there is no Sonnet-cap → native-Opus fallback (that semantics is
+    # Anthropic-only and would burn the Max subscription the operator chose GLM to avoid). Read the
+    # run's backend from cfg first (robust — cfg is passed by builder/reviewer) then the contextvar;
+    # if GLM, run straight through with no Opus probe. If cfg says GLM but the run-scoped contextvar
+    # wasn't pinned (a caller outside loop.run, or across a context-dropping boundary), pin it for
+    # this call so the seam in _run_agent_unrouted actually applies GLM instead of silently running
+    # Opus — keeps the cfg-view and the contextvar-view of the backend consistent (security review).
+    if _backends.is_glm(cfg):
+        _tok = None if _backends.current() == _backends.GLM else _backends.set_backend(_backends.GLM)
+        try:
+            return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id,
+                                   pass_number=pass_number, routing_tier=routing_tier)
+        finally:
+            if _tok is not None:
+                _backends.reset_backend(_tok)
 
     # Get the configured model
     model = getattr(options, "model", "") or ""
