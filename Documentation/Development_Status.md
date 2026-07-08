@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-08 · AUTO-93 · automatixy · • Both pages now render card titles as <h2> with Tailwind classes byte-for-byte unchanged — single h1 → h2 chain, no h3 anywhere. · 🔗 (no UI change beyond semantic tag — verify with axe DevTools showing zero heading-order violations on /packages and /quotes)
 - 2026-07-08 · AUTO-92 · automatixy · • Verified against source: ClientsPage has a lone valid h1 (no CardTitle, no h2/h3); TripsPage is h1→h2 (empty state) / lone h1 (populated) — no heading skip exists on either page, so the ticket's conditional fix… · 🔗 /clients and /trips (verify headings render one h1 with no level skip; no visual change)
 - 2026-07-08 · AUTO-91 · automatixy · • CardTitle gains `as?: 'h2'|'h3'` (default h3) with byte-identical Tailwind classes both ways; ref generic corrected to HTMLHeadingElement — verified. · 🔗 /leads
 - 2026-07-08 · AUTO-84 · automatixy · • Verified in source: `sheet.tsx`'s `SheetTitle` wraps Radix `Dialog.Title` (real `Primitive.h2`) and `drawer.tsx`'s `DrawerTitle` wraps vaul's `DrawerPrimitive.Title`, confirmed in `vaul/dist/index.js` line 1614 to be… · 🔗 open any Sheet/Drawer/Dialog/AlertDialog and the SocialPackageLeadForm success state (submit a lead from a social ad CTA) — e.g. /leads
