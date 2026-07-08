@@ -579,12 +579,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     else:
         # Autopilot off: offer two start modes that genuinely differ (EU-103 iter-2).
         #  · 'Choose tickets' opens the per-ticket picker (pick specific tickets, then run them).
-        #  · 'Auto-drain' starts the continuous backlog autopilot for this project.
+        #  · 'Resume implementing' picks up pending work (In-Progress first, then To-Do) on the active backend.
         _conf_choose = (f"return confirm('Open the ticket picker for "
                         f"{html.escape(app0 or '')} to choose specific tickets to develop?')")
-        _conf_drain = (f"return confirm('Start Auto-drain for "
+        _conf_drain = (f"return confirm('Resume implementing for "
                        f"{html.escape(app0 or '')}? "
-                       f"The unit will work tickets LIVE until the queue is empty or you press Stop.')")
+                       f"The unit will work In-Progress tickets first, then To-Do, until the queue is empty or you press Stop.')")
         ap_html = (
             '<span class=tbdiv></span>'
             '<div class="tbap off">'
@@ -604,8 +604,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             f'<input type=hidden name=app value="{ap_appq}">'
             '<input type=hidden name=mode value=drain>'
             f'<button class="aptbtn start" {ap_dis} '
-            'title="Drain the backlog automatically until empty">'
-            '&#9654;&nbsp;Auto-drain</button></form>'
+            'title="Resume implementing — work In-Progress tickets first, then To-Do, until empty">'
+            '&#9654;&nbsp;Resume implementing</button></form>'
             '</div>')
 
     # EU-106: global 'Open logs' button — macOS only (Darwin `open` command opens Finder).
