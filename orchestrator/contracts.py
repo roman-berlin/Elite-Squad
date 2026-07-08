@@ -158,6 +158,8 @@ AUDIT_EVENT_OUTCOME: dict[str, Outcome] = {
     **{event: outcome for outcome, event in _OUTCOME_AUDIT_EVENT.items()},
     "no_changes": Outcome.ESCALATED,   # EU-116: builder found no changes (fix already present) -> ESCALATED
     "escalated": Outcome.ESCALATED,    # explicit/legacy escalation event
+    "scrum_split": Outcome.REQUEUED,   # too big → split into sub-tickets, parent closed (a terminal REQUEUE,
+                                       # so the run reconstructs as done, not perpetually "running")
 }
 
 

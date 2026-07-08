@@ -18,13 +18,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 _TERMINAL = {"merged", "pr_opened", "escalated", "dryrun_land", "ship_dryrun",
-             "ticket_exception", "no_changes", "needs_human", "pm_triage"}
+             "ticket_exception", "no_changes", "needs_human", "pm_triage", "scrum_split"}
 _OUTCOME = {
     "merged": "merged→dev", "pr_opened": "PR / needs you", "escalated": "escalated",
     "dryrun_land": "dry-run", "ship_dryrun": "dry-run",
     "ticket_exception": "errored", "no_changes": "escalated",  # EU-116: no_changes -> ESCALATED
     "needs_human": "awaiting decision",
     "pm_triage": "re-queued",   # PM sent it back for one corrective pass — not a Needs-you item
+    "scrum_split": "split",     # too big → decomposed into sub-tickets, parent closed (a terminal outcome,
+                                # not a run still in flight — else the parent shows "running…" forever)
 }
 _NEEDS_YOU = {"PR / needs you", "escalated", "errored", "awaiting decision"}
 

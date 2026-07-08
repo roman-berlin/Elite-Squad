@@ -53,10 +53,10 @@ async def fake_officer(**kw):
     return TXT
 _recon.run_officer = fake_officer
 
-filed, commented, statused = [], [], []
+filed, commented, statused, bodies = [], [], [], []
 class FakeBL:
     def create_task(s, summary, description, labels=None):
-        filed.append((summary, labels)); return f"AUTO-{100 + len(filed)}"
+        filed.append((summary, labels)); bodies.append(description); return f"AUTO-{100 + len(filed)}"
     def add_comment(s, ticket, body): commented.append(body)
     def set_status(s, ticket, st): statused.append(st)
 backlog_base.make_backlog = lambda app: FakeBL()
@@ -70,6 +70,37 @@ chk("fragments labelled auto-split", all("auto-split" in (l or []) for _, l in f
 chk("fragment carries the parent reference", "EU-17" in filed[0][0] or True)  # title is the slice; body has the ref
 chk("parent comment names the fragment keys", commented and "AUTO-101" in commented[0] and "AUTO-102" in commented[0])
 chk("parent moved out of the queue (Done)", "Done" in statused)
+# the rule (Commander 2026-07-08): the parent closes (Done) with the "split into X,Y,Z" comment, and the
+# fragments — the active work now — move to In Progress ("in development"), not left sitting in To Do.
+chk("each fragment is moved to In Progress (in development), not left To Do",
+    statused.count("In Progress") == 2, str(statused))
+# a fresh parent (split-depth 0) → fragments stamped <!-- autosplit-depth: 1 --> so re-splits are bounded.
+# HTML-comment marker (fleet fix): invisible in Jira + a human ticket body is very unlikely to type it.
+chk("fragment body carries an incremented autosplit-depth: 1 marker",
+    any("<!-- autosplit-depth: 1 -->" in b for b in bodies), str(bodies)[:200])
+chk("fragment body carries EXACTLY ONE depth marker (echoed ones stripped — no accretion)",
+    all(b.count("autosplit-depth") <= 1 for b in bodies), str(bodies)[:200])
+# accumulation guard (fleet MAJOR): a body that somehow carries TWO markers must count the DEEPER one,
+# else a stale lower marker read first would defeat the bound. _split_depth reads the max.
+chk("depth read is the MAX marker, not the first (accumulation can't under-count)",
+    scrum._split_depth(types.SimpleNamespace(
+        description="x <!-- autosplit-depth: 1 --> y <!-- autosplit-depth: 3 -->")) == 3)
+
+# --- recursion guard: a ticket ALREADY at the max split depth must NOT re-split — it parks (ok=False)
+#     instead of fanning out into ever-more sub-tickets forever (adversarial-fleet finding, 2026-07-08). ---
+filed.clear(); bodies.clear(); commented.clear(); statused.clear()
+_deep = types.SimpleNamespace(id="EU-17d", summary="x",
+                              description="already decomposed <!-- autosplit-depth: 3 -->", ephemeral=False)
+_rd = asyncio.run(scrum.split(cfg, "automatixy", _deep, reason="a single irreducible action, still too big"))
+chk("depth guard: at max split depth → ok=False (parks, no unbounded re-split)", _rd["ok"] is False, str(_rd))
+chk("depth guard: error names the max-depth ceiling", "max auto-split depth" in (_rd.get("error") or ""),
+    str(_rd.get("error")))
+chk("depth guard: NOTHING is filed and the parent is left alone at max depth",
+    filed == [] and statused == [], f"filed={filed} statused={statused}")
+# spoof-resistance (fleet MINOR): a plain "[split-depth: 3]" in a legit body is NOT the machine marker,
+# so it does NOT trip the guard — only the HTML-comment marker counts.
+chk("a plain-text '[split-depth: 3]' in a legit body does NOT spoof the guard (depth 0)",
+    scrum._split_depth(types.SimpleNamespace(description="AC: verify [split-depth: 3] handling")) == 0)
 
 # --- no sub-tickets -> ok=False, nothing filed, parent left alone ---
 async def empty_officer(**kw): return "no ticket blocks here"

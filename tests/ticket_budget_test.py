@@ -149,6 +149,56 @@ chk("breach → the CANONICAL terminal event fires too (needs_human — cockpit/
     str([e for e in au.ev if e["event"] == "needs_human"]))
 
 # ---------------------------------------------------------------------------------------------- #
+# 1b) Budget breach on a NON-ephemeral ticket → auto-SPLIT (like the turn-limit path), not park.
+#     A ticket too big for the token/time budget decomposes into right-sized fragments instead of
+#     parking on the Commander — the same "too big → Scrum Master" behaviour the turn limit already has
+#     (AUTO-85 burned 11.9M on one 8-page pass and parked here before this fix).
+# ---------------------------------------------------------------------------------------------- #
+from orchestrator import scrum as _scrum_mod
+async def _split_ok(cfg_, app_name, ticket_, recap="", reason="", **k):
+    return {"ok": True, "keys": ["AUTO-90a", "AUTO-90b"]}
+_scrum_mod.split = _split_ok
+tmp_s = Path(tempfile.mkdtemp())
+cfg_s = Config(apps=[AppConfig(name="automatixy", repo_path=".", base_branch="DEV",
+                               protected_branch="MAIN", backlog_backend="none")],
+               audit_path=str(tmp_s / "audit.jsonl"), use_worktree=False,
+               per_ticket_token_budget=400_000)
+app_s = cfg_s.app("automatixy")
+tkt_s = Ticket(id="AUTO-90", key="AUTO-90", summary="s", description="d", ephemeral=False, app="automatixy")
+au_s = Audit()
+rep_s = asyncio.run(loop._attempt(tkt_s, app_s, cfg_s, Git(), None, au_s, loop.Budget(0), "autodev/AUTO-90"))
+chk("budget breach on a SPLITTABLE ticket → REQUEUED (Scrum split), not ESCALATED",
+    rep_s.outcome == Outcome.REQUEUED, str(rep_s.outcome))
+chk("the budget split is audited scrum_split(reason=budget, into=[...])",
+    any(e["event"] == "scrum_split" and e.get("reason") == "budget" and e.get("into") for e in au_s.ev),
+    str([e for e in au_s.ev if e["event"] == "scrum_split"]))
+chk("a successful budget split does NOT park on needs_human",
+    not any(e["event"] == "needs_human" for e in au_s.ev),
+    str([e for e in au_s.ev if e["event"] == "needs_human"]))
+# the split report preserves the attempt's real state (branch + iteration) — the run summary/cleanup
+# read them; dropping them to 0/None under-reports spend and leaks the throwaway branch (fleet finding).
+chk("budget-split report preserves the attempt branch (not dropped to None)", rep_s.branch is not None,
+    str(rep_s.branch))
+chk("budget-split report preserves the iteration count (not 0)", (rep_s.iterations or 0) >= 1,
+    str(rep_s.iterations))
+# scrum_split must reconstruct as a TERMINAL outcome — else the split parent shows "running…" forever.
+from orchestrator.contracts import AUDIT_EVENT_OUTCOME
+from orchestrator import dashboard as _dash
+chk("scrum_split is terminal (REQUEUED) so a split run is never stuck 'running'",
+    AUDIT_EVENT_OUTCOME.get("scrum_split") == Outcome.REQUEUED and "scrum_split" in _dash._TERMINAL)
+# dry-run integrity (fleet finding): a preview must NOT mutate the real board. In dry_run a budget breach
+# skips the split entirely (scrum.split files sub-tickets + closes the parent = live Jira writes) and parks.
+cfg_s.dry_run = True
+au_dry = Audit()
+rep_dry = asyncio.run(loop._attempt(
+    Ticket(id="AUTO-91", key="AUTO-91", summary="s", description="d", ephemeral=False, app="automatixy"),
+    app_s, cfg_s, Git(), None, au_dry, loop.Budget(0), "autodev/AUTO-91"))
+chk("dry-run budget breach does NOT split (no board writes on a preview) — it parks",
+    not any(e["event"] == "scrum_split" for e in au_dry.ev) and rep_dry.outcome == Outcome.ESCALATED,
+    str([e["event"] for e in au_dry.ev]))
+cfg_s.dry_run = False
+
+# ---------------------------------------------------------------------------------------------- #
 # 2) Budgets set to 0 disable the check
 # ---------------------------------------------------------------------------------------------- #
 cfg_off = Config(apps=[AppConfig(name="automatixy", repo_path=".", base_branch="DEV",
