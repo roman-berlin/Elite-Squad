@@ -47,10 +47,11 @@ class AgentRun:
     tools: list[str] = field(default_factory=list)   # tool calls made, for the transcript
     input_tokens: int = 0    # prompt + cache tokens this run (for the usage ledger)
     output_tokens: int = 0   # completion tokens this run
-    # EU-118: true when this run hit a Claude plan limit (429 / usage-limit).
+    # EU-118: true when this run hit a plan limit (429 / usage-limit) for either Claude or GLM.
     # Detection matches _CAP_PATTERNS + _TRANSIENT_PATTERNS below against the Agent SDK's
     # message.error field; the SDK surfaces Anthropic API errors (HTTP 429 with "rate limit"
-    # or "usage limit" details) there when a plan/session/weekly quota is exceeded.
+    # or "usage limit" details) and GLM/z.ai errors (quota/credit/balance issues) there when
+    # a plan/session/weekly quota is exceeded. EU-202: GLM quota errors are also detected.
     is_plan_limit: bool = False
     # EU-108 hardening (2026-07-05 fake cap alert): how the plan-limit error classified —
     #   "cap"       → the message names an exhausted usage/plan/weekly quota (fallback-eligible)
@@ -85,8 +86,10 @@ def configure_audit(audit) -> None:
 # quota exhaustion names the cap ("Claude usage limit reached", "weekly limit", "plan limit");
 # a transient per-minute 429 or 529 overload only carries status/rate-limit language. Cap
 # patterns win when both match (a real cap error usually also carries a 429 status).
+# EU-202: add GLM/z.ai-specific patterns (quota, credit, balance, billing).
 _CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit",
-                 "limit reached", "over limit", "quota exceeded")
+                 "limit reached", "over limit", "quota exceeded", "quota",
+                 "credit", "balance", "billing", "insufficient")
 _TRANSIENT_PATTERNS = ("rate limit", "rate_limit", "too many requests",
                        "overloaded", "429", "529")
 
