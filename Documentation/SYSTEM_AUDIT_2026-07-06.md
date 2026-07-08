@@ -186,8 +186,19 @@ no-LLM, and unblocks everything.**
 ### Wave 0 — Operational backstops (hours, no LLM, do first)
 - **N1** systemd `StartLimitIntervalSec=300`/`StartLimitBurst=5` + `self-update.sh` smoke-test (`python -c
   "import orchestrator.main"` or `./general doctor`) **before** `systemctl restart`; `daemon-reload`.
-- **EU-181** uninstall/repoint the 3 dead Mac launchd agents (`launchctl bootout`) — VPS cron is the
-  sanctioned scheduler; stop the err-log spam.
+- **EU-181** uninstall the 4 dead Mac launchd agents (`launchctl bootout`) — VPS cron is the
+  sanctioned scheduler; stop the err-log spam. On the Mac, run:
+  ```bash
+  launchctl bootout gui/$(id -u)/com.roman.general.sync
+  launchctl bootout gui/$(id -u)/com.roman.general.smalltalk
+  launchctl bootout gui/$(id -u)/com.roman.general.council
+  launchctl bootout gui/$(id -u)/com.roman.general.patrol
+  ```
+  These agents have been firing into deleted scripts (run-sync.sh, run-smalltalk.sh, run-council.sh,
+  run-patrol.sh) since bf1ce92 (2026-06-26), producing growing error logs (council/sync.err.log at
+  5429 B as of 2026-07-06). The VPS cron (`scripts/install-server-cron.sh` runs `./general sync` every
+  15 min) is the single source of truth for scheduling. The Mac has no autonomous sync scheduler —
+  its state syncs only when the server pulls the shared/unit-state branch.
 - **N3** fix or drop the VPS `patrol` cron.
 - **Server `state/` parity:** point the server `audit_path` at `state/` at next deploy (or consciously keep
   root — decide and document).
