@@ -602,6 +602,74 @@ def create_app(cfg: Config):
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get("/api/run-log-stream")
+    def run_log_stream_api():
+        """Stream the current run's log file in real-time using Server-Sent Events.
+
+        EU-200: This provides a live view of the run log in the web dashboard,
+        distinct from the interactive terminal panel. The log file is tailed
+        and new lines are sent as SSE events.
+
+        Query params:
+            app: The project name (defaults to active tab)
+        """
+        from flask import Response
+        appq = _board_project(request.args.get("app"))
+        st = get_state(appq or None)
+
+        def gen():
+            log_path = st.get("log_path")
+            if not log_path:
+                yield _sse("log", "No active run log to stream.")
+                return
+
+            log_file = Path(log_path)
+            if not log_file.exists():
+                yield _sse("log", f"Log file not found: {log_path}")
+                return
+
+            # Stream the log file, sending new lines as they're added
+            last_size = 0
+            last_check = 0.0
+
+            while True:
+                try:
+                    current_size = log_file.stat().st_size
+                    if current_size > last_size:
+                        with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                            f.seek(last_size)
+                            new_lines = f.readlines()
+                            for line in new_lines:
+                                yield _sse("log", line.rstrip("\n\r"))
+                        last_size = current_size
+                        last_check = time.time()
+                    else:
+                        # Check if run is still active - get fresh state
+                        current_st = get_state(appq or None)
+                        if not current_st.get("active") and not current_st.get("autopilot_on"):
+                            # Run ended - send remaining lines and close
+                            if current_size > last_size:
+                                with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                                    f.seek(last_size)
+                                    new_lines = f.readlines()
+                                    for line in new_lines:
+                                        yield _sse("log", line.rstrip("\n\r"))
+                            yield _sse("done", "Run ended.")
+                            break
+                        # No new lines - send keepalive every 2s
+                        now = time.time()
+                        if now - last_check >= 2.0:
+                            yield ": keepalive\n\n"
+                            last_check = now
+
+                    time.sleep(0.5)
+                except Exception:
+                    yield _sse("error", "Error reading log file.")
+                    break
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.get("/tasks")
     def tasks_page():
         flt = (request.args.get("filter") or "").strip()
