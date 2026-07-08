@@ -387,6 +387,11 @@ def plan_usage(cfg: Config | None = None, *, now: float | None = None, force: bo
     Cached for 5 minutes (a failed read for 1 minute). Best-effort — never raises. Fire it ONLY from a
     user-driven ``/usage`` render so an idle cockpit costs nothing; the cockpit board reads the local
     ledger via ``windows()``/``budget_status()``, never this probe.
+
+    EU-202: GLM/z.ai proactive detection is NOT currently available — z.ai has no public usage endpoint.
+    GLM limits are detected reactively (via _classify_plan_limit recognizing GLM quota errors) or
+    estimated from the ledger via glm_budget_status(). If z.ai adds a usage API, implement a
+    _probe_glm_limits() function and call it based on the active backend.
     """
     t = now if now is not None else time.time()
     cached = _plan_cache.get("data")
