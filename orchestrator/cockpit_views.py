@@ -179,11 +179,14 @@ def _result_banner(state: dict) -> str:
             f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
 
 
-def _plan_limit_banner(state: dict) -> str:
+def _plan_limit_banner(state: dict, cfg=None) -> str:
     """Plan-limit warning banner: shown when a Claude plan limit is hit.
 
     Prominent red banner that persists until the limit resets (not a one-shot like
-    ``_result_banner``). Displays which limit was hit and when it resets.
+    ``_result_banner``). Displays which limit was hit and when it resets. EU-191: when an alternate
+    backend (e.g. GLM) is configured, it also offers a one-click "Continue on <backend>" button that
+    switches the model backend and resumes the paused ticket, so an Opus/Claude limit doesn't stall
+    the drain until reset.
     """
     from . import cockpit_state as _cs
     from . import usage as _usg
@@ -219,14 +222,42 @@ def _plan_limit_banner(state: dict) -> str:
         except Exception:  # noqa: BLE001
             reset_text = "unknown time"
 
+    # EU-191: offer a one-click switch to an available alternate backend (e.g. GLM) instead of only
+    # waiting for the limit to reset. Only when the active backend is NATIVE (the Claude/Opus path the
+    # limit blocks) AND an alternate is actually runnable. The button switches the sticky backend and
+    # auto-resumes the last-run ticket (tracked in state['last_run']).
+    continue_offer = ""
+    try:
+        from . import backends as _bk, backend_pref as _bp
+        _cur = _bp.active(cfg) if cfg is not None else _bk.NATIVE
+        if _bk.normalize(_cur) == _bk.NATIVE:
+            _alts = _bk.alternates(_cur)
+            if _alts:
+                _alt = _alts[0]
+                _label = "GLM (Z.ai)" if _alt == _bk.GLM else _alt.upper()
+                _last = state.get("last_run") or {}
+                _tickets = [t for t in (_last.get("tickets") or []) if t]
+                _resume = (" &amp; resume " + html.escape(", ".join(_tickets))) if _tickets else ""
+                continue_offer = (
+                    "<form method=post action=/api/continue-on-alternate style='margin:8px 0 0'>"
+                    f"<input type=hidden name=backend value='{html.escape(_alt)}'>"
+                    "<button style='font-size:13px;font-weight:650;padding:6px 14px;border-radius:7px;"
+                    "background:#1f6feb;color:#fff;border:none;cursor:pointer'>"
+                    f"Continue on {_label}{_resume}</button>"
+                    "<span style='font-size:12px;color:#e7ebf2;font-weight:400;margin-left:10px'>"
+                    "&#8212; keep the drain moving without waiting for the reset</span></form>")
+    except Exception:  # noqa: BLE001 — the offer must never break the banner
+        continue_offer = ""
+
     return (
         "<div style='background:#2a1417;border-bottom:2px solid #5a1f22;color:#f0676b;"
-        "padding:16px 26px;font-size:14px;font-weight:650;display:flex;align-items:center;gap:11px'>"
+        "padding:16px 26px;font-size:14px;font-weight:650;display:flex;align-items:flex-start;gap:11px'>"
         "<span style='font-size:20px'>&#9888;</span>"
         "<div>"
         "<div style='font-size:15px;margin-bottom:4px'>&#9888; Claude plan limit reached &#8212; implementation paused</div>"
         f"<div style='font-size:13px;color:#e7ebf2;font-weight:400'>Resets at {html.escape(reset_text)}. "
         "New builds will wait until the limit renews.</div>"
+        f"{continue_offer}"
         "</div></div>"
     )
 
@@ -319,6 +350,37 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
     {picker}
   </details>
 </div>"""
+
+
+def backend_control(cfg) -> str:
+    """EU-190: the STICKY model-backend selector for the cockpit control bar.
+
+    Selecting a backend **persists** it (POST /api/model → backend_pref) and applies to ALL
+    subsequent runs; the active backend is shown at a glance. GLM is offered only when configured
+    (GLM_AUTH_TOKEN present). If the persisted choice is GLM but the key is now missing, it's shown
+    flagged and runs are blocked at launch — no silent fallback. Never renders the token value."""
+    from . import backends as _bk, backend_pref
+    active = backend_pref.active(cfg)
+    glm_ok = _bk.available("glm")
+    show_glm = glm_ok or active == _bk.GLM     # keep a stale GLM choice visible even if key vanished
+    opts = f"<option value='opus' {'selected' if active == _bk.NATIVE else ''}>Opus (Claude)</option>"
+    if show_glm:
+        glm_label = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
+        opts += (f"<option value='glm' {'selected' if active == _bk.GLM else ''} "
+                 f'title="Sends prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
+                 f"{glm_label}</option>")
+    if active == _bk.GLM and not glm_ok:
+        note = ("<span class=\"tbnote bad\" title=\"Set GLM_AUTH_TOKEN and restart\">"
+                "&#9888; GLM key missing — runs blocked</span>")
+    elif active == _bk.GLM:
+        note = "<span class=tbnote style=\"color:#8a909c\">&#8599; prompts go to Z.ai</span>"
+    else:
+        note = ""
+    return (
+        '<form method=post action=/api/model class=tbf title="Model backend — applies to all runs">'
+        '<span style="font-size:12px;color:#8a909c;margin-right:4px">Model</span>'
+        f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
+        f'</form>{note}')
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
@@ -556,8 +618,32 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         )
 
     # Render plan-limit banner BEFORE the control bar (if active)
-    plan_banner = _plan_limit_banner(_state)
-    return tab_bar + plan_banner + f"""
+    plan_banner = _plan_limit_banner(_state, cfg)
+
+    # EU-190: prominent model-backend alert — a bad GLM setup (missing/incorrect token, wrong URL)
+    # surfaces here with what to fix or re-onboard, so it's never missed. A transient
+    # _state['model_alert'] (set by a failed /api/model connection test) shows once; a persistent
+    # static-config problem re-derives every render while the active backend is GLM.
+    _malert = _state.pop("model_alert", None)
+    if not _malert:
+        from . import backends as _bk, backend_pref as _bp
+        if _bp.active(cfg) == _bk.GLM:
+            _iss = _bk.glm_config_issues()
+            if _iss:
+                _malert = ("GLM is selected but not usable — " + "; ".join(_iss)
+                           + ". Fix it in .env and restart, or set the Model back to Opus.")
+    model_banner = ""
+    if _malert:
+        model_banner = (
+            '<div role=alert style="background:#3a1113;border:1px solid #7f1d1d;color:#fecaca;'
+            'padding:9px 13px;border-radius:8px;margin:0 0 8px;font-size:13px;display:flex;'
+            'align-items:center;gap:12px;flex-wrap:wrap">'
+            f'<span>&#9888;&#65039; {html.escape(_malert)}</span>'
+            '<form method=post action=/api/model style="margin:0">'
+            '<input type=hidden name=backend value=opus>'
+            '<button style="font-size:12px;padding:3px 9px;border-radius:6px;cursor:pointer">'
+            'Switch to Opus</button></form></div>')
+    return tab_bar + plan_banner + model_banner + f"""
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
@@ -646,6 +732,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       </form>
     </div>
   </details>
+  {backend_control(cfg)}
 
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>

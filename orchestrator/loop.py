@@ -15,6 +15,7 @@ from collections import deque
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from . import backends
 from . import builder as builder_mod
 from . import decisions
 from . import notify
@@ -118,6 +119,39 @@ def _is_turn_limit(text: str | None) -> bool:
     return any(m in t for m in _TURN_LIMIT_MARKERS)
 
 
+async def _try_scrum_split(cfg: Config, app: AppConfig, ticket: Ticket, audit: AuditLog,
+                           recap: str, reason: str, split_reason: str,
+                           iterations: int = 0, cost: float = 0.0,
+                           branch: str | None = None) -> TicketReport | None:
+    """Hand an OVERSIZED ticket to the Scrum Master to split into right-sized, independently-shippable
+    sub-tickets. Returns a REQUEUED TicketReport (parent closed, fragments filed) when the split succeeds,
+    else None so the caller escalates to the Commander. Shared by the two "too big" ceilings — the turn
+    limit (the build ran out of turns) AND the per-ticket token/time budget — so a ticket decomposes
+    regardless of WHICH ceiling it hit, instead of parking on the Commander only for one of them.
+    Ephemeral tickets have no real backlog to file fragments into, so they never split (caller escalates).
+    ``iterations``/``cost``/``branch`` carry the attempt's real state into the report (the budget site has
+    them; the turn-limit exception site does not — its defaults are 0/0.0/None). scrum.split's own depth
+    guard makes an irreducibly-too-big ticket return ok=False here, so the caller escalates, never loops.
+    A DRY RUN must not mutate the real board (scrum.split files sub-tickets, comments + closes the parent),
+    so in dry_run we skip the split and let the caller escalate — no Jira writes on a preview."""
+    if ticket.ephemeral or getattr(cfg, "dry_run", False):
+        return None
+    try:
+        from . import scrum as _scrum
+        sp = await _scrum.split(cfg, app.name, ticket, recap=recap, reason=reason)
+    except Exception as sexc:  # noqa: BLE001 - a split failure must fall through to escalate
+        sp = {"ok": False, "keys": [], "error": str(sexc)}
+    if sp.get("ok") and sp.get("keys"):
+        kk = ", ".join(sp["keys"])
+        audit.record("scrum_split", ticket_id=ticket.id, reason=split_reason, into=sp["keys"])
+        _notify(cfg, f"🧩 {ticket.id} was too big for one pass — the Scrum Master split it into "
+                     f"{kk} and closed the parent. The unit takes the fragments next.")
+        print(f"  🧩 {ticket.id}: too big → Scrum Master split into {kk}; parent closed.", flush=True)
+        return TicketReport(ticket.id, Outcome.REQUEUED, iterations, cost, app.name, branch,
+                            notes=f"too big — Scrum Master split into {kk}")
+    return None
+
+
 async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exception,
                             audit: AuditLog) -> TicketReport:
     """Turn a ticket-level exception into a report. A turn-limit blow-out is NOT a real failure — the
@@ -127,24 +161,13 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
     msg = str(exc)
     if _is_turn_limit(msg):
         # Auto-split first — don't ask the Commander to do by hand what the Scrum Master is for.
-        # Needs a real backlog to file sub-tickets into, so only for non-ephemeral tickets.
-        if not ticket.ephemeral:
-            try:
-                from . import scrum as _scrum
-                sp = await _scrum.split(
-                    cfg, app.name, ticket,
-                    recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
-                    reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.")
-            except Exception as sexc:  # noqa: BLE001 - a split failure must fall through to escalate
-                sp = {"ok": False, "keys": [], "error": str(sexc)}
-            if sp.get("ok") and sp.get("keys"):
-                kk = ", ".join(sp["keys"])
-                audit.record("scrum_split", ticket_id=ticket.id, reason="turn-limit", into=sp["keys"])
-                _notify(cfg, f"🧩 {ticket.id} was too big for one pass — the Scrum Master split it into "
-                             f"{kk} and closed the parent. The unit takes the fragments next.")
-                print(f"  🧩 {ticket.id}: too big → Scrum Master split into {kk}; parent closed.", flush=True)
-                return TicketReport(ticket.id, Outcome.REQUEUED, 0, 0.0, app.name,
-                                    notes=f"too big — Scrum Master split into {kk}")
+        split = await _try_scrum_split(
+            cfg, app, ticket, audit,
+            recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
+            reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.",
+            split_reason="turn-limit")
+        if split is not None:
+            return split
         # No split possible → escalate to the Commander as before.
         note = (f"{ticket.id} ran out of turns before finishing — this ticket is likely too big for "
                 "a single pass. Split it into smaller tickets, or raise the turn budget "
@@ -347,6 +370,23 @@ def _worktree_lock(worktree_path: str):
 
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
               audit: AuditLog, stop_event=None) -> list[TicketReport]:
+    # EU-189: pin THIS run's model backend (Opus vs GLM) for every officer SDK call. set_backend
+    # writes a run-scoped contextvar that agent._run_agent_unrouted reads at the single SDK seam,
+    # so all officers inherit the choice with no per-call plumbing. Each run executes in its own
+    # asyncio.run() context (its own thread), so concurrent runs with different backends never
+    # bleed; reset in finally keeps a reused context tidy. This MUST wrap the whole run and set the
+    # var before awaiting the body — the body is one pure await-chain with no task/thread boundary,
+    # so the value reaches every officer call (a future create_task/run_in_executor added *before*
+    # this set would not inherit it — keep the set first).
+    _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE))
+    try:
+        return await _run_inner(cfg, worklist, audit, stop_event)
+    finally:
+        backends.reset_backend(_bk_token)
+
+
+async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
+                     audit: AuditLog, stop_event=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     gits: dict[str, Git] = {}
@@ -709,6 +749,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                          tokens_burned=_burned, token_budget=cfg.per_ticket_token_budget,
                          elapsed_min=round(_elapsed_min, 1),
                          time_budget_min=cfg.per_ticket_time_budget_min, reason=why)
+            # "Too big for the budget" IS "too big" — hand it to the Scrum Master to split into right-sized
+            # fragments, exactly like the turn-limit path (loop._exception_report), instead of parking on the
+            # Commander. AUTO-85 burned 11.9M on one 8-page pass and parked here; splitting decomposes it. Only
+            # escalate (below) when a split isn't possible (ephemeral ticket, or the splitter declines).
+            _split = await _try_scrum_split(
+                cfg, app, ticket, audit,
+                recap=f"{ticket.id} exceeded its per-ticket budget ({why}) before finishing — too big for one attempt.",
+                reason="Ticket blew the per-ticket token/time budget — split into smaller, independently-shippable tickets.",
+                split_reason="budget", iterations=iteration, cost=cost, branch=branch)
+            if _split is not None:
+                return _resolve(_split)
             decisions.add(cfg, ticket, app.name,
                           f"Per-ticket budget exceeded ({why}) after {iteration - 1} pass(es). "
                           "Raise the budget, narrow the ticket, or answer the open review items.")

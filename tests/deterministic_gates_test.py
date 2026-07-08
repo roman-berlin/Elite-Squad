@@ -123,13 +123,104 @@ chk("lockfile: nested manifest resolved against its own directory",
 # ══════════════════════════════════════════════════════════════════════════════
 _lint_app = AppConfig(name="a", repo_path=str(repo), backlog_backend="none",
                       lint_commands=["exit 3"], gate_timeout_sec=30)
-det = gate_mod.run_deterministic_checks(_lint_app, ["package.json"], DIRTY_DIFF)
+# apps/web uses package-lock.json (no frozen verifier in _LOCK_VERIFY) → the LOCKFILE flag is kept
+# conservatively without shelling out to a package manager, so the aggregate stays hermetic.
+det = gate_mod.run_deterministic_checks(_lint_app, ["apps/web/package.json"], DIRTY_DIFF)
 chk("deterministic: lint + secrets + lockfile aggregate into one failing report",
     not det.passed and "LINT" in det.report and "SECRET-LEAK" in det.report
     and "LOCKFILE" in det.report, det.report[:200])
 _clean_app = AppConfig(name="a", repo_path=str(repo), backlog_backend="none")
 chk("deterministic: all-clean passes",
     gate_mod.run_deterministic_checks(_clean_app, ["src/ok.py"], "+x = 1\n").passed)
+
+# lockfile VERIFY (2026-07-07): a manifest change that leaves the lock CONSISTENT (a scripts edit, or a
+# dep already in the lock) is a FALSE positive — the gate verifies real drift with the manager's own
+# NON-MUTATING --dry-run frozen check before failing, else legitimate tickets deadlock (found live on
+# AUTO-57). The verify goes through run_commands (shared timeout / process-group-kill / gate_env).
+_lockrepo = Path(tempfile.mkdtemp())
+(_lockrepo / "package.json").write_text('{"scripts":{"test:coverage":"vitest run --coverage"}}', encoding="utf-8")
+(_lockrepo / "bun.lock").write_text("# lock", encoding="utf-8")
+_bun_app = AppConfig(name="b", repo_path=str(_lockrepo), backlog_backend="none")
+_orig_rc = gate_mod.run_commands
+def _rc_stub(passed, cap=None):
+    def _f(app, commands, cwd=None):
+        if cap is not None:
+            cap["cwd"] = cwd; cap["cmd"] = commands
+        return GateResult(passed=passed, report="frozen --dry-run stub")
+    return _f
+try:
+    gate_mod.run_commands = _rc_stub(True)                                        # frozen --dry-run PASSES
+    _ok = gate_mod.run_deterministic_checks(_bun_app, ["package.json"], "+x = 1\n")
+    gate_mod.run_commands = _rc_stub(False)                                       # frozen --dry-run FAILS
+    _drift = gate_mod.run_deterministic_checks(_bun_app, ["package.json"], "+x = 1\n")
+finally:
+    gate_mod.run_commands = _orig_rc
+chk("lockfile verify: a lock-CONSISTENT package.json change is NOT flagged (frozen check passes)",
+    _ok.passed, _ok.report[:160])
+chk("lockfile verify: REAL drift (frozen check fails) still flags LOCKFILE",
+    not _drift.passed and "LOCKFILE" in _drift.report, _drift.report[:160])
+
+# monorepo-safety (the CRITICAL fleet fix): the frozen check runs in the MANIFEST'S OWN directory, never
+# the repo root — else a consistent root would MASK real drift in a sub-package (a weakened gate).
+_mono = Path(tempfile.mkdtemp())
+(_mono / "apps" / "web").mkdir(parents=True)
+(_mono / "apps" / "web" / "package.json").write_text("{}", encoding="utf-8")
+(_mono / "apps" / "web" / "bun.lock").write_text("# l", encoding="utf-8")
+_mono_app = AppConfig(name="m", repo_path=str(_mono), backlog_backend="none")
+_cap: dict = {}
+gate_mod.run_commands = _rc_stub(True, _cap)
+try:
+    gate_mod.run_deterministic_checks(_mono_app, ["apps/web/package.json"], "+x = 1\n")
+finally:
+    gate_mod.run_commands = _orig_rc
+chk("lockfile verify: monorepo — the frozen check runs in the manifest's OWN dir (not repo root)",
+    (_cap.get("cwd") or "").endswith(os.path.join("apps", "web")), str(_cap.get("cwd")))
+chk("lockfile verify: command is `bun install --frozen-lockfile --dry-run --ignore-scripts` (no writes, no scripts, no net)",
+    _cap.get("cmd") and all(f in _cap["cmd"][0] for f in ("--frozen-lockfile", "--dry-run", "--ignore-scripts")),
+    str(_cap.get("cmd")))
+chk("lockfile verify: an unknown manager (package-lock.json) keeps the static flag, no shell-out",
+    not gate_mod.run_deterministic_checks(
+        AppConfig(name="n", repo_path=str(repo), backlog_backend="none"),
+        ["apps/web/package.json"], "+x = 1\n").passed)
+
+# monorepo ROOT-HOISTED lock (AUTO-57 false-NEGATIVE fix, 2026-07-07): a bun/npm/pnpm/yarn workspace
+# keeps ONE lock at the repo ROOT while each app keeps its OWN package.json (no per-app lock). An
+# app-manifest change with the root lock UNCHANGED is REAL drift — but the sibling-only lookup found no
+# lock next to the app manifest and emitted no candidate, so the frozen check never ran and the gate
+# PASSED a broken build LIVE on AUTO-57 (added @vitest/coverage-v8 to an app's package.json, never
+# regenerated the root bun.lock → `bun install --frozen-lockfile` fails every CI run). The candidate
+# scan now walks UP to the nearest ancestor lock.
+_ws = Path(tempfile.mkdtemp())
+(_ws / "package.json").write_text("{}", encoding="utf-8")            # workspace root manifest
+(_ws / "bun.lock").write_text("# root lock", encoding="utf-8")       # the ONE hoisted lock
+(_ws / "apps" / "crm").mkdir(parents=True)
+(_ws / "apps" / "crm" / "package.json").write_text("{}", encoding="utf-8")  # app manifest, NO sibling lock
+chk("lockfile: app manifest vs ROOT-hoisted lock — drift flagged (walks up to the workspace-root lock)",
+    gate_mod.lockfile_sanity(["apps/crm/package.json"], str(_ws)) != [])
+chk("lockfile: app manifest + root lock BOTH changed → clean (the root lock was regenerated)",
+    gate_mod.lockfile_sanity(["apps/crm/package.json", "bun.lock"], str(_ws)) == [])
+chk("lockfile: app manifest with NO lock of its kind in the tree → never flagged (pyproject vs a bun.lock)",
+    gate_mod.lockfile_sanity(["apps/crm/pyproject.toml"], str(_ws)) == [])
+# end-to-end: the root-hoisted drift now reaches the frozen verifier — run IN THE APP DIR (not the repo
+# root), and a failing frozen check flags LOCKFILE. This is the exact chain that must have caught AUTO-57.
+_ws_app = AppConfig(name="ws", repo_path=str(_ws), backlog_backend="none")
+_cap_ws: dict = {}
+gate_mod.run_commands = _rc_stub(False, _cap_ws)                      # frozen --dry-run FAILS = real drift
+try:
+    _ws_drift = gate_mod.run_deterministic_checks(_ws_app, ["apps/crm/package.json"], "+x = 1\n")
+finally:
+    gate_mod.run_commands = _orig_rc
+chk("lockfile: root-hoisted drift flags LOCKFILE via the frozen verifier (the AUTO-57 chain)",
+    not _ws_drift.passed and "LOCKFILE" in _ws_drift.report, _ws_drift.report[:160])
+chk("lockfile: root-hoisted frozen check runs in the APP dir (apps/crm), never the repo root",
+    (_cap_ws.get("cwd") or "").endswith(os.path.join("apps", "crm")), str(_cap_ws.get("cwd")))
+# robustness (adversarial-fleet finding, 2026-07-07): the ancestor walk must TERMINATE on an ABSOLUTE
+# manifest_dir too. os.path.dirname("/") == "/" is a fixed point, so a `while not d` guard would spin
+# forever on an absolute path whose ancestry has no lock — unreachable from the git-relative live caller,
+# but a module-public helper must never hang. The walk now stops at any dirname fixed point ("" or "/").
+chk("lockfile: absolute manifest path with no lock in its ancestry terminates (no hang) → None",
+    gate_mod._nearest_lock(os.path.join(tempfile.gettempdir(), "nope", "apps", "web"),
+                           ("bun.lock",), os.path.join(tempfile.gettempdir(), "nope")) is None)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. base_gate_check — per-sha cache

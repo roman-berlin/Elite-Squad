@@ -18,13 +18,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 _TERMINAL = {"merged", "pr_opened", "escalated", "dryrun_land", "ship_dryrun",
-             "ticket_exception", "no_changes", "needs_human", "pm_triage"}
+             "ticket_exception", "no_changes", "needs_human", "pm_triage", "scrum_split"}
 _OUTCOME = {
     "merged": "merged→dev", "pr_opened": "PR / needs you", "escalated": "escalated",
     "dryrun_land": "dry-run", "ship_dryrun": "dry-run",
     "ticket_exception": "errored", "no_changes": "escalated",  # EU-116: no_changes -> ESCALATED
     "needs_human": "awaiting decision",
     "pm_triage": "re-queued",   # PM sent it back for one corrective pass — not a Needs-you item
+    "scrum_split": "split",     # too big → decomposed into sub-tickets, parent closed (a terminal outcome,
+                                # not a run still in flight — else the parent shows "running…" forever)
 }
 _NEEDS_YOU = {"PR / needs you", "escalated", "errored", "awaiting decision"}
 
@@ -75,9 +77,19 @@ def _audit_paths(audit_path: str | Path) -> list[Path]:
     branch); the bare shared/ form is accepted too so tests / any local-only layout work without it."""
     p = Path(audit_path)
     paths: list[Path] = [p]
-    for shared in (p.parent / ".unit-state" / "shared", p.parent / "shared"):
-        if shared.is_dir():
-            paths += sorted(shared.glob("*.jsonl"))
+    # The state clone lives at the REPO ROOT: sync._repo_root strips a ``state/`` subdir, so when
+    # audit.jsonl is under ``state/`` the synced shared/ is ``<root>/.unit-state/shared`` — NOT
+    # ``<state>/.unit-state/shared``. Probe the state-stripped root too, or peer/server audits never
+    # merge into the view (the cockpit silently shows nothing from other hosts).
+    root = p.parent
+    if root.name == "state":
+        root = root.parent
+    seen: set[Path] = set()
+    for shared in (root / ".unit-state" / "shared", p.parent / ".unit-state" / "shared", p.parent / "shared"):
+        if shared in seen or not shared.is_dir():
+            continue
+        seen.add(shared)
+        paths += sorted(shared.glob("*.jsonl"))
     return paths
 
 
@@ -657,18 +669,32 @@ function kpick(id){var f=document.getElementById('f');f.value=id;flt();f.scrollI
 
 
 def standup(cfg) -> str:
-    """A daily-meeting report: shipped today, needs-you, awaiting-decision."""
+    """The deterministic core of the morning daily: what shipped YESTERDAY, what needs you now, and
+    what awaits a decision. The daily fires ~08:30, so 'yesterday' is the completed work the Commander
+    wants to see; 'today so far' is added only once same-day merges exist. No cumulative/all-time
+    history — that is deliberately out (the Commander does not want it in the daily)."""
     from . import decisions
+    from datetime import timedelta
     tasks = load_tasks(cfg.audit_path)
-    today = datetime.now().strftime("%Y-%m-%d")
-    shipped = [t for t in tasks if t["outcome"] == "merged→dev"
-               and t["started"] and t["started"].strftime("%Y-%m-%d") == today]
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def _day(t) -> str | None:                              # when it landed (merge time), else run start —
+        d = t.get("ended") or t.get("started")              # .astimezone() normalizes an audit ts written on
+        return d.astimezone().strftime("%Y-%m-%d") if d else None  # another host (EU-181) to the reader's local
+        #                                                     day, so today/yday boundaries agree cross-host
+    shipped_y = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == yday]
+    shipped_t = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == today]
     needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU]
     pending = decisions.load(cfg)
 
-    lines = [f"🫡 Daily standup — {today}", ""]
-    lines.append(f"✅ Shipped to DEV today ({len(shipped)}): "
-                 + (", ".join(t["ticket_id"] for t in shipped) or "—"))
+    lines = [f"🫡 Daily stand-up — {today}", ""]
+    lines.append(f"✅ Shipped to DEV yesterday ({len(shipped_y)}): "
+                 + (", ".join(t["ticket_id"] for t in shipped_y) or "—"))
+    if shipped_t:
+        lines.append(f"✅ …and today so far ({len(shipped_t)}): "
+                     + ", ".join(t["ticket_id"] for t in shipped_t))
     lines.append(f"🟡 Needs you ({len(needs)}): "
                  + (", ".join(f'{t["ticket_id"]} [{t["outcome"]}]' for t in needs) or "—"))
     if pending:

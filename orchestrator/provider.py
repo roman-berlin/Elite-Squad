@@ -8,28 +8,36 @@ import os
 import re
 
 
-def get_provider_info(model: str = "") -> tuple[str, str]:
-    """Detect provider from endpoint configuration and model string.
+def get_provider_info(model: str = "", backend: str = "") -> tuple[str, str]:
+    """Detect provider from the applied backend / endpoint configuration and model string.
+
+    Args:
+        model: the model id that was served (e.g. "claude-opus-4-8", "glm-4.6").
+        backend: EU-189 — the backend actually applied for THIS call ("glm" / "opus"). When the
+            caller knows it, trust it: per-call GLM lives in ``options.env``, not ``os.environ``,
+            so the endpoint sniff below cannot see it. Empty → fall back to the env sniff (keeps
+            EU-123 callers that pass no backend working unchanged).
 
     Returns:
         (provider, model_version) where:
         - provider: "GLM" if using z.ai endpoint, "Anthropic" otherwise
         - model_version: Clean model name (e.g., "claude-opus-4-8", "claude-sonnet-4-6", "glm-4")
-
-    Detection logic:
-        1. Check ANTHROPIC_BASE_URL environment variable
-        2. If it contains z.ai → provider='GLM'
-        3. Otherwise → provider='Anthropic'
-        4. Extract model version from the model string
     """
-    # Check environment variable for provider endpoint
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-
-    # Detect provider from endpoint
-    if "z.ai" in base_url.lower():
+    # EU-189: prefer the explicitly-applied backend; if none was passed, consult the run-scoped
+    # selection (per-call GLM lives in options.env, not os.environ, so the sniff below can't see it);
+    # finally fall back to the ANTHROPIC_BASE_URL sniff for the native / back-compat path.
+    b = (backend or "").strip().lower()
+    if not b:
+        try:
+            from . import backends as _bk
+            b = _bk.current()
+        except Exception:  # pragma: no cover — backends is always importable
+            b = ""
+    if b == "glm":
         provider = "GLM"
     else:
-        provider = "Anthropic"
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+        provider = "GLM" if "z.ai" in base_url.lower() else "Anthropic"
 
     # Extract model version from model string
     # Model strings are like: "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"

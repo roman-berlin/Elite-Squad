@@ -84,11 +84,17 @@ def _git_show(repo_path: str, ref_path: str) -> str | None:
 
 
 def worktree_drift_check(cfg, app) -> tuple[str, str] | None:
-    """EU-18 doctor assertion: the (possibly reused) worktree's bun.lock — and its resolved
-    @supabase/supabase-js — equals DEV's pin after setup.
+    """EU-18 doctor assertion: surface whether the (possibly reused) worktree's bun.lock differs from
+    DEV's pin. This is INFORMATIONAL, never blocking: ``loop._repin_worktree_deps`` hard-restores
+    ``bun.lock`` from ``origin/<base>`` before EVERY build, so any pre-build drift self-heals and never
+    ships. Emitting 'bad' here DEADLOCKED the cockpit run gate (server.py) after any lock-changing land —
+    DEV moves forward, the reused worktree is left behind, the whole-lock comparison flags drift, and the
+    gate blocks the very build that would re-pin the tree (found live 2026-07-08 on AUTO-57's coverage
+    land, and it recurs on any DEV dep bump — including the pinned pkg). So a detected drift is reported
+    as 'warn', not 'bad'.
 
-    None = not applicable (in-tree mode, or the app isn't a Bun project at DEV) so the caller
-    emits no check line. Otherwise ``(status, detail)`` from :func:`lockfile_drift`."""
+    None = not applicable (in-tree mode, or the app isn't a Bun project at DEV) so the caller emits no
+    check line. Otherwise ``(status, detail)`` — 'ok' when in sync, 'warn' when it differs or can't tell."""
     if not getattr(cfg, "use_worktree", False):
         return None
     from . import loop  # lazy: avoids importing the SDK-heavy loop at module load
@@ -98,7 +104,10 @@ def worktree_drift_check(cfg, app) -> tuple[str, str] | None:
         return None  # no lockfile at DEV (not a Bun app, or origin not fetched) -> skip silently
     wt_lock_path = Path(loop._worktree_path(app, cfg)) / "bun.lock"
     wt_lock = wt_lock_path.read_text() if wt_lock_path.exists() else None
-    return lockfile_drift(wt_lock, base_lock)
+    st, det = lockfile_drift(wt_lock, base_lock)
+    if st == "bad":                                    # real drift, but _repin_worktree_deps heals it —
+        return ("warn", det + " — informational; re-pinned before the next build, does not block runs")
+    return (st, det)
 
 
 def checks(cfg) -> list[dict[str, str]]:

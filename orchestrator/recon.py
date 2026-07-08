@@ -93,7 +93,7 @@ def _opts(system: str, cwd: str, model: str, tools: list[str], turns: int, effor
         cwd=cwd,
         permission_mode="bypassPermissions",
         allowed_tools=(["Read", "Grep", "Glob"] if planning else tools),
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],   # recon is read-only — flag, never edit
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Task", "Agent"],   # recon is read-only — flag, never edit
         # EU-47: these read-only recon officers (provost/scout/quartermaster) run under bypassPermissions
         # with Bash allowed (for npm/bun audit), so the hard denylist must guard them too — Bash stays,
         # deny-by-content blocks `cat .env`/exfil. Same guard the write-capable officers attach.

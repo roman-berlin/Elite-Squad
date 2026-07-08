@@ -116,7 +116,7 @@ async def propose(cfg: Config, *, ticket_text: str | None = None) -> str:
         cwd=cwd,
         permission_mode="bypassPermissions",   # read-only propose pass; runs unattended — must never
         allowed_tools=["Read", "Grep", "Glob"], # dead-stop on a tool prompt no human is there to answer
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"],
         max_turns=14,
         effort="high",
@@ -170,7 +170,7 @@ async def apply(cfg: Config) -> str:
         cwd=root,
         permission_mode="bypassPermissions",   # unattended write; originals are snapshotted first
         allowed_tools=["Read", "Grep", "Glob", "Edit", "Write"],
-        disallowed_tools=["Bash", "NotebookEdit"],
+        disallowed_tools=["Bash", "NotebookEdit", "Task", "Agent"],
         setting_sources=["project"],
         max_turns=20,
         effort="high",

@@ -155,6 +155,24 @@ class Config:
     discussion_model: str = "claude-sonnet-5"              # council / stand-up / meetings / group / General chat (upgraded 2026-07-05)
     smalltalk_model: str = "claude-haiku-4-5-20251001"     # corridor small-talk — cheapest
 
+    # --- EU-189: model backend (which provider the officers execute against) ---
+    # 'opus' = Anthropic/Claude (default; the Max subscription). 'glm' = Z.ai GLM via the
+    # Anthropic-compatible endpoint (needs GLM_AUTH_TOKEN in env; see orchestrator/backends.py).
+    # Chosen per-run in the cockpit: the run route sets it on the per-run rcfg (like builder_effort)
+    # and loop.run pins it for every officer SDK call. Declared here so _known_only keeps a
+    # config.yaml `model_backend:` key (a fleet default) instead of silently dropping it.
+    # GOVERNANCE (Phase 1, per the EU-189 security review):
+    #   • Setting this to 'glm' in config.yaml makes it the fleet default for ALL ticket/task/bug
+    #     runs INCLUDING unattended autopilot + decision-resume — i.e. those runs egress prompts
+    #     (code, tickets, diffs) to Z.ai, a third-party sub-processor. The interactive cockpit picker
+    #     is the explicit, gated path; a YAML default is a standing opt-in. Meetings/ceremonies
+    #     (standup/council/etc.) currently stay on Opus regardless.
+    #   • The fleet dollar cap (max_cost_usd) does NOT price GLM (glm-4.6 isn't in the SDK's
+    #     Anthropic pricing table → ~$0), so it does not bound GLM runs; per_ticket_token_budget /
+    #     per_ticket_time_budget_min still do. Per-provider GLM pricing + an automation opt-in are
+    #     tracked for Phase 2.
+    model_backend: str = "opus"
+
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
     builder_effort: str = "high"            # default / fallback base when sizing is off
     reviewer_effort: str = "high"

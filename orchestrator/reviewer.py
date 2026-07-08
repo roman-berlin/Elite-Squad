@@ -128,7 +128,11 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
         cwd=app.workdir or app.repo_path,   # the isolated worktree when enabled
         permission_mode="bypassPermissions",   # read-only audit; runs unattended in the build loop —
         allowed_tools=["Read", "Grep", "Glob"], # must never dead-stop on a tool prompt mid-cycle
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        # Task/Agent (sub-agent spawn) is denied: allowed_tools does NOT gate it under bypassPermissions,
+        # and a sub-agent burns its OWN turns outside this max_turns cap — the 2026-07-08 AUTO-93 review
+        # ran ~75 min fanning out on a trivial diff. Denied at every officer site (class fix); a read-only
+        # judge reasons over the diff, it never needs to delegate.
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"],
         max_turns=30,
         effort=normalize_effort(cfg.reviewer_effort),

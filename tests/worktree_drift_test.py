@@ -51,6 +51,19 @@ chk("worktree not set up yet -> warn (can't tell)", st == "warn", st)
 st, _ = health.lockfile_drift(DEV_LOCK, None)
 chk("no base lockfile -> warn (nothing to pin against)", st == "warn", st)
 
+# Deadlock regression (2026-07-08): the reused build worktree is left BEHIND DEV after a lock-changing
+# land (DEV added @vitest/coverage-v8, or bumps any dep incl. the pinned one). loop._repin_worktree_deps
+# hard-restores bun.lock from origin/<base> before EVERY build, so the drift self-heals and never ships —
+# yet the check emitted 'bad', and the cockpit run gate (healthy = no 'bad') blocked the very build that
+# heals it. The PURE lockfile_drift stays a strict DETECTOR (any drift -> bad); the informational
+# DOWNGRADE to 'warn' lives in worktree_drift_check, which knows the build re-pins. (Verified end-to-end
+# below at the DRIFTED_LOCK -> warn assertion.)
+DEV_LOCK_AHEAD = DEV_LOCK.replace(
+    '"react": ["react@18.3.1", {}]',
+    '"react": ["react@18.3.1", {}],\n    "@vitest/coverage-v8": ["@vitest/coverage-v8@3.2.4", {}]')
+st, _ = health.lockfile_drift(DEV_LOCK, DEV_LOCK_AHEAD)
+chk("pure lockfile_drift stays a strict detector: any whole-lock difference -> bad", st == "bad", st)
+
 # ---- _resolved_pin extraction ----
 chk("_resolved_pin reads supabase version", health._resolved_pin(DEV_LOCK, "@supabase/supabase-js") == "2.39.0")
 chk("_resolved_pin missing pkg -> None", health._resolved_pin(DEV_LOCK, "@scope/absent") is None)
@@ -94,9 +107,14 @@ chk("no lockfile drift after worktree setup -> ok", res and res[0] == "ok", str(
 res = _run_check(zeltivo, cfg, DEV_LOCK)
 chk("zeltivo-crm typecheck gate passes (no drift) for an off-app ticket", res and res[0] != "bad", str(res))
 
-# Drifted worktree -> bad (the failure mode the frozen-lockfile re-pin guards against).
+# Drifted worktree -> warn, NOT bad: the drift is surfaced (informational) but does not block the run
+# gate, because loop._repin_worktree_deps restores bun.lock from origin/<base> before the build. A 'bad'
+# here deadlocked every cockpit run after a lock-changing land (the gate blocked the healing build).
 res = _run_check(zeltivo, cfg, DRIFTED_LOCK)
-chk("drifted worktree lock -> bad (drift caught)", res and res[0] == "bad", str(res))
+chk("drifted worktree lock -> warn (surfaced, non-blocking — re-pin heals it before the build)",
+    res and res[0] == "warn", str(res))
+chk("the drift detail is still shown on the warn (operator still sees it)",
+    res and ("drift" in res[1].lower() or "differs" in res[1].lower()), str(res))
 
 # Worktree mode off -> not applicable (in-tree shares the user's checkout).
 cfg_off = Config(apps=[zeltivo], audit_path="/tmp/x.jsonl", use_worktree=False, worktree_dir=wtroot)

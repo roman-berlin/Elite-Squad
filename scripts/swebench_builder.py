@@ -248,6 +248,10 @@ async def build_patch_for_task(
         permission_mode="bypassPermissions",
         # ACI tools: Read=view_file, Edit/Write=edit_file, Bash=run_tests/shell.
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        # Deny the Task/Agent sub-agent tool (allowed_tools does not gate it under bypassPermissions):
+        # this benchmark builder is the same profile as builder.py with the highest turn budget (60),
+        # so an un-denied sub-agent could fan out beyond max_turns (AUTO-93 class fix).
+        disallowed_tools=["Task", "Agent"],
         setting_sources=[],   # no .claude/ settings in the target repo
         max_turns=60,
         effort="high",

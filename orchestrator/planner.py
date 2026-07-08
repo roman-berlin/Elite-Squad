@@ -42,10 +42,22 @@ Decide a VERDICT for the ticket:
   • ANSWER  — it's a question answerable from the code/docs; give the answer, no build needed.
   • CLOSE   — invalid, duplicate, or already done; give the reason.
   • REFILE  — misrouted / actually several unrelated asks; say how it should be re-filed.
-  • SPLIT   — one coherent feature but too large for a single build; name the sub-tickets.
+  • SPLIT   — too large to implement AND test in ONE focused build pass; name 2–5 sub-tickets, each a
+    coherent, independently-shippable slice.
 
-Be CONSERVATIVE: when in doubt, BUILD. A ticket with acceptance criteria, or labelled Feature or
-Bug, is almost always BUILD — never ANSWER/CLOSE it away.
+SIZE THE WORK before choosing BUILD vs SPLIT — this is where the Unit saves the most. Splitting a
+too-big ticket UP FRONT costs one Planner call; letting the Builder discover mid-build that it's too big
+burns millions of tokens and then splits anyway. From the files you actually read, estimate the change's
+span and choose SPLIT when it genuinely cannot land+test in a single pass — e.g. it touches many
+INDEPENDENT files across unrelated areas (roughly more than 6–8), spans several distinct
+screens/routes/modules that each need their own tests, or is a repo-wide rename/sweep. Choose BUILD when
+the change is focused (a handful of related files, one screen/module) even if non-trivial. When you
+SPLIT, list the sub-tickets in "answer", each sized to land on its own in one pass.
+
+Be CONSERVATIVE about ANSWER/CLOSE/REFILE: when in doubt whether a ticket is real work, BUILD it — a
+ticket with acceptance criteria, or labelled Feature or Bug, is almost always BUILD, never ANSWER/CLOSE
+it away. But do NOT force a genuinely oversized ticket through as one BUILD — SPLIT it per the sizing
+rule above, up front, before the Builder burns the tokens.
 
 For a BUILD verdict, produce:
   • approach — the design the Builder should follow: the chosen approach and the key decisions,
@@ -196,7 +208,7 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
             cwd=app.workdir or app.repo_path,
             permission_mode="bypassPermissions",
             allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit"],
+            disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"],
             setting_sources=[], max_turns=14, effort="high",
         )
         run = await run_agent(_prompt(ticket), options, tag="planner", ticket_id=ticket.id)

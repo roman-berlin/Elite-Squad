@@ -167,7 +167,7 @@ async def _status_line(cfg: Config) -> str:
             ClaudeAgentOptions(model=cfg.smalltalk_model, system_prompt=memory.preamble() + sys_p,
                                cwd=str(Path(__file__).resolve().parent.parent),
                                permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-                               disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+                               disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
                                max_turns=3, effort="low"), tag="roster")
         return (run.final or run.text or "").strip().split("\n")[0][:240]
     except Exception:  # noqa: BLE001

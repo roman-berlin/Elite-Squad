@@ -9,6 +9,7 @@ fragment is small enough to land on its own, and the autopilot picks them up nex
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 from .config import Config
 
@@ -58,6 +59,26 @@ def parse_subtickets(text: str | None) -> list[dict[str, str]]:
     return out
 
 
+# Recursion bound: a fragment carries a machine-only HTML-comment marker "<!-- autosplit-depth: N -->" in
+# its body; a re-split increments it. Past this ceiling we STOP splitting and escalate to the Commander —
+# otherwise a ticket whose single irreducible action always blows the budget would fan out into ever-more
+# sub-tickets forever (the adversarial fleet's finding on the budget-triggered auto-split, 2026-07-08).
+# The marker is an HTML comment (invisible in rendered Jira, and a human ticket body is very unlikely to
+# type it verbatim — unlike a plain "[split-depth: N]" that a ticket ABOUT this feature could spoof). 3
+# levels is far more than any real ticket needs and still bounds the blast radius.
+_MAX_SPLIT_DEPTH = 3
+_DEPTH_RE = re.compile(r"<!--\s*autosplit-depth:\s*(\d+)\s*-->")
+
+
+def _split_depth(parent) -> int:
+    """How many times this ticket's lineage has already been auto-split (0 for an original ticket). Reads
+    the MAX marker present, so even if a re-split's LLM echoed the parent's footer and a body ends up with
+    more than one marker, the deepest still wins (a naive 'first match' could read a stale lower value and
+    let the bound be defeated — the fleet's MAJOR finding)."""
+    deps = _DEPTH_RE.findall(getattr(parent, "description", "") or "")
+    return max((int(x) for x in deps), default=0)
+
+
 async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str = "") -> dict:
     """Break ``parent`` into sub-tickets, FILE them, and close the parent. Returns
     {ok, keys, subs, error}. ``parent`` is a Ticket (needs .id/.summary/.description/.ephemeral)."""
@@ -65,6 +86,14 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
     from . import recon, models
     from .backlog.base import make_backlog
     result: dict = {"ok": False, "keys": [], "subs": [], "error": None}
+
+    # Recursion guard: refuse to split past the depth ceiling so an irreducible-but-too-big ticket parks
+    # for a human instead of splitting without bound. The caller sees ok=False and escalates as normal.
+    depth = _split_depth(parent)
+    if depth >= _MAX_SPLIT_DEPTH:
+        result["error"] = (f"max auto-split depth ({_MAX_SPLIT_DEPTH}) reached — {parent.id} is irreducibly "
+                           "too big for one attempt; narrow it or handle it manually")
+        return result
 
     task = "\n".join(filter(None, [
         f"Parent ticket {parent.id}: {getattr(parent, 'summary', '')}",
@@ -92,7 +121,11 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
     bl = make_backlog(app)
     keys: list[str] = []
     for s in subs[:6]:
-        body = s["body"] + f"\n\n— Auto-split from {parent.id} by the Scrum Master (too heavy to land as one)."
+        # Strip any depth marker the LLM may have echoed from the parent body, then stamp the ONE
+        # authoritative marker — so a fragment carries exactly one, and the depth can never accrete.
+        base_body = _DEPTH_RE.sub("", s["body"]).rstrip()
+        body = (base_body + f"\n\n— Auto-split from {parent.id} by the Scrum Master (too heavy to land as one)."
+                + f"\n<!-- autosplit-depth: {depth + 1} -->")
         try:
             k = bl.create_task(s["title"], body, labels=["auto-split"])
         except Exception as exc:  # noqa: BLE001 - one filing failure must not lose the rest
@@ -100,6 +133,15 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
             break
         if k:
             keys.append(k)
+            # The fragments ARE the active work now (they're implemented together to finish the parent),
+            # so move each straight to In Progress ("in development") rather than leaving it in To Do —
+            # the board shows the real state, and the autopilot resumes In Progress first. Best-effort:
+            # a missing transition just leaves it in its created column (set_status handles that), and a
+            # status nudge must never lose a filed fragment.
+            try:
+                bl.set_status(SimpleNamespace(key=k), "In Progress")
+            except Exception:  # noqa: BLE001
+                pass
     result["keys"] = keys
     result["ok"] = bool(keys)
 

@@ -294,6 +294,16 @@ finally:
     (loop.builder_mod, loop.reviewer_mod, loop.run_gate, loop._land, loop._notify) = _orig_loop
 
 
+# proactive sizing (2026-07-08): the Planner must SIZE the work up front and SPLIT a genuinely oversized
+# ticket BEFORE the Builder burns tokens — the cheap ~1-call decomposition, not the reactive turn-limit/
+# budget split after millions of tokens are gone. Pin the directive (not a bare keyword).
+_ps = planner.PLANNER_SYSTEM
+chk("planner prompt tells it to SIZE the work up front", "SIZE THE WORK" in _ps)
+chk("planner prompt splits oversized tickets BEFORE the burn (proactive)",
+    "SPLIT" in _ps and "before the Builder burns" in _ps, _ps[-400:])
+chk("planner keeps a conservative-BUILD bias scoped to ANSWER/CLOSE (not against SPLIT)",
+    "BUILD it" in _ps and "ANSWER/CLOSE" in _ps)
+
 # ══════════════════════════════════════════════════════════════════════════════
 passed = sum(1 for _, ok, _ in results if ok)
 print(f"\nplanner_test: {passed}/{len(results)} passed")

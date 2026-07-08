@@ -376,6 +376,11 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         cwd=workdir,                   # the isolated worktree when enabled
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        # Deny the Task/Agent sub-agent tool: allowed_tools does NOT gate it under bypassPermissions,
+        # so an un-denied sub-agent could fan out with its own turns outside max_turns — worst here of
+        # all officers (Opus ceiling + the highest turn budget). The Builder builds solo (delegation
+        # was removed); it never needs to spawn sub-agents. (AUTO-93 reviewer-runaway class fix.)
+        disallowed_tools=["Task", "Agent"],
         setting_sources=[],            # no settings files -> no ask/deny gate at any level
         hooks=guard.hooks_config(workdir),  # denylist + EU-188 worktree confinement (no writes outside workdir)
         max_turns=turns_for(cfg, eff),

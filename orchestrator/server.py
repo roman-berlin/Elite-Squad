@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from . import backend_pref
+from . import backends
 from . import dashboard as D
 from . import health
 from . import intake
@@ -97,6 +99,20 @@ def _first_shippable(cfg) -> str:
     except Exception:  # noqa: BLE001
         pass
     return cfg.apps[0].name if getattr(cfg, "apps", None) else ""
+
+
+def _resolve_run_backend(rcfg) -> str | None:
+    """EU-190: set this run's backend from the persisted sticky preference (cockpit /api/model),
+    falling back to the config.yaml default carried on ``rcfg``.
+
+    Returns an error string to BLOCK the run when the chosen backend isn't runnable (GLM selected
+    but ``GLM_AUTH_TOKEN`` missing) — *no silent fallback*, per EU-190 — else ``None``."""
+    bk = backend_pref.active(rcfg)
+    rcfg.model_backend = bk
+    if bk == backends.GLM and not backends.available("glm"):
+        return ("GLM is selected but GLM_AUTH_TOKEN is not configured — set it and restart, "
+                "or switch the Model back to Opus.")
+    return None
 
 
 def create_app(cfg: Config):
@@ -470,6 +486,10 @@ def create_app(cfg: Config):
             ev = threading.Event()
             ap_cfg = copy.copy(cfg)
             ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
+            _berr = _resolve_run_backend(ap_cfg)   # EU-190: cockpit autopilot honours the sticky Model
+            if _berr:                              # pick too (and blocks an unconfigured GLM), so the
+                st["last_msg"] = _berr             # control-bar label "applies to all runs" holds.
+                return redirect(_redir)
             # Claim THIS project's run slot atomically (per-app TOCTOU guard + the cross-project
             # parallel cap). Flask is threaded=True, so two near-simultaneous Starts for the same
             # project both pass the checks above; claim_run lets exactly one win. A manual run holding
@@ -739,6 +759,76 @@ def create_app(cfg: Config):
                 + _run_form(appq, _checkbox_rows([t for _, t in items]), "Develop selected"))
         return _wrap(f"Choose tickets — {html.escape(appq)}", body)
 
+    @app.post("/api/model")
+    def model_api():
+        # EU-190: persist the sticky active model backend. When switching to GLM, run a LIVE
+        # connection test first so a bad setup (missing/incorrect token, wrong URL) surfaces a clear,
+        # actionable alert ("what to fix, or re-onboard") in the cockpit instead of failing mid-run.
+        # No silent fallback; never stores or echoes the token — only the backend id.
+        bk = backends.normalize(request.form.get("backend"))
+        if bk == backends.GLM:
+            ok, detail = backends.glm_test_connection()
+            if not ok:
+                _state["model_alert"] = (
+                    f"GLM not enabled — {detail}.  Fix it in .env (GLM_AUTH_TOKEN / GLM_BASE_URL) "
+                    "and restart, or re-onboard, then pick GLM again.")
+                return redirect("/")
+        backend_pref.set_active(bk)
+        _state.pop("model_alert", None)
+        get_state(None)["last_msg"] = (
+            "Model backend set to "
+            + ("GLM (Z.ai) — connection OK." if bk == backends.GLM else "Opus (Claude)."))
+        return redirect("/")
+
+    @app.post("/api/continue-on-alternate")
+    def continue_on_alternate_api():
+        # EU-191: the plan-limit banner's "Continue on <backend>" button. Switch the sticky model
+        # backend to a runnable alternate (e.g. GLM), clear the plan-limit flags, and AUTO-RESUME the
+        # last cockpit run on that backend — so an Opus/Claude plan-limit doesn't stall the drain until
+        # it resets. Fail-closed: an unconfigured/unreachable backend surfaces an alert and does not switch.
+        bk = backends.normalize(request.form.get("backend"))
+        if not backends.available(bk):
+            _state["model_alert"] = (f"Cannot continue on {bk} — it is not configured. Set its "
+                                     "credentials in .env and restart.")
+            return redirect("/")
+        if bk == backends.GLM:
+            ok, detail = backends.glm_test_connection()
+            if not ok:
+                _state["model_alert"] = f"GLM not usable — {detail}. Fix .env and restart."
+                return redirect("/")
+        backend_pref.set_active(bk)
+        _state.pop("model_alert", None)
+        # Drop the plan-limit banner (the operator chose to switch rather than wait). MUST include the
+        # None key: the dashboard banner is rendered from the unit-wide None-keyed _state, so clearing
+        # only the per-app keys would leave the banner stuck on-screen forever after the switch.
+        for _a in [None, *_app_names]:
+            try:
+                cockpit_state.set_plan_limit_hit(_a, hit=False, reset_at=None)
+            except Exception:  # noqa: BLE001 — clearing the flag must never 500 the switch
+                pass
+        # Auto-resume the last cockpit run on the new backend (EU-191 design: switch + resume).
+        last = _state.get("last_run") or {}
+        app_name = _scope(last.get("app"))
+        keys = [k for k in (last.get("tickets") or []) if k]
+        msg = f"Model backend switched to {bk.upper()}."
+        if app_name and keys:
+            import copy
+            rcfg = copy.copy(cfg)
+            rcfg.dry_run = False
+            _resolve_run_backend(rcfg)   # picks up the just-set sticky backend
+            try:
+                worklist = intake.from_tickets(rcfg, app_name, keys)
+                from . import decisions as _dec
+                if _dec._run_bg(rcfg, audit, worklist, refuse_if_busy=True):
+                    msg = f"Switched to {bk.upper()} — resuming {', '.join(keys)}."
+                else:
+                    msg = (f"Switched to {bk.upper()}; a run is already active for {app_name}, so "
+                           f"{', '.join(keys)} was not re-started.")
+            except Exception as exc:  # noqa: BLE001
+                msg = f"Switched to {bk.upper()}, but auto-resume failed: {exc}"
+        get_state(None)["last_msg"] = msg
+        return redirect("/")
+
     @app.post("/api/run-selected")
     def run_selected_api():
         app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project
@@ -762,6 +852,11 @@ def create_app(cfg: Config):
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False
+        _berr = _resolve_run_backend(rcfg)   # EU-190: apply the persisted backend; block if unconfigured
+        if _berr:
+            release_run(app_name or None)
+            st["last_msg"] = _berr
+            return redirect("/")
         try:
             worklist = intake.from_tickets(rcfg, app_name, keys)
         except Exception as exc:  # noqa: BLE001
@@ -769,6 +864,10 @@ def create_app(cfg: Config):
             st["dry_run"] = None
             st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
+
+        # EU-191: remember the last cockpit run so the plan-limit prompt can auto-resume it on an
+        # alternate backend (GLM) if Opus hits its limit.
+        _state["last_run"] = {"app": app_name, "tickets": list(keys)}
 
         # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
         # Derive the label from the first ticket's id; fall back gracefully so test stubs never crash.
@@ -816,6 +915,20 @@ def create_app(cfg: Config):
                 # longer clears last_msg, so the operator still sees why a failed run failed.
                 if not errored:
                     st["last_msg"] = ""
+                # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
+                # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
+                # plan-limit banner + its Continue-on-GLM offer if this run tripped the Opus/Claude cap.
+                # The autopilot governor only sets this for its own loop, so without it the banner never
+                # appears for a manual cockpit run. _state['last_run'] holds the ticket for the Continue button.
+                try:
+                    from . import usage as _u191
+                    _pl = _u191.plan_limit_hit(cfg, force=True)
+                    if _pl.get("hit"):
+                        _reset = next((l.get("resets_at") for l in _pl.get("over_limits", [])
+                                       if l.get("resets_at")), None)
+                        cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
+                except Exception:  # noqa: BLE001 — detection must never break run cleanup
+                    pass
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -845,6 +958,11 @@ def create_app(cfg: Config):
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
+        _berr = _resolve_run_backend(rcfg)   # EU-190: apply the persisted backend; block if unconfigured
+        if _berr:
+            release_run(app_name or None)
+            st["last_msg"] = _berr
+            return redirect("/")
         try:
             if kind == "task" and ttype == "bug":
                 worklist = intake.from_text(rcfg, app_name, _bug_title(text), [],
@@ -908,6 +1026,20 @@ def create_app(cfg: Config):
                 # longer clears last_msg, so the operator still sees why a failed run failed.
                 if not errored:
                     st["last_msg"] = ""
+                # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
+                # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
+                # plan-limit banner + its Continue-on-GLM offer if this run tripped the Opus/Claude cap.
+                # The autopilot governor only sets this for its own loop, so without it the banner never
+                # appears for a manual cockpit run. _state['last_run'] holds the ticket for the Continue button.
+                try:
+                    from . import usage as _u191
+                    _pl = _u191.plan_limit_hit(cfg, force=True)
+                    if _pl.get("hit"):
+                        _reset = next((l.get("resets_at") for l in _pl.get("over_limits", [])
+                                       if l.get("resets_at")), None)
+                        cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
+                except Exception:  # noqa: BLE001 — detection must never break run cleanup
+                    pass
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -2585,6 +2717,11 @@ def create_app(cfg: Config):
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
         st["dry_run"] = rcfg.dry_run
+        _berr = _resolve_run_backend(rcfg)   # EU-190: apply the persisted backend; block if unconfigured
+        if _berr:
+            release_run(app_name or None)
+            st["last_msg"] = _berr
+            return redirect("/")
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
         try:
@@ -2614,6 +2751,20 @@ def create_app(cfg: Config):
                 # longer clears last_msg, so the operator still sees why a failed run failed.
                 if not errored:
                     st["last_msg"] = ""
+                # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
+                # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
+                # plan-limit banner + its Continue-on-GLM offer if this run tripped the Opus/Claude cap.
+                # The autopilot governor only sets this for its own loop, so without it the banner never
+                # appears for a manual cockpit run. _state['last_run'] holds the ticket for the Continue button.
+                try:
+                    from . import usage as _u191
+                    _pl = _u191.plan_limit_hit(cfg, force=True)
+                    if _pl.get("hit"):
+                        _reset = next((l.get("resets_at") for l in _pl.get("over_limits", [])
+                                       if l.get("resets_at")), None)
+                        cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
+                except Exception:  # noqa: BLE001 — detection must never break run cleanup
+                    pass
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 

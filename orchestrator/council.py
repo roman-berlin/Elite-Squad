@@ -120,10 +120,14 @@ _CHAIR_SYSTEM = (
 
 _DAILY_SYSTEM = (
     "You are THE CTO writing the Elite Unit's DAILY stand-up — it lands on Roman's phone, so keep the "
-    "WHOLE thing skimmable in ~10 seconds, under ~55 words. You are given the unit's record and the "
-    "deterministic stand-up already computed (what shipped, what needs him). Do NOT restate those "
-    "lines. Output exactly this markdown and nothing else:\n\n"
-    "**FOCUS** — one line: the single most important thing the unit should push today.\n\n"
+    "WHOLE thing skimmable in ~10 seconds, under ~45 words. You are given the deterministic stand-up "
+    "already computed (what shipped yesterday, what needs him) — do NOT restate those lines. The daily "
+    "is YESTERDAY's result + TODAY's focus + anything that needs him — NOTHING else. Do NOT cite "
+    "cumulative or all-time history: no totals or counters like 'X/Y tickets landed', 'avg passes', "
+    "'N hit max effort', 'reviewer bounce rate' — Roman does not want the running history, only today. "
+    "Output exactly this markdown and nothing else:\n\n"
+    "**FOCUS** — one line: the single most important thing the unit should push TODAY (a ticket or "
+    "action), grounded in what is open/needs-you right now.\n\n"
     "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product direction, business/"
     "strategy, or an irreversible call with no safe default); NOT a technical/process choice the unit "
     "should make itself. Hold a HIGH bar — most days this is 'None.' One question per line ending in "
@@ -253,7 +257,7 @@ def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
         cwd=cwd,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"],
         max_turns=8,
         effort="medium",
@@ -361,7 +365,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         model=cfg.discussion_model,
         system_prompt=memory.preamble() + _CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     chair_provider, chair_model = chair.provider, chair.model_version
     briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
@@ -466,7 +470,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
         model=cfg.discussion_model,
         system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision_raw = (chair.final or chair.text or "(no decision)").strip()
     chair_provider, chair_model = chair.provider, chair.model_version
@@ -524,7 +528,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model, system_prompt=memory.preamble() + _SHIP_REVIEW_CHAIR_SYSTEM, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision = (chair.final or chair.text or "(no recommendation)").strip()
 
@@ -840,7 +844,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         system_prompt=memory.preamble() + system + _COMMANDER_TICKET_RULE + filing.TICKET_BLOCK_RULE,
         cwd=_general_root(),
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         # Room to glance at a few files before replying — 6 was too tight and errored out when the
         # Commander's message invited a quick look ("investigate…"), so the CTO couldn't answer.
         max_turns=14, effort="low"), tag="the-general")
@@ -888,7 +892,7 @@ def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
         system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"], max_turns=5, effort="low")
 
 
@@ -1026,7 +1030,7 @@ async def _gather_standup(cfg: Config) -> tuple[str, list[tuple[str, str]], list
             model=cfg.discussion_model,
             system_prompt=memory.preamble() + f"{_STANDUP_SYSTEM}\n\nYour lens — {voice}",
             cwd=cwd, permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"], setting_sources=["project"],
+            disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"], setting_sources=["project"],
             max_turns=5, effort="low"), tag="standup-" + _officer_key(rank))
         rows.append((rank, (run.final or run.text or "(no report)").strip()))
         print(f"  · {rank} reported", flush=True)
@@ -1061,22 +1065,24 @@ async def daily_brief(cfg: Config, audit=None) -> str:
     of the deep multi-officer council (hold_council), which is now a WEEKLY ceremony. Sends one
     skimmable phone ping; surfaces any Commander decision as a separate 'needs your call'."""
     from . import dashboard, governor
-    facts = dashboard.standup(cfg)                     # deterministic — no model call
-    digest = format_signals(collect_signals(cfg))      # the record, context for the synthesis
+    facts = dashboard.standup(cfg)                     # deterministic — yesterday shipped, needs you, awaiting
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
+    # The daily is intentionally NOT fed the cumulative signals digest (format_signals) — that carries
+    # all-time totals ('X/Y landed', avg passes, max-effort hits) the Commander does not want in the
+    # daily. The deterministic facts (yesterday's result + what needs him) are context enough for the
+    # CTO to name TODAY's focus. The deep WEEKLY council still gets the full record.
     prompt = "\n".join([
-        "The unit's record:", "", digest, "",
-        *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
-        "Today's deterministic stand-up (already going to the Commander — do not repeat it):",
+        "Today's deterministic stand-up (already going to the Commander — do NOT repeat these lines):",
         "", facts, "",
-        "Now write the daily brief.",
+        *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
+        "Now write the daily brief: TODAY's single focus, and any decision that is genuinely his.",
     ])
     run = await run_agent(prompt, ClaudeAgentOptions(
         model=cfg.discussion_model,
         system_prompt=memory.preamble() + _DAILY_SYSTEM, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
     synth = (run.final or run.text or "").strip()
     governor.note_call(cfg, 1)
@@ -1088,7 +1094,7 @@ async def daily_brief(cfg: Config, audit=None) -> str:
         notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
                     + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     try:
-        _save_transcript(cfg, "daily", digest, [("CTO", synth)], synth)
+        _save_transcript(cfg, "daily", facts, [("CTO", synth)], synth)
     except OSError:
         pass
     if audit is not None:

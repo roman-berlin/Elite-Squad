@@ -80,7 +80,8 @@ async def distill(cfg, *, system: str, user: str, tag: str, fallback) -> str:
         run = await run_agent(user, ClaudeAgentOptions(
             model=getattr(cfg, "smalltalk_model", None) or getattr(cfg, "discussion_model", None),
             system_prompt=system, permission_mode="bypassPermissions",
-            allowed_tools=[], setting_sources=[], max_turns=1, effort="low"), tag=tag)
+            allowed_tools=[], disallowed_tools=["Task", "Agent"],  # no sub-agent fan-out (AUTO-93 class fix)
+            setting_sources=[], max_turns=1, effort="low"), tag=tag)
         return (run.final or run.text or "").strip() or fallback()
     except Exception:  # noqa: BLE001 - summarisation must never break a notification
         return fallback()
