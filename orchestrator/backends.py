@@ -100,6 +100,14 @@ def available(backend: str) -> bool:
     return True
 
 
+def alternates(current: str) -> list[str]:
+    """Runnable backend ids OTHER than ``current`` — the options to offer when the active backend is
+    blocked (e.g. an Opus/Claude plan-limit). Used by the cockpit's limit prompt (EU-191). NATIVE is
+    always runnable; GLM only when its token is configured. Order: GLM first (the usual alternate)."""
+    cur = normalize(current)
+    return [bk for bk in (GLM, NATIVE) if bk != cur and available(bk)]
+
+
 def glm_model() -> str:
     """The GLM model id to send (env-overridable, defaults to ``glm-4.6``)."""
     return (os.environ.get("GLM_MODEL") or _GLM_MODEL_DEFAULT).strip()

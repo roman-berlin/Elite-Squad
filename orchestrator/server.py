@@ -780,6 +780,53 @@ def create_app(cfg: Config):
             + ("GLM (Z.ai) — connection OK." if bk == backends.GLM else "Opus (Claude)."))
         return redirect("/")
 
+    @app.post("/api/continue-on-alternate")
+    def continue_on_alternate_api():
+        # EU-191: the plan-limit banner's "Continue on <backend>" button. Switch the sticky model
+        # backend to a runnable alternate (e.g. GLM), clear the plan-limit flags, and AUTO-RESUME the
+        # last cockpit run on that backend — so an Opus/Claude plan-limit doesn't stall the drain until
+        # it resets. Fail-closed: an unconfigured/unreachable backend surfaces an alert and does not switch.
+        bk = backends.normalize(request.form.get("backend"))
+        if not backends.available(bk):
+            _state["model_alert"] = (f"Cannot continue on {bk} — it is not configured. Set its "
+                                     "credentials in .env and restart.")
+            return redirect("/")
+        if bk == backends.GLM:
+            ok, detail = backends.glm_test_connection()
+            if not ok:
+                _state["model_alert"] = f"GLM not usable — {detail}. Fix .env and restart."
+                return redirect("/")
+        backend_pref.set_active(bk)
+        _state.pop("model_alert", None)
+        # Drop the plan-limit banner on every app (the operator chose to switch rather than wait).
+        for _a in (list(_app_names) or [None]):
+            try:
+                cockpit_state.set_plan_limit_hit(_a, hit=False, reset_at=None)
+            except Exception:  # noqa: BLE001 — clearing the flag must never 500 the switch
+                pass
+        # Auto-resume the last cockpit run on the new backend (EU-191 design: switch + resume).
+        last = _state.get("last_run") or {}
+        app_name = _scope(last.get("app"))
+        keys = [k for k in (last.get("tickets") or []) if k]
+        msg = f"Model backend switched to {bk.upper()}."
+        if app_name and keys:
+            import copy
+            rcfg = copy.copy(cfg)
+            rcfg.dry_run = False
+            _resolve_run_backend(rcfg)   # picks up the just-set sticky backend
+            try:
+                worklist = intake.from_tickets(rcfg, app_name, keys)
+                from . import decisions as _dec
+                if _dec._run_bg(rcfg, audit, worklist, refuse_if_busy=True):
+                    msg = f"Switched to {bk.upper()} — resuming {', '.join(keys)}."
+                else:
+                    msg = (f"Switched to {bk.upper()}; a run is already active for {app_name}, so "
+                           f"{', '.join(keys)} was not re-started.")
+            except Exception as exc:  # noqa: BLE001
+                msg = f"Switched to {bk.upper()}, but auto-resume failed: {exc}"
+        get_state(None)["last_msg"] = msg
+        return redirect("/")
+
     @app.post("/api/run-selected")
     def run_selected_api():
         app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project
@@ -815,6 +862,10 @@ def create_app(cfg: Config):
             st["dry_run"] = None
             st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
+
+        # EU-191: remember the last cockpit run so the plan-limit prompt can auto-resume it on an
+        # alternate backend (GLM) if Opus hits its limit.
+        _state["last_run"] = {"app": app_name, "tickets": list(keys)}
 
         # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
         # Derive the label from the first ticket's id; fall back gracefully so test stubs never crash.
