@@ -78,6 +78,13 @@ chk("endpoint switches the sticky backend (backend_pref.set_active)", "backend_p
 chk("endpoint clears the plan-limit flag (set_plan_limit_hit hit=False)", "set_plan_limit_hit" in _seg and "hit=False" in _seg)
 chk("endpoint auto-resumes the last run (_run_bg on the last_run tickets)", "_run_bg(" in _seg and "last_run" in _srv)
 chk("run-selected records last_run for the resume", '_state["last_run"]' in _srv)
+# Defect 1 (review): the accept must clear the None-keyed flag — the dashboard banner is rendered
+# from the unit-wide None-keyed _state, so a per-app-only clear leaves the banner stuck on-screen.
+chk("accept clears the None-keyed banner flag (banner would persist otherwise)",
+    "[None, *_app_names]" in _seg, "clear loop must include None")
+# Detection (review): a MANUAL cockpit run must raise the None-key flag when it trips the Opus cap.
+chk("a manual run raises the plan-limit banner on an Opus cap (usage.plan_limit_hit -> set_plan_limit_hit(None))",
+    "plan_limit_hit(cfg, force=True)" in _srv and "set_plan_limit_hit(None, hit=True" in _srv)
 
 if _HAD_TOKEN is not None:
     os.environ["GLM_AUTH_TOKEN"] = _HAD_TOKEN

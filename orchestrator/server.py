@@ -798,8 +798,10 @@ def create_app(cfg: Config):
                 return redirect("/")
         backend_pref.set_active(bk)
         _state.pop("model_alert", None)
-        # Drop the plan-limit banner on every app (the operator chose to switch rather than wait).
-        for _a in (list(_app_names) or [None]):
+        # Drop the plan-limit banner (the operator chose to switch rather than wait). MUST include the
+        # None key: the dashboard banner is rendered from the unit-wide None-keyed _state, so clearing
+        # only the per-app keys would leave the banner stuck on-screen forever after the switch.
+        for _a in [None, *_app_names]:
             try:
                 cockpit_state.set_plan_limit_hit(_a, hit=False, reset_at=None)
             except Exception:  # noqa: BLE001 — clearing the flag must never 500 the switch
@@ -907,6 +909,20 @@ def create_app(cfg: Config):
                     pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
+                # EU-191: if the Opus/Claude plan limit is now tripped, raise the unit-wide (None-keyed)
+                # banner with its Continue-on-GLM offer. The autopilot governor only sets this for its
+                # own loop — never for a manual cockpit run — so without this the banner (and the whole
+                # continue-on-alternate flow) never appears for the primary cockpit-drive workflow.
+                # _state['last_run'] already holds the just-run ticket, so the Continue button resumes it.
+                try:
+                    from . import usage as _u191
+                    _pl = _u191.plan_limit_hit(cfg, force=True)
+                    if _pl.get("hit"):
+                        _reset = next((l.get("resets_at") for l in _pl.get("over_limits", [])
+                                       if l.get("resets_at")), None)
+                        cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
+                except Exception:  # noqa: BLE001 — detection must never break run cleanup
+                    pass
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
                 # control-bar note so a finished run never lingers as 'Working'. Guarded by
                 # ``errored`` so a real run error (set just above) stays visible — release_run no
@@ -1004,6 +1020,20 @@ def create_app(cfg: Config):
                     pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
+                # EU-191: if the Opus/Claude plan limit is now tripped, raise the unit-wide (None-keyed)
+                # banner with its Continue-on-GLM offer. The autopilot governor only sets this for its
+                # own loop — never for a manual cockpit run — so without this the banner (and the whole
+                # continue-on-alternate flow) never appears for the primary cockpit-drive workflow.
+                # _state['last_run'] already holds the just-run ticket, so the Continue button resumes it.
+                try:
+                    from . import usage as _u191
+                    _pl = _u191.plan_limit_hit(cfg, force=True)
+                    if _pl.get("hit"):
+                        _reset = next((l.get("resets_at") for l in _pl.get("over_limits", [])
+                                       if l.get("resets_at")), None)
+                        cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
+                except Exception:  # noqa: BLE001 — detection must never break run cleanup
+                    pass
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
                 # control-bar note so a finished run never lingers as 'Working'. Guarded by
                 # ``errored`` so a real run error (set just above) stays visible — release_run no
@@ -2715,6 +2745,20 @@ def create_app(cfg: Config):
             finally:
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
+                # EU-191: if the Opus/Claude plan limit is now tripped, raise the unit-wide (None-keyed)
+                # banner with its Continue-on-GLM offer. The autopilot governor only sets this for its
+                # own loop — never for a manual cockpit run — so without this the banner (and the whole
+                # continue-on-alternate flow) never appears for the primary cockpit-drive workflow.
+                # _state['last_run'] already holds the just-run ticket, so the Continue button resumes it.
+                try:
+                    from . import usage as _u191
+                    _pl = _u191.plan_limit_hit(cfg, force=True)
+                    if _pl.get("hit"):
+                        _reset = next((l.get("resets_at") for l in _pl.get("over_limits", [])
+                                       if l.get("resets_at")), None)
+                        cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
+                except Exception:  # noqa: BLE001 — detection must never break run cleanup
+                    pass
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
                 # control-bar note so a finished run never lingers as 'Working'. Guarded by
                 # ``errored`` so a real run error (set just above) stays visible — release_run no
