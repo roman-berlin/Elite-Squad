@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-08 · AUTO-88 · automatixy · • Gated-state h2→h1 promotion is correct and isolated (mutually exclusive render branches, no other h1 collision on the route). · 🔗 /automations (view as a Basic-tier tenant to see the gated state's page title)
 - 2026-07-08 · AUTO-93 · automatixy · • Both pages now render card titles as <h2> with Tailwind classes byte-for-byte unchanged — single h1 → h2 chain, no h3 anywhere. · 🔗 (no UI change beyond semantic tag — verify with axe DevTools showing zero heading-order violations on /packages and /quotes)
 - 2026-07-08 · AUTO-92 · automatixy · • Verified against source: ClientsPage has a lone valid h1 (no CardTitle, no h2/h3); TripsPage is h1→h2 (empty state) / lone h1 (populated) — no heading skip exists on either page, so the ticket's conditional fix… · 🔗 /clients and /trips (verify headings render one h1 with no level skip; no visual change)
 - 2026-07-08 · AUTO-91 · automatixy · • CardTitle gains `as?: 'h2'|'h3'` (default h3) with byte-identical Tailwind classes both ways; ref generic corrected to HTMLHeadingElement — verified. · 🔗 /leads
