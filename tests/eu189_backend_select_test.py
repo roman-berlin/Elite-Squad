@@ -134,6 +134,8 @@ chk("glm apply: bearer = GLM_AUTH_TOKEN", opts.env.get("ANTHROPIC_AUTH_TOKEN") =
 chk("glm apply: ANTHROPIC_API_KEY blanked", opts.env.get("ANTHROPIC_API_KEY") == "")
 chk("glm apply: CLAUDE_CODE_OAUTH_TOKEN blanked", opts.env.get("CLAUDE_CODE_OAUTH_TOKEN") == "")
 chk("glm apply: model overridden to glm-4.6", opts.model == "glm-4.6")
+chk("glm apply: small-fast model = glm-4.5-air",
+    opts.env.get("ANTHROPIC_SMALL_FAST_MODEL") == "glm-4.5-air")
 chk("glm apply: os.environ NOT mutated", dict(os.environ) == env_before)
 
 # fresh dict per call (no shared singleton)

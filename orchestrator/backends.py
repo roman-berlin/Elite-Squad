@@ -53,6 +53,7 @@ _BACKEND: contextvars.ContextVar[str] = contextvars.ContextVar("model_backend", 
 # GLM defaults — overridable via env. The token has NO default: it must be provided or GLM is off.
 _GLM_BASE_URL_DEFAULT = "https://api.z.ai/api/anthropic"
 _GLM_MODEL_DEFAULT = "glm-4.6"
+_GLM_SMALL_FAST_DEFAULT = "glm-4.5-air"   # EU-190: the SDK's background/small-fast model under GLM
 _GLM_TIMEOUT_DEFAULT = "3000000"
 
 
@@ -111,6 +112,10 @@ def _glm_env() -> dict[str, str]:
     return {
         "ANTHROPIC_BASE_URL": (os.environ.get("GLM_BASE_URL") or _GLM_BASE_URL_DEFAULT).strip(),
         "ANTHROPIC_AUTH_TOKEN": _glm_token(),
+        # EU-190: pin the SDK's small/fast (background) model too, else it defaults to a Claude
+        # Haiku id and the SDK's background calls would hit z.ai with an id it doesn't serve.
+        "ANTHROPIC_SMALL_FAST_MODEL": (os.environ.get("GLM_SMALL_FAST_MODEL")
+                                       or _GLM_SMALL_FAST_DEFAULT).strip(),
         "API_TIMEOUT_MS": (os.environ.get("GLM_API_TIMEOUT_MS") or _GLM_TIMEOUT_DEFAULT).strip(),
         # Blank the native-subscription creds for THIS call so they never reach z.ai.
         "ANTHROPIC_API_KEY": "",
