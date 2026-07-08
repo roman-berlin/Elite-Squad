@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-08 · AUTO-92 · automatixy · • Verified against source: ClientsPage has a lone valid h1 (no CardTitle, no h2/h3); TripsPage is h1→h2 (empty state) / lone h1 (populated) — no heading skip exists on either page, so the ticket's conditional fix… · 🔗 /clients and /trips (verify headings render one h1 with no level skip; no visual change)
 - 2026-07-08 · AUTO-91 · automatixy · • CardTitle gains `as?: 'h2'|'h3'` (default h3) with byte-identical Tailwind classes both ways; ref generic corrected to HTMLHeadingElement — verified. · 🔗 /leads
 - 2026-07-08 · AUTO-84 · automatixy · • Verified in source: `sheet.tsx`'s `SheetTitle` wraps Radix `Dialog.Title` (real `Primitive.h2`) and `drawer.tsx`'s `DrawerTitle` wraps vaul's `DrawerPrimitive.Title`, confirmed in `vaul/dist/index.js` line 1614 to be… · 🔗 open any Sheet/Drawer/Dialog/AlertDialog and the SocialPackageLeadForm success state (submit a lead from a social ad CTA) — e.g. /leads
 - 2026-07-06 · EU-182 · Elite-Unit · • Fix is exactly the 1-line change: `_solo(...)` fallback call at recon.py:139 now forwards `audit=audit`. · 🔗 (no UI — run `python3 tests/recon_test.py` in the Elite-Unit repo, or inspect `officer_recon` audit entries in the live JSONL audit log after any recon officer run where delegation is armed and planning yields <2 slices)
