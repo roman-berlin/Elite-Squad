@@ -255,7 +255,7 @@ async def scribe(cfg) -> str:
         cwd=str(_ROOT),
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],   # Python does the write
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Task", "Agent"],   # Python does the write
         setting_sources=[],
         max_turns=12,
         effort=normalize_effort(getattr(cfg, "reviewer_effort", "high")),

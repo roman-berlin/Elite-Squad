@@ -257,7 +257,7 @@ def _officer_options(cfg: Config, system: str, cwd: str) -> ClaudeAgentOptions:
         cwd=cwd,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"],
         max_turns=8,
         effort="medium",
@@ -365,7 +365,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         model=cfg.discussion_model,
         system_prompt=memory.preamble() + _CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     chair_provider, chair_model = chair.provider, chair.model_version
     briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
@@ -470,7 +470,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
         model=cfg.discussion_model,
         system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision_raw = (chair.final or chair.text or "(no decision)").strip()
     chair_provider, chair_model = chair.provider, chair.model_version
@@ -528,7 +528,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model, system_prompt=memory.preamble() + _SHIP_REVIEW_CHAIR_SYSTEM, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
     decision = (chair.final or chair.text or "(no recommendation)").strip()
 
@@ -844,7 +844,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         system_prompt=memory.preamble() + system + _COMMANDER_TICKET_RULE + filing.TICKET_BLOCK_RULE,
         cwd=_general_root(),
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         # Room to glance at a few files before replying — 6 was too tight and errored out when the
         # Commander's message invited a quick look ("investigate…"), so the CTO couldn't answer.
         max_turns=14, effort="low"), tag="the-general")
@@ -892,7 +892,7 @@ def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
         system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"], max_turns=5, effort="low")
 
 
@@ -1030,7 +1030,7 @@ async def _gather_standup(cfg: Config) -> tuple[str, list[tuple[str, str]], list
             model=cfg.discussion_model,
             system_prompt=memory.preamble() + f"{_STANDUP_SYSTEM}\n\nYour lens — {voice}",
             cwd=cwd, permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash"], setting_sources=["project"],
+            disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"], setting_sources=["project"],
             max_turns=5, effort="low"), tag="standup-" + _officer_key(rank))
         rows.append((rank, (run.final or run.text or "(no report)").strip()))
         print(f"  · {rank} reported", flush=True)
@@ -1082,7 +1082,7 @@ async def daily_brief(cfg: Config, audit=None) -> str:
         model=cfg.discussion_model,
         system_prompt=memory.preamble() + _DAILY_SYSTEM, cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "Bash"], setting_sources=["project"],
+        disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
     synth = (run.final or run.text or "").strip()
     governor.note_call(cfg, 1)

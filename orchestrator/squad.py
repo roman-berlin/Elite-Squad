@@ -72,6 +72,7 @@ async def detect_domain_gap(ticket_text: str, squad: dict,
             system_prompt=_GAP_SYSTEM,
             permission_mode="bypassPermissions",
             allowed_tools=[],
+            disallowed_tools=["Task", "Agent"],  # no sub-agent fan-out (AUTO-93 class fix)
             setting_sources=[],
             max_turns=3,
             effort="low",

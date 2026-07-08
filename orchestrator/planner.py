@@ -208,7 +208,7 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
             cwd=app.workdir or app.repo_path,
             permission_mode="bypassPermissions",
             allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit"],
+            disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"],
             setting_sources=[], max_turns=14, effort="high",
         )
         run = await run_agent(_prompt(ticket), options, tag="planner", ticket_id=ticket.id)
