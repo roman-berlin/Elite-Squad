@@ -1561,6 +1561,9 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     # pin (``/api/board?app=<proj>`` must render THAT project's board).  Omitted when app is None
     # (the legacy all-projects render path used by some older tests).
     proj_tag = f'<span class=boardproj>{_esc(app)}</span>' if app else ""
+    # EU-200: Get the current run log path for the live log panel
+    log_stream_path = state.get("log_path")
+
     return (
         f'<div class=kpis>{k}</div>'
         f'{_sync_html(cfg)}'
@@ -1569,6 +1572,10 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<section class=panel>'
         f'<div class=ph>Active run{proj_tag}{liveness}</div>'
         f'<div class=run>{run}</div></section>'
+        f'<section class=panel>'
+        f'<div class=ph>&#128190; Live run log</div>'
+        f'<div class=runlog id=runlog data-log-path="{_esc(str(log_stream_path or ""))}">'
+        f'<div class=logempty>Waiting for run output…</div></div></section>'
         f'<section class=panel>'
         f'<div class=ph>&#128190; Terminal</div>'
         f'<div class=term>{_terminal_html()}</div></section>'
@@ -1926,6 +1933,12 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
 white-space:pre-wrap;word-break:break-word}
 .logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
+/* EU-200: live run log panel - same styles as logbox */
+.runlog{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#b9c2cf;background:#070a0e;
+margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
+white-space:pre-wrap;word-break:break-word}
+.runlog .lg-b{color:var(--warn)}.runlog .lg-ok{color:var(--ok)}.runlog .lg-dim{color:var(--faint)}
+.runlog .logempty{color:var(--dim);font-style:italic;padding:13px 16px;}
 details.collapse{padding:0}
 details.collapse>summary{cursor:pointer;list-style:none;user-select:none}
 details.collapse>summary::-webkit-details-marker{display:none}
@@ -2067,6 +2080,101 @@ function startStream(){
 applyUi();
 scrollLog();
 startStream();
+// EU-200: Live run log streaming
+(function(){
+  var runlogPanel=document.getElementById("runlog");
+  if(!runlogPanel)return;
+
+  var logPath=runlogPanel.getAttribute("data-log-path");
+  if(!logPath){
+    runlogPanel.innerHTML='<div class=logempty>No active run log to display.</div>';
+    return;
+  }
+
+  var runlogEs=null;
+  var runlogBuffer=[];
+  var _runlogPoll=null;
+
+  function renderRunlogLines(){
+    if(!runlogPanel)return;
+    if(runlogBuffer.length===0){
+      runlogPanel.innerHTML='<div class=logempty>Waiting for run output…</div>';
+      return;
+    }
+
+    var linesHtml=runlogBuffer.map(function(line){
+      var low=line.toLowerCase();
+      var cls="";
+      if("merged" in low || "✓" in line || " pass" in low || "ready" in low){
+        cls="lg-ok";
+      }else if(/error|fail|park|block|✗|reject/.test(low)){
+        cls="lg-b";
+      }else if(/^·/.test(line) || /builder:|reviewer:/.test(low)){
+        cls="lg-dim";
+      }
+      return'<span class="'+cls+'">'+line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")+'</span>';
+    }).join("\\n");
+
+    runlogPanel.innerHTML='<pre class=runlog>'+linesHtml+'</pre>';
+    runlogPanel.scrollTop=runlogPanel.scrollHeight;
+  }
+
+  function startRunlogStream(){
+    if(!logPath)return;
+
+    try{
+      runlogEs=new EventSource("/api/run-log-stream?app="+encodeURIComponent(APP));
+      runlogEs.addEventListener("log",function(e){
+        runlogBuffer.push(e.data);
+        // Keep buffer size manageable (last 1000 lines)
+        if(runlogBuffer.length>1000){
+          runlogBuffer=runlogBuffer.slice(-1000);
+        }
+        renderRunlogLines();
+      });
+      runlogEs.addEventListener("done",function(e){
+        if(runlogEs){
+          runlogEs.close();
+          runlogEs=null;
+        }
+      });
+      runlogEs.addEventListener("error",function(e){
+        console.error("Run log stream error:",e.data);
+      });
+      runlogEs.onerror=function(){
+        if(runlogEs){
+          runlogEs.close();
+          runlogEs=null;
+        }
+      };
+    }catch(e){
+      console.error("Failed to start run log stream:",e);
+    }
+  }
+
+  // Start the log stream
+  startRunlogStream();
+
+  // Update on board refresh (log path might change)
+  var originalApplyBoard=applyBoard;
+  applyBoard=function(html){
+    originalApplyBoard(html);
+    // Restart log stream with new log path
+    var newPanel=document.getElementById("runlog");
+    if(newPanel){
+      var newPath=newPanel.getAttribute("data-log-path");
+      if(newPath&&newPath!==logPath){
+        logPath=newPath;
+        runlogBuffer=[];
+        if(runlogEs){
+          runlogEs.close();
+          runlogEs=null;
+        }
+        startRunlogStream();
+      }
+    }
+  };
+})();
 // Terminal functionality
 (function(){
   var input=document.getElementById("terminput");

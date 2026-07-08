@@ -176,6 +176,9 @@ def release_run(app: str | None = None) -> None:
     transient 'Working / stopping…' control-bar note on a CLEAN terminal outcome is the ``_bg``'s
     job instead: it alone knows whether the run raised, so it clears the note only when it didn't —
     see the run/report/autopilot ``_bg`` finally blocks in ``server.py`` (EU-104 iteration-3).
+
+    EU-200: Bumps the log sequence so the SSE stream wakes immediately and the board reflects
+    the run-end state change without waiting for the 2s heartbeat.
     """
     with run_lock_for(app):
         st = get_state(app)
@@ -184,6 +187,9 @@ def release_run(app: str | None = None) -> None:
         st["run_started"] = None
         st["stop_event"] = None
         st["last_activity"] = None     # clear heartbeat so stale timestamps never show after release
+        # EU-200: Wake the SSE stream immediately so the board updates without delay.
+        # Only bump the sequence counters, NOT last_activity (EU-104 requires it stay None).
+        _bump_log_seq_only(app)
 
 
 def bump_log_seq(app: str | None = None) -> int:
@@ -197,6 +203,20 @@ def bump_log_seq(app: str | None = None) -> int:
         seq = _shared_log_seq
     st = get_state(app)
     st["last_activity"] = time.time()   # heartbeat — proves the run is alive
+    st["log_seq"] = st.get("log_seq", 0) + 1
+    return seq
+
+
+def _bump_log_seq_only(app: str | None = None) -> int:
+    """Bump only the sequence counters, NOT last_activity. Used by release_run to wake SSE.
+
+    EU-200: Wakes the SSE stream immediately on run_end without setting last_activity
+    (which EU-104 requires stays None after release_run)."""
+    global _shared_log_seq
+    with _log_seq_lock:
+        _shared_log_seq += 1
+        seq = _shared_log_seq
+    st = get_state(app)
     st["log_seq"] = st.get("log_seq", 0) + 1
     return seq
 
