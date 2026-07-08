@@ -667,18 +667,32 @@ function kpick(id){var f=document.getElementById('f');f.value=id;flt();f.scrollI
 
 
 def standup(cfg) -> str:
-    """A daily-meeting report: shipped today, needs-you, awaiting-decision."""
+    """The deterministic core of the morning daily: what shipped YESTERDAY, what needs you now, and
+    what awaits a decision. The daily fires ~08:30, so 'yesterday' is the completed work the Commander
+    wants to see; 'today so far' is added only once same-day merges exist. No cumulative/all-time
+    history — that is deliberately out (the Commander does not want it in the daily)."""
     from . import decisions
+    from datetime import timedelta
     tasks = load_tasks(cfg.audit_path)
-    today = datetime.now().strftime("%Y-%m-%d")
-    shipped = [t for t in tasks if t["outcome"] == "merged→dev"
-               and t["started"] and t["started"].strftime("%Y-%m-%d") == today]
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def _day(t) -> str | None:                              # when it landed (merge time), else run start —
+        d = t.get("ended") or t.get("started")              # .astimezone() normalizes an audit ts written on
+        return d.astimezone().strftime("%Y-%m-%d") if d else None  # another host (EU-181) to the reader's local
+        #                                                     day, so today/yday boundaries agree cross-host
+    shipped_y = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == yday]
+    shipped_t = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == today]
     needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU]
     pending = decisions.load(cfg)
 
-    lines = [f"🫡 Daily standup — {today}", ""]
-    lines.append(f"✅ Shipped to DEV today ({len(shipped)}): "
-                 + (", ".join(t["ticket_id"] for t in shipped) or "—"))
+    lines = [f"🫡 Daily stand-up — {today}", ""]
+    lines.append(f"✅ Shipped to DEV yesterday ({len(shipped_y)}): "
+                 + (", ".join(t["ticket_id"] for t in shipped_y) or "—"))
+    if shipped_t:
+        lines.append(f"✅ …and today so far ({len(shipped_t)}): "
+                     + ", ".join(t["ticket_id"] for t in shipped_t))
     lines.append(f"🟡 Needs you ({len(needs)}): "
                  + (", ".join(f'{t["ticket_id"]} [{t["outcome"]}]' for t in needs) or "—"))
     if pending:

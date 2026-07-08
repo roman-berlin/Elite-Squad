@@ -36,7 +36,7 @@ if hasattr(council, "daily_brief"):
     calls: list[dict] = []
     async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, routing_tier=None):
         calls.append({"tag": tag, "model": getattr(options, "model", ""),
-                      "effort": getattr(options, "effort", "")})
+                      "effort": getattr(options, "effort", ""), "prompt": prompt})
         return AgentRun(text="", final="**FOCUS** — land EU-129.\n\n**FOR THE COMMANDER**\nShip the paid tier now?",
                         cost_usd=0.01, num_turns=1, is_error=False)
     sent: list[str] = []
@@ -77,6 +77,36 @@ if hasattr(council, "daily_brief"):
     check("FOR THE COMMANDER question is surfaced as a separate 'needs your call' ping",
           any("needs your call" in s.lower() for s in sent), str(sent))
     check("daily_brief returns the synthesis text", isinstance(out, str) and "FOCUS" in out)
+
+    # ── NEW (2026-07-08): the daily must read as "yesterday shipped / today's focus / needs you" and
+    #    must NOT carry cumulative all-time history (Commander: "I don't need to know 91/134 landed"). ──
+    from orchestrator import dashboard
+    from datetime import datetime, timedelta
+    import json as _json
+    _dd = tempfile.mkdtemp()
+    _ap = Path(_dd) / "audit.jsonl"
+    # Start 2 days ago but MERGE yesterday: the run must bucket by MERGE time (ended), so it lands under
+    # "yesterday" — this pins that standup keys on ended, not started, and (with the astimezone fix) on the
+    # reader's local day.
+    _startts = (datetime.now() - timedelta(days=2)).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+    _mergets = (datetime.now() - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+    with open(_ap, "w") as _f:
+        _f.write(_json.dumps({"ts": _startts, "event": "ticket_start", "ticket_id": "AUTO-99", "app": "automatixy"}) + "\n")
+        _f.write(_json.dumps({"ts": _mergets, "event": "merged", "ticket_id": "AUTO-99", "app": "automatixy"}) + "\n")
+    _cfg2 = Config(apps=[]); _cfg2.audit_path = str(_ap)
+    _su = dashboard.standup(_cfg2)
+    check("standup surfaces YESTERDAY's shipped work by MERGE time (started 2d ago, merged yesterday)",
+          "yesterday" in _su.lower() and "AUTO-99" in _su, _su[:220])
+    # A directive test, not a mere keyword mention: the prompt must NEGATE ('do not cite') the cumulative
+    # concept AND name a concrete forbidden token — a reworded 'DO cite the all-time history' fails this.
+    _ds = council._DAILY_SYSTEM.lower()
+    check("_DAILY_SYSTEM explicitly FORBIDS cumulative/all-time history (directive + a concrete token)",
+          ("do not cite" in _ds or "not cite" in _ds)
+          and ("cumulative" in _ds or "all-time" in _ds) and "avg passes" in _ds,
+          council._DAILY_SYSTEM[:180])
+    check("the daily CTO prompt is NOT fed the cumulative signals digest (no 'avg passes')",
+          all("avg passes" not in (c.get("prompt") or "").lower() for c in calls),
+          str([(c.get("prompt") or "")[:50] for c in calls]))
 
 print("\n============ LIGHT DAILY BRIEF QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
