@@ -909,11 +909,17 @@ def create_app(cfg: Config):
                     pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
-                # EU-191: if the Opus/Claude plan limit is now tripped, raise the unit-wide (None-keyed)
-                # banner with its Continue-on-GLM offer. The autopilot governor only sets this for its
-                # own loop — never for a manual cockpit run — so without this the banner (and the whole
-                # continue-on-alternate flow) never appears for the primary cockpit-drive workflow.
-                # _state['last_run'] already holds the just-run ticket, so the Continue button resumes it.
+                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
+                # control-bar note so a finished run never lingers as 'Working'. Guarded by
+                # ``errored`` so a real run error (set just above) stays visible — release_run no
+                # longer clears last_msg, so the operator still sees why a failed run failed.
+                if not errored:
+                    st["last_msg"] = ""
+                # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
+                # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
+                # plan-limit banner + its Continue-on-GLM offer if this run tripped the Opus/Claude cap.
+                # The autopilot governor only sets this for its own loop, so without it the banner never
+                # appears for a manual cockpit run. _state['last_run'] holds the ticket for the Continue button.
                 try:
                     from . import usage as _u191
                     _pl = _u191.plan_limit_hit(cfg, force=True)
@@ -923,12 +929,6 @@ def create_app(cfg: Config):
                         cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
                 except Exception:  # noqa: BLE001 — detection must never break run cleanup
                     pass
-                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
-                # control-bar note so a finished run never lingers as 'Working'. Guarded by
-                # ``errored`` so a real run error (set just above) stays visible — release_run no
-                # longer clears last_msg, so the operator still sees why a failed run failed.
-                if not errored:
-                    st["last_msg"] = ""
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -1020,11 +1020,17 @@ def create_app(cfg: Config):
                     pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
-                # EU-191: if the Opus/Claude plan limit is now tripped, raise the unit-wide (None-keyed)
-                # banner with its Continue-on-GLM offer. The autopilot governor only sets this for its
-                # own loop — never for a manual cockpit run — so without this the banner (and the whole
-                # continue-on-alternate flow) never appears for the primary cockpit-drive workflow.
-                # _state['last_run'] already holds the just-run ticket, so the Continue button resumes it.
+                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
+                # control-bar note so a finished run never lingers as 'Working'. Guarded by
+                # ``errored`` so a real run error (set just above) stays visible — release_run no
+                # longer clears last_msg, so the operator still sees why a failed run failed.
+                if not errored:
+                    st["last_msg"] = ""
+                # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
+                # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
+                # plan-limit banner + its Continue-on-GLM offer if this run tripped the Opus/Claude cap.
+                # The autopilot governor only sets this for its own loop, so without it the banner never
+                # appears for a manual cockpit run. _state['last_run'] holds the ticket for the Continue button.
                 try:
                     from . import usage as _u191
                     _pl = _u191.plan_limit_hit(cfg, force=True)
@@ -1034,12 +1040,6 @@ def create_app(cfg: Config):
                         cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
                 except Exception:  # noqa: BLE001 — detection must never break run cleanup
                     pass
-                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
-                # control-bar note so a finished run never lingers as 'Working'. Guarded by
-                # ``errored`` so a real run error (set just above) stays visible — release_run no
-                # longer clears last_msg, so the operator still sees why a failed run failed.
-                if not errored:
-                    st["last_msg"] = ""
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
@@ -2745,11 +2745,17 @@ def create_app(cfg: Config):
             finally:
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
-                # EU-191: if the Opus/Claude plan limit is now tripped, raise the unit-wide (None-keyed)
-                # banner with its Continue-on-GLM offer. The autopilot governor only sets this for its
-                # own loop — never for a manual cockpit run — so without this the banner (and the whole
-                # continue-on-alternate flow) never appears for the primary cockpit-drive workflow.
-                # _state['last_run'] already holds the just-run ticket, so the Continue button resumes it.
+                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
+                # control-bar note so a finished run never lingers as 'Working'. Guarded by
+                # ``errored`` so a real run error (set just above) stays visible — release_run no
+                # longer clears last_msg, so the operator still sees why a failed run failed.
+                if not errored:
+                    st["last_msg"] = ""
+                # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
+                # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
+                # plan-limit banner + its Continue-on-GLM offer if this run tripped the Opus/Claude cap.
+                # The autopilot governor only sets this for its own loop, so without it the banner never
+                # appears for a manual cockpit run. _state['last_run'] holds the ticket for the Continue button.
                 try:
                     from . import usage as _u191
                     _pl = _u191.plan_limit_hit(cfg, force=True)
@@ -2759,12 +2765,6 @@ def create_app(cfg: Config):
                         cockpit_state.set_plan_limit_hit(None, hit=True, reset_at=_reset)
                 except Exception:  # noqa: BLE001 — detection must never break run cleanup
                     pass
-                # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
-                # control-bar note so a finished run never lingers as 'Working'. Guarded by
-                # ``errored`` so a real run error (set just above) stays visible — release_run no
-                # longer clears last_msg, so the operator still sees why a failed run failed.
-                if not errored:
-                    st["last_msg"] = ""
         threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
