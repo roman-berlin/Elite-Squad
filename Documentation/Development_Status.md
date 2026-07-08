@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-08 · AUTO-94 · automatixy · • All first-level microsite CardTitles now render <h2> via the AUTO-85a `as` prop — continuous h1→h2 chain, no h3 skips on /microsite (profile/preview/setup) and posts tab already uses plain h2. · 🔗 /microsite (check profile tab, preview tab, and the "no settings" setup state — all first-level card headings should be `<h2>`) and /automations (unchanged, single `<h1>`, no other headings)
 - 2026-07-08 · AUTO-90 · automatixy · All acceptance criteria met: OverviewTab demotes lead name to h3 and cascades section headings to h4; comprehensive a11y integration test proves exactly one h2 (SheetTitle) with continuous h2→h3→h4 chain and zero axe… · 🔗 /leads (open any lead to verify the drawer now has proper heading hierarchy with exactly one h2 element)
 - 2026-07-08 · AUTO-88 · automatixy · • Gated-state h2→h1 promotion is correct and isolated (mutually exclusive render branches, no other h1 collision on the route). · 🔗 /automations (view as a Basic-tier tenant to see the gated state's page title)
 - 2026-07-08 · AUTO-93 · automatixy · • Both pages now render card titles as <h2> with Tailwind classes byte-for-byte unchanged — single h1 → h2 chain, no h3 anywhere. · 🔗 (no UI change beyond semantic tag — verify with axe DevTools showing zero heading-order violations on /packages and /quotes)
