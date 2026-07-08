@@ -23,6 +23,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import backend_pref
+from . import backends
 from . import intake
 from .audit import AuditLog
 from .config import Config, normalize_effort
@@ -40,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--effort", default=None,
                    help="override the Builder's effort for this run, bypassing auto-sizing "
                         "(low|medium|high|xhigh/ultra|max)")
+    p.add_argument("--model", choices=["opus", "glm"], default=None,
+                   help="override the model backend for this run (opus=Claude, glm=Z.ai); "
+                        "overrides the persisted/config default")
     sub = p.add_subparsers(dest="command", required=True)
 
     t = sub.add_parser("task", help="work a free-text bug/feature (no Jira needed)")
@@ -58,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("drain", help="pull ready tickets from the backlog")
     d.add_argument("app", nargs="?", default=None, help="app name; omit to drain every backlogged app")
+
+    m = sub.add_parser("model", help="show or set the persisted model backend (opus|glm)")
+    m.add_argument("backend", nargs="?", choices=["opus", "glm"], default=None,
+                   help="omit to print the current backend; pass opus|glm to persist it")
 
     sub.add_parser("doctor", help="check config, keys, repos and tooling")
     sub.add_parser("ping", help="send a test Telegram message")
@@ -158,9 +167,22 @@ def _apply_overrides(cfg: Config, args) -> None:
     if getattr(args, "effort", None):
         cfg.builder_effort = normalize_effort(args.effort)
         cfg.adaptive_effort = False        # an explicit --effort pins it, bypassing auto-sizing
+    # EU-190: model backend. --model overrides for THIS run; otherwise run-family commands honour
+    # the persisted sticky preference (set from the cockpit or `./general model`), leaving unattended
+    # autopilot on the config.yaml default (a deliberate no-silent-automation-egress choice).
+    if getattr(args, "model", None):
+        cfg.model_backend = backends.normalize(args.model)
+    elif getattr(args, "command", None) in ("task", "ticket", "drain"):
+        cfg.model_backend = backend_pref.active(cfg)
 
 
 async def _run_work(cfg: Config, worklist) -> int:
+    # EU-190: no silent fallback — block a GLM run when GLM_AUTH_TOKEN isn't configured.
+    if (backends.normalize(getattr(cfg, "model_backend", "opus")) == backends.GLM
+            and not backends.available("glm")):
+        print("GLM is selected but GLM_AUTH_TOKEN is not configured — set it (and restart) "
+              "or run with --model opus.")
+        return 2
     if not worklist:
         print("Nothing to do (empty worklist).")
         return 0
@@ -388,6 +410,23 @@ async def _main(argv: list[str]) -> int:
         ok = notify.send("✅ General test ping — Telegram is wired up.")
         print("sent ✓ (check your Telegram)" if ok else "failed — double-check token / chat id.")
         return 0 if ok else 1
+    if args.command == "model":
+        # EU-190: show or set the persisted active model backend (opus|glm). No run pipeline needed —
+        # and the SET path is config-independent (writes a standalone gitignored file), so only the
+        # SHOW path loads config.yaml (which would raise if it's missing/invalid).
+        if args.backend is None:
+            cur = backend_pref.active(Config.load(args.config))
+            warn = ("  (⚠ GLM_AUTH_TOKEN not set — GLM runs are blocked)"
+                    if cur == backends.GLM and not backends.available("glm") else "")
+            print(f"model backend: {cur}{warn}")
+            return 0
+        bk = backends.normalize(args.backend)
+        if bk == backends.GLM and not backends.available("glm"):
+            print("GLM not configured — set GLM_AUTH_TOKEN in .env (and restart) before selecting GLM.")
+            return 2
+        backend_pref.set_active(bk)
+        print(f"model backend set to {bk} — applies to subsequent runs.")
+        return 0
 
     cfg = Config.load(args.config)
     _apply_overrides(cfg, args)
@@ -548,6 +587,14 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "autopilot":
         from . import autopilot as autopilot_mod
+        # EU-190: no silent fallback — block autopilot too when GLM is selected (via --model / config)
+        # but GLM_AUTH_TOKEN isn't configured. (Headless autopilot uses the config.yaml default, not
+        # the cockpit sticky pref — an automation-egress opt-in for that is tracked in Phase 2.)
+        if (backends.normalize(getattr(cfg, "model_backend", "opus")) == backends.GLM
+                and not backends.available("glm")):
+            print("GLM is selected but GLM_AUTH_TOKEN is not configured — set it (and restart) "
+                  "or run with --model opus.")
+            return 2
         await autopilot_mod.autopilot(cfg, args.app, once=getattr(args, "once", False),
                                       interval=getattr(args, "interval", 60))
         return 0

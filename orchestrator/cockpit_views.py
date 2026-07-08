@@ -321,39 +321,35 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
-def backend_select(cfg, name: str = "backend", style: str = "flex:1") -> str:
-    """EU-189: the model-backend <select> — Opus (default) plus GLM only when it's configured.
+def backend_control(cfg) -> str:
+    """EU-190: the STICKY model-backend selector for the cockpit control bar.
 
-    The GLM option is withheld until GLM_AUTH_TOKEN is present, so the operator can never select an
-    unconfigured backend. Pre-selects the run's effective default (``cfg.model_backend``)."""
-    from . import backends as _bk
+    Selecting a backend **persists** it (POST /api/model → backend_pref) and applies to ALL
+    subsequent runs; the active backend is shown at a glance. GLM is offered only when configured
+    (GLM_AUTH_TOKEN present). If the persisted choice is GLM but the key is now missing, it's shown
+    flagged and runs are blocked at launch — no silent fallback. Never renders the token value."""
+    from . import backends as _bk, backend_pref
+    active = backend_pref.active(cfg)
     glm_ok = _bk.available("glm")
-    cur = _bk.normalize(getattr(cfg, "model_backend", "opus"))
-    if cur == _bk.GLM and not glm_ok:
-        cur = _bk.NATIVE
-    opts = f"<option value='opus' {'selected' if cur == _bk.NATIVE else ''}>backend: Opus (Claude)</option>"
-    if glm_ok:
-        opts += (f"<option value='glm' {'selected' if cur == _bk.GLM else ''} "
-                 f'title="Sends this run&#39;s prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
-                 f"backend: GLM (Z.ai)</option>")
-    # Attributes are escaped as defence-in-depth (both call sites pass hardcoded values today).
-    name_a = html.escape(name, quote=True)
-    style_attr = f' style="{html.escape(style, quote=True)}"' if style else ""
-    return f'<select name="{name_a}" title="model backend"{style_attr}>{opts}</select>'
-
-
-def glm_hint() -> str:
-    """A one-line hint under the run form. Presence-only — never renders the token value.
-
-    When GLM is configured it doubles as a data-egress notice (EU-189 security review): choosing
-    GLM sends the run's prompts to a third party, and the operator should see that at the point of
-    choice."""
-    from . import backends as _bk
-    if _bk.available("glm"):
-        return ("<div style='font-size:11px;color:#5c6573;margin:2px 0 0'>GLM sends this run&#39;s "
-                "prompts — code, tickets, diffs — to Z.ai (a third-party provider).</div>")
-    return ("<div style='font-size:11px;color:#5c6573;margin:2px 0 0'>GLM backend: not configured "
-            "&mdash; set GLM_AUTH_TOKEN in .env to enable</div>")
+    show_glm = glm_ok or active == _bk.GLM     # keep a stale GLM choice visible even if key vanished
+    opts = f"<option value='opus' {'selected' if active == _bk.NATIVE else ''}>Opus (Claude)</option>"
+    if show_glm:
+        glm_label = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
+        opts += (f"<option value='glm' {'selected' if active == _bk.GLM else ''} "
+                 f'title="Sends prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
+                 f"{glm_label}</option>")
+    if active == _bk.GLM and not glm_ok:
+        note = ("<span class=\"tbnote bad\" title=\"Set GLM_AUTH_TOKEN and restart\">"
+                "&#9888; GLM key missing — runs blocked</span>")
+    elif active == _bk.GLM:
+        note = "<span class=tbnote style=\"color:#8a909c\">&#8599; prompts go to Z.ai</span>"
+    else:
+        note = ""
+    return (
+        '<form method=post action=/api/model class=tbf title="Model backend — applies to all runs">'
+        '<span style="font-size:12px;color:#8a909c;margin-right:4px">Model</span>'
+        f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
+        f'</form>{note}')
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
@@ -592,7 +588,31 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 
     # Render plan-limit banner BEFORE the control bar (if active)
     plan_banner = _plan_limit_banner(_state)
-    return tab_bar + plan_banner + f"""
+
+    # EU-190: prominent model-backend alert — a bad GLM setup (missing/incorrect token, wrong URL)
+    # surfaces here with what to fix or re-onboard, so it's never missed. A transient
+    # _state['model_alert'] (set by a failed /api/model connection test) shows once; a persistent
+    # static-config problem re-derives every render while the active backend is GLM.
+    _malert = _state.pop("model_alert", None)
+    if not _malert:
+        from . import backends as _bk, backend_pref as _bp
+        if _bp.active(cfg) == _bk.GLM:
+            _iss = _bk.glm_config_issues()
+            if _iss:
+                _malert = ("GLM is selected but not usable — " + "; ".join(_iss)
+                           + ". Fix it in .env and restart, or set the Model back to Opus.")
+    model_banner = ""
+    if _malert:
+        model_banner = (
+            '<div role=alert style="background:#3a1113;border:1px solid #7f1d1d;color:#fecaca;'
+            'padding:9px 13px;border-radius:8px;margin:0 0 8px;font-size:13px;display:flex;'
+            'align-items:center;gap:12px;flex-wrap:wrap">'
+            f'<span>&#9888;&#65039; {html.escape(_malert)}</span>'
+            '<form method=post action=/api/model style="margin:0">'
+            '<input type=hidden name=backend value=opus>'
+            '<button style="font-size:12px;padding:3px 9px;border-radius:6px;cursor:pointer">'
+            'Switch to Opus</button></form></div>')
+    return tab_bar + plan_banner + model_banner + f"""
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
@@ -675,14 +695,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         <div class=row>
           <select name=app title=project style="flex:1">{apps}</select>
           <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
-          {backend_select(cfg)}
         </div>
-        {glm_hint()}
         <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
         <button {run_dis}>&#9654; Run</button>
       </form>
     </div>
   </details>
+  {backend_control(cfg)}
 
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>

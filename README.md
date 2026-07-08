@@ -131,6 +131,30 @@ Scale up by raising `max_tickets_per_run` and using `drain` once you trust it.
 0 7 * * 1-5  cd /path/to/claude-pipeline && ./general --live --max-tickets 3 drain >> run.log 2>&1
 ```
 
+## Model backend — Opus (Claude) or GLM (Z.ai)
+
+By default every run uses **Opus** (your Claude Max subscription). You can point the unit at
+**GLM** (Z.ai's Anthropic-compatible endpoint) instead — a per-machine choice, not a code change.
+
+Enable GLM by adding to `.env` (keep `ANTHROPIC_*` commented so Opus stays the default):
+
+```bash
+export GLM_BASE_URL="https://api.z.ai/api/anthropic"
+export GLM_AUTH_TOKEN="..."                 # your Z.ai key (sent as the bearer token)
+export GLM_MODEL="glm-4.6"                   # optional
+export GLM_SMALL_FAST_MODEL="glm-4.5-air"    # optional
+```
+
+Then choose the backend — it **persists** and applies to every subsequent run:
+
+- **Cockpit:** the *Model* selector in the top control bar (the GLM option appears once the key is set).
+- **CLI:** `./general model glm` (or `opus`) to set it, `./general model` to show it, or `--model glm`
+  to override a single run — `./general --model glm task <app> "..."`.
+
+Selecting GLM sends the run's prompts (your code, tickets, diffs) to Z.ai, a third-party provider. If
+GLM is selected but the key isn't configured, runs are **blocked** with a clear message — no silent
+fallback. Opus is never affected and stays the default.
+
 ## Safety model (read before `--live`)
 
 - **Dry-run is the default** and previews dev health without side effects.

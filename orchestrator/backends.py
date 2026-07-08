@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import re
 
 # Canonical backend ids.
 NATIVE = "opus"   # Anthropic / Claude — the default; env untouched (Max subscription inherited).
@@ -156,3 +157,64 @@ def is_glm(cfg=None) -> bool:
     if cfg is not None and normalize(getattr(cfg, "model_backend", NATIVE)) == GLM:
         return True
     return current() == GLM
+
+
+# ── EU-190: GLM configuration validation + a live connection test ────────────────────────────────
+# So a bad GLM setup (missing/incorrect token, wrong URL) surfaces a clear, actionable message in
+# the cockpit ("what to fix, or re-onboard") instead of failing cryptically mid-run.
+
+def glm_config_issues() -> list[str]:
+    """STATIC validation of the GLM env config (no network). Empty list = looks OK to attempt.
+
+    Catches the problems knowable without a call: no token, or a missing/malformed base URL. It is
+    NOT a guarantee the backend works — an *incorrect* token only shows up via glm_test_connection.
+    """
+    issues: list[str] = []
+    if not _glm_token():
+        issues.append("GLM_AUTH_TOKEN is not set")
+    url = (os.environ.get("GLM_BASE_URL") or _GLM_BASE_URL_DEFAULT).strip()
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        issues.append(f"GLM_BASE_URL is missing or not a valid URL ({url or 'empty'!r})")
+    return issues
+
+
+def glm_test_connection(timeout: float = 8.0) -> tuple[bool, str]:
+    """LIVE probe of the GLM endpoint with the configured token. Returns ``(ok, human detail)``.
+
+    Maps common failures to actionable messages (bad token, wrong URL, unreachable). Sends a
+    1-token ``ping`` so cost is negligible. Never logs or returns the token itself.
+    """
+    issues = glm_config_issues()
+    if issues:
+        return False, "; ".join(issues)
+    base = (os.environ.get("GLM_BASE_URL") or _GLM_BASE_URL_DEFAULT).strip().rstrip("/")
+    model = glm_model()
+    try:
+        import requests
+        resp = requests.post(
+            f"{base}/v1/messages",
+            headers={
+                "authorization": f"Bearer {_glm_token()}",
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={"model": model, "max_tokens": 1,
+                  "messages": [{"role": "user", "content": "ping"}]},
+            timeout=timeout,
+        )
+    except requests.exceptions.ConnectionError:
+        return False, f"cannot reach {base} — check GLM_BASE_URL and your network"
+    except requests.exceptions.Timeout:
+        return False, f"{base} timed out after {timeout:.0f}s — check GLM_BASE_URL"
+    except Exception as exc:  # noqa: BLE001 — a test must never raise into the cockpit
+        return False, f"connection test failed ({type(exc).__name__})"
+    code = resp.status_code
+    if 200 <= code < 300:
+        return True, "OK"
+    if code in (401, 403):
+        return False, "token rejected (HTTP 401/403) — check GLM_AUTH_TOKEN (incorrect or expired)"
+    if code == 404:
+        return False, f"endpoint not found (HTTP 404) — check GLM_BASE_URL ({base})"
+    if code == 400:
+        return False, f"request rejected (HTTP 400) — the endpoint is reachable; check GLM_MODEL ({model})"
+    return False, f"GLM endpoint returned HTTP {code}"

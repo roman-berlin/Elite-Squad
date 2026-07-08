@@ -198,9 +198,134 @@ chk("native run: os.environ has no z.ai leak", "z.ai" not in os.environ.get("ANT
 
 _without_glm_token()
 
+# ── 8. backend_pref persistence (EU-190 sticky selection) — isolated to a tmp file ──────────────
+import tempfile
+from pathlib import Path
+from orchestrator import backend_pref
+
+_tmp = tempfile.mkdtemp()
+backend_pref._file = lambda: Path(_tmp) / "model_backend.json"   # isolate from the repo root (one patch, all importers)
+
+_without_glm_token()
+chk("pref: unset -> get() is None", backend_pref.get() is None)
+chk("pref: active() falls back to opus", backend_pref.active(_Cfg("opus")) == "opus")
+chk("pref: active() honours cfg default when unset", backend_pref.active(_Cfg("glm")) == "glm")
+backend_pref.set_active("glm")
+chk("pref: set_active('glm') persists", backend_pref.get() == "glm")
+chk("pref: active() overrides cfg with persisted pref", backend_pref.active(_Cfg("opus")) == "glm")
+backend_pref.set_active("garbage")
+chk("pref: set_active normalizes unknown -> opus", backend_pref.get() == "opus")
+backend_pref.set_active("opus")
+
+# ── 9. server._resolve_run_backend: applies pref + BLOCKS unconfigured GLM (no silent fallback) ──
+import orchestrator.server as srv
+
+class _RC:
+    def __init__(self, mb="opus"): self.model_backend = mb
+
+backend_pref.set_active("opus")
+_rc = _RC("glm")                                  # cfg default glm, but pref opus -> pref wins
+_err = srv._resolve_run_backend(_rc)
+chk("resolve: pref(opus) overrides cfg(glm)", _rc.model_backend == "opus" and _err is None)
+
+_with_glm_token()
+backend_pref.set_active("glm")
+_rc = _RC("opus")
+_err = srv._resolve_run_backend(_rc)
+chk("resolve: GLM configured -> applied, no block", _rc.model_backend == "glm" and _err is None)
+
+_without_glm_token()
+_rc = _RC("opus")
+_err = srv._resolve_run_backend(_rc)              # pref=glm but token now missing
+chk("resolve: GLM unconfigured -> BLOCK (no silent fallback)", _rc.model_backend == "glm" and bool(_err))
+backend_pref.set_active("opus")
+
+# ── 9b. GLM config validation + live connection test (EU-190 alerting: 'what to fix') ───────────
+_without_glm_token()
+chk("config_issues: no token flagged", any("GLM_AUTH_TOKEN" in x for x in backends.glm_config_issues()))
+_with_glm_token()
+os.environ["GLM_BASE_URL"] = "not-a-url"
+chk("config_issues: bad url flagged", any("GLM_BASE_URL" in x for x in backends.glm_config_issues()))
+os.environ.pop("GLM_BASE_URL", None)
+chk("config_issues: token + default url -> clean", backends.glm_config_issues() == [])
+
+# glm_test_connection maps HTTP statuses / network errors to actionable messages (fake `requests`)
+_real_requests = sys.modules.get("requests")
+_fake_rq = types.ModuleType("requests")
+class _RQExc:
+    class ConnectionError(Exception): pass
+    class Timeout(Exception): pass
+_fake_rq.exceptions = _RQExc
+class _RQResp:
+    def __init__(self, code): self.status_code = code
+def _rq_post(code=None, exc=None):
+    def _p(*a, **k):
+        if exc: raise exc()
+        return _RQResp(code)
+    return _p
+sys.modules["requests"] = _fake_rq
+_with_glm_token()
+_fake_rq.post = _rq_post(code=200)
+chk("test_connection: 200 -> OK", backends.glm_test_connection()[0] is True)
+_fake_rq.post = _rq_post(code=401)
+_r = backends.glm_test_connection(); chk("test_connection: 401 -> bad token", _r[0] is False and "token" in _r[1].lower())
+_fake_rq.post = _rq_post(code=404)
+_r = backends.glm_test_connection(); chk("test_connection: 404 -> bad URL", _r[0] is False and "url" in _r[1].lower())
+_fake_rq.post = _rq_post(exc=_RQExc.ConnectionError)
+_r = backends.glm_test_connection(); chk("test_connection: conn error -> unreachable", _r[0] is False and "reach" in _r[1].lower())
+_without_glm_token()
+chk("test_connection: no token -> static issue (no network)", backends.glm_test_connection()[0] is False)
+if _real_requests is not None:
+    sys.modules["requests"] = _real_requests
+else:
+    sys.modules.pop("requests", None)
+
+# ── 10. cockpit set/get via the Flask test client (AC: 'cockpit set/get switches the backend') ───
+from orchestrator.config import Config, AppConfig
+srv.health.summary = lambda c: {"healthy": True, "checks": []}
+_appdir = tempfile.mkdtemp()
+Path(_appdir, "audit.jsonl").write_text("", encoding="utf-8")
+_cfg = Config(apps=[AppConfig(name="alpha", repo_path=_appdir, base_branch="DEV",
+                              protected_branch="MAIN", backlog_backend="none")],
+              audit_path=str(Path(_appdir, "audit.jsonl")), use_worktree=False)
+_client = srv.create_app(_cfg).test_client()
+
+backend_pref.set_active("opus")
+_with_glm_token()
+backends.glm_test_connection = lambda timeout=8.0: (True, "OK")     # stub: no live network in tests
+_client.post("/api/model", data={"backend": "glm"})
+chk("cockpit set: glm (connection OK) -> persists glm", backend_pref.get() == "glm")
+_client.post("/api/model", data={"backend": "opus"})
+chk("cockpit set: opus -> persists opus", backend_pref.get() == "opus")
+backends.glm_test_connection = lambda timeout=8.0: (False, "token rejected (incorrect GLM_AUTH_TOKEN)")
+srv._state.pop("model_alert", None)
+_client.post("/api/model", data={"backend": "glm"})   # connection test fails -> alert, not persisted
+chk("cockpit set: glm (bad connection) -> NOT persisted", backend_pref.get() == "opus")
+chk("cockpit set: bad connection -> model_alert surfaced", "GLM not enabled" in (srv._state.get("model_alert") or ""))
+_without_glm_token()
+
+# ── 11. CLI: --model override, `model` subcommand, block-on-missing-key ──────────────────────────
+from orchestrator import main as M
+_p = M.build_parser()
+chk("CLI: --model glm parses on task", M.build_parser().parse_args(["--model", "glm", "task", "a", "x"]).model == "glm")
+_ma = _p.parse_args(["model", "glm"])
+chk("CLI: `model` subcommand parses", _ma.command == "model" and _ma.backend == "glm")
+
+_ccfg = _Cfg("opus")
+M._apply_overrides(_ccfg, _p.parse_args(["--model", "glm", "task", "a", "x"]))
+chk("CLI: --model glm overrides cfg.model_backend", _ccfg.model_backend == "glm")
+backend_pref.set_active("glm")
+_ccfg2 = _Cfg("opus")
+M._apply_overrides(_ccfg2, _p.parse_args(["task", "a", "x"]))
+chk("CLI: task honours persisted pref when no --model", _ccfg2.model_backend == "glm")
+backend_pref.set_active("opus")
+
+_without_glm_token()
+chk("CLI: _run_work blocks unconfigured GLM (returns 2)", asyncio.run(M._run_work(_Cfg("glm"), [("a", "t")])) == 2)
+
 # ── tally ──────────────────────────────────────────────────────────────────────────────────────
 passed = sum(1 for _, ok, _ in results if ok)
-print("\n=========== EU-189 MODEL-BACKEND SELECTION QA ===========")
+print("\n=========== MODEL SELECTION QA (EU-189 + EU-190) ===========")
 for n, ok, det in results:
     print(f"  [{'PASS' if ok else 'FAIL'}] {n}" + (f"  ({det})" if det and not ok else ""))
 print("---------------------------------------------------------")

@@ -57,6 +57,8 @@ recent_projects.json
 # Jira connections — holds API TOKENS (the cockpit's quick-connect store). NEVER version it; each
 # machine keeps its own, and the cockpit only ever shows tokens masked. See connections.py.
 jira_connections.json
+# EU-190: persisted active model backend (opus|glm) — per-machine, no secrets. See backend_pref.py.
+model_backend.json
 # Auto-written failure post-mortems — runtime diagnostics regenerated from the audit log (forensics.py).
 postmortems/
 # Patrol cron/launchd runtime logs (the scheduled Scout/Provost/Quartermaster sweep writes cron.log here).
