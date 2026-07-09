@@ -672,12 +672,14 @@ def create_app(cfg: Config):
 
     @app.get("/tasks")
     def tasks_page():
+        # EU-129: Resolve the active project first so needs.count() can scope to it.
+        _appq = _board_project(request.args.get("app"))
         flt = (request.args.get("filter") or "").strip()
         # 'parked' scopes to the auto-skipped blocked set, which lives outside the task log.
         blocked = warroom._load_blocked(cfg) if flt.lower() == "parked" else None
         try:
             from . import needs as _needs_mod
-            _needs_cnt = _needs_mod.count(cfg)
+            _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
@@ -686,7 +688,6 @@ def create_app(cfg: Config):
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
         # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
-        _appq = _board_project(request.args.get("app"))
         _home = f"/?app={html.escape(_appq)}" if _appq else "/"
         back = (f"<style>"
                 ".backbtn{{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
@@ -1578,9 +1579,14 @@ def create_app(cfg: Config):
         EU-102: renders s['rows'] (already typed with category+why) grouped into four
         labelled sections.  Officer recommendations and ticket proposals (not yet in rows)
         are appended below as before.
+
+        EU-129: scopes to the active project (via ?app=) so each tab shows only that project's
+        items. The app parameter is resolved by _board_project() (read-only, doesn't change the
+        active tab) and passed to summary() as app_name.
         """
         from . import needs as _needs
-        s = _needs.summary(cfg)
+        appq = _board_project(request.args.get("app"))   # EU-129: scope to active project
+        s = _needs.summary(cfg, appq)
         style = (
             "<style>"
             ".nsec{margin:4px 0 24px}.nsec h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;"

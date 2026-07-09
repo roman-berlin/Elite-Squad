@@ -55,7 +55,7 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(repo), base_branch
                              protected_branch="MAIN", backlog_backend="none")],
              audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
 cfg.detected_auth = lambda: "test"
-_needs.summary = lambda c: {"decisions": [], "approvals": [], "tasks": [TASK], "total": 1}
+_needs.summary = lambda c, a=None: {"decisions": [], "approvals": [], "tasks": [TASK], "total": 1}
 
 client = server.create_app(cfg).test_client()
 r = client.get("/needs"); body = r.get_data(as_text=True)

@@ -21,16 +21,89 @@ Dedup: a ticket in blocked_tickets.json yields exactly ONE row, category ``parke
 skipping it), even when its latest run also errored — the errored/PR loop skips blocked ticket ids.
 
 Defensive end-to-end: any missing/half-written source degrades to an empty stream, never a crash.
+
+EU-129 — per-project scoping + a single audit parse per render:
+
+  Before this fix ``summary()``/``count()`` took no ``app_name`` and always aggregated EVERY
+  project, so the Needs-you badge/KPI card showed the SAME number on every cockpit tab. Data is
+  already app-tagged (decisions/approvals/proposals carry an ``app`` field; audit task rows carry
+  ``app`` too), so both entry points now take an ``app_name`` parameter and filter rows to the
+  active project — by the ``app`` field for decisions/approvals/proposals, and by ticket-key
+  prefix (``<PREFIX>-123`` -> ``PREFIX``) for errored/parked/PR rows, which don't carry an ``app``
+  field of their own. ``ALL_PROJECTS`` (a sentinel, matching
+  ``cockpit_state.ALL_PROJECTS_SENTINEL``) preserves the old "aggregate everything" behaviour.
+
+  Separately, ``summary()`` used to call ``dashboard.load_tasks(cfg.audit_path)`` TWICE per call
+  (once for the errored/PR pass, once for the parked pass) — a full, uncached parse of the audit
+  log each time — and the cockpit board calls ``summary()`` twice per render (KPI card + side
+  panel), so one tab switch could parse the audit up to 4x. ``load_tasks`` is now called exactly
+  ONCE per ``summary()`` call and the same list is reused for both passes, and the whole ``summary()``
+  result is memoized for a few seconds per ``(audit signature, app_name)`` so the KPI card and the
+  side panel share one computation per render instead of recomputing it twice.
 """
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
 
 from .config import Config
 
 # Outcomes from dashboard._NEEDS_YOU that are NOT a PR — shown under category "errored".
 _FAILED_OUTCOMES = {"errored", "escalated", "awaiting decision"}
 
+# The "All projects" sentinel — mirrors cockpit_state.ALL_PROJECTS_SENTINEL ("*"). Accepted here
+# too (not just imported) so needs.py has no hard dependency on cockpit_state at import time.
+ALL_PROJECTS = "*"
 
-def summary(cfg: Config) -> dict:
+# EU-129: short-lived memo of summary() results, keyed on (audit signature, app_name), so a burst
+# of renders for the SAME tab (KPI card + side panel, or a fast poll) share one computation instead
+# of re-parsing the audit + re-reading every source file on each call. TTL is intentionally short —
+# long enough to collapse the handful of calls in a single render, short enough that a fresh
+# decision/approval/run is never stale for more than a moment.
+_SUMMARY_CACHE: "dict[tuple, tuple[float, dict]]" = {}
+_SUMMARY_TTL = 3.0
+
+
+def _ticket_prefix(ticket_id) -> str:
+    """The project-key prefix of a ticket id, e.g. 'AUTO-123' -> 'AUTO'. Empty when unparseable."""
+    s = str(ticket_id or "").strip().upper()
+    if "-" not in s:
+        return ""
+    return s.split("-", 1)[0]
+
+
+def _row_matches_app(row: dict, app_name: str, app_prefix: str) -> bool:
+    """Whether ``row`` belongs to ``app_name`` — by the row's own ``app``/``app_name`` field when
+    present (decisions/approvals/proposals/tasks carry ``app``; specialist rosters carry
+    ``app_name``), else by ticket-key prefix (covers rows that key on ``ticket_id`` but carry
+    neither field)."""
+    row_app = row.get("app") or row.get("app_name")
+    if row_app:
+        return str(row_app) == app_name
+    tid = row.get("ticket_id") or row.get("id") or ""
+    return bool(app_prefix) and _ticket_prefix(tid) == app_prefix
+
+
+def _cache_key(cfg: Config, app_name: Optional[str]) -> tuple:
+    """Memoization key: the audit signature (so any audit change busts the cache) plus every other
+    per-app source file's mtime signature, plus the app scope itself."""
+    from . import dashboard as _D
+
+    paths = _D._audit_paths(cfg.audit_path)
+    sig = _D._audit_sig(paths)
+    extra_sigs = []
+    for fname in ("pending_decisions.json", "blocked_tickets.json",
+                  "approvals.json", "proposals.json"):
+        fp = Path(cfg.audit_path).with_name(fname)
+        try:
+            st = fp.stat()
+            extra_sigs.append((fname, st.st_size, st.st_mtime_ns))
+        except OSError:
+            extra_sigs.append((fname, None, None))
+    return (sig, tuple(extra_sigs), app_name or ALL_PROJECTS)
+
+
+def summary(cfg: Config, app_name: Optional[str] = None) -> dict:
     """Unified inbox: a flat ``rows`` list (typed, with category + why) plus backward-compat keys.
 
     Each row is a copy of the source item extended with:
@@ -38,9 +111,33 @@ def summary(cfg: Config) -> dict:
       ``why``      — one-line human reason string (question text, note, or fallback label)
 
     ``total`` == ``len(rows)`` == ``count()`` — one number for every Needs-you surface (EU-102).
+
+    ``app_name`` (EU-129) scopes every stream to ONE project — by ``app`` field where the row
+    carries one, else by ticket-key prefix. Pass ``None``/``""``/``ALL_PROJECTS`` (``"*"``) for the
+    old unit-wide aggregate (the "All projects" view). Memoized for a few seconds per
+    (audit signature, app_name) so repeated calls in the same render (KPI card + side panel) don't
+    re-parse the audit or re-read the source files more than once (EU-129 perf fix).
     """
+    import time
+
+    key = _cache_key(cfg, app_name)
+    now = time.time()
+    hit = _SUMMARY_CACHE.get(key)
+    if hit is not None and now - hit[0] < _SUMMARY_TTL:
+        return hit[1]
+    result = _summary_uncached(cfg, app_name)
+    _SUMMARY_CACHE[key] = (now, result)
+    return result
+
+
+def _summary_uncached(cfg: Config, app_name: Optional[str]) -> dict:
     import json
-    from pathlib import Path
+
+    scoped = bool(app_name) and app_name != ALL_PROJECTS
+    # Ticket-key prefix match for rows with no 'app' field of their own (errored/parked/PR
+    # rows key on ticket_id, e.g. 'AUTO-123' / 'EU-129') — most app names ARE their
+    # Jira project key, so the raw (uppercased) app_name doubles as the prefix to match against.
+    app_prefix = str(app_name).strip().upper() if scoped else ""
 
     rows: list[dict] = []
 
@@ -69,6 +166,8 @@ def summary(cfg: Config) -> dict:
         decisions_items = _dec.load(cfg) or []
     except Exception:  # noqa: BLE001
         pass
+    if scoped:
+        decisions_items = [d for d in decisions_items if _row_matches_app(d, app_name, app_prefix)]
     for d in decisions_items:
         rows.append({
             **d,
@@ -81,16 +180,30 @@ def summary(cfg: Config) -> dict:
     # suffixed ("EU-81#out-of-scope").
     decision_ids = {str(d.get("id") or "").split("#", 1)[0] for d in decisions_items if d.get("id")}
 
+    # ── 2, 3 & 4. Load the audit-derived task list EXACTLY ONCE (EU-129 perf fix) ──
+    # dashboard.load_tasks() is a full parse of the (potentially multi-thousand-line) audit log.
+    # It used to be called separately for the errored/PR pass (below) AND the parked pass (section
+    # 3) — two full parses per summary() call, times two summary() calls per render (KPI + side
+    # panel) = up to 4x per tab switch. Loaded once here and reused for both passes below.
+    all_tasks: list[dict] = []
+    dismissed: dict = {}
+    try:
+        from . import dashboard as _D
+        all_tasks = _D.load_tasks(cfg.audit_path)
+        dismissed = _D.load_dismissed(cfg.audit_path)
+    except Exception:  # noqa: BLE001
+        pass
+
     # ── 2 & 4. latest_needs_you() → errored | escalated → "errored", PR → "pr" ──
     task_items: list[dict] = []
     try:
         from . import dashboard as _D
-        _tasks = _D.load_tasks(cfg.audit_path)
-        _dismissed = _D.load_dismissed(cfg.audit_path)
         # One row per ticket (latest run); stale / dismissed runs are already filtered out.
-        task_items = _D.latest_needs_you(_tasks, _dismissed)
+        task_items = _D.latest_needs_you(all_tasks, dismissed)
     except Exception:  # noqa: BLE001
         pass
+    if scoped:
+        task_items = [t for t in task_items if _row_matches_app(t, app_name, app_prefix)]
     for t in task_items:
         # Dedup: a blocked ticket is surfaced as its 'parked' row (section 3) ONLY — skip it here so
         # it can never also appear as 'errored'/'pr'. 'parked' wins because autopilot is skipping it.
@@ -113,14 +226,16 @@ def summary(cfg: Config) -> dict:
     # ── 3. Parked/blocked tickets — blocked_tickets.json via latest_parked() ─
     # Uses the same ``blocked_ids`` resolved in section 0, so the dedup skip above and the parked
     # rows here are driven by ONE source — they can't disagree on which tickets are blocked.
+    # Reuses ``all_tasks`` loaded above — no second load_tasks() call (EU-129 perf fix).
     parked_items: list[dict] = []
     try:
         from . import dashboard as _D
         if blocked_ids:
-            _all_tasks = _D.load_tasks(cfg.audit_path)
-            parked_items = _D.latest_parked(_all_tasks, blocked_ids)
+            parked_items = _D.latest_parked(all_tasks, blocked_ids)
     except Exception:  # noqa: BLE001
         pass
+    if scoped:
+        parked_items = [t for t in parked_items if _row_matches_app(t, app_name, app_prefix)]
     for t in parked_items:
         # Review fix (2026-07-05): skip parked rows already represented by their decision row —
         # one blocked ticket, one row, one badge count.
@@ -136,6 +251,10 @@ def summary(cfg: Config) -> dict:
     # Both need the Commander, so both ARE part of the unified inbox (rows + badge count), so
     # total == count == len(rows) everywhere and a pending item can never raise the badge without
     # rendering a row.
+    # EU-129: officer recommendations (drill/adjutant) are unit-wide, NOT per-project — they cover
+    # doctrine/personnel actions, not a single app's tickets — so they are intentionally NOT filtered
+    # by app_name and always show on every tab (same as "All projects"). Proposals DO carry a project
+    # scope and are filtered.
     approvals_items: list[dict] = []
     proposal_items: list[dict] = []
     try:
@@ -148,6 +267,8 @@ def summary(cfg: Config) -> dict:
         proposal_items = _ap.pending_proposals(cfg) or []
     except Exception:  # noqa: BLE001
         pass
+    if scoped:
+        proposal_items = [p for p in proposal_items if _row_matches_app(p, app_name, app_prefix)]
 
     for a in approvals_items:
         rows.append({
@@ -162,6 +283,7 @@ def summary(cfg: Config) -> dict:
             "category": "proposal",
             "why": str(p.get("source") or f"{_n} ticket(s) to file"),
         })
+
     return {
         "rows": rows,
         # Per-stream keys — server.py /needs renders each section with its own action form.
@@ -175,8 +297,17 @@ def summary(cfg: Config) -> dict:
     }
 
 
-def count(cfg: Config) -> int:
+def clear_cache() -> None:
+    """Drop the summary() memo cache — test seam / call after mutating source files in a test that
+    needs the very next summary()/count() call to be a guaranteed fresh (uncached) read."""
+    _SUMMARY_CACHE.clear()
+
+
+def count(cfg: Config, app_name: Optional[str] = None) -> int:
     """Badge number — the unified inbox row count (decisions + errored + parked + PRs +
     officer approvals + ticket proposals).  count == len(summary()['rows'])
-    == summary()['total'], always."""
-    return len(summary(cfg)["rows"])
+    == summary()['total'], always.
+
+    EU-129: ``app_name`` scopes the count to ONE project (``None``/``ALL_PROJECTS`` aggregates
+    every project, preserving the old behaviour)."""
+    return len(summary(cfg, app_name)["rows"])

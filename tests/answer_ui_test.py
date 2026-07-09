@@ -85,7 +85,7 @@ chk("empty -> no handle_reply, no crash", "reply" not in calls)
 dashboard.needs_detail_html = lambda t: "detail"
 dashboard.needs_chat_summary = lambda t: "summary"
 dashboard._short = lambda s, n=120: (s or "")[:n]
-needs.summary = lambda c: {"total": 2,
+needs.summary = lambda c, a=None: {"total": 2,
                            "decisions": [{"id": "AUTO-1", "app": "automatixy", "question": "pick a date"}],
                            "approvals": [],
                            "tasks": [{"ticket_id": "AUTO-14", "app": "automatixy",
