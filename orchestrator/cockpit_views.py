@@ -420,32 +420,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     def busy(k):
         return "disabled" if _state.get(k) else ""
 
-    # ── Two DIFFERENT repos, two DIFFERENT promotions — kept visually distinct so they can't be
-    # confused. (A) "Update unit": THE CTO'S OWN code (this tool) dev->main -> the 24/7 VPS
-    # self-updates. (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production.
-    # Both only on a cockpit allowed to push (the Mac, via GENERAL_COCKPIT_PROMOTE).
-    promote_html = ""
-    try:
-        from . import sync as _sync
-        if _sync.can_promote():
-            _ahead = _sync.promote_status(cfg).get("ahead", 0)
-            if _ahead:
-                _pc = (f"Update THE UNIT itself — promote the CTO (this tool\\u2019s own code, the "
-                       f"~/Projects/General repo) dev \\u2192 main, {_ahead} commit(s). The 24/7 server "
-                       f"self-updates within ~15 min. This is the unit\\u2019s brain, NOT your app.")
-                promote_html = (
-                    '<span class=tbdiv></span>'
-                    '<form method=post action=/api/promote class=tbf '
-                    f'''onsubmit="return confirm('{_pc}')">'''
-                    f'<button class="btn deploy" title="Promote the CTO — this tool&#39;s OWN code — '
-                    f'dev&#8594;main. The VPS self-updates. NOT your app." {busy("promoting")}>'
-                    f'&#9881;&#65039; Update unit<span class=cbadge>{_ahead}</span></button></form>')
-            else:
-                promote_html = ('<span class=tbdiv></span><span class="tbnote ok" '
-                                'title="The CTO (the unit\'s own code) is in sync with the server">'
-                                '&#10003; unit current</span>')
-    except Exception:  # noqa: BLE001
-        promote_html = ""
+    # ── Unit promotion (Update unit) removed per EU-205 — this section now only handles product app shipping.
+    # (A) "Update unit": THE CTO'S OWN code (this tool) dev->main was removed from the cockpit UI.
+    # (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production remains.
 
     # (B) Ship the CURRENT app DEV -> MAIN (production). Names the app + says PRODUCTION so it's never
     # mistaken for the unit self-deploy above.
@@ -739,7 +716,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
   <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
-  {promote_html}
   {ship_html}
   {ap_html}
   {open_logs_html}

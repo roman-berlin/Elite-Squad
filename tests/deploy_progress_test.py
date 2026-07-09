@@ -1,6 +1,6 @@
-"""Deploy progress + fresh badge QA: while a unit-promote / app-ship runs, the control bar shows a live
-progress strip that polls /api/deploy-status and reloads when done; at 0-ahead both buttons show an
-explicit 'all merged' status instead of a stale number."""
+"""Deploy progress + fresh badge QA: while an app-ship runs, the control bar shows a live
+progress strip that polls /api/deploy-status and reloads when done; at 0-ahead the app Ship button
+shows an explicit 'all merged' status. EU-205 removed the unit promote button from the cockpit UI."""
 import sys, types, tempfile
 from pathlib import Path
 
@@ -68,19 +68,21 @@ server._state["shipping"] = False
 # --- no strip element when idle (the CSS rule is always present; the strip element is not) ---
 chk("no strip when idle", "<div class=deploybar>" not in server._control_bar(cfg, "automatixy", True))
 
-# --- 0-ahead: explicit 'all merged' status, not a stale number ---
+# --- 0-ahead: explicit 'all merged' status for app, but unit promote button removed EU-205 ---
 _ahead["unit"] = 0
 _ahead["app"] = 0
 idle_bar = server._control_bar(cfg, "automatixy", True)
-chk("unit at 0 -> 'unit current' (not a button)", "unit current" in idle_bar and "Update unit" not in idle_bar)
+# EU-205: unit promote button removed from cockpit UI
+chk("unit promote button removed (EU-205)", "Update unit" not in idle_bar and "unit current" not in idle_bar)
 chk("app at 0 -> 'automatixy shipped' (not a stale ship button)",
     "automatixy shipped" in idle_bar and "Ship automatixy" not in idle_bar)
 
-# --- non-zero: the buttons show the live count ---
+# --- non-zero: only the app Ship button shows the count (unit button removed EU-205) ---
 _ahead["unit"] = 3
 _ahead["app"] = 13
 live_bar = server._control_bar(cfg, "automatixy", True)
-chk("unit ahead -> Update unit button with the count", "Update unit" in live_bar and ">3<" in live_bar)
+# EU-205: unit promote button no longer renders even when ahead
+chk("unit ahead -> no Update unit button (EU-205)", "Update unit" not in live_bar)
 chk("app ahead -> Ship button with the count", "Ship automatixy" in live_bar and ">13<" in live_bar)
 chk("ahead -> no 'all merged' note", "unit current" not in live_bar and "automatixy shipped" not in live_bar)
 
