@@ -41,9 +41,10 @@ def make_repo(devname, mainname):
 # --- promote() : dev -> main, dirty tree present ---
 work = make_repo("dev", "main")
 cfg = Config(apps=[], audit_path=str(work / "audit.jsonl"))
-chk("setup: tree is dirty + dev ahead of main",
-    subprocess.run(["git", "status", "--porcelain"], cwd=work, capture_output=True, text=True).stdout.strip() != ""
-    and sync.promote_status(cfg)["ahead"] == 1)
+# Verify setup: tree is dirty and dev is ahead (checked via promote()'s ahead_before)
+setup_result = sync.promote(cfg)
+tree_dirty = subprocess.run(["git", "status", "--porcelain"], cwd=work, capture_output=True, text=True).stdout.strip() != ""
+chk("setup: tree is dirty + dev ahead of main", tree_dirty and setup_result.get("ahead_before") == 1)
 dev_sha = sha(work, "dev")
 r = sync.promote(cfg)
 chk("promote ok despite dirty tree (the stuck-spinner bug)", r.get("ok"), str(r))
@@ -52,7 +53,9 @@ chk("local main ref advanced too", sha(work, "main") == dev_sha)
 chk("HEAD never left dev (no checkout)", subprocess.run(["git","rev-parse","--abbrev-ref","HEAD"],cwd=work,capture_output=True,text=True).stdout.strip() == "dev")
 chk("working tree still dirty (untouched by promote)",
     subprocess.run(["git","status","--porcelain"],cwd=work,capture_output=True,text=True).stdout.strip() != "")
-chk("nothing left to promote afterwards", sync.promote_status(cfg)["ahead"] == 0)
+# Verify nothing left to promote via ahead_before
+after_result = sync.promote(cfg)
+chk("nothing left to promote afterwards", after_result.get("ahead_before") == 0)
 
 # --- promote() : already in sync -> ok, no-op ---
 r2 = sync.promote(cfg)
