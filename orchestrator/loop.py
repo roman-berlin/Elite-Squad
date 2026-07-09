@@ -119,6 +119,43 @@ def _is_turn_limit(text: str | None) -> bool:
     return any(m in t for m in _TURN_LIMIT_MARKERS)
 
 
+# EU-197: Helper to wrap officer execution with transcript context
+def _officer_transcript_context(app: AppConfig, ticket: Ticket, officer: str, cfg: Config):
+    """Context manager for per-officer transcript writing.
+
+    Sets up the transcript context before an officer runs and tears it down
+    after completion. Captures full tool inputs, reasoning, and results when
+    transcript_enabled is True.
+
+    Usage:
+        with _officer_transcript_context(app, ticket, "builder", cfg):
+            result = await builder_mod.build(...)
+    """
+    from . import transcript
+    import datetime as _dt
+
+    # Generate timestamp in HHMMSS format
+    timestamp = _dt.datetime.now().strftime("%H%M%S")
+
+    class _TranscriptContext:
+        def __enter__(self):
+            try:
+                transcript.set_transcript_context(app.name, ticket.id, timestamp, officer, cfg)
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            try:
+                transcript.clear_transcript_context()
+                transcript.close_transcript(app.name, ticket.id, timestamp, officer)
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+            return False  # Don't suppress exceptions
+
+    return _TranscriptContext()
+
+
 async def _try_scrum_split(cfg: Config, app: AppConfig, ticket: Ticket, audit: AuditLog,
                            recap: str, reason: str, split_reason: str,
                            iterations: int = 0, cost: float = 0.0,
@@ -385,6 +422,28 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
         backends.reset_backend(_bk_token)
 
 
+def _fetch_fragments_to_worklist(cfg: Config, app: AppConfig,
+                                 fragment_keys: list[str]) -> list[tuple[AppConfig, Ticket]]:
+    """Convert fragment ticket keys into worklist items.
+
+    After a Scrum Master split, the fragment keys are created in the backlog.
+    This helper fetches each fragment ticket and returns a list of (app, ticket)
+    pairs that can be injected into the worklist.
+
+    EU-201: fragments are built in dependency order (the order returned by the split).
+    """
+    from .backlog.base import make_backlog
+    backlog = make_backlog(app)
+    items: list[tuple[AppConfig, Ticket]] = []
+    for key in fragment_keys:
+        try:
+            fragment_ticket = backlog.get_task(key)
+            items.append((app, fragment_ticket))
+        except Exception as exc:  # noqa: BLE001 - one fragment fetch failing must not break the run
+            print(f"  · fragment {key} fetch failed: {exc}", flush=True)
+    return items
+
+
 async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                      audit: AuditLog, stop_event=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
@@ -410,7 +469,11 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                       flush=True)
 
     try:
-        for app, ticket in worklist:
+        # EU-201: Use an index so we can inject fragments after the parent ticket
+        i = 0
+        while i < len(worklist):
+            app, ticket = worklist[i]
+            i += 1
             if stop_event is not None and stop_event.is_set():
                 audit.record("run_stopped", reason="commander stop (before ticket)")
                 print("  ■ stopped by Commander — remaining tickets skipped.", flush=True)
@@ -441,6 +504,30 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
             except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
                 report = await _exception_report(cfg, ticket, app, exc, audit)
             reports.append(report)
+
+            # EU-201: After a split, inject the fragments into the worklist at the current position
+            # The fragments are built serially in dependency order before the next queue ticket
+            if report.outcome == Outcome.REQUEUED and report.notes and "split into" in report.notes.lower():
+                # Extract fragment keys from the notes (format: "too big — Scrum Master split into AUTO-101, AUTO-102")
+                import re
+                fragment_match = re.search(r'split into ([^.\n]+)', report.notes)
+                if fragment_match:
+                    fragment_keys_str = fragment_match.group(1).strip()
+                    # Split by comma and clean up the keys
+                    fragment_keys = [k.strip() for k in fragment_keys_str.split(',')]
+                    if fragment_keys:
+                        # Fetch the fragment tickets and convert to worklist items
+                        fragment_items = _fetch_fragments_to_worklist(cfg, app, fragment_keys)
+                        if fragment_items:
+                            # Inject fragments at the current position (after the parent)
+                            worklist[i:i] = fragment_items
+                            audit.record("fragment_injection", ticket_id=ticket.id,
+                                        fragment_count=len(fragment_items), fragment_keys=fragment_keys)
+                            print(f"  🧩 {ticket.id}: injected {len(fragment_items)} fragment(s) into worklist: "
+                                  f"{', '.join(fragment_keys)} — building them next in order.", flush=True)
+                            _notify(cfg, f"🧩 {ticket.id}: {len(fragment_items)} fragment(s) will be built next: "
+                                       f"{', '.join(fragment_keys)}")
+
             # Failure forensics: if this ticket has now failed enough times, auto-write its post-mortem.
             try:
                 from . import forensics
@@ -881,7 +968,9 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration, adr=adr)
         # EU-72: hand the builder the typed SpecArtifact (primary context) + the shared pool it
         # publishes its BuildArtifact into.
-        build = await builder_mod.build(req, app, cfg, audit=audit, store=store, spec=store.spec)
+        # EU-197: Wrap builder with transcript context to capture full tool inputs + reasoning
+        with _officer_transcript_context(app, ticket, "builder", cfg):
+            build = await builder_mod.build(req, app, cfg, audit=audit, store=store, spec=store.spec)
         cost += build.cost_usd
         budget.add(build.cost_usd)
         _burn("builder", build.input_tokens, build.output_tokens)   # EU-96: accumulate builder burn
@@ -1055,8 +1144,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         diff = git.diff_against_base()
         # EU-72: hand the Reviewer the Builder's BuildArtifact (primary context) + the pool it
         # publishes its ReviewVerdict into. EU-52: escalate the reviewer on re-review.
-        review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
-                                           store=store, build_artifact=store.build)
+        # EU-197: Wrap reviewer with transcript context to capture full tool inputs + reasoning
+        with _officer_transcript_context(app, ticket, "reviewer", cfg):
+            review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
+                                               store=store, build_artifact=store.build)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
@@ -1067,8 +1158,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         if review.parse_failed:
             print("  review · unparseable verdict → re-reviewing once (no rebuild)", flush=True)
             audit.record("review_parse_retry", ticket_id=ticket.id, iteration=iteration)
-            review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
-                                               store=store, build_artifact=store.build)
+            # EU-197: Wrap reviewer retry with transcript context
+            with _officer_transcript_context(app, ticket, "reviewer", cfg):
+                review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
+                                                   store=store, build_artifact=store.build)
             cost += review.cost_usd
             budget.add(review.cost_usd)
             _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry

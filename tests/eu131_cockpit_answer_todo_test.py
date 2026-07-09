@@ -203,7 +203,7 @@ task_file.write_text(
 
 # Verify it appears in Needs-you (mock the summary to include our test task)
 original_summary = needs.summary
-needs.summary = lambda c: {
+needs.summary = lambda c, a=None: {
     "decisions": [],
     "approvals": [],
     "tasks": [{

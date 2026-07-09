@@ -63,26 +63,6 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
-def _audit_ship(audit, app_name: str, r: dict) -> None:
-    """Record an app DEV→MAIN ship in the audit so it shows up in the logs/history — until now a ship's
-    only trace was the in-memory cockpit banner, so 'check the logs' came up empty. Best-effort."""
-    try:
-        audit.record("ship", app=app_name, base=r.get("base"), prot=r.get("prot"),
-                     ahead=int(r.get("ahead_before", 0) or 0), ok=bool(r.get("ok")),
-                     error=(r.get("error") or "")[:300])
-    except Exception:  # noqa: BLE001 - logging a ship must never break the ship
-        pass
-
-
-def _audit_promote(audit, r: dict) -> None:
-    """Record a unit dev→main promote ('Update unit') in the audit, same rationale as _audit_ship."""
-    try:
-        audit.record("promote", target="unit", ahead=int(r.get("ahead_before", 0) or 0),
-                     ok=bool(r.get("ok")), error=(r.get("error") or "")[:300])
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -602,14 +582,84 @@ def create_app(cfg: Config):
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get("/api/run-log-stream")
+    def run_log_stream_api():
+        """Stream the current run's log file in real-time using Server-Sent Events.
+
+        EU-200: This provides a live view of the run log in the web dashboard,
+        distinct from the interactive terminal panel. The log file is tailed
+        and new lines are sent as SSE events.
+
+        Query params:
+            app: The project name (defaults to active tab)
+        """
+        from flask import Response
+        appq = _board_project(request.args.get("app"))
+        st = get_state(appq or None)
+
+        def gen():
+            log_path = st.get("log_path")
+            if not log_path:
+                yield _sse("log", "No active run log to stream.")
+                return
+
+            log_file = Path(log_path)
+            if not log_file.exists():
+                yield _sse("log", f"Log file not found: {log_path}")
+                return
+
+            # Stream the log file, sending new lines as they're added
+            last_size = 0
+            last_check = 0.0
+
+            while True:
+                try:
+                    current_size = log_file.stat().st_size
+                    if current_size > last_size:
+                        with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                            f.seek(last_size)
+                            new_lines = f.readlines()
+                            for line in new_lines:
+                                yield _sse("log", line.rstrip("\n\r"))
+                        last_size = current_size
+                        last_check = time.time()
+                    else:
+                        # Check if run is still active - get fresh state
+                        current_st = get_state(appq or None)
+                        if not current_st.get("active") and not current_st.get("autopilot_on"):
+                            # Run ended - send remaining lines and close
+                            if current_size > last_size:
+                                with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                                    f.seek(last_size)
+                                    new_lines = f.readlines()
+                                    for line in new_lines:
+                                        yield _sse("log", line.rstrip("\n\r"))
+                            yield _sse("done", "Run ended.")
+                            break
+                        # No new lines - send keepalive every 2s
+                        now = time.time()
+                        if now - last_check >= 2.0:
+                            yield ": keepalive\n\n"
+                            last_check = now
+
+                    time.sleep(0.5)
+                except Exception:
+                    yield _sse("error", "Error reading log file.")
+                    break
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.get("/tasks")
     def tasks_page():
+        # EU-129: Resolve the active project first so needs.count() can scope to it.
+        _appq = _board_project(request.args.get("app"))
         flt = (request.args.get("filter") or "").strip()
         # 'parked' scopes to the auto-skipped blocked set, which lives outside the task log.
         blocked = warroom._load_blocked(cfg) if flt.lower() == "parked" else None
         try:
             from . import needs as _needs_mod
-            _needs_cnt = _needs_mod.count(cfg)
+            _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
@@ -618,7 +668,6 @@ def create_app(cfg: Config):
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
         # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
-        _appq = _board_project(request.args.get("app"))
         _home = f"/?app={html.escape(_appq)}" if _appq else "/"
         back = (f"<style>"
                 ".backbtn{{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
@@ -1319,74 +1368,12 @@ def create_app(cfg: Config):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
 
-    @app.post("/api/promote")
-    def promote_api():
-        """Promote DEV -> main from the cockpit (the server auto-deploys main). Mac-only + ff-only."""
-        from . import sync
-        if not sync.can_promote():
-            return Response("Deploy is disabled on this cockpit (read-only box).", status=403)
-        if _state.get("active"):
-            _state["last_result"] = "finish the active run before deploying DEV → main"
-            return redirect("/")
-        if not _state.get("promoting"):
-            _state["promoting"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
-
-            def _bg():
-                try:
-                    r = sync.promote(cfg)
-                    _audit_promote(audit, r)
-                    if r.get("ok"):
-                        n = r.get("ahead_before", 0)
-                        _state["last_result"] = (f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
-                                                 if n else "Unit already current — nothing to deploy.")
-                    else:
-                        _state["last_result"] = "Deploy failed: " + (r.get("error") or "unknown")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"Deploy error: {exc}"
-                finally:
-                    _state["promoting"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/")
-
     @app.get("/api/deploy-status")
     def deploy_status_api():
-        """Live state for the deploy progress bar: is a unit-promote or app-ship still running, and the
-        latest result line. The cockpit polls this so the button shows progress instead of looking dead."""
+        """Live state for the deploy progress bar. The cockpit polls this so the button shows progress instead of looking dead."""
         from flask import jsonify
-        active = bool(_state.get("promoting") or _state.get("shipping"))
-        kind = "ship" if _state.get("shipping") else ("promote" if _state.get("promoting") else "")
-        return jsonify({"active": active, "kind": kind, "msg": _state.get("last_result", "")})
-
-    @app.post("/api/ship-main")
-    def ship_main_api():
-        """Ship the CURRENT app's DEV -> MAIN (production) from the cockpit. Mac-only + ff-only."""
-        from . import sync
-        if not sync.can_promote():
-            return Response("Shipping is disabled on this cockpit (read-only box).", status=403)
-        app_name = _scope(request.form.get("app"))   # ship the active tab's one concrete project
-        if _state.get("active"):
-            _state["last_result"] = "finish the active run before shipping to production"
-            return redirect("/")
-        if not _state.get("shipping"):
-            _state["shipping"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
-
-            def _bg():
-                try:
-                    r = sync.promote_app(cfg.app(app_name))
-                    _audit_ship(audit, app_name, r)
-                    if r.get("ok"):
-                        n = r.get("ahead_before", 0)
-                        _state["last_result"] = (f"Shipped {app_name} {r['base']}→{r['prot']} "
-                                                 f"({n} commit(s)) to PRODUCTION." if n else
-                                                 f"{app_name} already shipped — nothing ahead.")
-                    else:
-                        _state["last_result"] = "Ship failed: " + (r.get("error") or "unknown")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"Ship error: {exc}"
-                finally:
-                    _state["shipping"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/")
+        # EU-204: promote and ship-main endpoints removed; this now always returns inactive
+        return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
 
     @app.post("/api/patrol")
     def patrol_api():
@@ -1510,9 +1497,14 @@ def create_app(cfg: Config):
         EU-102: renders s['rows'] (already typed with category+why) grouped into four
         labelled sections.  Officer recommendations and ticket proposals (not yet in rows)
         are appended below as before.
+
+        EU-129: scopes to the active project (via ?app=) so each tab shows only that project's
+        items. The app parameter is resolved by _board_project() (read-only, doesn't change the
+        active tab) and passed to summary() as app_name.
         """
         from . import needs as _needs
-        s = _needs.summary(cfg)
+        appq = _board_project(request.args.get("app"))   # EU-129: scope to active project
+        s = _needs.summary(cfg, appq)
         style = (
             "<style>"
             ".nsec{margin:4px 0 24px}.nsec h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;"
@@ -2404,12 +2396,7 @@ def create_app(cfg: Config):
                 f'{"s" if len(tickets) != 1 else ""} · {html.escape(base)} &rarr; {html.escape(prot)}</div></div>'
                 f'<div class=shtix>Tickets going live: {html.escape(tix_summary)}</div>'
                 + "".join(cards)
-                + '<form method=post action=/api/ship-main class=shbar '
-                + 'onsubmit="return confirm(\'Ship ' + html.escape(appq)
-                + ' to PRODUCTION now? This deploys your live product.\')">'
-                + f'<input type=hidden name=app value="{html.escape(appq)}">'
-                + f'<button class=shgo>&#128640; Ship {html.escape(appq)} to production</button>'
-                + back + '</form></div>')
+                + '<div class=shbar>' + back + '</div></div>')
         return _wrap("Ship to production", body)
 
     @app.get("/chat")

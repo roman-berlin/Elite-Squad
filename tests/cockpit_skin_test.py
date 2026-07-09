@@ -85,7 +85,7 @@ body = client.get("/ship-preview?app=automatixy").get_data(as_text=True)
 chk("ship-preview injects tokens + uses var()", ":root{" in body and "var(--ink)" in body)
 chk("ship-preview emits a real Jira deep-link when base_url is set",
     'href="https://acme.atlassian.net/browse/AUTO-9"' in body)
-chk("ship-preview ships to /api/ship-main", "/api/ship-main" in body)
+chk("ship-preview does NOT ship to /api/ship-main (removed in EU-204)", "/api/ship-main" not in body)
 
 # ── no base_url → degrade to plain text, never a dead/empty href ──
 app2 = AppConfig(name="plainapp", repo_path=str(tmp), base_branch="DEV", protected_branch="MAIN",

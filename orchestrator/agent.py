@@ -47,10 +47,11 @@ class AgentRun:
     tools: list[str] = field(default_factory=list)   # tool calls made, for the transcript
     input_tokens: int = 0    # prompt + cache tokens this run (for the usage ledger)
     output_tokens: int = 0   # completion tokens this run
-    # EU-118: true when this run hit a Claude plan limit (429 / usage-limit).
+    # EU-118: true when this run hit a plan limit (429 / usage-limit) for either Claude or GLM.
     # Detection matches _CAP_PATTERNS + _TRANSIENT_PATTERNS below against the Agent SDK's
     # message.error field; the SDK surfaces Anthropic API errors (HTTP 429 with "rate limit"
-    # or "usage limit" details) there when a plan/session/weekly quota is exceeded.
+    # or "usage limit" details) and GLM/z.ai errors (quota/credit/balance issues) there when
+    # a plan/session/weekly quota is exceeded. EU-202: GLM quota errors are also detected.
     is_plan_limit: bool = False
     # EU-108 hardening (2026-07-05 fake cap alert): how the plan-limit error classified —
     #   "cap"       → the message names an exhausted usage/plan/weekly quota (fallback-eligible)
@@ -85,8 +86,10 @@ def configure_audit(audit) -> None:
 # quota exhaustion names the cap ("Claude usage limit reached", "weekly limit", "plan limit");
 # a transient per-minute 429 or 529 overload only carries status/rate-limit language. Cap
 # patterns win when both match (a real cap error usually also carries a 429 status).
+# EU-202: add GLM/z.ai-specific patterns (quota, credit, balance, billing).
 _CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit",
-                 "limit reached", "over limit", "quota exceeded")
+                 "limit reached", "over limit", "quota exceeded", "quota",
+                 "credit", "balance", "billing", "insufficient")
 _TRANSIENT_PATTERNS = ("rate limit", "rate_limit", "too many requests",
                        "overloaded", "429", "529")
 
@@ -101,12 +104,67 @@ def _classify_plan_limit(err: str) -> str:
     return ""
 
 
-def _tool_brief(name: str, inp) -> str:
+def _tool_brief(name: str, inp, cwd: str | None = None) -> str:
+    """Generate a brief description of a tool call.
+
+    EU-197: Relativize file paths to cwd before truncation, so filenames survive.
+    For Task/Agent tools, surface subagent_type + description + first line of prompt.
+    """
     if isinstance(inp, dict):
-        for k in ("file_path", "path", "command", "pattern", "url"):
+        # Handle Task/Agent sub-agent tools specially
+        if name in ("Task", "Agent"):
+            parts = [name]
+            # Try different field names for subagent type
+            subagent_type = inp.get("subagent_type") or inp.get("agentType") or inp.get("type")
+            if subagent_type:
+                parts.append(str(subagent_type))
+
+            # Add description if available
+            description = inp.get("description")
+            if description:
+                parts.append(str(description).splitlines()[0][:50])
+
+            # Add first line of prompt if available
+            prompt = inp.get("prompt")
+            if prompt:
+                first_line = str(prompt).splitlines()[0][:40]
+                parts.append(first_line)
+
+            brief = " ".join(parts)
+            return brief[:72] if len(brief) > 72 else brief
+
+        # For other tools, handle file paths with relativization
+        for k in ("file_path", "path"):
+            v = inp.get(k)
+            if v and cwd:
+                # Relativize the path to cwd before truncation
+                try:
+                    from pathlib import Path as _Path
+                    abs_path = _Path(v).resolve()
+                    base_path = _Path(cwd).resolve()
+                    try:
+                        rel_path = abs_path.relative_to(base_path)
+                        # Use the relative path (more readable)
+                        v_str = str(rel_path)
+                    except ValueError:
+                        # Path is not relative to cwd (different mount, etc.),
+                        # fall back to just the filename
+                        v_str = abs_path.name
+                except Exception:
+                    # If relativization fails, use original value
+                    v_str = str(v)
+
+                return f"{name} {v_str[:72]}"
+            elif v:
+                # No cwd provided, use original behavior but truncate
+                return f"{name} {str(v).splitlines()[0][:72]}"
+
+        # For non-path fields (command, pattern, url), use original behavior
+        for k in ("command", "pattern", "url"):
             v = inp.get(k)
             if v:
                 return f"{name} {str(v).splitlines()[0][:72]}"
+
     return name or "tool"
 
 
@@ -230,11 +288,26 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
             for b in message.content:
                 if isinstance(b, TextBlock):
                     parts.append(b.text)
+                    # EU-197: write officer reasoning to transcript
+                    try:
+                        from . import transcript
+                        transcript.write_text(b.text)
+                    except Exception:  # noqa: BLE001 — best-effort
+                        pass
                 elif ToolUseBlock is not None and isinstance(b, ToolUseBlock):
-                    brief = _tool_brief(getattr(b, "name", ""), getattr(b, "input", None))
+                    brief = _tool_brief(getattr(b, "name", ""), getattr(b, "input", None),
+                                     cwd=getattr(options, "cwd", None))
                     tools.append(brief)
                     if tag:
                         print(f"      · {tag}: {brief}", flush=True)
+                    # EU-197: write full tool input to transcript
+                    try:
+                        from . import transcript
+                        tool_name = getattr(b, "name", "")
+                        tool_input = getattr(b, "input", None)
+                        transcript.write_tool_use(tool_name, tool_input)
+                    except Exception:  # noqa: BLE001 — best-effort
+                        pass
             text = "".join(parts)
             if text:
                 chunks.append(text)
@@ -288,6 +361,13 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                                turns=turns, **extra)
         except Exception:  # noqa: BLE001 — instrumentation must never break a run
             pass
+
+    # EU-197: write final result to transcript
+    try:
+        from . import transcript
+        transcript.write_result(final)
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
 
     return AgentRun(text="\n".join(chunks), final=final, cost_usd=cost,
                     num_turns=turns, is_error=is_error, tools=tools,

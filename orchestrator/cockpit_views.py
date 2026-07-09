@@ -180,13 +180,13 @@ def _result_banner(state: dict) -> str:
 
 
 def _plan_limit_banner(state: dict, cfg=None) -> str:
-    """Plan-limit warning banner: shown when a Claude plan limit is hit.
+    """Plan-limit warning banner: shown when a Claude or GLM plan limit is hit.
 
     Prominent red banner that persists until the limit resets (not a one-shot like
     ``_result_banner``). Displays which limit was hit and when it resets. EU-191: when an alternate
     backend (e.g. GLM) is configured, it also offers a one-click "Continue on <backend>" button that
     switches the model backend and resumes the paused ticket, so an Opus/Claude limit doesn't stall
-    the drain until reset.
+    the drain until reset. EU-202: bidirectional — offers Opus→GLM AND GLM→Opus.
     """
     from . import cockpit_state as _cs
     from . import usage as _usg
@@ -222,30 +222,31 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
         except Exception:  # noqa: BLE001
             reset_text = "unknown time"
 
-    # EU-191: offer a one-click switch to an available alternate backend (e.g. GLM) instead of only
-    # waiting for the limit to reset. Only when the active backend is NATIVE (the Claude/Opus path the
-    # limit blocks) AND an alternate is actually runnable. The button switches the sticky backend and
-    # auto-resumes the last-run ticket (tracked in state['last_run']).
+    # EU-191 + EU-202: offer a one-click switch to an available alternate backend instead of only
+    # waiting for the limit to reset. Works for BOTH directions: Opus→GLM AND GLM→Opus.
+    # The button switches the sticky backend and auto-resumes the last-run ticket (tracked in
+    # state['last_run']).
     continue_offer = ""
+    backend_label = "Claude"  # Default, updated below
     try:
         from . import backends as _bk, backend_pref as _bp
-        _cur = _bp.active(cfg) if cfg is not None else _bk.NATIVE
-        if _bk.normalize(_cur) == _bk.NATIVE:
-            _alts = _bk.alternates(_cur)
-            if _alts:
-                _alt = _alts[0]
-                _label = "GLM (Z.ai)" if _alt == _bk.GLM else _alt.upper()
-                _last = state.get("last_run") or {}
-                _tickets = [t for t in (_last.get("tickets") or []) if t]
-                _resume = (" &amp; resume " + html.escape(", ".join(_tickets))) if _tickets else ""
-                continue_offer = (
-                    "<form method=post action=/api/continue-on-alternate style='margin:8px 0 0'>"
-                    f"<input type=hidden name=backend value='{html.escape(_alt)}'>"
-                    "<button style='font-size:13px;font-weight:650;padding:6px 14px;border-radius:7px;"
-                    "background:#1f6feb;color:#fff;border:none;cursor:pointer'>"
-                    f"Continue on {_label}{_resume}</button>"
-                    "<span style='font-size:12px;color:#e7ebf2;font-weight:400;margin-left:10px'>"
-                    "&#8212; keep the drain moving without waiting for the reset</span></form>")
+        _cur = _bk.normalize(_bp.active(cfg) if cfg is not None else _bk.NATIVE)
+        backend_label = "Claude (Opus)" if _cur == _bk.NATIVE else "GLM (Z.ai)"
+        _alts = _bk.alternates(_cur)
+        if _alts:
+            _alt = _alts[0]
+            _label = "GLM (Z.ai)" if _alt == _bk.GLM else "Claude (Opus)"
+            _last = state.get("last_run") or {}
+            _tickets = [t for t in (_last.get("tickets") or []) if t]
+            _resume = (" &amp; resume " + html.escape(", ".join(_tickets))) if _tickets else ""
+            continue_offer = (
+                "<form method=post action=/api/continue-on-alternate style='margin:8px 0 0'>"
+                f"<input type=hidden name=backend value='{html.escape(_alt)}'>"
+                "<button style='font-size:13px;font-weight:650;padding:6px 14px;border-radius:7px;"
+                "background:#1f6feb;color:#fff;border:none;cursor:pointer'>"
+                f"Continue on {_label}{_resume}</button>"
+                "<span style='font-size:12px;color:#e7ebf2;font-weight:400;margin-left:10px'>"
+                "&#8212; keep the drain moving without waiting for the reset</span></form>")
     except Exception:  # noqa: BLE001 — the offer must never break the banner
         continue_offer = ""
 
@@ -254,7 +255,7 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
         "padding:16px 26px;font-size:14px;font-weight:650;display:flex;align-items:flex-start;gap:11px'>"
         "<span style='font-size:20px'>&#9888;</span>"
         "<div>"
-        "<div style='font-size:15px;margin-bottom:4px'>&#9888; Claude plan limit reached &#8212; implementation paused</div>"
+        f"<div style='font-size:15px;margin-bottom:4px'>&#9888; {html.escape(backend_label)} plan limit reached &#8212; implementation paused</div>"
         f"<div style='font-size:13px;color:#e7ebf2;font-weight:400'>Resets at {html.escape(reset_text)}. "
         "New builds will wait until the limit renews.</div>"
         f"{continue_offer}"
@@ -419,65 +420,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     def busy(k):
         return "disabled" if _state.get(k) else ""
 
-    # ── Two DIFFERENT repos, two DIFFERENT promotions — kept visually distinct so they can't be
-    # confused. (A) "Update unit": THE CTO'S OWN code (this tool) dev->main -> the 24/7 VPS
-    # self-updates. (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production.
-    # Both only on a cockpit allowed to push (the Mac, via GENERAL_COCKPIT_PROMOTE).
-    promote_html = ""
-    try:
-        from . import sync as _sync
-        if _sync.can_promote():
-            _ahead = _sync.promote_status(cfg).get("ahead", 0)
-            if _ahead:
-                _pc = (f"Update THE UNIT itself — promote the CTO (this tool\\u2019s own code, the "
-                       f"~/Projects/General repo) dev \\u2192 main, {_ahead} commit(s). The 24/7 server "
-                       f"self-updates within ~15 min. This is the unit\\u2019s brain, NOT your app.")
-                promote_html = (
-                    '<span class=tbdiv></span>'
-                    '<form method=post action=/api/promote class=tbf '
-                    f'''onsubmit="return confirm('{_pc}')">'''
-                    f'<button class="btn deploy" title="Promote the CTO — this tool&#39;s OWN code — '
-                    f'dev&#8594;main. The VPS self-updates. NOT your app." {busy("promoting")}>'
-                    f'&#9881;&#65039; Update unit<span class=cbadge>{_ahead}</span></button></form>')
-            else:
-                promote_html = ('<span class=tbdiv></span><span class="tbnote ok" '
-                                'title="The CTO (the unit\'s own code) is in sync with the server">'
-                                '&#10003; unit current</span>')
-    except Exception:  # noqa: BLE001
-        promote_html = ""
-
-    # (B) Ship the CURRENT app DEV -> MAIN (production). Names the app + says PRODUCTION so it's never
-    # mistaken for the unit self-deploy above.
+    # ── Per-project "Ship <app>" DEV→MAIN button removed per EU-206 — the button no longer renders.
+    # The underlying ship functionality remains intact: routes, sync module, and ship-preview page
+    # are still available, only the per-project button was removed from the control bar.
     ship_html = ""
-    try:
-        from . import sync as _sync
-        # An app whose repo IS the CTO's OWN repo (e.g. the 'Elite-Unit' app, added so the unit can
-        # work its own EU tickets) is promoted via "Update unit" — NOT shipped as a product. Suppress its
-        # Ship button so there's no duplicate/ambiguous "ship the unit" path next to Update-unit.
-        _is_unit_repo = False
-        if app0:
-            try:
-                _is_unit_repo = Path(cfg.app(app0).repo_path).resolve() == _sync._repo_root(cfg)
-            except Exception:  # noqa: BLE001
-                _is_unit_repo = False
-        if _sync.can_promote() and app0 and not _is_unit_repo:
-            _sa = _sync.app_promote_status(cfg.app(app0))
-            _sn = _sa.get("ahead", 0)
-            if _sn:
-                # The button now OPENS A REVIEW PAGE (commits + their tickets) instead of shipping on
-                # the spot — you see exactly what's going to production, then confirm there.
-                ship_html = (
-                    f'<a class="btn ship" href="/ship-preview?app={html.escape(app0)}" '
-                    f'title="Review the {html.escape(app0)} commits + tickets, then ship to production">'
-                    f'&#128640; Ship {html.escape(app0)} &rarr; production<span class=cbadge>{_sn}</span></a>')
-            else:
-                # Nothing ahead — DEV is fully merged into production. Show it explicitly (don't just hide
-                # the button) so "all shipped" is unmistakable after a merge.
-                ship_html = ('<span class="tbnote ok" '
-                             f'title="{html.escape(app0)} DEV is fully merged into production — nothing to ship">'
-                             f'&#10003; {html.escape(app0)} shipped</span>')
-    except Exception:  # noqa: BLE001
-        ship_html = ""
 
     # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
     from . import warroom as _wr
@@ -578,12 +524,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     else:
         # Autopilot off: offer two start modes that genuinely differ (EU-103 iter-2).
         #  · 'Choose tickets' opens the per-ticket picker (pick specific tickets, then run them).
-        #  · 'Auto-drain' starts the continuous backlog autopilot for this project.
+        #  · 'Resume implementing' picks up pending work (In-Progress first, then To-Do) on the active backend.
         _conf_choose = (f"return confirm('Open the ticket picker for "
                         f"{html.escape(app0 or '')} to choose specific tickets to develop?')")
-        _conf_drain = (f"return confirm('Start Auto-drain for "
+        _conf_drain = (f"return confirm('Resume implementing for "
                        f"{html.escape(app0 or '')}? "
-                       f"The unit will work tickets LIVE until the queue is empty or you press Stop.')")
+                       f"The unit will work In-Progress tickets first, then To-Do, until the queue is empty or you press Stop.')")
         ap_html = (
             '<span class=tbdiv></span>'
             '<div class="tbap off">'
@@ -603,8 +549,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             f'<input type=hidden name=app value="{ap_appq}">'
             '<input type=hidden name=mode value=drain>'
             f'<button class="aptbtn start" {ap_dis} '
-            'title="Drain the backlog automatically until empty">'
-            '&#9654;&nbsp;Auto-drain</button></form>'
+            'title="Resume implementing — work In-Progress tickets first, then To-Do, until empty">'
+            '&#9654;&nbsp;Resume implementing</button></form>'
             '</div>')
 
     # EU-106: global 'Open logs' button — macOS only (Darwin `open` command opens Finder).
@@ -738,7 +684,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
   <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
   <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
-  {promote_html}
   {ship_html}
   {ap_html}
   {open_logs_html}
