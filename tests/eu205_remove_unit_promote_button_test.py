@@ -1,8 +1,9 @@
 """EU-205: Remove unit dev→main promote button from cockpit UI.
+EU-206: Remove per-project "Ship <app>" DEV→MAIN button from cockpit UI.
 
 Acceptance criteria:
 - The "Update unit" button no longer renders on the cockpit sync status view
-- No call to `_sync.can_promote()` remains in cockpit_views.py (for unit promotion)
+- No call to `_sync.can_promote()` remains in cockpit_views.py (both unit and app promotion buttons removed)
 - The `_ahead` badge computed from `sync.promote_status()` is gone from the control bar
 - Cockpit loads without error; sync status view renders cleanly
 - Tests pass (`python3 tests/run_all.py`)
@@ -82,30 +83,30 @@ chk(
     "Found 'Update unit' or 'promote the CTO' in control bar"
 )
 
-# Test 2: No call to `_sync.can_promote()` remains in cockpit_views.py for unit promotion
-# The only remaining call should be in the ship_html block for product apps
+# Test 2: No call to `_sync.can_promote()` remains in cockpit_views.py
+# Both unit promotion (EU-205) and app ship button (EU-206) logic removed
 with open(Path(__file__).parent.parent / "orchestrator" / "cockpit_views.py", encoding="utf-8") as f:
     content = f.read()
 
-# Check that the unit promotion section (lines ~423-425) doesn't contain can_promote
+# Check that the promotion section doesn't contain can_promote
 lines = content.split("\n")
-unit_promote_section = "\n".join(lines[422:426])  # Lines 423-425 (0-indexed)
+promotion_section = "\n".join(lines[422:426])  # Lines 423-425 (0-indexed)
 chk(
-    "No call to _sync.can_promote() in unit promotion section",
-    "can_promote" not in unit_promote_section,
-    f"Found can_promote in unit promotion section:\n{unit_promote_section}"
+    "No call to _sync.can_promote() in promotion section",
+    "can_promote" not in promotion_section,
+    f"Found can_promote in promotion section:\n{promotion_section}"
 )
 
-# Verify the only remaining can_promote call is in the ship_html block
+# Verify NO can_promote calls remain (both unit and app buttons removed)
 can_promote_count = content.count("can_promote()")
 chk(
-    "Only one can_promote() call remains (for ship_html)",
-    can_promote_count == 1,
-    f"Expected 1 can_promote() call, found {can_promote_count}"
+    "No can_promote() calls remain (EU-205 + EU-206)",
+    can_promote_count == 0,
+    f"Expected 0 can_promote() calls, found {can_promote_count}"
 )
 
 # Test 3: The `_ahead` badge computed from sync.promote_status() is gone from unit promotion
-# The only remaining promote_status call should be _sync.app_promote_status for product apps
+# AND app_promote_status is gone from ship button logic (both removed: EU-205 + EU-206)
 unit_promote_ahead_check = ("_sync.promote_status(cfg)" in content or
                            "promote_status(cfg)" in content)
 chk(
@@ -114,11 +115,11 @@ chk(
     "Found sync.promote_status(cfg) call (unit promotion _ahead badge)"
 )
 
-# Verify app_promote_status is still there (for product apps)
+# Verify app_promote_status is also removed (ship button logic removed in EU-206)
 chk(
-    "app_promote_status still present (for product apps)",
-    "app_promote_status" in content,
-    "app_promote_status should remain for ship_html"
+    "app_promote_status removed (EU-206)",
+    "app_promote_status" not in content,
+    "app_promote_status should be removed with ship button logic"
 )
 
 # Test 4: Cockpit loads without error; sync status view renders cleanly

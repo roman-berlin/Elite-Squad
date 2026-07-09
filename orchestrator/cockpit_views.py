@@ -420,42 +420,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     def busy(k):
         return "disabled" if _state.get(k) else ""
 
-    # ── Unit promotion (Update unit) removed per EU-205 — this section now only handles product app shipping.
-    # (A) "Update unit": THE CTO'S OWN code (this tool) dev->main was removed from the cockpit UI.
-    # (B) "Ship <app>": your PRODUCT (e.g. Automatixy) DEV->MAIN -> live production remains.
-
-    # (B) Ship the CURRENT app DEV -> MAIN (production). Names the app + says PRODUCTION so it's never
-    # mistaken for the unit self-deploy above.
+    # ── Per-project "Ship <app>" DEV→MAIN button removed per EU-206 — the button no longer renders.
+    # The underlying ship functionality remains intact: routes, sync module, and ship-preview page
+    # are still available, only the per-project button was removed from the control bar.
     ship_html = ""
-    try:
-        from . import sync as _sync
-        # An app whose repo IS the CTO's OWN repo (e.g. the 'Elite-Unit' app, added so the unit can
-        # work its own EU tickets) is promoted via "Update unit" — NOT shipped as a product. Suppress its
-        # Ship button so there's no duplicate/ambiguous "ship the unit" path next to Update-unit.
-        _is_unit_repo = False
-        if app0:
-            try:
-                _is_unit_repo = Path(cfg.app(app0).repo_path).resolve() == _sync._repo_root(cfg)
-            except Exception:  # noqa: BLE001
-                _is_unit_repo = False
-        if _sync.can_promote() and app0 and not _is_unit_repo:
-            _sa = _sync.app_promote_status(cfg.app(app0))
-            _sn = _sa.get("ahead", 0)
-            if _sn:
-                # The button now OPENS A REVIEW PAGE (commits + their tickets) instead of shipping on
-                # the spot — you see exactly what's going to production, then confirm there.
-                ship_html = (
-                    f'<a class="btn ship" href="/ship-preview?app={html.escape(app0)}" '
-                    f'title="Review the {html.escape(app0)} commits + tickets, then ship to production">'
-                    f'&#128640; Ship {html.escape(app0)} &rarr; production<span class=cbadge>{_sn}</span></a>')
-            else:
-                # Nothing ahead — DEV is fully merged into production. Show it explicitly (don't just hide
-                # the button) so "all shipped" is unmistakable after a merge.
-                ship_html = ('<span class="tbnote ok" '
-                             f'title="{html.escape(app0)} DEV is fully merged into production — nothing to ship">'
-                             f'&#10003; {html.escape(app0)} shipped</span>')
-    except Exception:  # noqa: BLE001
-        ship_html = ""
 
     # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
     from . import warroom as _wr
