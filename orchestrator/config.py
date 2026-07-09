@@ -329,6 +329,12 @@ class Config:
     # 0 (the default) disables purging.
     log_retention_days: int = 0
 
+    # --- EU-197: per-officer transcript (full tool inputs + reasoning) ---
+    # transcript_enabled: when True, persist a full JSONL transcript per officer run
+    # to logs/<app>/<date>/<TICKET>-<HHMMSS>-<officer>.jsonl with secrets redacted.
+    # Best-effort (never breaks a run). Disabled by default.
+    transcript_enabled: bool = False
+
     # --- audit ---
     # The audit log's directory is the runtime-state root: every sidecar (blocked_tickets.json,
     # pending_decisions.json, usage_ledger.jsonl, council/, report .md files, …) is derived from it
