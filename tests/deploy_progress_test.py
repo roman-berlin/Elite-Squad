@@ -1,6 +1,7 @@
 """Deploy progress + fresh badge QA: while an app-ship runs, the control bar shows a live
-progress strip that polls /api/deploy-status and reloads when done; at 0-ahead the app Ship button
-shows an explicit 'all merged' status. EU-205 removed the unit promote button from the cockpit UI."""
+progress strip that polls /api/deploy-status and reloads when done. EU-205 removed the unit promote
+button; EU-206 removed the per-project ship button from the cockpit UI (underlying functionality
+remains via ship-preview page and routes)."""
 import sys, types, tempfile
 from pathlib import Path
 
@@ -68,33 +69,32 @@ server._state["shipping"] = False
 # --- no strip element when idle (the CSS rule is always present; the strip element is not) ---
 chk("no strip when idle", "<div class=deploybar>" not in server._control_bar(cfg, "automatixy", True))
 
-# --- 0-ahead: explicit 'all merged' status for app, but unit promote button removed EU-205 ---
+# --- 0-ahead: both unit and app ship buttons removed from cockpit UI (EU-205 + EU-206) ---
 _ahead["unit"] = 0
 _ahead["app"] = 0
 idle_bar = server._control_bar(cfg, "automatixy", True)
-# EU-205: unit promote button removed from cockpit UI
+# EU-205: unit promote button removed; EU-206: app ship button removed
 chk("unit promote button removed (EU-205)", "Update unit" not in idle_bar and "unit current" not in idle_bar)
-chk("app at 0 -> 'automatixy shipped' (not a stale ship button)",
-    "automatixy shipped" in idle_bar and "Ship automatixy" not in idle_bar)
+chk("app ship button removed (EU-206)", "Ship automatixy" not in idle_bar and "automatixy shipped" not in idle_bar)
 
-# --- non-zero: only the app Ship button shows the count (unit button removed EU-205) ---
+# --- non-zero: neither unit nor app ship buttons render (EU-205 + EU-206) ---
 _ahead["unit"] = 3
 _ahead["app"] = 13
 live_bar = server._control_bar(cfg, "automatixy", True)
-# EU-205: unit promote button no longer renders even when ahead
+# EU-205: unit promote button removed; EU-206: app ship button removed
 chk("unit ahead -> no Update unit button (EU-205)", "Update unit" not in live_bar)
-chk("app ahead -> Ship button with the count", "Ship automatixy" in live_bar and ">13<" in live_bar)
-chk("ahead -> no 'all merged' note", "unit current" not in live_bar and "automatixy shipped" not in live_bar)
+chk("app ahead -> no Ship button (EU-206)", "Ship automatixy" not in live_bar)
+chk("ahead -> no 'all merged' notes", "unit current" not in live_bar and "automatixy shipped" not in live_bar)
 
-# --- the General's OWN repo as an app (e.g. 'Elite-Unit', repo == the unit repo) is NOT a shippable
-#     product: it's promoted via "Update unit", so NO "Ship → production" button/status for it ---
+# --- the General's OWN repo as an app (e.g. 'Elite-Unit') has neither unit promote nor app ship
+#     button — both removed from cockpit UI (EU-205 + EU-206) ---
 cfg_eu = Config(apps=[AppConfig(name="Elite-Unit", repo_path=str(tmp), base_branch="dev",
                                 protected_branch="main", backlog_backend="none")],
                 audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
 cfg_eu.detected_auth = lambda: "test"
 _ahead["app"] = 9
 eu_bar = server._control_bar(cfg_eu, "Elite-Unit", True)
-chk("unit-repo app -> no Ship button (promoted via Update unit, not shipped)",
+chk("unit-repo app -> no ship buttons (both removed via EU-205 + EU-206)",
     "Ship Elite-Unit" not in eu_bar and "Elite-Unit shipped" not in eu_bar)
 
 print("\n============ DEPLOY PROGRESS QA ============")

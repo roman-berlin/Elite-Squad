@@ -46,10 +46,9 @@ os.environ.pop("GENERAL_COCKPIT_PROMOTE", None)
 chk("ship refused off-Mac (no flag)", not sync.promote_app(app)["ok"] and "disabled" in (sync.promote_app(app)["error"] or ""))
 os.environ["GENERAL_COCKPIT_PROMOTE"] = "1"
 
-# --- the cockpit Ship button renders (Mac, app ahead) ---
+# --- the cockpit Ship button removed per EU-206 (underlying functionality remains) ---
 bar = server._control_bar(cfg, "automatixy", True)
-chk("Ship button present for the current app", "/ship-preview?app=automatixy" in bar and "Ship automatixy" in bar, "")
-chk("Ship button shows the ahead count", "<span class=cbadge>2</span>" in bar)
+chk("Ship button removed from cockpit (EU-206)", "Ship automatixy" not in bar and "/ship-preview" not in bar)
 
 # --- ship: ff MAIN to DEV, push, return to DEV ---
 r = sync.promote_app(app)
