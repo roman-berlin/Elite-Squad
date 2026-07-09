@@ -42,7 +42,7 @@ from orchestrator import dashboard as _dashboard
 _dashboard.needs_detail_html = lambda t: "detail"
 _dashboard.needs_chat_summary = lambda t: "summary"
 _dashboard._short = lambda s, n=120: (s or "")[:n]
-needs.summary = lambda c: {
+needs.summary = lambda c, a=None: {
     "total": 1,
     "decisions": [{"id": "AUTO-32", "app": "automatixy", "question": "Use tabs or spaces?"}],
     "approvals": [], "proposals": [], "tasks": [],
