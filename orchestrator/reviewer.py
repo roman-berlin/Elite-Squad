@@ -105,6 +105,57 @@ def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = No
     return "\n".join(parts)
 
 
+def _classify_diff(diff: str) -> tuple[str, str]:
+    """Classify a diff as 'trivial' or 'production' based on size and content.
+
+    Returns (category, reason) where category is 'trivial' or 'production'.
+    Trivial: tests-only changes AND <30 total changed lines.
+    Production: any .tsx/.py production file changed, OR ≥30 lines, OR mixed changes.
+    """
+    if not diff or not diff.strip():
+        return ("trivial", "empty diff")
+
+    # Check for production file changes (.tsx or .py files, excluding test files)
+    # Production files are those not under /tests/ or with names not ending in _test.py
+    has_production_change = False
+    production_reason = ""
+
+    for line in diff.split("\n"):
+        # Look for file paths in diff headers (e.g., "+++ b/src/components/Button.tsx")
+        if line.startswith("+++ b/") or line.startswith("--- a/"):
+            file_path = line.split()[1] if len(line.split()) > 1 else ""
+            # Check if it's a production file
+            is_tsx = file_path.endswith(".tsx")
+            is_py = file_path.endswith(".py")
+            is_test = "/tests/" in file_path or file_path.endswith("_test.py")
+
+            if (is_tsx or is_py) and not is_test:
+                has_production_change = True
+                production_reason = f"{'.tsx' if is_tsx else '.py'} production file"
+                break
+
+    # Count changed lines (lines starting with + or -)
+    changed_lines = sum(1 for line in diff.split("\n") if line.startswith("+") or line.startswith("-"))
+
+    # Classification logic
+    if has_production_change:
+        return ("production", production_reason)
+    if changed_lines >= 30:
+        return ("production", "≥30 lines")
+    return ("trivial", "tests-only, <30 lines")
+
+
+def _effort_for_diff(category: str, cfg: Config) -> tuple[str, int]:
+    """Return (effort, max_turns) based on diff category.
+
+    Trivial diffs → low effort, max_turns ≤ 10 (fast conformance check).
+    Production diffs → cfg.reviewer_effort, max_turns = 30 (full-depth review).
+    """
+    if category == "trivial":
+        return ("low", 10)
+    return (normalize_effort(cfg.reviewer_effort), 30)
+
+
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1,
                  *, store: PerTicketArtifactStore | None = None,
                  build_artifact: BuildArtifact | None = None) -> ReviewResult:
@@ -122,6 +173,12 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     rmodel, rreason = models.for_reviewer(cfg, diff, iteration)   # ceiling unless auto_model is on
     if getattr(cfg, "auto_model", False):
         print(f"  · reviewer model: {rreason}", flush=True)
+
+    # EU-198: scale effort/turns based on diff size + nature
+    diff_category, diff_reason = _classify_diff(diff)
+    review_effort, review_turns = _effort_for_diff(diff_category, cfg)
+    print(f"  · reviewer: {diff_category} diff → {review_effort} effort, {review_turns} turns ({diff_reason})", flush=True)
+
     options = ClaudeAgentOptions(
         model=rmodel,
         system_prompt=memory.preamble() + REVIEWER_SYSTEM,
@@ -134,8 +191,8 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
         # judge reasons over the diff, it never needs to delegate.
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
         setting_sources=["project"],
-        max_turns=30,
-        effort=normalize_effort(cfg.reviewer_effort),
+        max_turns=review_turns,
+        effort=review_effort,
     )
     # Sonnet-cap → one-shot Opus retry for this pass (per-call, no weekly pin — see run_agent_with_fallback)
     # EU-174: determine routing tier based on task characteristics
