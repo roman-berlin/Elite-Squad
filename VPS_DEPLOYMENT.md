@@ -161,40 +161,25 @@ cd ~/General && ./general doctor      # config/keys/repos/tooling
 with systemd:
 
 ```bash
-sudo tee /etc/systemd/system/general.service >/dev/null <<EOF
-[Unit]
-Description=Elite Unit — cockpit + Telegram listener
-After=network-online.target
-# EU-184 (Wave 0): bound the restart storm. Without a start-limit, a main deploy that crashes on
-# startup restarts forever (Restart=always + RestartSec=5 → ~864 restarts/min was observed on
-# 2026-07-05). After StartLimitBurst restarts within StartLimitIntervalSec, systemd gives up and
-# leaves the unit 'failed' instead of pegging the box. self-update.sh's smoke-test-before-restart
-# is the first line of defence; this is the backstop for a RUNTIME crash the import test misses.
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-[Service]
-User=$USER
-WorkingDirectory=$HOME/General
-ExecStart=$HOME/General/general serve --port 8787
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload                 # ALWAYS after editing the unit file (the audit found it edited without a reload)
-sudo systemctl enable --now general.service
-systemctl status general.service        # should be 'active (running)'
+bash scripts/install-service.sh
 ```
 
-> **Applying EU-184 to a box already running the old unit:** re-run the `tee` block above (it
-> overwrites the unit with the start-limit lines), then `sudo systemctl daemon-reload && sudo
-> systemctl restart general.service`. `scripts/self-update.sh` already smoke-tests each new `main`
-> before restarting and reverts a broken deploy — so the two together mean a bad push can neither
-> deploy (import break → reverted + Telegram alert) nor crash-loop the box (runtime break →
-> systemd stops after 5 tries).
+The `install-service.sh` script writes the hardened systemd unit (with the EU-184 crash-loop
+backstop: `StartLimitIntervalSec=300` and `StartLimitBurst=5`), calls `systemctl daemon-reload`
+to apply the changes, and enables the service. The script is idempotent — you can re-run it any
+time to re-apply the unit configuration.
+
+Verify:
+```bash
+systemctl status general.service        # should be 'active (running)'
+systemctl show general.service -p StartLimitIntervalUSec  # should show 5min (300s)
+```
+
+> **Applying EU-184 to a box already running the old unit:** re-run `bash scripts/install-service.sh`
+> (it overwrites the unit with the start-limit lines). `scripts/self-update.sh` already smoke-tests
+> each new `main` before restarting and reverts a broken deploy — so the two together mean a bad push
+> can neither deploy (import break → reverted + Telegram alert) nor crash-loop the box (runtime
+> break → systemd stops after 5 tries).
 
 ## Step 5 — Schedule the discussions (cron)
 
