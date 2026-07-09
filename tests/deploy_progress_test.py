@@ -1,7 +1,7 @@
 """Deploy progress + fresh badge QA: while an app-ship runs, the control bar shows a live
 progress strip that polls /api/deploy-status and reloads when done. EU-205 removed the unit promote
-button; EU-206 removed the per-project ship button from the cockpit UI (underlying functionality
-remains via ship-preview page and routes)."""
+button; EU-206 removed the per-project ship button from the cockpit UI; EU-204 removed the backend
+endpoints, so the deploy-status API now always returns inactive."""
 import sys, types, tempfile
 from pathlib import Path
 
@@ -29,42 +29,17 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp / "app"), base
              audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
 cfg.detected_auth = lambda: "test"
 
-# control over deploy state + git-ahead counts (no real git / network)
+# control over git-ahead counts (no real git / network)
 sync.can_promote = lambda: True
 _ahead = {"unit": 0, "app": 0}
 sync.promote_status = lambda c: {"ahead": _ahead["unit"], "subjects": [], "error": None}
 sync.app_promote_status = lambda a: {"ahead": _ahead["app"], "base": "DEV", "prot": "MAIN", "error": None}
 
-# reset deploy flags
-server._state["promoting"] = False
-server._state["shipping"] = False
-
-# --- /api/deploy-status reflects the live flags ---
+# --- EU-204: /api/deploy-status now always returns inactive (endpoints removed) ---
 client = server.create_app(cfg).test_client()
 import json as _json
 d0 = _json.loads(client.get("/api/deploy-status").get_data(as_text=True))
-chk("deploy-status: idle -> not active", d0["active"] is False and d0["kind"] == "")
-server._state["promoting"] = True
-d1 = _json.loads(client.get("/api/deploy-status").get_data(as_text=True))
-chk("deploy-status: promoting -> active/promote", d1["active"] and d1["kind"] == "promote")
-server._state["promoting"] = False
-server._state["shipping"] = True
-d2 = _json.loads(client.get("/api/deploy-status").get_data(as_text=True))
-chk("deploy-status: shipping -> active/ship", d2["active"] and d2["kind"] == "ship")
-server._state["shipping"] = False
-
-# --- control bar: progress strip appears while deploying, with the poller ---
-server._state["promoting"] = True
-bar = server._control_bar(cfg, "automatixy", True)
-chk("strip shows while promoting", "<div class=deploybar>" in bar)
-chk("strip says deploying the unit", "Deploying the unit" in bar)
-chk("strip polls the status endpoint", "/api/deploy-status" in bar and "location.reload()" in bar)
-server._state["promoting"] = False
-
-server._state["shipping"] = True
-bar_s = server._control_bar(cfg, "automatixy", True)
-chk("strip shows while shipping", "<div class=deploybar>" in bar_s and "Shipping" in bar_s and "automatixy" in bar_s)
-server._state["shipping"] = False
+chk("deploy-status: always inactive after EU-204", d0["active"] is False and d0["kind"] == "")
 
 # --- no strip element when idle (the CSS rule is always present; the strip element is not) ---
 chk("no strip when idle", "<div class=deploybar>" not in server._control_bar(cfg, "automatixy", True))

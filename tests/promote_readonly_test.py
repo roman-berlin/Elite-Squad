@@ -1,5 +1,4 @@
-"""QA for EU-25: a read-only cockpit (GENERAL_COCKPIT_PROMOTE unset) must return a graceful
-403 from POST /api/promote and POST /api/ship-main — never a 500 from a NameError on Response."""
+"""QA for EU-204: POST /api/promote and POST /api/ship-main must return 404 (endpoints removed)."""
 import os, sys, tempfile, types
 
 # The server imports pull in the agent SDK transitively; stub it (same trick as testurl_test.py).
@@ -29,14 +28,12 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path="/tmp/x",
 client = create_app(cfg).test_client()
 
 r1 = client.post("/api/promote")
-check("/api/promote -> 403 (not 500)", r1.status_code == 403, f"got {r1.status_code}")
-check("/api/promote disabled message", b"disabled" in r1.data.lower(), r1.data[:80])
+check("/api/promote -> 404 (removed)", r1.status_code == 404, f"got {r1.status_code}")
 
 r2 = client.post("/api/ship-main")
-check("/api/ship-main -> 403 (not 500)", r2.status_code == 403, f"got {r2.status_code}")
-check("/api/ship-main disabled message", b"disabled" in r2.data.lower(), r2.data[:80])
+check("/api/ship-main -> 404 (removed)", r2.status_code == 404, f"got {r2.status_code}")
 
-print("\n========== PROMOTE READ-ONLY QA (EU-25) ==========")
+print("\n========== PROMOTE ENDPOINTS REMOVED QA (EU-204) ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
     print(f"  [{'PASS' if ok else 'FAIL'}] {n}" + (f"  ({det})" if det and not ok else ""))

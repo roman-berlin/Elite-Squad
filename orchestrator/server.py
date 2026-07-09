@@ -63,26 +63,6 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
-def _audit_ship(audit, app_name: str, r: dict) -> None:
-    """Record an app DEV→MAIN ship in the audit so it shows up in the logs/history — until now a ship's
-    only trace was the in-memory cockpit banner, so 'check the logs' came up empty. Best-effort."""
-    try:
-        audit.record("ship", app=app_name, base=r.get("base"), prot=r.get("prot"),
-                     ahead=int(r.get("ahead_before", 0) or 0), ok=bool(r.get("ok")),
-                     error=(r.get("error") or "")[:300])
-    except Exception:  # noqa: BLE001 - logging a ship must never break the ship
-        pass
-
-
-def _audit_promote(audit, r: dict) -> None:
-    """Record a unit dev→main promote ('Update unit') in the audit, same rationale as _audit_ship."""
-    try:
-        audit.record("promote", target="unit", ahead=int(r.get("ahead_before", 0) or 0),
-                     ok=bool(r.get("ok")), error=(r.get("error") or "")[:300])
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -1387,74 +1367,12 @@ def create_app(cfg: Config):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
 
-    @app.post("/api/promote")
-    def promote_api():
-        """Promote DEV -> main from the cockpit (the server auto-deploys main). Mac-only + ff-only."""
-        from . import sync
-        if not sync.can_promote():
-            return Response("Deploy is disabled on this cockpit (read-only box).", status=403)
-        if _state.get("active"):
-            _state["last_result"] = "finish the active run before deploying DEV → main"
-            return redirect("/")
-        if not _state.get("promoting"):
-            _state["promoting"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
-
-            def _bg():
-                try:
-                    r = sync.promote(cfg)
-                    _audit_promote(audit, r)
-                    if r.get("ok"):
-                        n = r.get("ahead_before", 0)
-                        _state["last_result"] = (f"Deployed {n} commit(s) DEV → main — the server self-updates within ~15 min."
-                                                 if n else "Unit already current — nothing to deploy.")
-                    else:
-                        _state["last_result"] = "Deploy failed: " + (r.get("error") or "unknown")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"Deploy error: {exc}"
-                finally:
-                    _state["promoting"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/")
-
     @app.get("/api/deploy-status")
     def deploy_status_api():
-        """Live state for the deploy progress bar: is a unit-promote or app-ship still running, and the
-        latest result line. The cockpit polls this so the button shows progress instead of looking dead."""
+        """Live state for the deploy progress bar. The cockpit polls this so the button shows progress instead of looking dead."""
         from flask import jsonify
-        active = bool(_state.get("promoting") or _state.get("shipping"))
-        kind = "ship" if _state.get("shipping") else ("promote" if _state.get("promoting") else "")
-        return jsonify({"active": active, "kind": kind, "msg": _state.get("last_result", "")})
-
-    @app.post("/api/ship-main")
-    def ship_main_api():
-        """Ship the CURRENT app's DEV -> MAIN (production) from the cockpit. Mac-only + ff-only."""
-        from . import sync
-        if not sync.can_promote():
-            return Response("Shipping is disabled on this cockpit (read-only box).", status=403)
-        app_name = _scope(request.form.get("app"))   # ship the active tab's one concrete project
-        if _state.get("active"):
-            _state["last_result"] = "finish the active run before shipping to production"
-            return redirect("/")
-        if not _state.get("shipping"):
-            _state["shipping"] = True   # set BEFORE redirect so the reloaded page shows the progress bar (no race)
-
-            def _bg():
-                try:
-                    r = sync.promote_app(cfg.app(app_name))
-                    _audit_ship(audit, app_name, r)
-                    if r.get("ok"):
-                        n = r.get("ahead_before", 0)
-                        _state["last_result"] = (f"Shipped {app_name} {r['base']}→{r['prot']} "
-                                                 f"({n} commit(s)) to PRODUCTION." if n else
-                                                 f"{app_name} already shipped — nothing ahead.")
-                    else:
-                        _state["last_result"] = "Ship failed: " + (r.get("error") or "unknown")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"Ship error: {exc}"
-                finally:
-                    _state["shipping"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/")
+        # EU-204: promote and ship-main endpoints removed; this now always returns inactive
+        return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
 
     @app.post("/api/patrol")
     def patrol_api():
@@ -2472,12 +2390,7 @@ def create_app(cfg: Config):
                 f'{"s" if len(tickets) != 1 else ""} · {html.escape(base)} &rarr; {html.escape(prot)}</div></div>'
                 f'<div class=shtix>Tickets going live: {html.escape(tix_summary)}</div>'
                 + "".join(cards)
-                + '<form method=post action=/api/ship-main class=shbar '
-                + 'onsubmit="return confirm(\'Ship ' + html.escape(appq)
-                + ' to PRODUCTION now? This deploys your live product.\')">'
-                + f'<input type=hidden name=app value="{html.escape(appq)}">'
-                + f'<button class=shgo>&#128640; Ship {html.escape(appq)} to production</button>'
-                + back + '</form></div>')
+                + '<div class=shbar>' + back + '</div></div>')
         return _wrap("Ship to production", body)
 
     @app.get("/chat")
