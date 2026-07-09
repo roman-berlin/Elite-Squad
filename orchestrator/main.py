@@ -363,7 +363,7 @@ def _doctor(cfg_path: str) -> int:
         return 1
     print(f"  ✓ config loaded ({len(cfg.apps)} app(s): {', '.join(a.name for a in cfg.apps)})")
     s = health.summary(cfg)
-    print(f"  ✓ models: builder {s['models']['builder']} · reviewer {s['models']['reviewer']}")
+    print(f"  ✓ models: builder {s['models']['builder']} · reviewer {s['models']['reviewer']} · backend {s['backend']}")
     for c in s["checks"]:
         line = f"{glyph.get(c['status'], '  ?')} {c['name']}"
         if c["detail"]:

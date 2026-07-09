@@ -182,6 +182,14 @@ def summary(cfg) -> dict[str, Any]:
     c = checks(cfg)
     problems = [x for x in c if x["status"] == "bad"]
     warnings = [x for x in c if x["status"] == "warn"]
+
+    # EU-199: surface the active model backend (Opus vs GLM)
+    from . import backend_pref
+    from .backends import NATIVE, GLM
+
+    active_backend = backend_pref.active(cfg)
+    backend_label = "Opus (Claude)" if active_backend == NATIVE else "GLM (Z.ai)"
+
     return {
         "healthy": not problems,
         "problems": len(problems),
@@ -189,4 +197,5 @@ def summary(cfg) -> dict[str, Any]:
         "checks": c,
         "models": {"builder": getattr(cfg, "builder_model", "?"),
                    "reviewer": getattr(cfg, "reviewer_model", "?")},
+        "backend": backend_label,
     }
