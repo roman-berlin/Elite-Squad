@@ -60,8 +60,8 @@ chk("page titles the app + production", "Ship automatixy" in body and "productio
 chk("page lists the tickets going live", "AUTO-4" in body and "AUTO-7" in body)
 chk("page shows the commit subjects", "budget panel" in body and "superadmin authz" in body)
 chk("page shows the untagged commit under 'No ticket'", "No ticket" in body and "typo" in body)
-chk("page has the final Ship button posting to /api/ship-main",
-    "/api/ship-main" in body and "Ship automatixy to production" in body)
+chk("page does NOT have Ship button (/api/ship-main removed in EU-204)",
+    "/api/ship-main" not in body and "Ship automatixy to production" not in body)
 chk("page summarises ticket count", "2 tickets" in body or "2 ticket" in body)
 
 # --- EU-26 regression: /ship-preview with NO ?app= must not 500 (app0 NameError) ---
