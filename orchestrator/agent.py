@@ -282,56 +282,79 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     import time as _time
     _t0 = _time.monotonic()
 
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, AssistantMessage):
-            parts: list[str] = []
-            for b in message.content:
-                if isinstance(b, TextBlock):
-                    parts.append(b.text)
-                    # EU-197: write officer reasoning to transcript
-                    try:
-                        from . import transcript
-                        transcript.write_text(b.text)
-                    except Exception:  # noqa: BLE001 — best-effort
-                        pass
-                elif ToolUseBlock is not None and isinstance(b, ToolUseBlock):
-                    brief = _tool_brief(getattr(b, "name", ""), getattr(b, "input", None),
-                                     cwd=getattr(options, "cwd", None))
-                    tools.append(brief)
-                    if tag:
-                        print(f"      · {tag}: {brief}", flush=True)
-                    # EU-197: write full tool input to transcript
-                    try:
-                        from . import transcript
-                        tool_name = getattr(b, "name", "")
-                        tool_input = getattr(b, "input", None)
-                        transcript.write_tool_use(tool_name, tool_input)
-                    except Exception:  # noqa: BLE001 — best-effort
-                        pass
-            text = "".join(parts)
-            if text:
-                chunks.append(text)
-                final = text
-            # EU-118: detect plan-limit errors in message errors
-            if getattr(message, "error", None):
-                is_error = True
-                kind = _classify_plan_limit(str(getattr(message, "error", "")))
-                if kind:
-                    is_plan_limit = True
-                    if plan_limit_kind != "cap":  # a cap sighting outranks a transient one
-                        plan_limit_kind = kind
-        elif isinstance(message, ResultMessage):
-            cost = message.total_cost_usd or 0.0
-            turns = message.num_turns
-            is_error = is_error or message.is_error
-            if message.result:
-                final = message.result
-            u = getattr(message, "usage", None)
-            if isinstance(u, dict):
-                in_tok = (int(u.get("input_tokens", 0) or 0)
-                          + int(u.get("cache_read_input_tokens", 0) or 0)
-                          + int(u.get("cache_creation_input_tokens", 0) or 0))
-                out_tok = int(u.get("output_tokens", 0) or 0)
+    saw_result = False
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                parts: list[str] = []
+                for b in message.content:
+                    if isinstance(b, TextBlock):
+                        parts.append(b.text)
+                        # EU-197: write officer reasoning to transcript
+                        try:
+                            from . import transcript
+                            transcript.write_text(b.text)
+                        except Exception:  # noqa: BLE001 — best-effort
+                            pass
+                    elif ToolUseBlock is not None and isinstance(b, ToolUseBlock):
+                        brief = _tool_brief(getattr(b, "name", ""), getattr(b, "input", None),
+                                         cwd=getattr(options, "cwd", None))
+                        tools.append(brief)
+                        if tag:
+                            print(f"      · {tag}: {brief}", flush=True)
+                        # EU-197: write full tool input to transcript
+                        try:
+                            from . import transcript
+                            tool_name = getattr(b, "name", "")
+                            tool_input = getattr(b, "input", None)
+                            transcript.write_tool_use(tool_name, tool_input)
+                        except Exception:  # noqa: BLE001 — best-effort
+                            pass
+                text = "".join(parts)
+                if text:
+                    chunks.append(text)
+                    final = text
+                # EU-118: detect plan-limit errors in message errors
+                if getattr(message, "error", None):
+                    is_error = True
+                    kind = _classify_plan_limit(str(getattr(message, "error", "")))
+                    if kind:
+                        is_plan_limit = True
+                        if plan_limit_kind != "cap":  # a cap sighting outranks a transient one
+                            plan_limit_kind = kind
+            elif isinstance(message, ResultMessage):
+                saw_result = True
+                cost = message.total_cost_usd or 0.0
+                turns = message.num_turns
+                is_error = is_error or message.is_error
+                if message.result:
+                    final = message.result
+                # A provider-side terminal error rides in ResultMessage.result (NOT message.error) —
+                # that's where GLM/z.ai quota text lands. Classify it here or the EU-82/EU-191 pause
+                # never engages for GLM caps (the EU-202 blind spot, 2026-07-09).
+                if message.is_error and message.result:
+                    kind = _classify_plan_limit(str(message.result))
+                    if kind:
+                        is_plan_limit = True
+                        if plan_limit_kind != "cap":
+                            plan_limit_kind = kind
+                u = getattr(message, "usage", None)
+                if isinstance(u, dict):
+                    in_tok = (int(u.get("input_tokens", 0) or 0)
+                              + int(u.get("cache_read_input_tokens", 0) or 0)
+                              + int(u.get("cache_creation_input_tokens", 0) or 0))
+                    out_tok = int(u.get("output_tokens", 0) or 0)
+    except Exception as exc:  # noqa: BLE001 — see below; genuine crashes re-raise
+        # SDK quirk (claude_agent_sdk 0.2.x): after a CLI error result whose `errors` array is empty,
+        # the SDK raises "Claude Code returned an error result: {subtype}" — with subtype literally
+        # "success" — DISCARDING the real error text (which we already captured in `final` from the
+        # ResultMessage) and skipping metering/audit/transcript. 9 runs died that way since 06-21
+        # (EU-136 + AUTO-73 on 07-09 alone). If we already consumed the result, degrade to a normal
+        # is_error return so the loop posts the REAL failure and the run ends cleanly.
+        if saw_result and str(exc).startswith("Claude Code returned an error result"):
+            is_error = True
+        else:
+            raise
 
     duration_s = round(_time.monotonic() - _t0, 2)
 
