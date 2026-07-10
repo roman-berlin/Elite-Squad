@@ -148,7 +148,10 @@ def _tool_brief(name: str, inp, cwd: str | None = None) -> str:
                         v_str = str(rel_path)
                     except ValueError:
                         # Path is not relative to cwd (different mount, etc.),
-                        # fall back to just the filename
+                        # or symlink resolution created different canonical paths.
+                        # EU-209: Path.resolve() follows symlinks, so if cwd and file_path
+                        # are accessed through different symlink structures, relativization
+                        # may fail. Fall back to just the filename (acceptable behavior).
                         v_str = abs_path.name
                 except Exception:
                     # If relativization fails, use original value
