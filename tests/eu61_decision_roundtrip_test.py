@@ -44,13 +44,18 @@ ns = types.SimpleNamespace
 
 
 class FakeBacklog:
-    """In-memory stand-in for a JiraAdapter: records status/comment writes and serves a scripted answer."""
+    """In-memory stand-in for a JiraAdapter: records status/comment writes and serves a scripted answer.
+    Comments accumulate in a list (a park now legitimately posts a ⛔ reason comment, 2026-07-09);
+    .comment stays as the LAST one for the single-comment assertions."""
     def __init__(self, latest=""):
         self.status = None
-        self.comment = None
+        self.comments = []
         self.latest = latest
+    @property
+    def comment(self):
+        return self.comments[-1] if self.comments else None
     def set_status(self, ticket, status): self.status = status
-    def add_comment(self, ticket, body): self.comment = body
+    def add_comment(self, ticket, body): self.comments.append(body)
     def latest_answer(self, ticket): return self.latest or None
     def get_task(self, key):
         return Ticket(id=key, key=key, summary="do thing", description="Original spec.", app="automatixy")
@@ -77,6 +82,8 @@ decisions._save(cfg, [])
 f1 = use(FakeBacklog(latest=""))            # no human comment on the ticket yet
 decisions.add(cfg, TKT, "automatixy", "Which date format — DD/MM or ISO-8601?")
 chk("park transitions the ticket to 'Blocked'", f1.status == "Blocked", str(f1.status))
+chk("park posts the ⛔ reason comment (the board shows WHY it's Blocked)",
+    f1.comment is not None and "Which date format" in f1.comment, str(f1.comment))
 entry = decisions.load(cfg)[0]
 chk("park records the decision in 'Needs you'", entry["question"].startswith("Which date format"))
 chk("park snapshots a resume baseline (no prior human comment)", entry.get("answer_baseline") == "")
@@ -113,7 +120,8 @@ chk("Jira answer is read and folded into the builder context",
     "Use ISO-8601" in out.description and "Which date format" in out.description, out.description[-120:])
 chk("the original spec is preserved alongside the decision", "Original spec." in out.description)
 chk("the park is cleared after a Jira-native resume", decisions.load(cfg) == [])
-chk("Jira-native resume does NOT echo the answer back as a new comment", f3.comment is None)
+chk("Jira-native resume does NOT echo the answer back as a new comment",
+    not any("Use ISO-8601" in c for c in f3.comments), str(f3.comments))
 
 # unanswered (only the pre-park baseline comment) → still parked, no injection
 decisions._save(cfg, [])

@@ -74,7 +74,8 @@ _srv = Path("orchestrator/server.py").read_text(encoding="utf-8")
 chk("server registers POST /api/continue-on-alternate", '"/api/continue-on-alternate"' in _srv)
 # it must set the sticky backend, drop the plan-limit flag, and re-run the last tickets
 _seg = _srv.split("def continue_on_alternate_api", 1)[-1][:2600]
-chk("endpoint switches the sticky backend (backend_pref.set_active)", "backend_pref.set_active(bk)" in _seg)
+chk("endpoint switches the sticky backend (backend_pref.set_active, cfg-anchored)",
+    "backend_pref.set_active(bk, cfg)" in _seg)
 chk("endpoint clears the plan-limit flag (set_plan_limit_hit hit=False)", "set_plan_limit_hit" in _seg and "hit=False" in _seg)
 chk("endpoint auto-resumes the last run (_run_bg on the last_run tickets)", "_run_bg(" in _seg and "last_run" in _srv)
 chk("run-selected records last_run for the resume", '_state["last_run"]' in _srv)
