@@ -383,6 +383,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         stop_event.set()
 
     audit = AuditLog(cfg.audit_path)
+    # Stale-process forensics (2026-07-09, mirrors server.serve): one audit line per process start
+    # (git SHA + pid) so "which code was this drain actually on?" is a single grep — the resident
+    # process ran pre-EU-201 code for 11h after the unit landed EU-201 on itself.
+    try:
+        import subprocess as _sp
+        _sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                       text=True, timeout=5).stdout.strip()
+        audit.record("process_start", role="autopilot", app=app_name or "", sha=_sha, pid=os.getpid())
+    except Exception:  # noqa: BLE001 — forensics must never block the drain
+        pass
     from . import cockpit_state
     from .git_ops import clear_parked_repos
     run_key = app_name or None

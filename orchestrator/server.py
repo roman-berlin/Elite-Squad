@@ -2763,6 +2763,17 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         app = create_app(cfg)
     except ImportError:
         raise SystemExit("Flask is required for the control panel. Run: pip install -r requirements.txt")
+    # Stale-process forensics (2026-07-09): the resident serve process kept running PRE-EU-201 code
+    # for 11 hours after the unit landed EU-201 on itself, silently stranding split fragments. One
+    # audit line per process start (git SHA + pid) makes "which code was this run actually on?" a
+    # single grep instead of log archaeology.
+    try:
+        import os as _os, subprocess as _sp
+        _sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                       text=True, timeout=5).stdout.strip()
+        AuditLog(cfg.audit_path).record("process_start", role="serve", sha=_sha, pid=_os.getpid())
+    except Exception:  # noqa: BLE001 — forensics must never block the cockpit
+        pass
     # Quiet the per-request access log (the dashboard polls GET /api/board every 5s). Without this
     # the terminal is flooded and the unit's real progress is lost in the noise.
     import logging

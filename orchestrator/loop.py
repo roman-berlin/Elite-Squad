@@ -1541,6 +1541,17 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,
                      done=cfg.mark_done_on_merge)
+        # Self-update restart signal (2026-07-09): when the unit lands a change to ITS OWN repo, the
+        # resident serve/autopilot processes keep executing the old code from memory (no hot-reload) —
+        # that gap ran pre-EU-201 code for 11h and silently stranded split fragments. Say so, loudly.
+        try:
+            from pathlib import Path as _P
+            if _P(app.repo_path).resolve() == _P(__file__).resolve().parent.parent:
+                audit.record("self_update_pending_restart", ticket_id=ticket.id)
+                _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restart serve/autopilot "
+                             "so the running processes load it (the keepalive daemons respawn on kill).")
+        except Exception:  # noqa: BLE001 — the signal is best-effort
+            pass
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).
         _record_changelog(cfg, ticket, app, review.summary or build.summary, turl)
 
