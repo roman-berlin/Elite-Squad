@@ -190,7 +190,7 @@ async def _try_scrum_split(cfg: Config, app: AppConfig, ticket: Ticket, audit: A
 
 
 async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Exception,
-                            audit: AuditLog) -> TicketReport:
+                            audit: AuditLog, backlog=None) -> TicketReport:
     """Turn a ticket-level exception into a report. A turn-limit blow-out is NOT a real failure — the
     ticket was simply too big to finish in one pass. "Too big" is the Scrum Master's job, so first hand
     it to him to split into right-sized sub-tickets, and only escalate to the Commander if a split isn't
@@ -220,6 +220,15 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
         return TicketReport(ticket.id, Outcome.ESCALATED, 0, 0.0, app.name,
                             notes="ran out of turns — ticket too big for one pass")
     audit.record(Outcome.ERRORED.audit_event, ticket_id=ticket.id, app=app.name, error=msg)
+    # Leave a Jira-visible trace of the failure (2026-07-09: errored tickets sat In Progress with
+    # ZERO comment — invisible on the board). Comment only, no transition: the autopilot retries
+    # ERRORED tickets from In Progress, and parks to Blocked itself after repeated failures.
+    if backlog is not None and not ticket.ephemeral and not getattr(cfg, "dry_run", False):
+        try:
+            backlog.add_comment(ticket, f"❌ Build errored: {msg[:600]}\n"
+                                        "(the unit will retry; repeated failures park it as Blocked)")
+        except Exception:  # noqa: BLE001 — the trace is best-effort, never breaks error handling
+            pass
     _notify(cfg, f"❌ {ticket.id} — error: {msg[:200]}")
     return TicketReport(ticket.id, Outcome.ERRORED, 0, 0.0, app.name, notes=msg)
 
@@ -486,6 +495,7 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                 reports.append(TicketReport(ticket.id, Outcome.SKIPPED, 0, 0.0, app.name,
                                             notes="deferred — worktree busy (another run active)"))
                 continue
+            backlog = None   # pre-bind: an exception before assignment must not NameError the handler
             try:
                 if app.name not in gits:
                     gits[app.name] = _make_git(cfg, app)
@@ -502,7 +512,7 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                     ensured.add(app.name)
                 report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
             except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
-                report = await _exception_report(cfg, ticket, app, exc, audit)
+                report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
             reports.append(report)
 
             # EU-201: After a split, inject the fragments into the worklist at the current position
@@ -1505,10 +1515,16 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             from . import dashboard as _D
             whatdone = _D.bullets(review.summary or build.summary, limit=3, width=200)
             head = "marked Done" if cfg.mark_done_on_merge else "moved to QA"
-            backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
-            backlog.add_comment(
-                ticket,
-                f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
+            # Best-effort: the code IS merged at this point — a Jira hiccup here must degrade to a
+            # log line, not propagate to _exception_report and mislabel a successful land as a
+            # ticket_exception (which would strand the already-merged ticket In Progress).
+            try:
+                backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
+                backlog.add_comment(
+                    ticket,
+                    f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
+            except Exception as exc:  # noqa: BLE001 — tracker trouble never un-lands a merge
+                print(f"  land · ticket status update skipped ({exc})", flush=True)
         done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,

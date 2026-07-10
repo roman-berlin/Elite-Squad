@@ -164,6 +164,9 @@ apps:
                                       # "Blocked" column to the board first (with a transition back to
                                       # In Progress), or point this at an existing column you use for it.
         QA: "QA"                      # merged tickets land here for your review (pass->Done, fail->To Do)
+        Needs Human: "Blocked"        # human-handoff states park in the Blocked column (visible), not In Progress
+      # status_fallbacks:             # optional: per-target transition fallbacks when a column is absent.
+      #   QA: ["Done", "Closed"]      # (this QA->Done/Closed chain is the built-in default)
         Done: "Done"
         Needs Human: "In Progress"
 

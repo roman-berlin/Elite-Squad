@@ -122,7 +122,7 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     # Only the ticket's own (main) decision parks it to 'Blocked'; a distinct-entry_id sub-decision
     # must not move the ticket's status out from under an in-flight build.
     if block and (entry_id is None or entry_id == ticket.id):
-        baseline = _park_on_tracker(cfg, ticket, app_name)
+        baseline = _park_on_tracker(cfg, ticket, app_name, reason=question)
         if baseline is not None:
             entry["answer_baseline"] = baseline
 
@@ -136,12 +136,13 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     return eid
 
 
-def _park_on_tracker(cfg, ticket: Ticket, app_name: str) -> str | None:
+def _park_on_tracker(cfg, ticket: Ticket, app_name: str, reason: str = "") -> str | None:
     """Transition a parked ticket to 'Blocked' (the visible state of a decision round-trip, EU-61) and
     return the latest human comment currently on it — the baseline the autopilot compares against to
     detect a NEW Commander answer. Best-effort: a no-op (returns None) for dry-run, ephemeral
     (trackerless) tickets, and apps with no backlog; never raises, so a tracker hiccup can't break the
-    escalation path."""
+    escalation path. ``reason`` (the escalation question) is posted as a comment so the board shows
+    WHY the ticket is Blocked — before 2026-07-09 a park moved the ticket with no Jira-visible cause."""
     if getattr(cfg, "dry_run", False) or getattr(ticket, "ephemeral", False):
         return None
     try:
@@ -151,6 +152,11 @@ def _park_on_tracker(cfg, ticket: Ticket, app_name: str) -> str | None:
         from .backlog.base import make_backlog
         backlog = make_backlog(app)
         backlog.set_status(ticket, "Blocked")
+        if reason.strip():
+            try:
+                backlog.add_comment(ticket, "⛔ Blocked — needs the Commander:\n" + reason.strip()[:900])
+            except Exception:  # noqa: BLE001 - the reason trace is best-effort
+                pass
         try:
             return backlog.latest_answer(ticket) or ""
         except Exception:  # noqa: BLE001 - the resume baseline is optional
