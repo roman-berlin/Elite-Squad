@@ -332,6 +332,28 @@ def _auto_clear_decision_ghosts(cfg: Config, audit: "AuditLog") -> None:
         pass
 
 
+def _reopen_on_tracker(cfg: Config, ticket_id: str) -> None:
+    """EU-219: the other half of the park->Blocked round-trip. When the Commander /unblocks a ticket,
+    best-effort transition it back to 'In Progress' on whichever jira-backed app's board actually has
+    it, so the drain's queue_statuses re-picks it next cycle — without this, once the newly-park block
+    (below) actually moves a ticket to Blocked, /unblock only cleared the in-memory skip-set and left
+    the board silently stuck. Resolves the ticket via get_task across jira-backed apps, first match
+    wins (mirrors _resumable_answered's per-app try loop). set_status is a no-op if the ticket isn't
+    Blocked, and a wrong-project/network miss on one app just falls through to the next — best-effort
+    throughout so a board hiccup can never turn /unblock into an exception."""
+    from .backlog.base import make_backlog
+    for app in cfg.apps:
+        if getattr(app, "backlog_backend", "none") == "none":
+            continue
+        try:
+            backlog = make_backlog(app)
+            ticket = backlog.get_task(ticket_id)
+            backlog.set_status(ticket, "In Progress")
+            return
+        except Exception:  # noqa: BLE001 - wrong project for this board, network, etc.
+            continue
+
+
 def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     """Clear a parked ticket (or all). Autopilot will retry it next cycle."""
     blocked = load_blocked(cfg)
@@ -341,8 +363,15 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
         hit = {b for b in blocked if b.lower() == ticket_id.lower()}
         blocked -= hit
         save_blocked(cfg, blocked)
-        return f"unblocked {ticket_id}" if hit else f"{ticket_id} was not parked"
+        if not hit:
+            return f"{ticket_id} was not parked"
+        for tid in hit:
+            _reopen_on_tracker(cfg, tid)
+        return f"unblocked {ticket_id}"
+    ids = sorted(blocked)
     save_blocked(cfg, set())
+    for tid in ids:
+        _reopen_on_tracker(cfg, tid)
     return f"unblocked all ({len(blocked)})"
 
 
@@ -391,6 +420,41 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
             if answer and answer != pending[tid].get("answer_baseline"):
                 out[tid] = (app, ticket)
     return out
+
+
+def _park_errored_on_tracker(cfg: Config, by_id: dict, newly: list, errored: set) -> None:
+    """EU-219: 2026-07-09 forensics found a ticket_exception left the ticket In Progress with no board
+    state change — the single-run path posts an ❌ error comment (12ecb49) but deliberately does not
+    transition (ERRORED tickets are retried). The missing half: once the autopilot's error threshold
+    actually parks a ticket (n >= _MAX_TICKET_ERRORS, see the caller), the board should show it Blocked
+    with a reason, so /unblock's round-trip (_reopen_on_tracker above) has something to reverse.
+
+    Only touches tickets in ``newly`` whose report outcome this cycle was Outcome.ERRORED — PARKED
+    outcomes (ESCALATED/PR_OPENED) are NOT re-transitioned here; decisions.add already set those
+    Blocked with their own reason comment (_park_on_tracker). Best-effort per ticket: a board hiccup
+    (bad token, wrong project, network) must never crash the autopilot cycle."""
+    if not newly or not errored:
+        return
+    from .backlog.base import make_backlog
+    for tid in newly:
+        if tid not in errored:
+            continue
+        hit = by_id.get(tid)
+        if not hit:
+            continue
+        app, ticket = hit
+        if getattr(cfg, "dry_run", False) or getattr(ticket, "ephemeral", False):
+            continue
+        try:
+            backlog = make_backlog(app)
+            backlog.set_status(ticket, "Blocked")
+            backlog.add_comment(
+                ticket,
+                f"⛔ Parked after {_MAX_TICKET_ERRORS} consecutive errors — "
+                f"reply /unblock {tid} or answer here to retry.",
+            )
+        except Exception:  # noqa: BLE001 - a board hiccup must never crash the loop
+            pass
 
 
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
@@ -795,6 +859,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # decision. The conservative overrides (AC / [Feature] / [Bug] ⇒ always build) become
             # deterministic pre-checks on that verdict when the Planner lands.
 
+            # EU-219: snapshot (app, ticket) by id BEFORE run_loop so the newly-park block below can
+            # best-effort transition a freshly-parked ERRORED ticket to Blocked without re-fetching it.
+            by_id = {t.id: (a, t) for (a, t) in worklist}
+
             reports = await run_loop(cfg, worklist, audit)
 
             # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
@@ -808,6 +876,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
             # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
+            errored = {r.ticket_id for r in reports if r.outcome is Outcome.ERRORED}
             retrying: list[str] = []
             counts_changed = False
             for r in reports:
@@ -841,6 +910,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             if newly:
                 blocked.update(newly)
                 save_blocked(cfg, blocked)
+                # EU-219: only the ERRORED-threshold arrivals need a fresh Blocked transition here —
+                # PARKED outcomes (ESCALATED/PR_OPENED) were already moved to Blocked by decisions.add.
+                _park_errored_on_tracker(cfg, by_id, newly, errored)
                 notify.send("⏸️ Parked (need you): " + ", ".join(newly)
                             + "\nReply /unblock <id> once handled and I'll retry it.")
             _learn_from_cycle(cfg, reports, audit)   # fold this cycle's lessons into memory (free)
