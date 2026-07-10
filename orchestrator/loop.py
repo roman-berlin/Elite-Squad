@@ -1100,6 +1100,18 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # squad._plan → detect_domain_gap — where it actually routes provisioning; the gate
         # no longer re-classifies here just to attach an advisory note.)
         gate = run_gate(app, git.changed_paths())
+        if not gate.passed:
+            # Flake honesty (2026-07-09): a red gate must REPRODUCE before it burns a builder pass.
+            # 5 of the last 14 "max passes — PM escalated" strandings were full-suite flakes
+            # (EU-129/139/201/204/206 — 4 later merged with ZERO extra fix passes); worse, the same
+            # flake twice tripped the fingerprint-stuck breaker. Mirrors the base-gate confirmation
+            # re-run in gate.py. Only a reproduced red proceeds to fingerprint/stuck handling.
+            confirm = run_gate(app, git.changed_paths())
+            if confirm.passed:
+                audit.record("gate_flake_confirmed_green", ticket_id=ticket.id,
+                             iteration=iteration, first_report=(gate.report or "")[:1500])
+                print("  gate · red once, green on confirmation re-run — flake, proceeding", flush=True)
+                gate = confirm
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
                      report=("" if gate.passed else (gate.report or "")[:2500]))
         if not gate.passed:
