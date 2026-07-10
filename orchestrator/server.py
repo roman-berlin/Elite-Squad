@@ -81,13 +81,23 @@ def _first_shippable(cfg) -> str:
     return cfg.apps[0].name if getattr(cfg, "apps", None) else ""
 
 
-def _resolve_run_backend(rcfg) -> str | None:
-    """EU-190: set this run's backend from the persisted sticky preference (cockpit /api/model),
-    falling back to the config.yaml default carried on ``rcfg``.
+def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
+    """EU-190/EU-223: set this run's backend from the persisted sticky preference (cockpit
+    /api/model), resolving an optional PER-APP override first, then the global sticky pref, then
+    the config.yaml default carried on ``rcfg``.
+
+    ``app_name`` should be the concrete project THIS run targets (pass the run's own app, e.g. the
+    per-app autopilot's ``key`` — None for a legacy/unit-wide call so two parallel drains, EU-103,
+    each resolve their own backend). When omitted, falls back to the run's own single app
+    (``rcfg.apps[0].name``) so a caller that only has ``rcfg`` (tests, the CLI) still resolves
+    per-app correctly.
 
     Returns an error string to BLOCK the run when the chosen backend isn't runnable (GLM selected
     but ``GLM_AUTH_TOKEN`` missing) — *no silent fallback*, per EU-190 — else ``None``."""
-    bk = backend_pref.active(rcfg)
+    if app_name is None:
+        _apps = getattr(rcfg, "apps", None)
+        app_name = _apps[0].name if _apps else None
+    bk = backend_pref.active(rcfg, app_name)
     rcfg.model_backend = bk
     if bk == backends.GLM and not backends.available("glm"):
         return ("GLM is selected but GLM_AUTH_TOKEN is not configured — set it and restart, "
@@ -466,9 +476,9 @@ def create_app(cfg: Config):
             ev = threading.Event()
             ap_cfg = copy.copy(cfg)
             ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
-            _berr = _resolve_run_backend(ap_cfg)   # EU-190: cockpit autopilot honours the sticky Model
-            if _berr:                              # pick too (and blocks an unconfigured GLM), so the
-                st["last_msg"] = _berr             # control-bar label "applies to all runs" holds.
+            _berr = _resolve_run_backend(ap_cfg, key)  # EU-190/EU-223: THIS app's (or global, key=None)
+            if _berr:                              # sticky Model pick (blocks an unconfigured GLM), so
+                st["last_msg"] = _berr             # two per-app drains (EU-103) each get their own.
                 return redirect(_redir)
             # Claim THIS project's run slot atomically (per-app TOCTOU guard + the cross-project
             # parallel cap). Flask is threaded=True, so two near-simultaneous Starts for the same
@@ -810,11 +820,21 @@ def create_app(cfg: Config):
 
     @app.post("/api/model")
     def model_api():
-        # EU-190: persist the sticky active model backend. When switching to GLM, run a LIVE
-        # connection test first so a bad setup (missing/incorrect token, wrong URL) surfaces a clear,
-        # actionable alert ("what to fix, or re-onboard") in the cockpit instead of failing mid-run.
-        # No silent fallback; never stores or echoes the token — only the backend id.
-        bk = backends.normalize(request.form.get("backend"))
+        # EU-190/EU-223: persist the active model backend — GLOBALLY, or (an optional `app` field)
+        # for ONE project only, so e.g. the Elite-Unit drain can stay on Opus while automatixy runs
+        # GLM. When switching to GLM, run a LIVE connection test first so a bad setup
+        # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
+        # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
+        # or echoes the token — only the backend id.
+        raw = (request.form.get("backend") or "").strip().lower()
+        app_param = (request.form.get("app") or "").strip() or None
+        if app_param and raw in ("inherit", ""):
+            # "Inherit global" — clear this app's override; it now resolves the global pick.
+            backend_pref.set_active(None, cfg, app_name=app_param)
+            _state.pop("model_alert", None)
+            get_state(None)["last_msg"] = f"{app_param}: Model now inherits the global pick."
+            return redirect("/")
+        bk = backends.normalize(raw)
         if bk == backends.GLM:
             ok, detail = backends.glm_test_connection()
             if not ok:
@@ -822,20 +842,27 @@ def create_app(cfg: Config):
                     f"GLM not enabled — {detail}.  Fix it in .env (GLM_AUTH_TOKEN / GLM_BASE_URL) "
                     "and restart, or re-onboard, then pick GLM again.")
                 return redirect("/")
-        backend_pref.set_active(bk, cfg)
+        if app_param:
+            backend_pref.set_active(bk, cfg, app_name=app_param)
+        else:
+            backend_pref.set_active(bk, cfg)
         _state.pop("model_alert", None)
+        _label = "GLM (Z.ai) — connection OK." if bk == backends.GLM else "Opus (Claude)."
         get_state(None)["last_msg"] = (
-            "Model backend set to "
-            + ("GLM (Z.ai) — connection OK." if bk == backends.GLM else "Opus (Claude)."))
+            f"{app_param}: Model set to {_label} (this project only)." if app_param
+            else "Model backend set to " + _label)
         return redirect("/")
 
     @app.post("/api/continue-on-alternate")
     def continue_on_alternate_api():
-        # EU-191: the plan-limit banner's "Continue on <backend>" button. Switch the sticky model
-        # backend to a runnable alternate (e.g. GLM), clear the plan-limit flags, and AUTO-RESUME the
-        # last cockpit run on that backend — so an Opus/Claude plan-limit doesn't stall the drain until
-        # it resets. Fail-closed: an unconfigured/unreachable backend surfaces an alert and does not switch.
+        # EU-191/EU-223: the plan-limit banner's "Continue on <backend>" button. Switch the sticky
+        # model backend to a runnable alternate (e.g. GLM) — for the AFFECTED app only when the
+        # banner named one (`app`), else globally as before — clear the plan-limit flags, and
+        # AUTO-RESUME the last cockpit run on that backend, so an Opus/Claude plan-limit doesn't
+        # stall the drain until it resets. Fail-closed: an unconfigured/unreachable backend surfaces
+        # an alert and does not switch.
         bk = backends.normalize(request.form.get("backend"))
+        app_param = (request.form.get("app") or "").strip() or None
         if not backends.available(bk):
             _state["model_alert"] = (f"Cannot continue on {bk} — it is not configured. Set its "
                                      "credentials in .env and restart.")
@@ -845,7 +872,10 @@ def create_app(cfg: Config):
             if not ok:
                 _state["model_alert"] = f"GLM not usable — {detail}. Fix .env and restart."
                 return redirect("/")
-        backend_pref.set_active(bk, cfg)
+        if app_param:
+            backend_pref.set_active(bk, cfg, app_name=app_param)
+        else:
+            backend_pref.set_active(bk, cfg)
         _state.pop("model_alert", None)
         # Drop the plan-limit banner (the operator chose to switch rather than wait). MUST include the
         # None key: the dashboard banner is rendered from the unit-wide None-keyed _state, so clearing
@@ -864,7 +894,7 @@ def create_app(cfg: Config):
             import copy
             rcfg = copy.copy(cfg)
             rcfg.dry_run = False
-            _resolve_run_backend(rcfg)   # picks up the just-set sticky backend
+            _resolve_run_backend(rcfg, app_name)   # picks up the just-set (per-app or global) backend
             try:
                 worklist = intake.from_tickets(rcfg, app_name, keys)
                 from . import decisions as _dec
@@ -901,7 +931,7 @@ def create_app(cfg: Config):
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False
-        _berr = _resolve_run_backend(rcfg)   # EU-190: apply the persisted backend; block if unconfigured
+        _berr = _resolve_run_backend(rcfg, app_name)   # EU-190/EU-223: this app's (or global) backend
         if _berr:
             release_run(app_name or None)
             st["last_msg"] = _berr
@@ -1007,7 +1037,7 @@ def create_app(cfg: Config):
         if effort:
             rcfg.builder_effort = normalize_effort(effort)
             rcfg.adaptive_effort = False     # an explicit pick bypasses auto-sizing for this run
-        _berr = _resolve_run_backend(rcfg)   # EU-190: apply the persisted backend; block if unconfigured
+        _berr = _resolve_run_backend(rcfg, app_name)   # EU-190/EU-223: this app's (or global) backend
         if _berr:
             release_run(app_name or None)
             st["last_msg"] = _berr
@@ -2704,7 +2734,7 @@ def create_app(cfg: Config):
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
         rcfg.dry_run = request.form.get("dryrun") == "on"   # default: live (build + merge to DEV)
         st["dry_run"] = rcfg.dry_run
-        _berr = _resolve_run_backend(rcfg)   # EU-190: apply the persisted backend; block if unconfigured
+        _berr = _resolve_run_backend(rcfg, app_name)   # EU-190/EU-223: this app's (or global) backend
         if _berr:
             release_run(app_name or None)
             st["last_msg"] = _berr
