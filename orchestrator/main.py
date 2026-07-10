@@ -411,11 +411,12 @@ async def _main(argv: list[str]) -> int:
         print("sent ✓ (check your Telegram)" if ok else "failed — double-check token / chat id.")
         return 0 if ok else 1
     if args.command == "model":
-        # EU-190: show or set the persisted active model backend (opus|glm). No run pipeline needed —
-        # and the SET path is config-independent (writes a standalone gitignored file), so only the
-        # SHOW path loads config.yaml (which would raise if it's missing/invalid).
+        # EU-190: show or set the persisted active model backend (opus|glm). The store is anchored to
+        # the config's state dir (hermeticity fix, 2026-07-09), so BOTH paths load config.yaml now.
+        cfg = Config.load(args.config)
+        backend_pref.migrate(cfg)
         if args.backend is None:
-            cur = backend_pref.active(Config.load(args.config))
+            cur = backend_pref.active(cfg)
             warn = ("  (⚠ GLM_AUTH_TOKEN not set — GLM runs are blocked)"
                     if cur == backends.GLM and not backends.available("glm") else "")
             print(f"model backend: {cur}{warn}")
@@ -424,12 +425,15 @@ async def _main(argv: list[str]) -> int:
         if bk == backends.GLM and not backends.available("glm"):
             print("GLM not configured — set GLM_AUTH_TOKEN in .env (and restart) before selecting GLM.")
             return 2
-        backend_pref.set_active(bk)
+        backend_pref.set_active(bk, cfg)
         print(f"model backend set to {bk} — applies to subsequent runs.")
         return 0
 
     cfg = Config.load(args.config)
     _apply_overrides(cfg, args)
+    # One-time move of a legacy repo-root model_backend.json into the state dir (live entrypoint only —
+    # never from library/app code, so tests around tmp configs can't relocate the operator's real pref).
+    backend_pref.migrate(cfg)
     from . import usage
     usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
     usage.prune(cfg)

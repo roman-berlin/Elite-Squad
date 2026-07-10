@@ -822,7 +822,7 @@ def create_app(cfg: Config):
                     f"GLM not enabled — {detail}.  Fix it in .env (GLM_AUTH_TOKEN / GLM_BASE_URL) "
                     "and restart, or re-onboard, then pick GLM again.")
                 return redirect("/")
-        backend_pref.set_active(bk)
+        backend_pref.set_active(bk, cfg)
         _state.pop("model_alert", None)
         get_state(None)["last_msg"] = (
             "Model backend set to "
@@ -845,7 +845,7 @@ def create_app(cfg: Config):
             if not ok:
                 _state["model_alert"] = f"GLM not usable — {detail}. Fix .env and restart."
                 return redirect("/")
-        backend_pref.set_active(bk)
+        backend_pref.set_active(bk, cfg)
         _state.pop("model_alert", None)
         # Drop the plan-limit banner (the operator chose to switch rather than wait). MUST include the
         # None key: the dashboard banner is rendered from the unit-wide None-keyed _state, so clearing
