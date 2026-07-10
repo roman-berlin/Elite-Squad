@@ -81,6 +81,16 @@ cat > "$PLIST" <<PLIST_EOF
     <key>ThrottleInterval</key>
     <integer>5</integer>
 
+    <!-- launchd agents get a MINIMAL Path (no /opt/homebrew/bin, no shell profile) — without this
+         the automatixy gate died with "[Errno 2] No such file or directory: 'bun'" on 2026-07-10.
+         Embed the INSTALLING shell's PATH so every toolchain the gates need (bun, node, gh…)
+         resolves exactly as it does when Roman runs serve by hand. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${PATH}</string>
+    </dict>
+
     <!-- The command; WorkingDirectory makes config.yaml/state/ relative paths resolve. The
          general wrapper owns .venv activation and .env sourcing. -->
     <key>WorkingDirectory</key>
