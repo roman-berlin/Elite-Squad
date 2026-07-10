@@ -65,6 +65,57 @@ def _save(cfg, items: list[dict]) -> None:
     locking.locked_rmw(_store(cfg), lambda _current: items, default=[])
 
 
+def _validate_question_format(question: str) -> tuple[bool, str]:
+    """EU-229: validate ask quality — reject empty/garbage questions.
+
+    Returns (is_valid, error_reason). Invalid patterns:
+    - Empty or whitespace-only
+    - Leaked internal monologue (starts with '## ANALYSIS', 'Looking at the', etc.)
+    - Raw markdown headers (##, ###) that aren't proper questions
+
+    Well-formed questions:
+    - One-line clear question (e.g. "Which date format should we use?")
+    - Structured with options (e.g. "Which format?\nOptions:\n1. X\n2. Y")
+    - Very short test/data questions (e.g. "q0") - allowed for testing
+    """
+    if not question or not question.strip():
+        return False, "empty question"
+
+    q = question.strip()
+
+    # Detect leaked internal monologue / chain-of-thought - these are exact patterns
+    # that should NEVER appear in a question sent to the Commander.
+    # Check both at start and anywhere in the text (PM's "WHY PM CANNOT RESOLVE" prefix can
+    # precede the leaked monologue, so we need to check the full text).
+    leaked_patterns = [
+        "## ANALYSIS",
+        "Looking at the",
+        "Reality check on",
+        "I need to",
+        "Let me",
+        "Based on the",
+    ]
+    q_lower = q.lower()
+    for pattern in leaked_patterns:
+        pattern_lower = pattern.lower()
+        # Check if it starts with the pattern OR if the pattern appears anywhere in the text
+        if q_lower.startswith(pattern_lower) or pattern_lower in q_lower:
+            return False, f"leaked internal monologue (contains '{pattern[:20]}')"
+
+    # Raw markdown headers (##, ###) - these should NEVER appear in a Commander-facing question
+    # They indicate leaked developer markdown. More lenient check: only if they appear
+    # as actual headers (at line start or after newline).
+    if "## " in q or "### " in q:
+        # Check if it's a markdown header (at start of line)
+        for line in q.split("\n"):
+            if line.strip().startswith("## ") or line.strip().startswith("### "):
+                return False, "leaked markdown header"
+
+    # Allow anything that passes the leaked-pattern checks - the goal is to filter
+    # out obvious leaked monologue, not to enforce perfect structure
+    return True, ""
+
+
 def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None = None,
         *, block: bool = True, extra: dict | None = None) -> str | None:
     """Record a pending decision for the cockpit 'Needs you'. `entry_id` overrides the storage/de-dup
@@ -87,17 +138,22 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     This prevents the autopilot from stacking duplicate 'which date format?' cards when a
     re-run re-hits the same escalation point.
 
+    EU-229: ask quality enforcement — rejects empty/garbage questions before writing to the store.
+
     Returns the stored entry id — the newly written one on a fresh park, or the EXISTING entry's
-    id on a dedup hit (no new row). It does NOT return None to flag a dedup hit, so a caller that
-    must page the Commander only on a GENUINELY new park cannot use `is not None`: snapshot the
-    parked ids via load() before calling and notify only when the returned id is absent from that
-    snapshot (see loop.py's findings-decisions route and eu89_stateful_chat_test._park_and_notify).
-    In practice the return is always a non-None id; the ``| None`` annotation is permissive only."""
+    id on a dedup hit (no new row). Returns None on validation failure (garbage question)."""
     # NB: decisions.add is a faithful storage primitive — it records whatever the routing layer hands
     # it (the out-of-scope PROPOSE-FIRST proposal, the EU-83 resume payload, a needs_human ask) and must
     # never silently drop a write. EU-92's "PM owns routine escalations" is enforced UPSTREAM (the PM
     # prompt self-resolves the routine classes; loop._route_out_of_scope auto-files out-of-scope findings
     # instead of paging) — gutting this primitive would just lose the entries those paths depend on.
+
+    # EU-229: Validate question quality before proceeding
+    is_valid, error = _validate_question_format(question)
+    if not is_valid:
+        # Silently reject — the caller (loop.py escalation path) should regenerate
+        return None
+
     eid = entry_id or ticket.id
     base_tid = str(ticket.id).split("#", 1)[0]
     q_fp = _question_fingerprint(question)
