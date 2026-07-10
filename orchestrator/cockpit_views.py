@@ -239,10 +239,15 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
             _last = state.get("last_run") or {}
             _tickets = [t for t in (_last.get("tickets") or []) if t]
             _resume = (" &amp; resume " + html.escape(", ".join(_tickets))) if _tickets else ""
+            # EU-223: name the affected app (the paused run's project) so the switch — and the
+            # server-side handler — flips only THAT app's backend, not the whole unit.
+            _affected_app = (_last.get("app") or "").strip() or None
             continue_offer = (
                 "<form method=post action=/api/continue-on-alternate style='margin:8px 0 0'>"
                 f"<input type=hidden name=backend value='{html.escape(_alt)}'>"
-                "<button style='font-size:13px;font-weight:650;padding:6px 14px;border-radius:7px;"
+                + (f"<input type=hidden name=app value='{html.escape(_affected_app)}'>"
+                   if _affected_app else "")
+                + "<button style='font-size:13px;font-weight:650;padding:6px 14px;border-radius:7px;"
                 "background:#1f6feb;color:#fff;border:none;cursor:pointer'>"
                 f"Continue on {_label}{_resume}</button>"
                 "<span style='font-size:12px;color:#e7ebf2;font-weight:400;margin-left:10px'>"
@@ -353,13 +358,18 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
-def backend_control(cfg) -> str:
-    """EU-190: the STICKY model-backend selector for the cockpit control bar.
+def backend_control(cfg, app_name: str | None = None) -> str:
+    """EU-190/EU-223: the STICKY model-backend selectors for the cockpit control bar.
 
-    Selecting a backend **persists** it (POST /api/model → backend_pref) and applies to ALL
-    subsequent runs; the active backend is shown at a glance. GLM is offered only when configured
-    (GLM_AUTH_TOKEN present). If the persisted choice is GLM but the key is now missing, it's shown
-    flagged and runs are blocked at launch — no silent fallback. Never renders the token value."""
+    The GLOBAL selector (unchanged): persists via POST /api/model with no `app` and applies to
+    every project that has no per-app override; the active backend is shown at a glance. GLM is
+    offered only when configured (GLM_AUTH_TOKEN present). If the persisted choice is GLM but the
+    key is now missing, it's shown flagged and runs are blocked at launch — no silent fallback.
+
+    EU-223 adds an optional PER-PROJECT selector for ``app_name`` — defaults to "Inherit global"
+    (selected when the app has no override) and posts ``app=<app_name>`` alongside ``backend=`` so
+    only THAT project's pref changes — the two parallel drains (EU-103) can each pin a backend.
+    Never renders the token value."""
     from . import backends as _bk, backend_pref
     active = backend_pref.active(cfg)
     glm_ok = _bk.available("glm")
@@ -377,11 +387,30 @@ def backend_control(cfg) -> str:
         note = "<span class=tbnote style=\"color:#8a909c\">&#8599; prompts go to Z.ai</span>"
     else:
         note = ""
+    per_project = ""
+    if app_name:
+        override = backend_pref.get_apps(cfg).get(app_name)
+        inherit_label = "Opus" if active == _bk.NATIVE else "GLM"
+        popts = (f"<option value='inherit' {'selected' if not override else ''}>"
+                 f"Inherit global ({inherit_label})</option>"
+                 f"<option value='opus' {'selected' if override == _bk.NATIVE else ''}>"
+                 f"Opus (Claude)</option>")
+        if glm_ok or override == _bk.GLM:
+            glm_plabel = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
+            popts += (f"<option value='glm' {'selected' if override == _bk.GLM else ''}>"
+                      f"{glm_plabel}</option>")
+        per_project = (
+            f'<form method=post action=/api/model class=tbf '
+            f'title="Model for {html.escape(app_name)} only">'
+            f'<input type=hidden name="app" value="{html.escape(app_name)}">'
+            '<span style="font-size:12px;color:#8a909c;margin-right:4px">This project</span>'
+            f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{popts}</select>'
+            '</form>')
     return (
         '<form method=post action=/api/model class=tbf title="Model backend — applies to all runs">'
         '<span style="font-size:12px;color:#8a909c;margin-right:4px">Model</span>'
         f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
-        f'</form>{note}')
+        f'</form>{note}{per_project}')
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
@@ -678,7 +707,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       </form>
     </div>
   </details>
-  {backend_control(cfg)}
+  {backend_control(cfg, app0)}
 
   <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
   <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>

@@ -17,6 +17,13 @@ an app around a tmp config can never relocate the operator's real preference fil
 
 Precedence: this persisted preference OVERRIDES the ``config.yaml`` ``model_backend`` boot default,
 which in turn falls back to Opus. Never stores a secret — only the backend id (``'opus'`` | ``'glm'``).
+
+EU-223: the sticky pref is also OPTIONALLY overridable PER APP, so two parallel drains (EU-103 —
+e.g. the Elite-Unit drain and the automatixy drain running at the same time) can each pin a
+different backend. Shape: ``{"backend": "opus", "apps": {"automatixy": "glm"}}``. Precedence for
+``active(cfg, app_name)``: the app's own override -> the global ``backend`` -> the config.yaml
+default. A flat legacy file (no ``apps`` key) keeps working unchanged — every app just inherits the
+global pref, exactly as before EU-223.
 """
 from __future__ import annotations
 
@@ -54,27 +61,71 @@ def migrate(cfg) -> None:
         pass
 
 
-def get(cfg=None) -> str | None:
-    """The persisted backend id (normalized), or ``None`` if never set / unreadable."""
+def _load(cfg=None) -> dict:
+    """Best-effort parse of the whole store file — ``{}`` if missing/unreadable/not an object.
+    Single read path shared by ``get``/``get_apps``/``set_active`` so a per-app write never clobbers
+    the global key (or a sibling app's override) it didn't touch."""
     try:
-        bk = json.loads(_file(cfg).read_text(encoding="utf-8")).get("backend")
+        data = json.loads(_file(cfg).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get(cfg=None) -> str | None:
+    """The persisted GLOBAL backend id (normalized), or ``None`` if never set / unreadable."""
+    bk = _load(cfg).get("backend")
     return backends.normalize(bk) if bk else None
 
 
-def set_active(bk: str, cfg=None) -> None:
-    """Persist the active backend id (normalized). Best-effort — never raises."""
+def get_apps(cfg=None) -> dict[str, str]:
+    """EU-223: the per-app override map ``{app_name: backend_id}`` (values normalized).
+
+    Tolerates the flat legacy shape (no ``apps`` key) by returning ``{}`` — every app then falls
+    back to the global pref via :func:`active`, exactly as before EU-223."""
+    apps = _load(cfg).get("apps")
+    if not isinstance(apps, dict):
+        return {}
+    return {name: backends.normalize(bk) for name, bk in apps.items()
+            if isinstance(name, str) and bk}
+
+
+# Marker values meaning "remove this app's override / let it inherit the global pref" when passed
+# to set_active(..., app_name=...). Not a valid backend id, so never confused with 'opus'/'glm'.
+_INHERIT = (None, "", "inherit")
+
+
+def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
+    """Persist the active backend id. Best-effort — never raises.
+
+    Without ``app_name``: sets the GLOBAL ``backend`` key, leaving any ``apps`` overrides intact.
+    With ``app_name``: writes/clears ONE entry under ``apps`` — ``bk`` in
+    ``(None, "", "inherit")`` REMOVES that app's override (it then inherits the global pref) —
+    while preserving the global ``backend`` and every other app's entry untouched."""
     try:
         target = _file(cfg)
+        data = _load(cfg)
+        if app_name:
+            apps = dict(data.get("apps") or {})
+            if bk in _INHERIT:
+                apps.pop(app_name, None)
+            else:
+                apps[app_name] = backends.normalize(bk)
+            data["apps"] = apps
+        else:
+            data["backend"] = backends.normalize(bk)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps({"backend": backends.normalize(bk)}, indent=2), encoding="utf-8")
+        target.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except OSError:
         pass
 
 
-def active(cfg=None) -> str:
-    """The effective active backend: the persisted preference, else the ``config.yaml`` default,
-    else Opus. Always a canonical id (``'opus'`` | ``'glm'``)."""
+def active(cfg=None, app_name: str | None = None) -> str:
+    """The effective active backend for ``app_name`` (global when omitted): the app's own override,
+    else the persisted GLOBAL preference, else the ``config.yaml`` default, else Opus. Always a
+    canonical id (``'opus'`` | ``'glm'``)."""
+    if app_name:
+        override = get_apps(cfg).get(app_name)
+        if override:
+            return override
     return get(cfg) or backends.normalize(getattr(cfg, "model_backend", backends.NATIVE))
