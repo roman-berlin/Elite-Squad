@@ -49,6 +49,11 @@ class JiraAdapter(BacklogAdapter):
         self.jql_override = b.get("jql")
         self.ac_field = b.get("acceptance_criteria_field")
         self.status_map = b.get("status_map", {})
+        # Per-board transition fallbacks: when the primary target status doesn't exist on this
+        # board, try these in order (logical names; each is re-mapped through status_map). Default
+        # covers the QA hand-off column being absent — land → QA falls back to Done/Closed.
+        self.status_fallbacks = {str(k): list(v) for k, v in
+                                 (b.get("status_fallbacks") or {"QA": ["Done", "Closed"]}).items()}
         self.fetch_images = b.get("fetch_images", True)   # download ticket image attachments for the Builder
         # Queue order: resume In Progress first, then pull the ready column (To Do),
         # each ordered by board Rank (top first). Override with `queue_statuses:` in config.
@@ -205,17 +210,24 @@ class JiraAdapter(BacklogAdapter):
             return None
 
     def set_status(self, ticket: Ticket, status: str) -> None:
-        target = self.status_map.get(status, status)
-        # Already in the target column (e.g. resuming an In Progress ticket)? No-op, no comment.
+        # Candidates: the mapped target, then its per-board fallbacks (e.g. QA → Done/Closed for a
+        # board that has no QA column). Without the chain, a missing target silently stranded the
+        # ticket In Progress with only a "please move it manually" comment — the 2026-07-09 stuck-
+        # column incident: every land had been TRYING "QA" and no-oping before the column existed.
+        targets = [self.status_map.get(status, status)]
+        targets += [self.status_map.get(f, f) for f in self.status_fallbacks.get(status, [])]
+        # Already in ANY candidate column (e.g. resuming an In Progress ticket, or a ticket the
+        # Commander already moved to Done)? No-op, no comment — never bounce a ticket backwards.
         current = self._current_status(ticket.key)
-        if current and current.lower() == target.lower():
+        if current and any(current.lower() == t.lower() for t in targets):
             return
         tr = self.session.get(self._url(f"issue/{ticket.key}/transitions"))
         tr.raise_for_status()
-        match = next((t for t in tr.json().get("transitions", [])
-                      if t["to"]["name"].lower() == target.lower()), None)
+        available = tr.json().get("transitions", [])
+        match = next((t for tgt in targets for t in available
+                      if t["to"]["name"].lower() == tgt.lower()), None)
         if not match:
-            self.add_comment(ticket, f"[autodev] No transition to '{target}' available "
+            self.add_comment(ticket, f"[autodev] No transition to '{targets[0]}' available "
                                      f"from '{current or 'current status'}'; please move it manually.")
             return
         self.session.post(self._url(f"issue/{ticket.key}/transitions"),

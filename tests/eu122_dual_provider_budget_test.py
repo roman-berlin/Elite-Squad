@@ -115,6 +115,10 @@ cfg_fresh = Config(
     glm_quota_tokens=100_000,
     budget_bad_threshold=0.95
 )
+# 2026-07-10: budget gates judge the ACTIVE provider only (GLM at 97.8% must not hold an Opus
+# drain — the 18:05 incident). These GLM-exhaustion checks therefore make GLM the active backend.
+from orchestrator import backend_pref as _bp
+_bp.set_active("glm", cfg_fresh)
 pre = usage.pre_flight_check(cfg_fresh, ticket_estimate_pct=0.08)
 chk("Pre-flight check allows start when budget is healthy",
     pre["should_skip"] is False,
@@ -146,10 +150,12 @@ ledger_estimate = Path(tempfile.mkdtemp()) / "audit.jsonl"
 usage.configure(str(ledger_estimate))
 cfg_estimate = Config(
     apps=[],
+    glm_low_watermark_tokens=1_000,   # toy 100k quota: keep the watermark below test headroom
     audit_path=str(ledger_estimate),
     glm_quota_tokens=100_000,
     budget_bad_threshold=0.95
 )
+_bp.set_active("glm", cfg_estimate)   # GLM is the active backend for this GLM-headroom check
 usage.record("glm", 70000, 0, 0.0, "glm")  # 70% used
 pre = usage.pre_flight_check(cfg_estimate, ticket_estimate_pct=0.20)
 # 70% < 95% - 20% = 75%, so should NOT skip
@@ -164,10 +170,12 @@ very_fresh_ledger = Path(tempfile.mkdtemp()) / "audit.jsonl"
 usage.configure(str(very_fresh_ledger))
 cfg_very_fresh = Config(
     apps=[],
+    glm_low_watermark_tokens=1_000,   # toy 100k quota: keep the watermark below test headroom
     audit_path=str(very_fresh_ledger),
     glm_quota_tokens=100_000,
     budget_bad_threshold=0.95
 )
+_bp.set_active("glm", cfg_very_fresh)   # GLM active — its bad-threshold crossing must stop THIS drain
 grace = usage.graceful_stop_check(cfg_very_fresh)
 chk("Graceful stop check allows continuation when healthy",
     grace["should_stop"] is False,

@@ -2,3 +2,5 @@ claude-agent-sdk>=0.2.0
 requests>=2.31
 PyYAML>=6.0
 Flask>=3.0          # control panel web app (general serve)
+pytest>=8.0         # eu199 drives pytest directly; CI installs from this file (2026-07-10)
+pytest-asyncio>=1.0

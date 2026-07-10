@@ -30,7 +30,7 @@ CRON_TZ=Asia/Jerusalem
 30 8 * * * cd $HOME/General && ./general daily >> council/cron.log 2>&1
 # Deep officer council — WEEKLY, Mon 09:30 (the ~8-call multi-officer muster + CTO briefing)
 30 9 * * 1 cd $HOME/General && ./general council >> council/cron.log 2>&1
-0 9 * * 1 cd $HOME/General && ./general patrol >> council/cron.log 2>&1
+0 9 * * 1 cd $HOME/General && ./general patrol automatixy >> council/cron.log 2>&1
 # SWE-bench Verified weekly benchmark — Mon 04:00 (off-peak), deterministic sample via --weekly seed
 0 4 * * 1 cd $HOME/General && python3 scripts/swebench_builder.py --weekly --sample 20 >> council/cron.log 2>&1
 CRON

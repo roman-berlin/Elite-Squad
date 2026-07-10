@@ -291,6 +291,69 @@ def _auto_clear_merged_ghosts(cfg: Config, blocked: set[str], audit: "AuditLog")
     return blocked
 
 
+def _auto_clear_decision_ghosts(cfg: Config, audit: "AuditLog") -> None:
+    """Remove ghost pending decisions — decisions whose base ticket already merged.
+
+    Ghost scenario: a ticket was parked (needs_human), then the Commander ran it
+    manually and it merged — but pending_decisions.json was never cleaned up.
+    Result: stale 'Needs you' cards for completed work. This function is called
+    at the start of each autopilot cycle so the decision store self-heals (EU-229).
+
+    Best-effort: any exception leaves the store unchanged so the loop never breaks."""
+    from . import decisions
+    from . import dashboard as D
+
+    try:
+        pending = decisions.load(cfg)
+        if not pending:
+            return
+
+        tasks = D.load_tasks(cfg.audit_path)
+        # Find the latest run per ticket in the pending store
+        latest: dict[str, dict] = {}
+        for t in tasks:
+            tid = str(t.get("ticket_id") or "")
+            if tid not in {p.get("id") for p in pending}:
+                continue
+            if tid not in latest or D._started_key(t) >= D._started_key(latest[tid]):
+                latest[tid] = t
+
+        # Tickets whose most-recent run merged are done — drop their decisions
+        to_clear = {p.get("id") for p in pending
+                    if p.get("id") in latest and latest[p.get("id")].get("outcome") == "merged→dev"}
+
+        if to_clear:
+            remaining = [p for p in pending if p.get("id") not in to_clear]
+            decisions._save(cfg, remaining)
+            audit.record("decision_ghost_cleared", tickets=sorted(to_clear))
+            print(f"  · auto-cleared ghost decisions: {', '.join(sorted(to_clear))} "
+                  f"(latest run already merged)", flush=True)
+    except Exception:  # noqa: BLE001 — ghost-clearing must never crash the autopilot loop
+        pass
+
+
+def _reopen_on_tracker(cfg: Config, ticket_id: str) -> None:
+    """EU-219: the other half of the park->Blocked round-trip. When the Commander /unblocks a ticket,
+    best-effort transition it back to 'In Progress' on whichever jira-backed app's board actually has
+    it, so the drain's queue_statuses re-picks it next cycle — without this, once the newly-park block
+    (below) actually moves a ticket to Blocked, /unblock only cleared the in-memory skip-set and left
+    the board silently stuck. Resolves the ticket via get_task across jira-backed apps, first match
+    wins (mirrors _resumable_answered's per-app try loop). set_status is a no-op if the ticket isn't
+    Blocked, and a wrong-project/network miss on one app just falls through to the next — best-effort
+    throughout so a board hiccup can never turn /unblock into an exception."""
+    from .backlog.base import make_backlog
+    for app in cfg.apps:
+        if getattr(app, "backlog_backend", "none") == "none":
+            continue
+        try:
+            backlog = make_backlog(app)
+            ticket = backlog.get_task(ticket_id)
+            backlog.set_status(ticket, "In Progress")
+            return
+        except Exception:  # noqa: BLE001 - wrong project for this board, network, etc.
+            continue
+
+
 def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     """Clear a parked ticket (or all). Autopilot will retry it next cycle."""
     blocked = load_blocked(cfg)
@@ -300,29 +363,46 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
         hit = {b for b in blocked if b.lower() == ticket_id.lower()}
         blocked -= hit
         save_blocked(cfg, blocked)
-        return f"unblocked {ticket_id}" if hit else f"{ticket_id} was not parked"
+        if not hit:
+            return f"{ticket_id} was not parked"
+        for tid in hit:
+            _reopen_on_tracker(cfg, tid)
+        return f"unblocked {ticket_id}"
+    ids = sorted(blocked)
     save_blocked(cfg, set())
+    for tid in ids:
+        _reopen_on_tracker(cfg, tid)
     return f"unblocked all ({len(blocked)})"
 
 
 def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) -> dict:
-    """EU-61: parked tickets the Commander has answered DIRECTLY on their Jira ticket → auto-resume.
+    """EU-61 + EU-229: parked tickets the Commander has answered DIRECTLY on their Jira ticket → auto-resume.
 
-    For each parked ticket that still has an OPEN pending decision, fetch it by key and compare the
-    latest human comment against the baseline snapshotted at park time (decisions.add). A genuinely-new
-    answer means the Commander resolved it on Jira (not Telegram), so it should re-enter the develop
-    queue without a manual /unblock. Returns ``{ticket_id: (app, ticket)}``. Fetched by key, so it's
-    independent of the board's queue_statuses; best-effort per ticket (a wrong-project/network miss just
-    skips that ticket this cycle)."""
+    EU-229: universal Jira-answer resume — scans ALL pending decisions with real Jira keys, not just
+    blocked ∩ pending. Any parked ticket (or any ticket with a pending decision) that receives a new
+    Jira comment auto-resumes, removing the blocked-only constraint from the original EU-61 implementation.
+
+    For each pending decision, fetch it by key and compare the latest human comment against the
+    baseline snapshotted at park time (decisions.add). A genuinely-new answer means the Commander resolved
+    it on Jira (not Telegram), so it should re-enter the develop queue without a manual /unblock.
+    Returns ``{ticket_id: (app, ticket)}``. Fetched by key, so it's independent of the board's
+    queue_statuses; best-effort per ticket (a wrong-project/network miss just skips that ticket this cycle)."""
     from . import decisions
     from .backlog.base import make_backlog
+    import re
     out: dict = {}
-    if not blocked:
-        return out
+
+    # EU-229: Load ALL pending decisions, not just blocked ones
     pending = {d.get("id"): d for d in decisions.load(cfg)}
-    targets = [tid for tid in blocked if tid in pending]
+    if not pending:
+        return out
+
+    # Filter to decisions with real Jira keys (e.g. AUTO-1, EU-42) — skip internal entry ids
+    _JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+    targets = [tid for tid in pending.keys() if tid and _JIRA_KEY_RE.match(str(tid).split("#")[0])]
     if not targets:
         return out
+
     apps = [cfg.app(app_name)] if app_name else [a for a in cfg.apps if a.backlog_backend != "none"]
     for app in apps:
         try:
@@ -340,6 +420,41 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
             if answer and answer != pending[tid].get("answer_baseline"):
                 out[tid] = (app, ticket)
     return out
+
+
+def _park_errored_on_tracker(cfg: Config, by_id: dict, newly: list, errored: set) -> None:
+    """EU-219: 2026-07-09 forensics found a ticket_exception left the ticket In Progress with no board
+    state change — the single-run path posts an ❌ error comment (12ecb49) but deliberately does not
+    transition (ERRORED tickets are retried). The missing half: once the autopilot's error threshold
+    actually parks a ticket (n >= _MAX_TICKET_ERRORS, see the caller), the board should show it Blocked
+    with a reason, so /unblock's round-trip (_reopen_on_tracker above) has something to reverse.
+
+    Only touches tickets in ``newly`` whose report outcome this cycle was Outcome.ERRORED — PARKED
+    outcomes (ESCALATED/PR_OPENED) are NOT re-transitioned here; decisions.add already set those
+    Blocked with their own reason comment (_park_on_tracker). Best-effort per ticket: a board hiccup
+    (bad token, wrong project, network) must never crash the autopilot cycle."""
+    if not newly or not errored:
+        return
+    from .backlog.base import make_backlog
+    for tid in newly:
+        if tid not in errored:
+            continue
+        hit = by_id.get(tid)
+        if not hit:
+            continue
+        app, ticket = hit
+        if getattr(cfg, "dry_run", False) or getattr(ticket, "ephemeral", False):
+            continue
+        try:
+            backlog = make_backlog(app)
+            backlog.set_status(ticket, "Blocked")
+            backlog.add_comment(
+                ticket,
+                f"⛔ Parked after {_MAX_TICKET_ERRORS} consecutive errors — "
+                f"reply /unblock {tid} or answer here to retry.",
+            )
+        except Exception:  # noqa: BLE001 - a board hiccup must never crash the loop
+            pass
 
 
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
@@ -383,6 +498,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         stop_event.set()
 
     audit = AuditLog(cfg.audit_path)
+    # Stale-process forensics (2026-07-09, mirrors server.serve): one audit line per process start
+    # (git SHA + pid) so "which code was this drain actually on?" is a single grep — the resident
+    # process ran pre-EU-201 code for 11h after the unit landed EU-201 on itself.
+    try:
+        import subprocess as _sp
+        _sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                       text=True, timeout=5).stdout.strip()
+        audit.record("process_start", role="autopilot", app=app_name or "", sha=_sha, pid=os.getpid())
+    except Exception:  # noqa: BLE001 — forensics must never block the drain
+        pass
     from . import cockpit_state
     from .git_ops import clear_parked_repos
     run_key = app_name or None
@@ -635,6 +760,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # EU-78: auto-clear ghost-parked tickets whose latest audit run already succeeded
             # (e.g. parked in a previous session, then ran manually and merged).
             blocked = _auto_clear_merged_ghosts(cfg, blocked, audit)
+            # EU-229: auto-clear ghost pending decisions whose base ticket already merged
+            _auto_clear_decision_ghosts(cfg, audit)
             # EU-61: a parked ticket the Commander answered directly on Jira auto-resumes — lift it out
             # of the skip-set and put it at the FRONT of the queue (resume before taking new work).
             resumed = _resumable_answered(cfg, app_name, blocked)
@@ -732,6 +859,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # decision. The conservative overrides (AC / [Feature] / [Bug] ⇒ always build) become
             # deterministic pre-checks on that verdict when the Planner lands.
 
+            # EU-219: snapshot (app, ticket) by id BEFORE run_loop so the newly-park block below can
+            # best-effort transition a freshly-parked ERRORED ticket to Blocked without re-fetching it.
+            by_id = {t.id: (a, t) for (a, t) in worklist}
+
             reports = await run_loop(cfg, worklist, audit)
 
             # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
@@ -745,6 +876,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
             # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
+            errored = {r.ticket_id for r in reports if r.outcome is Outcome.ERRORED}
             retrying: list[str] = []
             counts_changed = False
             for r in reports:
@@ -778,6 +910,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             if newly:
                 blocked.update(newly)
                 save_blocked(cfg, blocked)
+                # EU-219: only the ERRORED-threshold arrivals need a fresh Blocked transition here —
+                # PARKED outcomes (ESCALATED/PR_OPENED) were already moved to Blocked by decisions.add.
+                _park_errored_on_tracker(cfg, by_id, newly, errored)
                 notify.send("⏸️ Parked (need you): " + ", ".join(newly)
                             + "\nReply /unblock <id> once handled and I'll retry it.")
             _learn_from_cycle(cfg, reports, audit)   # fold this cycle's lessons into memory (free)

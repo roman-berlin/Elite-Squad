@@ -1,12 +1,29 @@
 """EU-190: the persisted **active model backend** (Opus vs GLM), shared by the cockpit and the CLI.
 
 The operator picks a backend once; it sticks across cockpit reloads/restarts and applies to
-subsequent runs until changed. Stored in a **gitignored** ``model_backend.json`` at the repo root —
-the same location convention as ``connections.py`` — so the long-running cockpit and the one-shot
-``./general`` CLI always agree on the active backend.
+subsequent runs until changed. Stored in a **gitignored** ``model_backend.json`` anchored to the
+run's state directory (the parent of ``cfg.audit_path`` — i.e. ``state/`` for the live unit), so the
+long-running cockpit and the one-shot ``./general`` CLI always agree on the active backend.
+
+Anchoring to the *config* (not the package root) is load-bearing for hermeticity: the pre-fix
+repo-root store leaked the developer's real sticky pref into every test run — 12 harnesses went red
+in the main tree (runs blocked on "GLM selected but GLM_AUTH_TOKEN is not configured") while the
+worktree-isolated gates stayed green, because only the main tree had the gitignored file
+(2026-07-09). Tests build Configs with tmp audit paths, so they now get their own empty store.
+
+``migrate()`` moves a legacy repo-root file into the anchored location once; it is called ONLY from
+the live CLI entrypoint (``main.py``), never from ``create_app``/library code, so a test constructing
+an app around a tmp config can never relocate the operator's real preference file.
 
 Precedence: this persisted preference OVERRIDES the ``config.yaml`` ``model_backend`` boot default,
 which in turn falls back to Opus. Never stores a secret — only the backend id (``'opus'`` | ``'glm'``).
+
+EU-223: the sticky pref is also OPTIONALLY overridable PER APP, so two parallel drains (EU-103 —
+e.g. the Elite-Unit drain and the automatixy drain running at the same time) can each pin a
+different backend. Shape: ``{"backend": "opus", "apps": {"automatixy": "glm"}}``. Precedence for
+``active(cfg, app_name)``: the app's own override -> the global ``backend`` -> the config.yaml
+default. A flat legacy file (no ``apps`` key) keeps working unchanged — every app just inherits the
+global pref, exactly as before EU-223.
 """
 from __future__ import annotations
 
@@ -16,30 +33,99 @@ from pathlib import Path
 from . import backends
 
 
-def _file() -> Path:
-    """Repo-root store — same convention as connections.py so cockpit + CLI never diverge."""
+def _legacy_file() -> Path:
+    """The pre-EU-190-hermeticity repo-root store — read only by ``migrate()``."""
     return Path(__file__).resolve().parent.parent / "model_backend.json"
 
 
-def get() -> str | None:
-    """The persisted backend id (normalized), or ``None`` if never set / unreadable."""
-    try:
-        bk = json.loads(_file().read_text(encoding="utf-8")).get("backend")
-    except (OSError, json.JSONDecodeError):
-        return None
-    return backends.normalize(bk) if bk else None
+def _file(cfg=None) -> Path:
+    """State-dir store, anchored to ``cfg.audit_path``'s parent (``state/`` live; a tmp dir in
+    tests). Falls back to the legacy repo-root path only when no config is available."""
+    audit = getattr(cfg, "audit_path", None) if cfg is not None else None
+    if audit:
+        return Path(audit).resolve().parent / "model_backend.json"
+    return _legacy_file()
 
 
-def set_active(bk: str) -> None:
-    """Persist the active backend id (normalized). Best-effort — never raises."""
+def migrate(cfg) -> None:
+    """One-time move of a legacy repo-root ``model_backend.json`` into the cfg-anchored store.
+    Best-effort, never raises; a no-op when there is nothing to move or the target already exists.
+    Called from the live CLI entrypoint only — see the module docstring for why."""
     try:
-        _file().write_text(
-            json.dumps({"backend": backends.normalize(bk)}, indent=2), encoding="utf-8")
+        legacy, target = _legacy_file(), _file(cfg)
+        if legacy == target or not legacy.exists() or target.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        legacy.rename(target)
     except OSError:
         pass
 
 
-def active(cfg=None) -> str:
-    """The effective active backend: the persisted preference, else the ``config.yaml`` default,
-    else Opus. Always a canonical id (``'opus'`` | ``'glm'``)."""
-    return get() or backends.normalize(getattr(cfg, "model_backend", backends.NATIVE))
+def _load(cfg=None) -> dict:
+    """Best-effort parse of the whole store file — ``{}`` if missing/unreadable/not an object.
+    Single read path shared by ``get``/``get_apps``/``set_active`` so a per-app write never clobbers
+    the global key (or a sibling app's override) it didn't touch."""
+    try:
+        data = json.loads(_file(cfg).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get(cfg=None) -> str | None:
+    """The persisted GLOBAL backend id (normalized), or ``None`` if never set / unreadable."""
+    bk = _load(cfg).get("backend")
+    return backends.normalize(bk) if bk else None
+
+
+def get_apps(cfg=None) -> dict[str, str]:
+    """EU-223: the per-app override map ``{app_name: backend_id}`` (values normalized).
+
+    Tolerates the flat legacy shape (no ``apps`` key) by returning ``{}`` — every app then falls
+    back to the global pref via :func:`active`, exactly as before EU-223."""
+    apps = _load(cfg).get("apps")
+    if not isinstance(apps, dict):
+        return {}
+    return {name: backends.normalize(bk) for name, bk in apps.items()
+            if isinstance(name, str) and bk}
+
+
+# Marker values meaning "remove this app's override / let it inherit the global pref" when passed
+# to set_active(..., app_name=...). Not a valid backend id, so never confused with 'opus'/'glm'.
+_INHERIT = (None, "", "inherit")
+
+
+def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
+    """Persist the active backend id. Best-effort — never raises.
+
+    Without ``app_name``: sets the GLOBAL ``backend`` key, leaving any ``apps`` overrides intact.
+    With ``app_name``: writes/clears ONE entry under ``apps`` — ``bk`` in
+    ``(None, "", "inherit")`` REMOVES that app's override (it then inherits the global pref) —
+    while preserving the global ``backend`` and every other app's entry untouched."""
+    try:
+        target = _file(cfg)
+        data = _load(cfg)
+        if app_name:
+            apps = dict(data.get("apps") or {})
+            if bk in _INHERIT:
+                apps.pop(app_name, None)
+            else:
+                apps[app_name] = backends.normalize(bk)
+            data["apps"] = apps
+        else:
+            data["backend"] = backends.normalize(bk)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def active(cfg=None, app_name: str | None = None) -> str:
+    """The effective active backend for ``app_name`` (global when omitted): the app's own override,
+    else the persisted GLOBAL preference, else the ``config.yaml`` default, else Opus. Always a
+    canonical id (``'opus'`` | ``'glm'``)."""
+    if app_name:
+        override = get_apps(cfg).get(app_name)
+        if override:
+            return override
+    return get(cfg) or backends.normalize(getattr(cfg, "model_backend", backends.NATIVE))

@@ -578,10 +578,12 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
     reason = ""
     skip_provider = active
 
+    # Only the ACTIVE provider's headroom gates new work. An exhausted INACTIVE provider is a
+    # can't-switch-there fact, not a hold reason — 2026-07-10: GLM at 97.8% held fresh Opus drains.
     claude_available = status["claude"].get("available", False)
     claude_limits = status["claude"].get("limits", [])
 
-    if claude_available and claude_limits:
+    if active == PROVIDER_CLAUDE and claude_available and claude_limits:
         bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
         for limit in claude_limits:
             util = float(limit.get("utilization", 0.0))
@@ -593,7 +595,7 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
                 reason = f"Claude {label} at {util:.1%} capacity (~{pct_rem:.1%} remaining)"
                 break
 
-    if not should_skip and status["glm"].get("on", False):
+    if not should_skip and active == PROVIDER_GLM and status["glm"].get("on", False):
         glm_pct = status["glm"].get("pct", 0.0)
         bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
         if glm_pct >= bad_threshold - ticket_estimate_pct:
@@ -676,7 +678,9 @@ def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | Non
         else:
             reason = (f"At {active.capitalize()} low-watermark (remaining {remaining:,} ≤ watermark {low_watermark:,}) "
                      f"- finish current ticket then stop")
-    elif critical_provider:
+    elif critical_provider == active:
+        # Only the ACTIVE provider crossing the bad threshold stops the drain. A bad INACTIVE
+        # provider must not (2026-07-10: GLM at 97.8% graceful-stopped fresh Opus drains).
         should_stop = True
         if critical_provider == "claude":
             claude_limits = status["claude"].get("limits", [])
@@ -689,6 +693,8 @@ def graceful_stop_check(cfg: Config | None = None, *, prior_remaining: int | Non
         elif critical_provider == "glm":
             glm_pct = status["glm"].get("pct", 0.0)
             reason = f"GLM quota at {glm_pct:.1%} used"
+    else:
+        critical_provider = None   # a bad INACTIVE provider is informational, never a stop
 
     if not reason and not should_stop:
         reason = f"{active.capitalize()} budget healthy ({remaining:,} remaining)"
@@ -933,8 +939,17 @@ def dual_provider_budget_status(cfg: Config | None = None) -> dict:
     claude_stat = claude_budget_status_detailed(cfg)
     glm_stat = glm_budget_status(cfg)
 
-    # Determine active provider (default to Claude, will be overridden by EU-121 fallback logic)
+    # The ACTIVE provider is the operator's sticky backend pick (EU-190), not a hard-coded default.
+    # Hard-coding Claude here made every budget gate judge the WRONG provider — live incident
+    # 2026-07-10: fresh Opus drains were graceful-stopped by GLM's 97.8% quota (an INACTIVE
+    # provider) minutes after the backend flipped to Opus.
     active_provider = PROVIDER_CLAUDE
+    try:
+        from . import backend_pref, backends
+        if backend_pref.active(cfg) == backends.GLM:
+            active_provider = PROVIDER_GLM
+    except Exception:  # noqa: BLE001 — budget status must never crash on a pref hiccup
+        pass
 
     # Check if active provider can pick up a ticket (above low-watermark)
     active_stat = claude_stat if active_provider == PROVIDER_CLAUDE else glm_stat

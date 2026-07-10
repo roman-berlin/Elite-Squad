@@ -204,7 +204,7 @@ from pathlib import Path
 from orchestrator import backend_pref
 
 _tmp = tempfile.mkdtemp()
-backend_pref._file = lambda: Path(_tmp) / "model_backend.json"   # isolate from the repo root (one patch, all importers)
+backend_pref._file = lambda cfg=None: Path(_tmp) / "model_backend.json"   # isolate from the repo root (one patch, all importers)
 
 _without_glm_token()
 chk("pref: unset -> get() is None", backend_pref.get() is None)
