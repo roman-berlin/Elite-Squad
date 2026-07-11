@@ -61,6 +61,15 @@ Rules for the verdict:
   set verdict to FAIL.
 """
 
+REVIEWER_SYSTEM += """
+EU-249 hard rule — admitted-red tests are ALWAYS blocking: if the Builder's own handoff (the
+diff_digest/decisions/open_questions you were given) admits that a test is failing, was skipped, or
+hit a "test infrastructure issue" it didn't resolve, you MUST record that as a blocker/major quality
+issue (area "tests") and the verdict CANNOT be PASS. Do not let confident prose about the rest of the
+diff talk you into passing a self-reported red or skipped test — a diff whose own author says the
+tests didn't run/pass ships nothing verified, regardless of how the rest of the diff reads.
+"""
+
 # EU-42: give the Reviewer the out-of-scope findings channel. A real-but-off-spec issue it notices
 # while judging the diff (a bug/risk outside THIS ticket's scope) is emitted as the shared
 # ===TICKETS=== block, which loop._route_out_of_scope parses off review.raw and routes into the
@@ -103,6 +112,101 @@ def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = No
         "Review it now. Read any files you need for context, then emit the JSON verdict.",
     ]
     return "\n".join(parts)
+
+
+# EU-249: a deterministic backstop for the AUTO-97 failure mode — the Builder's OWN handoff admitted
+# "test files were created but encountered test infrastructure issues with localStorage mocking" and
+# the LLM reviewer still emitted PASS with blocking:0. The system-prompt rule above is the primary
+# defence; this pair of regexes is the safety net that doesn't depend on the model noticing, so it
+# can't silently regress.
+#
+# Iteration-2 narrowing: the v1 regex was too broad — it flagged ordinary GREEN summaries like
+# "Tests: 23 passed, 0 failed." and explicitly RESOLVED failures like "Fixed the failing test, now
+# green", bouncing perfectly good diffs. The detector now fires only on a genuinely UNRESOLVED
+# admission and deliberately ignores negation/resolution contexts:
+#   • STRONG signals fire unconditionally — an unambiguous unresolved admission (test infra issue,
+#     "still failing", "not passing", "couldn't get … to pass", "had to skip", "never ran").
+#   • WEAK signals (a bare "failing/broken/skipped … test") fire ONLY when the same field carries NO
+#     negation/resolution context ("no", "0", "zero", "none", "fixed", "resolved", "now pass/green",
+#     "all tests pass", "nothing broke") — so "0 failed", "No tests failed", "Fixed the failing test,
+#     now green" and friends stay PASS.
+# A false positive costs one extra builder pass; a false negative ships an unverified diff — but the
+# earlier over-broad version was itself parking valid diffs, so precision here IS the fix.
+_UNRESOLVED_STRONG_RE = re.compile(
+    r"(?i)("
+    r"\btest(?:s|ing)?\s+infra(?:structure)?\b"                          # "test infrastructure issues"
+    r"|\binfra(?:structure)?\s+issues?\b[^.\n]{0,40}\btests?\b"
+    r"|\btests?\b[^.\n]{0,40}\binfra(?:structure)?\s+issues?\b"
+    r"|\bstill\s+(?:fail\w*|broken|red|not\s+pass\w*)\b"                 # "still failing"
+    r"|\bnot\s+passing\b|\bnot\s+green\b"
+    r"|\b(?:won'?t|can'?t|cannot|couldn'?t|could\s+not|unable\s+to)\b[^.\n]{0,40}\bpass\w*\b"
+    r"|\bhad\s+to\s+skip\b"
+    r"|\btests?\b[^.\n]{0,40}\bnever\s+(?:ran|passed|run)\b"
+    r")"
+)
+# A bare "failing/broken/skipped … test" — ambiguous on its own (could be "Fixed the failing test").
+_WEAK_RED_TEST_RE = re.compile(
+    r"(?i)("
+    r"\b(?:fail(?:ing|ed|s)?|broken)\b[^.\n]{0,30}\btests?\b"
+    r"|\btests?\b[^.\n]{0,30}\b(?:fail(?:ing|ed|s)?|broken)\b"
+    r"|\bskip(?:ped|ping|s)?\b[^.\n]{0,30}\btests?\b"
+    r"|\btests?\b[^.\n]{0,30}\bskip(?:ped|ping|s)?\b"
+    r")"
+)
+# Negation / resolution wording that clears a WEAK signal (the failure was reported as GONE).
+_RESOLVED_CTX_RE = re.compile(
+    r"(?i)("
+    r"\bfixed\b|\bresolved\b|\bcorrected\b"
+    r"|\bnow\s+(?:pass\w*|green|work\w*)\b"
+    r"|\ball\s+tests?\s+(?:pass\w*|green)\b"
+    r"|\bnothing\s+(?:broke\w*|fail\w*)\b"
+    r"|\bno\b|\bnone\b|\bzero\b|\b0\b"
+    r")"
+)
+
+
+def _admitted_red_test_note(build_artifact: BuildArtifact | None) -> str | None:
+    """The offending sentence if the Builder's handoff (diff_digest/decisions/open_questions) admits
+    a genuinely UNRESOLVED failing/skipped/broken test, else None. A STRONG signal fires on its own;
+    a WEAK ("failing … test") signal fires only absent negation/resolution context in the same field
+    — so ordinary green summaries and already-fixed failures are not flagged (EU-249 iteration 2)."""
+    if build_artifact is None:
+        return None
+    fields = ([build_artifact.diff_digest] + list(build_artifact.decisions or [])
+             + list(build_artifact.open_questions or []))
+    for text in fields:
+        if not text:
+            continue
+        if _UNRESOLVED_STRONG_RE.search(text):
+            return text.strip()
+        if _WEAK_RED_TEST_RE.search(text) and not _RESOLVED_CTX_RE.search(text):
+            return text.strip()
+    return None
+
+
+def _enforce_admitted_red_tests(result: ReviewResult, build_artifact: BuildArtifact | None) -> ReviewResult:
+    """EU-249: force FAIL (with a recorded blocker) when the Builder's own handoff admits a failing,
+    skipped, or infrastructure-broken test — even if the LLM verdict said PASS with no blocking
+    issues. A self-reported red/skipped test is categorically blocking, not prose the reviewer's
+    overall impression can wave through (the exact AUTO-97 shape)."""
+    note = _admitted_red_test_note(build_artifact)
+    if note is None:
+        return result
+    if result.verdict != Verdict.PASS and result.blocking_issues:
+        return result   # already failing on this diff for another reason — nothing to force
+    forced = QualityIssue(
+        severity="blocker", area="tests",
+        detail=("Builder's own handoff admits a failing/skipped/broken test: "
+                f"\"{note[:300]}\" — a self-reported red or skipped test is an automatic blocking "
+                "finding (EU-249) and cannot ship PASS."),
+    )
+    result.quality_issues = list(result.quality_issues) + [forced]
+    result.required_changes = list(result.required_changes) + [
+        "Fix the failing/skipped test admitted in the build handoff (or remove the dead test) and "
+        "confirm it actually runs green before resubmitting."
+    ]
+    result.verdict = Verdict.FAIL
+    return result
 
 
 def _classify_diff(diff: str) -> tuple[str, str]:
@@ -220,6 +324,7 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer", cfg=cfg, routing_tier=routing_tier)
 
     result = _parse(run.final or run.text)
+    result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking

@@ -94,6 +94,13 @@ class AppConfig:
     # gates for the apps listed here (they depend on it), so a shared dependency correctly re-gates its
     # consumers. e.g. {"ui": ["zeltivo-crm", "landing-page"]}. (EU-19)
     gate_shared_packages: dict[str, list[str]] = field(default_factory=dict)
+    # EU-249: per-app opt-in for the diff-scoped test-collectability + test-run gate (see
+    # gate.test_collectability_gate). For every ADDED/RENAMED *.test.*/*.spec.* file in a diff it
+    # flags a phantom duplicated-app-root path (apps/<x>/**/apps/<x>/) or one matching none of its
+    # owning app's vitest `include` globs, then runs the survivors with a scoped `bunx vitest run`
+    # (immune to pre-existing full-suite failures elsewhere in the app). False by default so it
+    # never fires for an app with no monorepo/vitest shape (e.g. the EU python gate).
+    test_collectability_enabled: bool = False
     gate_timeout_sec: int = 1800
     gate_env: dict[str, str] = field(default_factory=dict)    # extra env for gate cmds (e.g. NODE_OPTIONS, worker caps)
     # Phase-2 §3.3: fast lint/format commands run as a deterministic gate AFTER the test gate and
