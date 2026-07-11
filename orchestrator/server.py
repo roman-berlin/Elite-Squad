@@ -81,6 +81,69 @@ def _first_shippable(cfg) -> str:
     return cfg.apps[0].name if getattr(cfg, "apps", None) else ""
 
 
+MERGE_STATS_TIME_RANGES = ("today", "week", "month", "all")
+
+
+def compute_merge_stats(audit_path: str, time_range: str, now: float | None = None) -> dict:
+    """EU-158: aggregate `merged`/`pr_opened` land-outcome audit events into merge statistics for one
+    time window. Pure function (no Flask) so it's directly testable — the route below is a thin
+    request-parsing wrapper around it.
+
+    ``time_range`` must be one of ``MERGE_STATS_TIME_RANGES``; the caller (the route) is responsible
+    for rejecting anything else with a 400 before calling this. ``now`` defaults to ``time.time()``;
+    tests pass a fixed value so windows are deterministic.
+
+    Window start (local time, matching AuditLog.record's ``time.strftime`` local timestamps):
+      today  -> local midnight of `now`'s date
+      week   -> now - 7 days
+      month  -> now - 30 days
+      all    -> no lower bound (epoch)
+    ``success_rate`` = merged / (merged + pr_opened) within the same window; ``None`` when there were
+    no land attempts (avoids a divide-by-zero and avoids implying a false 100%)."""
+    import json as _json
+
+    if now is None:
+        now = time.time()
+    if time_range == "today":
+        midnight = time.localtime(now)
+        window_start = time.mktime((midnight.tm_year, midnight.tm_mon, midnight.tm_mday,
+                                     0, 0, 0, 0, 0, -1))
+    elif time_range == "week":
+        window_start = now - 7 * 86400
+    elif time_range == "month":
+        window_start = now - 30 * 86400
+    else:  # "all"
+        window_start = 0.0
+
+    merged = 0
+    pr_opened = 0
+    for line in D.audit_lines(audit_path):
+        try:
+            ev = _json.loads(line)
+        except ValueError:
+            continue
+        event = ev.get("event")
+        if event not in ("merged", "pr_opened"):
+            continue
+        ts = D._parse_ts(ev.get("ts", ""))
+        if ts is None or time.mktime(ts.timetuple()) < window_start:
+            continue
+        if event == "merged":
+            merged += 1
+        else:
+            pr_opened += 1
+
+    total_attempts = merged + pr_opened
+    success_rate = (merged / total_attempts) if total_attempts else None
+    return {
+        "time_range": time_range,
+        "total_merges": merged,
+        "pr_opened": pr_opened,
+        "success_rate": success_rate,
+        "window_start": window_start,
+    }
+
+
 def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     """EU-190/EU-223: set this run's backend from the persisted sticky preference (cockpit
     /api/model), resolving an optional PER-APP override first, then the global sticky pref, then
@@ -1404,6 +1467,19 @@ def create_app(cfg: Config):
         from flask import jsonify
         # EU-204: promote and ship-main endpoints removed; this now always returns inactive
         return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
+
+    @app.get("/api/merge-stats")
+    def merge_stats_api():
+        """EU-158: merge statistics for a time window, aggregated from the audit log's land-outcome
+        events (`merged` / `pr_opened`). See ``compute_merge_stats`` for the aggregation itself."""
+        from flask import jsonify
+        time_range = request.args.get("time_range")
+        if time_range not in MERGE_STATS_TIME_RANGES:
+            return jsonify({
+                "error": (f"invalid time_range {time_range!r} — must be one of: "
+                          f"{'|'.join(MERGE_STATS_TIME_RANGES)}"),
+            }), 400
+        return jsonify(compute_merge_stats(cfg.audit_path, time_range))
 
     @app.post("/api/patrol")
     def patrol_api():
