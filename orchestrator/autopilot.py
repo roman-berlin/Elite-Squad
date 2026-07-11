@@ -510,6 +510,15 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         pass
     from . import cockpit_state
     from .git_ops import clear_parked_repos
+    # EU-253: install the stdout Tee here too, idempotently. server.serve() only installs it in the
+    # cockpit process (server.py's `if not isinstance(sys.stdout, _Tee)` guard) — an external/CLI
+    # daemon running `general autopilot` standalone (main.py -> this function, no cockpit process)
+    # never got a Tee, so run_logger.write_line() (fed only by _Tee.write) never received a single
+    # line and every automode per-ticket log came out empty. Same guard as server.py: a no-op when
+    # this IS the cockpit process (stdout is already wrapped), so it can never double-wrap.
+    import sys
+    if not isinstance(sys.stdout, cockpit_state._Tee):
+        sys.stdout = cockpit_state._Tee(sys.stdout)
     run_key = app_name or None
     owns_run_state = False    # set True only once claim_run succeeds; gates release in the finally
     run_state = None

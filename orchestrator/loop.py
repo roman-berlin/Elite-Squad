@@ -27,6 +27,8 @@ from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
 from .gate import base_gate_check, gate_fingerprint, run_deterministic_checks, run_gate
 from . import jira_adapter as jira_commenter
+from . import cockpit_state
+from . import run_logger
 from .git_ops import Git, GitError
 from .officers import display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW
@@ -496,23 +498,65 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                                             notes="deferred — worktree busy (another run active)"))
                 continue
             backlog = None   # pre-bind: an exception before assignment must not NameError the handler
+            # EU-253: bracket THIS ticket with a per-ticket log file before any work starts, and
+            # close it once the ticket is done (success OR caught exception — so even a
+            # ticket_exception leaves a per-ticket transcript on disk). Every drain funnels through
+            # this one bracket — cockpit /api/run, /api/run-tickets, AND automode's autopilot loop —
+            # so automode lands (which never went through server.py's manual open/close) finally get
+            # logs/<app>/<YYYY-MM-DD>/<TICKET>-<HHMMSS>.log.
+            #
+            # The handle MUST be registered under the SAME key cockpit_state._Tee.write looks up, or
+            # the captured stdout lands under a key with no open handle and the file stays empty (the
+            # iteration-1 bug: it keyed on app.name while a unit-wide drain's Tee keys on None). _Tee
+            # attributes each line to active_runs()[0] when exactly one run is active, else None —
+            # so we compute the SAME effective key here. The on-disk PATH still comes from the
+            # ticket's app.name (run_logger derives the path from app_name, the registry key from
+            # run_key). Open/close are best-effort: a log I/O problem must never abort a build.
+            _active = cockpit_state.active_runs()
+            _log_key = _active[0] if len(_active) == 1 else None
+            _log_opened = False
             try:
-                if app.name not in gits:
-                    gits[app.name] = _make_git(cfg, app)
-                git = gits[app.name]
-                # Ephemeral (free-text) tickets have no tracker -> no creds needed.
-                if ticket.ephemeral:
-                    backlog = NoneBacklog()
+                if len(_active) > 1:
+                    # Concurrent drains: _Tee collapses attribution to the shared None key, so a
+                    # dedicated per-ticket handle can't own only THIS drain's lines (and two drains
+                    # both registering under None would clobber each other). Drop a dated note file
+                    # instead of a silently-empty one, then leave the shared stream alone.
+                    run_logger.write_note_log(
+                        cfg, app.name, ticket.id,
+                        f"[EU-253] {len(_active)} runs active {_active!r} at start of {ticket.id} "
+                        f"({app.name}) — the live stdout stream attributes lines to the shared drain "
+                        f"(None) key while multiple runs are in flight, so a dedicated per-ticket log "
+                        f"can't be isolated for this ticket. Consult the shared drain log; per-ticket "
+                        f"separation is only available when a single run is active.")
                 else:
-                    if app.name not in backlogs:
-                        backlogs[app.name] = make_backlog(app)
-                    backlog = backlogs[app.name]
-                if app.name not in ensured:
-                    git.ensure_clean()
-                    ensured.add(app.name)
-                report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
-            except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
-                report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
+                    run_logger.open_run_log(cfg, app.name, ticket.id, run_key=_log_key)
+                    _log_opened = True
+            except Exception:  # noqa: BLE001 — log setup must never block a run
+                _log_opened = False
+            try:
+                try:
+                    if app.name not in gits:
+                        gits[app.name] = _make_git(cfg, app)
+                    git = gits[app.name]
+                    # Ephemeral (free-text) tickets have no tracker -> no creds needed.
+                    if ticket.ephemeral:
+                        backlog = NoneBacklog()
+                    else:
+                        if app.name not in backlogs:
+                            backlogs[app.name] = make_backlog(app)
+                        backlog = backlogs[app.name]
+                    if app.name not in ensured:
+                        git.ensure_clean()
+                        ensured.add(app.name)
+                    report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
+                except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
+                    report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
+            finally:
+                if _log_opened:
+                    try:
+                        run_logger.close_run_log(run_key=_log_key)
+                    except Exception:  # noqa: BLE001 — log teardown must never block a run
+                        pass
             reports.append(report)
 
             # EU-201: After a split, inject the fragments into the worklist at the current position
