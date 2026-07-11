@@ -770,24 +770,31 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 save_blocked(cfg, blocked)
                 notify.send("▶️ Resuming (answered on Jira): " + ", ".join(sorted(resumed)))
                 audit.record("decision_resumed", tickets=sorted(resumed), via="jira-comment")
-            # Three-tier worklist assembly (EU-87): In Progress → answered/unblocked → To Do.
-            # Pull more than cap so the blocked filter still leaves enough to fill the cap, then cap
-            # the DRAWN (new) work here — `cap` bounds only how much fresh backlog a cycle pulls.
+            # Three-tier worklist assembly (EU-87, cap contract fixed by EU-252): In Progress →
+            # answered/unblocked → To Do. Pull more than cap so the blocked filter still leaves
+            # enough to fill the cap. `cap` bounds only how much FRESH To Do work a cycle pulls —
+            # it must never truncate the drawn window before the tier split runs, or a jql override
+            # that ranks an In Progress fragment low (by priority/Rank) gets clipped off before
+            # tier-1 can rescue it, starving already-in-flight work behind newer To Do filings
+            # (EU-252: EU-233..237 sat 29h unpicked this way). So filter blocked over the FULL
+            # drawn window first, split tiers over that full window, and cap ONLY the To Do slice.
             # Answered/resumed tickets (Tier-2 below) are work already in flight that the Commander
             # explicitly replied to, so they ride ON TOP of the cap and are never dropped — this is
             # the pre-EU-87 contract eu61_autopilot_resume_queue_test.py pins (capping the *combined*
             # list instead silently truncated the To Do tail when cap was small).
             raw = intake.from_drain(cfg, app_name, cap + len(blocked) + len(resumed) + 5)
-            raw = [(a, t) for (a, t) in raw if t.id not in blocked][:cap]
+            raw = [(a, t) for (a, t) in raw if t.id not in blocked]
 
             # Tier-1: tickets the board already shows as In Progress — always run these first so
-            # a ticket we started in a previous cycle is never delayed by new To Do items.
+            # a ticket we started in a previous cycle is never delayed by new To Do items. Never
+            # bounded by `cap` (EU-252) — an In Progress resume must never be starved by fresh work.
             # Use getattr for robustness in tests / adapters that return plain namespaces.
             in_progress = [(a, t) for (a, t) in raw
                            if (s := getattr(t, "status", None)) and "progress" in s.lower()]
-            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order.
+            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order. `cap` bounds
+            # only this fresh-backlog slice (EU-252) — In Progress and answered resumes are additive.
             to_do = [(a, t) for (a, t) in raw
-                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())]
+                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())][:cap]
 
             # Tier-2: parked tickets the Commander answered directly on Jira. They sit between
             # In Progress and To Do so a replied-to ticket is never left behind a fresh To Do.
@@ -799,7 +806,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             answered_items = [v for k, v in resumed.items() if k not in in_drain]
 
             # Final ordering: In Progress → answered → To Do. The cap was already applied to the
-            # drawn work above; answered resumes are intentionally additive (see note above).
+            # To Do slice above (EU-252); In Progress and answered resumes are intentionally
+            # additive/uncapped (see notes above).
             worklist = in_progress + answered_items + to_do
 
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed

@@ -146,9 +146,14 @@ class JiraAdapter(BacklogAdapter):
     # -- interface -------------------------------------------------------- #
     def get_ready_tasks(self, limit: int) -> list[Ticket]:
         """Resume In Progress first, then pull To Do top-to-bottom (board Rank),
-        assignee = you. A full `jql:` override, if set, replaces this entirely.
+        assignee = you. A full `jql:` override, if set, replaces the To-Do/ready query — but a
+        PRECEDING In-Progress-only query still runs first regardless. Without it, a custom override's
+        ORDER BY (e.g. "priority DESC, Rank ASC") can rank an In Progress fragment below `limit`, so
+        it never enters the drawn window at all and the tier-1 resume-first split in autopilot.py
+        becomes a no-op — this stranded EU-233..237 for 29h behind newer To Do filings (EU-252).
+        Results are deduped by key across both queries.
         (Jira Cloud search endpoint; older instances: POST /rest/api/3/search.)"""
-        queries = [self.jql_override] if self.jql_override else \
+        queries = [self._jql_for_status("In Progress"), self.jql_override] if self.jql_override else \
             [self._jql_for_status(s) for s in self.queue_statuses]
         out: list[Ticket] = []
         seen: set[str] = set()

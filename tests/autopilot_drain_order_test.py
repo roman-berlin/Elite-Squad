@@ -53,19 +53,21 @@ def _app():
 # --------------------------------------------------------------------------- #
 
 def _run_cycle(drain_tickets, resumed_map, blocked_set, cap=5):
-    """Simulate the EU-87 worklist-assembly code with the same logic as autopilot.py."""
+    """Simulate the EU-87/EU-252 worklist-assembly code with the same logic as autopilot.py.
+    EU-252: `cap` bounds only the To Do (tier-3) slice — it is applied BEFORE the tiers are
+    joined, not to the combined list, so In Progress/answered work is never truncated by it."""
     app = _app()
     raw = [(app, t) for t in drain_tickets if t.id not in blocked_set]
 
     in_progress = [(a, t) for (a, t) in raw
                    if t.status and "progress" in t.status.lower()]
     to_do = [(a, t) for (a, t) in raw
-             if not (t.status and "progress" in t.status.lower())]
+             if not (t.status and "progress" in t.status.lower())][:cap]
 
     in_drain = {t.id for _, t in raw}
     answered_items = [v for k, v in resumed_map.items() if k not in in_drain]
 
-    worklist = (in_progress + answered_items + to_do)[:cap]
+    worklist = in_progress + answered_items + to_do
     return [t.id for _, t in worklist]
 
 
@@ -107,12 +109,17 @@ chk("answered In Progress ticket stays in tier-1 (not duplicated via tier-2)",
 chk("answered In Progress ticket appears before To Do",
     order_ov.index("AUTO-7") < order_ov.index("AUTO-3"), str(order_ov))
 
-# ---- cap is applied AFTER tier ordering (In Progress never gets cut by a full To Do tier) ----
+# ---- EU-252: cap bounds ONLY the To Do slice — In Progress rides through uncapped, never cut
+# by a full To Do tier (a cap on the combined list is what starved EU-233..237) ----
 many_todo = [_ticket(f"AUTO-{10+i}", "To Do") for i in range(4)]
 order_cap = _run_cycle([ip1, ip2] + many_todo, resumed_map={}, blocked_set=set(), cap=3)
 chk("cap applied after tier ordering — both In Progress tickets survive",
     "AUTO-1" in order_cap and "AUTO-2" in order_cap, str(order_cap))
-chk("cap limits total to 3", len(order_cap) == 3, str(order_cap))
+chk("cap bounds only To Do: total is N(In Progress) + cap, not cap alone",
+    len(order_cap) == 5, str(order_cap))
+todo_ids = {t.id for t in many_todo}
+chk("cap bounds only To Do: exactly `cap` To Do tickets admitted",
+    sum(1 for k in order_cap if k in todo_ids) == 3, str(order_cap))
 
 # ---- empty answered tier (no resumed tickets) still works ----
 order_no_ans = _run_cycle([ip1, td1, td2], resumed_map={}, blocked_set=set())
