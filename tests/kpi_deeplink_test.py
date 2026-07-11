@@ -1,7 +1,7 @@
 """KPI deep-link QA (EU-32 / EU-102): the War Room KPI cards must link to a view SCOPED to the
 count they show.  EU-102: the separate Parked KPI card is retired — parked items are folded into
 the unified Needs-you inbox, so the Needs-you card now links to /needs (not /tasks?filter=needs).
-Merged -> /tasks?filter=merged, Security blocks -> /forensics?cat=security_block (not /council)."""
+Merged -> /merge-stats (EU-159), Security blocks -> /forensics?cat=security_block (not /council)."""
 import sys, types, tempfile, json
 from pathlib import Path
 
@@ -54,7 +54,7 @@ cards = {c["label"]: c.get("href") for c in warroom.kpis(scfg, warroom.D.load_ta
 chk("Parked card is gone (retired by EU-102)", "Parked" not in cards, str(list(cards.keys())))
 # EU-150: the standalone Merged total card is retired — use "Merged → DEV today" which links to /tasks?filter=merged
 chk("Merged total card is gone (retired by EU-150)", "Merged total" not in cards, str(list(cards.keys())))
-chk("Merged → DEV today card -> /tasks?filter=merged", cards.get("Merged → DEV today") == "/tasks?filter=merged", str(cards.get("Merged → DEV today")))
+chk("Merged → DEV today card -> /merge-stats", cards.get("Merged → DEV today") == "/merge-stats", str(cards.get("Merged → DEV today")))
 # 5a882a6: the Needs-you card itself was removed from the board — /needs remains the inbox route.
 chk("Needs you card is gone (removed by 5a882a6)", "Needs you" not in cards, str(list(cards.keys())))
 chk("Security blocks card -> security-scoped forensics",

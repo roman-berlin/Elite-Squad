@@ -1468,6 +1468,34 @@ def create_app(cfg: Config):
         # EU-204: promote and ship-main endpoints removed; this now always returns inactive
         return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
 
+    @app.get("/merge-stats")
+    def merge_stats_page():
+        """EU-159: the frontend merge-statistics page — the minimal shippable slice, "today" only.
+        Renders via ``_wrap`` (page title + '← cockpit' breadcrumb come from there for free)."""
+        stats = compute_merge_stats(cfg.audit_path, "today")
+        sr = stats["success_rate"]
+        sr_str = "—" if sr is None else f"{round(sr * 100)}%"
+        style = (
+            "<style>"
+            ".msgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));"
+            "gap:14px;margin:14px 0}"
+            ".mscard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);"
+            "padding:16px 18px}"
+            ".msbig{color:var(--ink);font-size:32px;font-weight:750;margin:4px 0 6px}"
+            ".mslabel{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
+            "font-weight:700}"
+            "</style>")
+        inner = (
+            style
+            + "<p style='color:var(--dim);margin:-4px 0 4px'>Today’s land outcomes, aggregated from the audit log.</p>"
+            + "<div class=msgrid>"
+            + f"<div class=mscard><div class=msbig>{stats['total_merges']}</div><div class=mslabel>Total merges</div></div>"
+            + f"<div class=mscard><div class=msbig>{stats['pr_opened']}</div><div class=mslabel>PRs opened</div></div>"
+            + f"<div class=mscard><div class=msbig>{html.escape(sr_str)}</div><div class=mslabel>Success rate</div></div>"
+            + "</div>"
+        )
+        return _wrap("Merge statistics", inner)
+
     @app.get("/api/merge-stats")
     def merge_stats_api():
         """EU-158: merge statistics for a time window, aggregated from the audit log's land-outcome
