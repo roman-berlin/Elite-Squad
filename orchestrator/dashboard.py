@@ -668,6 +668,50 @@ function kpick(id){var f=document.getElementById('f');f.value=id;flt();f.scrollI
 </script></body></html>"""
 
 
+# EU-245: the daily's "Needs you" line used to be a raw scan of load_tasks() — EVERY historical run
+# of a ticket, forever, with no dedup and no "is this actually resolved now" check. A ticket rerun 5x
+# over weeks showed up 5x (AUTO-14 x5 in the 2026-07-11 case), and a ticket resolved weeks ago never
+# aged out. needs.summary() (orchestrator/needs.py) already solves exactly this for the cockpit's
+# Needs-you panel — one row per ticket (latest run only), resolved/dismissed tickets dropped,
+# blocked_tickets.json + pending_decisions.json merged in — so the digest now sources from THAT single
+# live inbox instead of re-deriving its own (divergent) view of "needs you" from the raw audit.
+#
+# Categories kept: 'errored' (errored/escalated/awaiting-decision — latest run) and 'pr' (PR opened,
+# needs review) and 'parked' (blocked_tickets.json). 'decision' is deliberately EXCLUDED here — the
+# Commander's open questions already get their own "Awaiting your decision" section below, so folding
+# them in here too would double them up. 'approval'/'proposal' are officer-level asks, not a single
+# ticket, so they don't belong in a per-ticket digest line either.
+_NEEDS_YOU_CATEGORIES = {"errored", "parked", "pr"}
+_NEEDS_YOU_MAX = 10   # bound the digest; anything past this collapses into an "…and N more" tail
+
+
+def _needs_you_label(row: dict[str, Any]) -> str:
+    """The bracketed tag for one Needs-you row, e.g. 'AUTO-14 [errored]' / 'AUTO-9 [blocked]'."""
+    if row.get("category") == "parked":
+        return "blocked"
+    return str(row.get("outcome") or row.get("category") or "needs you")
+
+
+def _needs_you_rows(cfg) -> list[dict[str, Any]]:
+    """The deduped, currently-actionable Needs-you rows for the daily digest — one row per ticket,
+    oldest (longest-waiting) first. Sourced from needs.summary(cfg), the same live inbox the cockpit's
+    Needs-you panel renders — never a raw scan of the whole audit log's outcome field."""
+    from . import needs as _needs
+    live = _needs.summary(cfg).get("rows") or []
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in live:
+        if row.get("category") not in _NEEDS_YOU_CATEGORIES:
+            continue
+        tid = str(row.get("ticket_id") or "")
+        if not tid or tid in seen:      # belt-and-suspenders: needs.summary() already dedupes by
+            continue                     # ticket per-category, this guards a cross-category repeat too
+        seen.add(tid)
+        out.append(row)
+    out.sort(key=_started_key)
+    return out
+
+
 def standup(cfg) -> str:
     """The deterministic core of the morning daily: what shipped YESTERDAY, what needs you now, and
     what awaits a decision. The daily fires ~08:30, so 'yesterday' is the completed work the Commander
@@ -686,7 +730,7 @@ def standup(cfg) -> str:
         #                                                     day, so today/yday boundaries agree cross-host
     shipped_y = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == yday]
     shipped_t = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == today]
-    needs = [t for t in tasks if t["outcome"] in _NEEDS_YOU]
+    needs_rows = _needs_you_rows(cfg)
     pending = decisions.load(cfg)
 
     lines = [f"🫡 Daily stand-up — {today}", ""]
@@ -695,8 +739,12 @@ def standup(cfg) -> str:
     if shipped_t:
         lines.append(f"✅ …and today so far ({len(shipped_t)}): "
                      + ", ".join(t["ticket_id"] for t in shipped_t))
-    lines.append(f"🟡 Needs you ({len(needs)}): "
-                 + (", ".join(f'{t["ticket_id"]} [{t["outcome"]}]' for t in needs) or "—"))
+    shown = needs_rows[:_NEEDS_YOU_MAX]
+    needs_line = ", ".join(f'{r["ticket_id"]} [{_needs_you_label(r)}]' for r in shown) or "—"
+    overflow = len(needs_rows) - len(shown)
+    if overflow > 0:
+        needs_line += f" …and {overflow} more (cockpit → /needs)"
+    lines.append(f"🟡 Needs you ({len(needs_rows)}): " + needs_line)
     if pending:
         lines.append("❓ Awaiting your decision:")
         lines += [f'   • {p["id"]}: {p.get("question", "")}' for p in pending]
