@@ -29,6 +29,11 @@ from typing import IO, Any
 _log_handles: "dict[object, IO[str]]" = {}
 _lock = threading.Lock()
 
+# Unique marker so ``run_key`` can distinguish "not supplied" (derive the registry key from
+# ``app_name`` — the legacy behaviour) from an explicit ``None`` (the unit-wide/all-apps
+# drain key that ``_Tee.write`` actually uses when a single run is active). EU-253.
+_UNSET: object = object()
+
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -46,18 +51,12 @@ def log_root(cfg: Any) -> Path:
     return (base / folder).resolve()
 
 
-def open_run_log(cfg: Any, app_name: str | None, ticket_key: str | None) -> Path:
-    """Open a log file for a new run and register it in the handle registry.
+def _prepare_log_path(cfg: Any, app_name: str | None, ticket_key: str | None) -> Path:
+    """Compute (and mkdir) the dated per-ticket log path, purging old day-folders first.
 
-    Log path: ``<log_root>/<app>/<YYYY-MM-DD>/<TICKET>-<HHMMSS>.log``
-
-    Also:
-    * Auto-purges day-folders older than ``cfg.log_retention_days`` (if set).
-    * Stores the log path in the per-app run state under ``state['log_path']`` via
-      ``cockpit_state.get_state()``.
-
-    Returns the resolved log :class:`~pathlib.Path`.  Call this *before* starting the
-    background thread so every line the ``_Tee`` captures goes straight to the file.
+    Path: ``<log_root>/<app>/<YYYY-MM-DD>/<TICKET>-<HHMMSS>.log``.  Shared by
+    ``open_run_log`` (which then opens+registers a handle) and ``write_note_log`` (which
+    writes a one-shot note without registering a handle).
     """
     now = datetime.datetime.now()
     app_slug = _safe_slug(app_name or "default")
@@ -69,18 +68,53 @@ def open_run_log(cfg: Any, app_name: str | None, ticket_key: str | None) -> Path
     day_dir = root / app_slug / date_str
     day_dir.mkdir(parents=True, exist_ok=True)
 
-    log_path = day_dir / f"{ticket_slug}-{time_str}.log"
-
     # Auto-purge old day-folders before we write anything new.
     retention = int(getattr(cfg, "log_retention_days", 0) or 0)
     if retention > 0:
         _purge_old_logs(root / app_slug, retention, now)
 
+    return day_dir / f"{ticket_slug}-{time_str}.log"
+
+
+def _resolve_key(app_name: str | None, run_key: object) -> object:
+    """The handle-registry key: the explicit ``run_key`` when supplied, else derived from
+    ``app_name`` (``None`` for a falsy name) — the legacy default.
+
+    EU-253: the registry key MUST match what ``cockpit_state._Tee.write`` looks up
+    (``active_runs()[0]`` when exactly one run is active, else ``None``) or captured lines
+    land under a key nobody wrote a handle for and the file stays empty.  The ON-DISK PATH
+    is always derived from ``app_name`` (see ``_prepare_log_path``); only the in-memory
+    registry key follows ``run_key``.
+    """
+    return (app_name if app_name else None) if run_key is _UNSET else run_key
+
+
+def open_run_log(cfg: Any, app_name: str | None, ticket_key: str | None,
+                 *, run_key: object = _UNSET) -> Path:
+    """Open a log file for a new run and register it in the handle registry.
+
+    Log path: ``<log_root>/<app>/<YYYY-MM-DD>/<TICKET>-<HHMMSS>.log`` (from ``app_name``).
+
+    Also:
+    * Auto-purges day-folders older than ``cfg.log_retention_days`` (if set).
+    * Stores the log path in the per-app run state under ``state['log_path']`` via
+      ``cockpit_state.get_state()``.
+
+    ``run_key`` (EU-253): the in-memory handle-registry key to register under.  Default
+    (unsupplied) keeps the legacy behaviour — key derived from ``app_name``.  Automode
+    drains pass the ACTIVE run key that ``_Tee.write`` uses (``None`` for a unit-wide
+    drain), so captured lines actually reach this handle while the file still lives under
+    the ticket's app.
+
+    Returns the resolved log :class:`~pathlib.Path`.  Call this *before* starting the
+    background thread so every line the ``_Tee`` captures goes straight to the file.
+    """
+    log_path = _prepare_log_path(cfg, app_name, ticket_key)
+
     # Open the log file in line-buffered append mode so each line flushes immediately.
     handle: IO[str] = log_path.open("a", encoding="utf-8", buffering=1)
 
-    # The registry key matches the cockpit_state key (app name or None).
-    key: object = app_name if app_name else None
+    key = _resolve_key(app_name, run_key)
     with _lock:
         _close_handle(key)   # close any stale handle (defensive; shouldn't happen)
         _log_handles[key] = handle
@@ -95,12 +129,31 @@ def open_run_log(cfg: Any, app_name: str | None, ticket_key: str | None) -> Path
     return log_path
 
 
-def close_run_log(app_name: str | None) -> None:
-    """Close and de-register the open log handle for *app_name*.
+def write_note_log(cfg: Any, app_name: str | None, ticket_key: str | None, note: str) -> Path:
+    """Write a standalone dated per-ticket log file containing *note* — NO handle registered.
 
-    Call this in the run ``_bg`` finally-block alongside ``release_run()``.
+    EU-253: when more than one run is active, ``_Tee.write`` collapses line attribution to
+    the shared ``None`` key, so a per-ticket handle can't cleanly own this drain's lines
+    (and two drains registering under ``None`` would clobber each other's handle).  Rather
+    than leave a SILENTLY EMPTY per-ticket file, we drop a real, dated file that explains the
+    gap and points at the shared drain stream.  Best-effort: never raises."""
+    log_path = _prepare_log_path(cfg, app_name, ticket_key)
+    try:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(note.rstrip("\n") + "\n")
+    except Exception:  # noqa: BLE001 — a note-write failure must never abort a run
+        pass
+    return log_path
+
+
+def close_run_log(app_name: str | None = None, *, run_key: object = _UNSET) -> None:
+    """Close and de-register the open log handle for *app_name* / *run_key*.
+
+    Call this in the run ``_bg`` finally-block alongside ``release_run()``.  ``run_key``
+    (EU-253) mirrors ``open_run_log``: pass the same key you opened under so the right
+    handle is closed (the default derives it from ``app_name``).
     """
-    key: object = app_name if app_name else None
+    key = _resolve_key(app_name, run_key)
     with _lock:
         _close_handle(key)
 

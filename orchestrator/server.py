@@ -1011,18 +1011,6 @@ def create_app(cfg: Config):
         # alternate backend (GLM) if Opus hits its limit.
         _state["last_run"] = {"app": app_name, "tickets": list(keys)}
 
-        # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
-        # Derive the label from the first ticket's id; fall back gracefully so test stubs never crash.
-        try:
-            _ticket_label = worklist[0][1].id if worklist else (keys[0] if keys else "run")
-        except (IndexError, AttributeError, TypeError):
-            _ticket_label = keys[0] if keys else "run"
-        try:
-            from . import run_logger as _rl
-            _rl.open_run_log(rcfg, app_name, _ticket_label)
-        except Exception:  # noqa: BLE001 — log setup must never block a run
-            pass
-
         def _bg():
             st["last_msg"] = ""
             ev = threading.Event()
@@ -1043,12 +1031,6 @@ def create_app(cfg: Config):
             finally:
                 if audit is not None:
                     audit.record("run_end", tickets=len(reports or []))
-                # EU-106: close the run log before releasing the run slot.
-                try:
-                    from . import run_logger as _rl
-                    _rl.close_run_log(app_name or None)
-                except Exception:  # noqa: BLE001
-                    pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
@@ -1121,19 +1103,6 @@ def create_app(cfg: Config):
             st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
-        # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
-        # Derive the label from the first ticket's id; fall back gracefully to the run kind so test
-        # stubs (which may return plain strings as worklist items) never crash the request.
-        try:
-            _ticket_label = worklist[0][1].id if worklist else kind
-        except (IndexError, AttributeError, TypeError):
-            _ticket_label = kind
-        try:
-            from . import run_logger as _rl
-            _rl.open_run_log(rcfg, app_name, _ticket_label)
-        except Exception:  # noqa: BLE001 — log setup must never block a run
-            pass
-
         def _bg():
             st["last_msg"] = ""
             ev = threading.Event()
@@ -1154,12 +1123,6 @@ def create_app(cfg: Config):
             finally:
                 if audit is not None:
                     audit.record("run_end", tickets=len(reports or []))
-                # EU-106: close the run log before releasing the run slot.
-                try:
-                    from . import run_logger as _rl
-                    _rl.close_run_log(app_name or None)
-                except Exception:  # noqa: BLE001
-                    pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
