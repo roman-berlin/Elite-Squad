@@ -1678,9 +1678,26 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                         f"• DEV is live with a failing smoke.\n"
                         f"• {smnote[:900]}")
 
+        # CI-conclusion (EU-251): for CI-relevant tickets, poll the REAL GitHub Actions conclusion
+        # for the merge commit instead of certifying the Builder's self-report ("CI will go green")
+        # — AUTO-112 landed on exactly that false claim with nothing in the land path ever
+        # consulting GitHub Actions. Complementary to the SRE/smoke LOCAL re-run gates (AUTO-57/83):
+        # this reads the REMOTE conclusion, the only thing that catches CI-environment-only
+        # failures. A complete no-op (zero `gh` calls) for a non-CI ticket; best-effort — a `gh`
+        # hiccup here must never unwind an already-successful land.
+        ci_note = ""
+        try:
+            from . import ci_conclusion
+            if ci_conclusion.should_run(cfg, ticket):
+                ci_result = ci_conclusion.check(cfg, app, ticket, merge_sha, audit)
+                ci_note = ci_conclusion.report(cfg, app, ticket, backlog, ci_result, audit)
+        except Exception as exc:  # noqa: BLE001 — best-effort, like sentinel/smoke
+            print(f"  🔎 CI · conclusion check skipped ({exc})", flush=True)
+
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
-                            + (", Done" if cfg.mark_done_on_merge else ", awaiting QA") + smoke_note)
+                            + (", Done" if cfg.mark_done_on_merge else ", awaiting QA")
+                            + smoke_note + ci_note)
 
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)
