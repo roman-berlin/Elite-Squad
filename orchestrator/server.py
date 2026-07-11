@@ -1470,14 +1470,21 @@ def create_app(cfg: Config):
 
     @app.get("/merge-stats")
     def merge_stats_page():
-        """EU-159/EU-160: the frontend merge-statistics page with a four-way time-range selector
-        (today / this week / this month / all time). Reads ``?time_range=`` and validates it against
-        ``MERGE_STATS_TIME_RANGES``, falling back to 'today' when absent or invalid, then server-renders
-        the initial cards for that range so a bookmarked ``?time_range=week`` URL loads correctly. An
-        inline script lets the user switch ranges client-side via the existing JSON API
-        (GET /api/merge-stats?time_range=) without a full reload — it rewrites the card numbers, moves
-        the 'active'/aria-current marker to the clicked control, and updates the URL via
-        history.pushState so the range stays shareable/bookmarkable.
+        """EU-159/EU-160/EU-161: the frontend merge-statistics page with a four-way time-range
+        selector (today / this week / this month / all time). Reads ``?time_range=`` and validates
+        it against ``MERGE_STATS_TIME_RANGES``, falling back to 'today' when absent or invalid, then
+        server-renders the initial cards for that range so a bookmarked ``?time_range=week`` URL
+        loads correctly. An inline script lets the user switch ranges client-side via the existing
+        JSON API (GET /api/merge-stats?time_range=) without a full reload — it rewrites the card
+        numbers (with a var(--t-fast) fade), moves the 'active'/aria-current marker to the clicked
+        control, shows a loading placeholder while the request is in flight, shows a role=alert
+        error state with a retry affordance if it fails, and updates the URL via history.pushState
+        so the range stays shareable/bookmarkable.
+
+        EU-161: markup wrapped in semantic <main>/<section> landmarks with a labelled stats section,
+        each stat value associated with its label via aria-describedby, a responsive grid that
+        collapses to one column below a small breakpoint, and colours/radius/motion pulled from the
+        EU-39 design tokens (var(--panel)/var(--ink)/var(--t-fast)/var(--ring)/…) — no raw hex.
         Renders via ``_wrap`` (page title + '← cockpit' breadcrumb come from there for free)."""
         time_range = request.args.get("time_range")
         if time_range not in MERGE_STATS_TIME_RANGES:
@@ -1488,17 +1495,38 @@ def create_app(cfg: Config):
         range_labels = {"today": "Today", "week": "This week", "month": "This month", "all": "All time"}
         style = (
             "<style>"
+            ".msmain{max-width:920px}"
+            ".mslede{color:var(--dim);margin:-4px 0 4px}"
+            ".mssectitle{font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
+            "color:var(--dim);font-weight:700;margin:20px 0 8px}"
             ".msgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));"
             "gap:14px;margin:14px 0}"
+            "@media (max-width:560px){.msgrid{grid-template-columns:1fr}}"
             ".mscard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);"
-            "padding:16px 18px}"
-            ".msbig{color:var(--ink);font-size:32px;font-weight:750;margin:4px 0 6px}"
+            "padding:16px 18px;box-shadow:var(--shadow-1)}"
+            ".msbig{color:var(--ink);font-size:32px;font-weight:750;margin:4px 0 6px;"
+            "transition:opacity var(--t-fast)}"
+            ".msbig.msfade{opacity:.25}"
             ".mslabel{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
             "font-weight:700}"
-            ".msranges{display:flex;gap:8px;margin:10px 0}"
+            ".msranges{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}"
             ".msrange{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);"
-            "color:var(--ink);padding:7px 14px;font-weight:600;cursor:pointer;font:inherit}"
+            "color:var(--ink);padding:7px 14px;font-weight:600;cursor:pointer;font:inherit;"
+            "transition:background var(--t-fast),border-color var(--t-fast)}"
             ".msrange.active{background:var(--accent);border-color:var(--accent);color:#fff}"
+            ".msloading{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:13px;"
+            "margin:10px 0}"
+            ".msloading[hidden]{display:none}"
+            ".msspin{width:16px;height:16px;border:2px solid var(--line2);border-top-color:var(--accent);"
+            "border-radius:var(--r-pill);animation:msspin .8s linear infinite;flex:none}"
+            "@keyframes msspin{to{transform:rotate(360deg)}}"
+            ".mserror{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--badbg);"
+            "border:1px solid var(--badline);color:var(--bad);border-radius:var(--r-md);"
+            "padding:12px 16px;margin:10px 0}"
+            ".mserror[hidden]{display:none}"
+            ".msretry{background:var(--panel);border:1px solid var(--badline);color:var(--ink);"
+            "border-radius:var(--r-sm);padding:6px 14px;font-weight:650;cursor:pointer;font:inherit;"
+            "transition:background var(--t-fast)}"
             "</style>")
         range_buttons = "".join(
             f"<button type=button class='msrange{' active' if r == time_range else ''}' "
@@ -1509,37 +1537,83 @@ def create_app(cfg: Config):
             "<script>"
             "(function(){"
             "var btns=document.querySelectorAll('.msrange');"
-            "function applyStats(s){"
-            "document.getElementById('ms-total').textContent=s.total_merges;"
-            "document.getElementById('ms-pr').textContent=s.pr_opened;"
-            "var sr=s.success_rate;"
-            "document.getElementById('ms-sr').textContent=(sr===null||sr===undefined)?'—':Math.round(sr*100)+'%';"
+            "var loading=document.getElementById('ms-loading');"
+            "var errorBox=document.getElementById('ms-error');"
+            "var retryBtn=document.getElementById('ms-retry');"
+            "var grid=document.getElementById('ms-stats-grid');"
+            f"var lastRange={time_range!r};"
+            "function setBusy(b){"
+            "if(loading){loading.hidden=!b;loading.setAttribute('aria-busy',b?'true':'false');}"
+            "if(grid){grid.setAttribute('aria-busy',b?'true':'false');}"
             "}"
-            "btns.forEach(function(b){b.addEventListener('click',function(){"
-            "var r=b.getAttribute('data-range');"
-            "fetch('/api/merge-stats?time_range='+r).then(function(resp){return resp.json();}).then(function(s){"
+            "function hideError(){if(errorBox){errorBox.hidden=true;}}"
+            "function showError(){if(errorBox){errorBox.hidden=false;}}"
+            "function applyStats(s){"
+            "var total=document.getElementById('ms-total');"
+            "var pr=document.getElementById('ms-pr');"
+            "var sr=document.getElementById('ms-sr');"
+            "[total,pr,sr].forEach(function(el){if(el){el.classList.add('msfade');}});"
+            "total.textContent=s.total_merges;"
+            "pr.textContent=s.pr_opened;"
+            "var rate=s.success_rate;"
+            "sr.textContent=(rate===null||rate===undefined)?'—':Math.round(rate*100)+'%';"
+            "setTimeout(function(){"
+            "[total,pr,sr].forEach(function(el){if(el){el.classList.remove('msfade');}});"
+            "},16);"
+            "}"
+            "function loadRange(r){"
+            "hideError();"
+            "setBusy(true);"
+            "fetch('/api/merge-stats?time_range='+r).then(function(resp){"
+            "if(!resp.ok){throw new Error('merge-stats fetch failed');}"
+            "return resp.json();"
+            "}).then(function(s){"
+            "setBusy(false);"
             "applyStats(s);"
+            "lastRange=r;"
             "btns.forEach(function(x){"
-            "var active=x===b;"
+            "var active=x.getAttribute('data-range')===r;"
             "x.classList.toggle('active',active);"
             "if(active){x.setAttribute('aria-current','page');}else{x.removeAttribute('aria-current');}"
             "});"
             "var url=new URL(window.location);"
             "url.searchParams.set('time_range',r);"
             "history.pushState({},'',url);"
+            "}).catch(function(){"
+            "setBusy(false);"
+            "showError();"
             "});"
+            "}"
+            "btns.forEach(function(b){b.addEventListener('click',function(){"
+            "loadRange(b.getAttribute('data-range'));"
             "});});"
+            "if(retryBtn){retryBtn.addEventListener('click',function(){loadRange(lastRange);});}"
             "})();"
             "</script>")
         inner = (
             style
-            + "<p style='color:var(--dim);margin:-4px 0 4px'>Land outcomes, aggregated from the audit log.</p>"
+            + "<main class=msmain>"
+            + "<p class=mslede>Land outcomes, aggregated from the audit log.</p>"
+            + "<section aria-label='Time range'>"
             + f"<div class=msranges>{range_buttons}</div>"
-            + "<div class=msgrid>"
-            + f"<div class=mscard><div class=msbig id=ms-total>{stats['total_merges']}</div><div class=mslabel>Total merges</div></div>"
-            + f"<div class=mscard><div class=msbig id=ms-pr>{stats['pr_opened']}</div><div class=mslabel>PRs opened</div></div>"
-            + f"<div class=mscard><div class=msbig id=ms-sr>{html.escape(sr_str)}</div><div class=mslabel>Success rate</div></div>"
+            + "</section>"
+            + "<section aria-labelledby=ms-stats-heading>"
+            + "<h2 id=ms-stats-heading class=mssectitle>Overview</h2>"
+            + "<div id=ms-loading class=msloading aria-busy=true hidden>"
+            + "<span class=msspin></span>Loading merge statistics…</div>"
+            + "<div id=ms-error class=mserror role=alert hidden>"
+            + "<span class=msetext>Couldn't load merge statistics.</span>"
+            + "<button type=button id=ms-retry class=msretry>Retry</button></div>"
+            + "<div class=msgrid id=ms-stats-grid>"
+            + (f"<div class=mscard><div class=msbig id=ms-total aria-describedby=ms-total-label>"
+               f"{stats['total_merges']}</div><div class=mslabel id=ms-total-label>Total merges</div></div>")
+            + (f"<div class=mscard><div class=msbig id=ms-pr aria-describedby=ms-pr-label>"
+               f"{stats['pr_opened']}</div><div class=mslabel id=ms-pr-label>PRs opened</div></div>")
+            + (f"<div class=mscard><div class=msbig id=ms-sr aria-describedby=ms-sr-label>"
+               f"{html.escape(sr_str)}</div><div class=mslabel id=ms-sr-label>Success rate</div></div>")
             + "</div>"
+            + "</section>"
+            + "</main>"
             + script
         )
         return _wrap("Merge statistics", inner)
