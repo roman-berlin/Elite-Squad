@@ -12,10 +12,14 @@ Setup (one time):
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+from pathlib import Path
 
 import requests
+
+from . import locking
 
 # Phone reports (EU-62): a verbose report is SUMMARISED into a COMPLETE bulleted brief — every decision,
 # action item, and blocker in tight bullets — never a truncated prefix that ends with "…(full report in
@@ -142,16 +146,89 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list:
         return []
 
 
-# EU-118: plan-limit alert sent flag (one-shot per session to avoid spam)
+# EU-211: persist the one-shot alert-dedup flags to a locked JSON sidecar so an orchestrator
+# restart doesn't re-fire an alert that already went out (they used to live in process memory
+# only). The sidecar lives in the same state root as sonnet_fallback_state.json / model_backend.json
+# — the parent of ``cfg.audit_path`` (see backend_pref._file / sync.state_dir), which resolves to
+# ``state/`` on the live unit and to ``./`` on the server (audit_path='./audit.jsonl'). ``cfg`` is
+# threaded in from every autopilot.py call site; the in-memory flags lazy-load from disk on the
+# first cfg-bearing call (module import has no cfg to anchor the path).
+_DEDUP_FILENAME = "sonnet_alert_dedup.json"
+
+
+def _dedup_path(cfg=None) -> Path | None:
+    """State-dir sidecar anchored to ``cfg.audit_path``'s parent (``state/`` live; a tmp dir in
+    tests). Returns ``None`` when no audit path is available, so persistence is a safe no-op
+    rather than writing to an invented relative location."""
+    audit = getattr(cfg, "audit_path", None) if cfg is not None else None
+    if not audit:
+        return None
+    return Path(audit).resolve().parent / _DEDUP_FILENAME
+
+
+def _load_dedup_state(cfg=None) -> dict:
+    """Best-effort load of the persisted dedup flags. A missing/corrupt/unanchored file is treated
+    as "no flags set" — it never raises, matching approvals.py's tolerance for a bad sidecar."""
+    p = _dedup_path(cfg)
+    if p is None:
+        return {}
+    try:
+        if not p.exists():
+            return {}
+        raw = p.read_text(encoding="utf-8").strip()
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_dedup_state(mutate_fn, cfg=None) -> None:
+    """Locked read-modify-write of the dedup sidecar (same locking.locked_rmw pattern as
+    approvals.py/decisions.py). ``mutate_fn`` receives the freshly-read ON-DISK state, so a
+    concurrent process's key is merged, never clobbered. Best-effort: a missing state root or an
+    OS error is swallowed — persistence must never break a notification."""
+    p = _dedup_path(cfg)
+    if p is None:
+        return
+
+    def _mut(st):
+        return mutate_fn(st if isinstance(st, dict) else {})
+    try:
+        locking.locked_rmw(p, _mut, default={}, corrupt_to_default=True)
+    except OSError:
+        pass
+
+
+# In-memory one-shot flags, lazily seeded from the persisted sidecar on the first cfg-bearing call
+# (module import can't resolve the state root — it has no cfg). ``_dedup_loaded`` guards the seed so
+# only the first call reads disk; every alert path calls ``_ensure_dedup_loaded(cfg)`` before it
+# checks a flag, so a restart's persisted state is always applied before the first send decision.
+# EU-118 (plan-limit) / EU-122 (dual-provider low-watermark) flags, persisted since EU-211.
+_dedup_loaded = False
 _plan_limit_alert_sent = False
+_dual_low_watermark_alerted: set[str] = set()
 
 
-def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
+def _ensure_dedup_loaded(cfg=None) -> None:
+    """Seed the in-memory flags from disk once, on the first call that carries a cfg. Idempotent
+    and never raises; a no-op until a state root can be resolved."""
+    global _dedup_loaded, _plan_limit_alert_sent, _dual_low_watermark_alerted
+    if _dedup_loaded or _dedup_path(cfg) is None:
+        return
+    st = _load_dedup_state(cfg)
+    _plan_limit_alert_sent = bool(st.get("plan_limit_alert_sent", False))
+    _dual_low_watermark_alerted = set(st.get("dual_low_watermark_alerted") or [])
+    _dedup_loaded = True
+
+
+def plan_limit_alert(over_limits: list, reset_times: list[str], cfg=None) -> bool:
     """Send a SEVERE Telegram alert when a Claude plan limit is hit.
 
     Returns True if sent, False if not configured or failed. Only sends ONCE per
-    session (resets on process restart) to avoid spamming the Commander every
-    autopilot cycle while the limit is active.
+    session — persisted to the dedup sidecar (EU-211) so an orchestrator restart does
+    NOT re-fire the same alert; use ``reset_plan_limit_alert`` to allow a new one.
 
     Args:
         over_limits: List of limit dicts that are hit (from ``usage.plan_limit_hit``)
@@ -159,7 +236,9 @@ def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
     """
     global _plan_limit_alert_sent
 
-    # Only alert once per session
+    _ensure_dedup_loaded(cfg)
+
+    # Only alert once per session (flag is seeded from disk, so this also covers restarts)
     if _plan_limit_alert_sent:
         return False
 
@@ -186,23 +265,30 @@ def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
     if sent:
         _plan_limit_alert_sent = True
 
+        def _mark(st: dict) -> dict:
+            st["plan_limit_alert_sent"] = True
+            return st
+        _save_dedup_state(_mark, cfg)
+
     return sent
 
 
-def reset_plan_limit_alert() -> None:
+def reset_plan_limit_alert(cfg=None) -> None:
     """Clear the plan-limit alert sent flag — e.g. after the limit resets.
 
     Allows a new alert to be sent if the limit is hit again in a future billing period.
+    Clears both the in-memory flag and the persisted dedup entry (EU-211).
     """
     global _plan_limit_alert_sent
     _plan_limit_alert_sent = False
 
+    def _mark(st: dict) -> dict:
+        st["plan_limit_alert_sent"] = False
+        return st
+    _save_dedup_state(_mark, cfg)
 
-# EU-122: dual-provider low-watermark alert sent flag (one-shot per provider per session)
-_dual_low_watermark_alerted: set[str] = set()
 
-
-def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
+def dual_low_watermark_alert(provider: str, usage_data: dict, cfg=None) -> bool:
     """Send a Telegram alert when a provider crosses the budget bad threshold (low-watermark).
 
     Args:
@@ -213,6 +299,8 @@ def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
     per session (resets on process restart) to avoid spamming.
     """
     global _dual_low_watermark_alerted
+
+    _ensure_dedup_loaded(cfg)
 
     # Only alert once per provider per session
     if provider in _dual_low_watermark_alerted:
@@ -257,21 +345,44 @@ def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
     if sent:
         _dual_low_watermark_alerted.add(provider)
 
+        def _mark(st: dict) -> dict:
+            # Merge with the ON-DISK set (read fresh under the lock) so a concurrent process's
+            # persisted provider is never dropped — only THIS provider's key is added.
+            existing = set(st.get("dual_low_watermark_alerted") or [])
+            existing.add(provider)
+            st["dual_low_watermark_alerted"] = sorted(existing)
+            return st
+        _save_dedup_state(_mark, cfg)
+
     return sent
 
 
-def reset_dual_low_watermark_alert(provider: str | None = None) -> None:
+def reset_dual_low_watermark_alert(provider: str | None = None, cfg=None) -> None:
     """Clear the dual-provider low-watermark alert sent flag.
 
     Args:
         provider: If "claude" or "glm", clears only that provider's flag.
                   If None, clears all providers (e.g. at midnight or after quota reset).
+
+    Clears both the in-memory flag(s) and the persisted dedup entry (EU-211).
     """
     global _dual_low_watermark_alerted
     if provider is None:
         _dual_low_watermark_alerted.clear()
     else:
         _dual_low_watermark_alerted.discard(provider)
+
+    def _mark(st: dict) -> dict:
+        # Merge with the ON-DISK set so clearing one provider (or all) never clobbers a concurrent
+        # process's persisted key for a DIFFERENT provider.
+        existing = set(st.get("dual_low_watermark_alerted") or [])
+        if provider is None:
+            existing.clear()
+        else:
+            existing.discard(provider)
+        st["dual_low_watermark_alerted"] = sorted(existing)
+        return st
+    _save_dedup_state(_mark, cfg)
 
 
 def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:

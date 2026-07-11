@@ -639,7 +639,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     reset_times = list(set(limit.get("resets_in", "unknown") for limit in over_limits))
 
                     # Send severe Telegram alert (one-shot per session)
-                    notify.plan_limit_alert(over_limits, reset_times)
+                    notify.plan_limit_alert(over_limits, reset_times, cfg)
 
                     # Also send regular notification for logs
                     notify.send(f"⛔ Autopilot paused — Claude plan limit(s) reached: {', '.join(limit_names)}. "
@@ -678,7 +678,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     pass
                 # Reset the plan-limit alert flag so a new alert can be sent if the limit is hit again
                 # (e.g., in the next billing period or after the session window rolls over)
-                notify.reset_plan_limit_alert()
+                notify.reset_plan_limit_alert(cfg)
             plan_limit_paused = False
 
             # EU-122: Mid-run graceful stop check — finish current ticket, then stop/switch.
@@ -690,9 +690,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 if critical_provider:
                     # Send Telegram alert for the low-watermark crossing (one-shot per provider)
                     if critical_provider == "claude":
-                        notify.dual_low_watermark_alert("claude", graceful_check["status"]["claude"])
+                        notify.dual_low_watermark_alert("claude", graceful_check["status"]["claude"], cfg)
                     elif critical_provider == "glm":
-                        notify.dual_low_watermark_alert("glm", graceful_check["status"]["glm"])
+                        notify.dual_low_watermark_alert("glm", graceful_check["status"]["glm"], cfg)
 
                     # Log the graceful stop condition
                     audit.record("graceful_stop_triggered", provider=critical_provider,
