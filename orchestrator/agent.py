@@ -87,8 +87,14 @@ def configure_audit(audit) -> None:
 # a transient per-minute 429 or 529 overload only carries status/rate-limit language. Cap
 # patterns win when both match (a real cap error usually also carries a 429 status).
 # EU-202: add GLM/z.ai-specific patterns (quota, credit, balance, billing).
+# EU-210: the generic terms "limit reached" / "over limit" were DROPPED. They made a transient
+# "rate limit reached" (or "429: rate limit reached") match a cap pattern via the substring
+# "limit reached", so it took the immediate Opus-probe / weekly-cap path instead of the backoff
+# retry — the primary false-alarm defect from the audit. A "cap" now requires EXPLICIT
+# plan/weekly/usage/quota (or GLM billing) language; anything that is only status/rate-limit
+# language falls through to the transient class and gets a backoff retry, never a weekly fallback.
 _CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit",
-                 "limit reached", "over limit", "quota exceeded", "quota",
+                 "quota exceeded", "quota",
                  "credit", "balance", "billing", "insufficient")
 _TRANSIENT_PATTERNS = ("rate limit", "rate_limit", "too many requests",
                        "overloaded", "429", "529")
@@ -411,9 +417,11 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
 # This is a thin wrapper around run_agent that adds the retry logic. The EU-108 weekly-Opus PIN was
 # deleted (Phase-2 Task 2): a Sonnet cap must never pin a week of the most expensive tier.
 
-# Backoff before the single Sonnet retry on a transient rate limit. Module-level so tests
-# (and an operator in a pinch) can zero it out.
-_TRANSIENT_RETRY_BACKOFF_S = 5.0
+# EU-210: backoff-then-retry a transient Sonnet rate limit up to this many times, spaced this many
+# seconds apart, BEFORE ever escalating it into cap handling — a single transient 429 must not be
+# misread as the weekly cap. Module-level so tests (and an operator in a pinch) can zero/shrink them.
+_TRANSIENT_RETRY_ATTEMPTS = 2
+_TRANSIENT_RETRY_BACKOFF_S = 2.0
 
 
 async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag: str = "",
@@ -422,10 +430,14 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     """Run a Sonnet agent with a per-call, one-shot Opus fallback on a Sonnet weekly cap.
 
     When a Sonnet call hits a plan-limit:
-      1. Transient rate limit (per-minute 429 / 529 overload) → back off once and retry
-         Sonnet; never probe Opus.
-      2. Cap-classified error ("usage limit reached" etc.) → retry once with Opus so the
-         CURRENT unit of work can finish if Opus still has headroom.
+      1. Transient rate limit (per-minute 429 / 529 overload) → back off and retry Sonnet up to
+         `_TRANSIENT_RETRY_ATTEMPTS` times (~`_TRANSIENT_RETRY_BACKOFF_S` apart); the first retry
+         that comes back clean returns immediately — never probes Opus, never touches fallback
+         state (EU-210). If EVERY retry is still transient, that's no longer just a blip — escalate
+         into cap handling below instead of silently returning the still-transient result.
+      2. Cap-classified error ("usage limit reached" etc.) — or a transient error that survived
+         every backoff retry — → retry once with Opus so the CURRENT unit of work can finish if
+         Opus still has headroom.
       3. If Opus succeeds cleanly (is_error False) → return the Opus result, persisting NOTHING.
          The next call starts cheap on Sonnet again. (The EU-108 weekly-Opus pin was deleted in
          Phase-2 Task 2 — a Sonnet cap must never pin a week of the most expensive tier.)
@@ -480,18 +492,37 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     if not result.is_plan_limit:
         return result
 
-    # Transient rate limit (per-minute 429, 529 overload) — not a quota exhaustion. Back off
-    # and retry Sonnet once; probing Opus over a blip would burn the expensive tier needlessly.
+    # Transient rate limit (per-minute 429, 529 overload) — not (yet) a quota exhaustion. Back off
+    # and retry Sonnet up to _TRANSIENT_RETRY_ATTEMPTS times; probing Opus (or classifying as the
+    # weekly cap) over a single blip would burn the expensive tier / raise a false alarm needlessly
+    # (EU-210). The first retry that comes back clean returns immediately.
     if result.plan_limit_kind != "cap":
-        if _TRANSIENT_RETRY_BACKOFF_S > 0:
-            import asyncio
-            print(f"  · transient rate-limit on {model} — retrying once after "
-                  f"{_TRANSIENT_RETRY_BACKOFF_S:.0f}s (no weekly fallback)", flush=True)
-            await asyncio.sleep(_TRANSIENT_RETRY_BACKOFF_S)
-        return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id,
-                               pass_number=pass_number, routing_tier=routing_tier)
+        import asyncio
+        for attempt in range(1, _TRANSIENT_RETRY_ATTEMPTS + 1):
+            if _TRANSIENT_RETRY_BACKOFF_S > 0:
+                print(f"  · transient rate-limit on {model} — retry {attempt}/"
+                      f"{_TRANSIENT_RETRY_ATTEMPTS} after {_TRANSIENT_RETRY_BACKOFF_S:.0f}s "
+                      f"(no weekly fallback)", flush=True)
+                await asyncio.sleep(_TRANSIENT_RETRY_BACKOFF_S)
+            result = await run_agent(prompt, options, tag=tag, ticket_id=ticket_id,
+                                     pass_number=pass_number, routing_tier=routing_tier)
+            if not result.is_plan_limit or result.plan_limit_kind == "cap":
+                # Clean → return immediately. Explicit cap language → stop retrying as
+                # "transient" and fall straight into cap handling below.
+                break
 
-    # Sonnet hit a cap-classified plan-limit error — try Opus once to distinguish the limit type.
+        if not result.is_plan_limit:
+            return result
+
+        if result.plan_limit_kind != "cap":
+            # Every backoff retry ALSO came back transient — no longer just a blip. Escalate into
+            # the cap-handling path below so a persistently-failing transient error still gets the
+            # Opus-probe / EU-82 pause semantics instead of being silently returned as-is.
+            print(f"  · transient rate-limit on {model} persisted through "
+                  f"{_TRANSIENT_RETRY_ATTEMPTS} retries — escalating to cap handling", flush=True)
+
+    # Sonnet hit a cap-classified plan-limit error (or a transient one that survived every backoff
+    # retry) — try Opus once to distinguish the limit type.
     # 2026-07-05 audit §6 defect 1: the old manual rebuild here dropped cwd, hooks (the guard
     # denylist) and disallowed_tools — the Opus probe ran in the orchestrator's own CWD with no
     # guard under the inherited bypassPermissions, and its output was used as the build result.

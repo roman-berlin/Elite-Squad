@@ -81,6 +81,69 @@ def _first_shippable(cfg) -> str:
     return cfg.apps[0].name if getattr(cfg, "apps", None) else ""
 
 
+MERGE_STATS_TIME_RANGES = ("today", "week", "month", "all")
+
+
+def compute_merge_stats(audit_path: str, time_range: str, now: float | None = None) -> dict:
+    """EU-158: aggregate `merged`/`pr_opened` land-outcome audit events into merge statistics for one
+    time window. Pure function (no Flask) so it's directly testable — the route below is a thin
+    request-parsing wrapper around it.
+
+    ``time_range`` must be one of ``MERGE_STATS_TIME_RANGES``; the caller (the route) is responsible
+    for rejecting anything else with a 400 before calling this. ``now`` defaults to ``time.time()``;
+    tests pass a fixed value so windows are deterministic.
+
+    Window start (local time, matching AuditLog.record's ``time.strftime`` local timestamps):
+      today  -> local midnight of `now`'s date
+      week   -> now - 7 days
+      month  -> now - 30 days
+      all    -> no lower bound (epoch)
+    ``success_rate`` = merged / (merged + pr_opened) within the same window; ``None`` when there were
+    no land attempts (avoids a divide-by-zero and avoids implying a false 100%)."""
+    import json as _json
+
+    if now is None:
+        now = time.time()
+    if time_range == "today":
+        midnight = time.localtime(now)
+        window_start = time.mktime((midnight.tm_year, midnight.tm_mon, midnight.tm_mday,
+                                     0, 0, 0, 0, 0, -1))
+    elif time_range == "week":
+        window_start = now - 7 * 86400
+    elif time_range == "month":
+        window_start = now - 30 * 86400
+    else:  # "all"
+        window_start = 0.0
+
+    merged = 0
+    pr_opened = 0
+    for line in D.audit_lines(audit_path):
+        try:
+            ev = _json.loads(line)
+        except ValueError:
+            continue
+        event = ev.get("event")
+        if event not in ("merged", "pr_opened"):
+            continue
+        ts = D._parse_ts(ev.get("ts", ""))
+        if ts is None or time.mktime(ts.timetuple()) < window_start:
+            continue
+        if event == "merged":
+            merged += 1
+        else:
+            pr_opened += 1
+
+    total_attempts = merged + pr_opened
+    success_rate = (merged / total_attempts) if total_attempts else None
+    return {
+        "time_range": time_range,
+        "total_merges": merged,
+        "pr_opened": pr_opened,
+        "success_rate": success_rate,
+        "window_start": window_start,
+    }
+
+
 def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     """EU-190/EU-223: set this run's backend from the persisted sticky preference (cockpit
     /api/model), resolving an optional PER-APP override first, then the global sticky pref, then
@@ -1404,6 +1467,169 @@ def create_app(cfg: Config):
         from flask import jsonify
         # EU-204: promote and ship-main endpoints removed; this now always returns inactive
         return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
+
+    @app.get("/merge-stats")
+    def merge_stats_page():
+        """EU-159/EU-160/EU-161: the frontend merge-statistics page with a four-way time-range
+        selector (today / this week / this month / all time). Reads ``?time_range=`` and validates
+        it against ``MERGE_STATS_TIME_RANGES``, falling back to 'today' when absent or invalid, then
+        server-renders the initial cards for that range so a bookmarked ``?time_range=week`` URL
+        loads correctly. An inline script lets the user switch ranges client-side via the existing
+        JSON API (GET /api/merge-stats?time_range=) without a full reload — it rewrites the card
+        numbers (with a var(--t-fast) fade), moves the 'active'/aria-current marker to the clicked
+        control, shows a loading placeholder while the request is in flight, shows a role=alert
+        error state with a retry affordance if it fails, and updates the URL via history.pushState
+        so the range stays shareable/bookmarkable.
+
+        EU-161: markup wrapped in semantic <main>/<section> landmarks with a labelled stats section,
+        each stat value associated with its label via aria-describedby, a responsive grid that
+        collapses to one column below a small breakpoint, and colours/radius/motion pulled from the
+        EU-39 design tokens (var(--panel)/var(--ink)/var(--t-fast)/var(--ring)/…) — no raw hex.
+        Renders via ``_wrap`` (page title + '← cockpit' breadcrumb come from there for free)."""
+        time_range = request.args.get("time_range")
+        if time_range not in MERGE_STATS_TIME_RANGES:
+            time_range = "today"
+        stats = compute_merge_stats(cfg.audit_path, time_range)
+        sr = stats["success_rate"]
+        sr_str = "—" if sr is None else f"{round(sr * 100)}%"
+        range_labels = {"today": "Today", "week": "This week", "month": "This month", "all": "All time"}
+        style = (
+            "<style>"
+            ".msmain{max-width:920px}"
+            ".mslede{color:var(--dim);margin:-4px 0 4px}"
+            ".mssectitle{font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
+            "color:var(--dim);font-weight:700;margin:20px 0 8px}"
+            ".msgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));"
+            "gap:14px;margin:14px 0}"
+            "@media (max-width:560px){.msgrid{grid-template-columns:1fr}}"
+            ".mscard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);"
+            "padding:16px 18px;box-shadow:var(--shadow-1)}"
+            ".msbig{color:var(--ink);font-size:32px;font-weight:750;margin:4px 0 6px;"
+            "transition:opacity var(--t-fast)}"
+            ".msbig.msfade{opacity:.25}"
+            ".mslabel{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
+            "font-weight:700}"
+            ".msranges{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}"
+            ".msrange{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);"
+            "color:var(--ink);padding:7px 14px;font-weight:600;cursor:pointer;font:inherit;"
+            "transition:background var(--t-fast),border-color var(--t-fast)}"
+            ".msrange.active{background:var(--accent);border-color:var(--accent);color:#fff}"
+            ".msloading{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:13px;"
+            "margin:10px 0}"
+            ".msloading[hidden]{display:none}"
+            ".msspin{width:16px;height:16px;border:2px solid var(--line2);border-top-color:var(--accent);"
+            "border-radius:var(--r-pill);animation:msspin .8s linear infinite;flex:none}"
+            "@keyframes msspin{to{transform:rotate(360deg)}}"
+            ".mserror{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--badbg);"
+            "border:1px solid var(--badline);color:var(--bad);border-radius:var(--r-md);"
+            "padding:12px 16px;margin:10px 0}"
+            ".mserror[hidden]{display:none}"
+            ".msretry{background:var(--panel);border:1px solid var(--badline);color:var(--ink);"
+            "border-radius:var(--r-sm);padding:6px 14px;font-weight:650;cursor:pointer;font:inherit;"
+            "transition:background var(--t-fast)}"
+            "</style>")
+        range_buttons = "".join(
+            f"<button type=button class='msrange{' active' if r == time_range else ''}' "
+            f"data-range='{r}'{' aria-current=page' if r == time_range else ''}>{html.escape(label)}</button>"
+            for r, label in range_labels.items()
+        )
+        script = (
+            "<script>"
+            "(function(){"
+            "var btns=document.querySelectorAll('.msrange');"
+            "var loading=document.getElementById('ms-loading');"
+            "var errorBox=document.getElementById('ms-error');"
+            "var retryBtn=document.getElementById('ms-retry');"
+            "var grid=document.getElementById('ms-stats-grid');"
+            f"var lastRange={time_range!r};"
+            "function setBusy(b){"
+            "if(loading){loading.hidden=!b;loading.setAttribute('aria-busy',b?'true':'false');}"
+            "if(grid){grid.setAttribute('aria-busy',b?'true':'false');}"
+            "}"
+            "function hideError(){if(errorBox){errorBox.hidden=true;}}"
+            "function showError(){if(errorBox){errorBox.hidden=false;}}"
+            "function applyStats(s){"
+            "var total=document.getElementById('ms-total');"
+            "var pr=document.getElementById('ms-pr');"
+            "var sr=document.getElementById('ms-sr');"
+            "[total,pr,sr].forEach(function(el){if(el){el.classList.add('msfade');}});"
+            "total.textContent=s.total_merges;"
+            "pr.textContent=s.pr_opened;"
+            "var rate=s.success_rate;"
+            "sr.textContent=(rate===null||rate===undefined)?'—':Math.round(rate*100)+'%';"
+            "setTimeout(function(){"
+            "[total,pr,sr].forEach(function(el){if(el){el.classList.remove('msfade');}});"
+            "},16);"
+            "}"
+            "function loadRange(r){"
+            "hideError();"
+            "setBusy(true);"
+            "fetch('/api/merge-stats?time_range='+r).then(function(resp){"
+            "if(!resp.ok){throw new Error('merge-stats fetch failed');}"
+            "return resp.json();"
+            "}).then(function(s){"
+            "setBusy(false);"
+            "applyStats(s);"
+            "lastRange=r;"
+            "btns.forEach(function(x){"
+            "var active=x.getAttribute('data-range')===r;"
+            "x.classList.toggle('active',active);"
+            "if(active){x.setAttribute('aria-current','page');}else{x.removeAttribute('aria-current');}"
+            "});"
+            "var url=new URL(window.location);"
+            "url.searchParams.set('time_range',r);"
+            "history.pushState({},'',url);"
+            "}).catch(function(){"
+            "setBusy(false);"
+            "showError();"
+            "});"
+            "}"
+            "btns.forEach(function(b){b.addEventListener('click',function(){"
+            "loadRange(b.getAttribute('data-range'));"
+            "});});"
+            "if(retryBtn){retryBtn.addEventListener('click',function(){loadRange(lastRange);});}"
+            "})();"
+            "</script>")
+        inner = (
+            style
+            + "<main class=msmain>"
+            + "<p class=mslede>Land outcomes, aggregated from the audit log.</p>"
+            + "<section aria-label='Time range'>"
+            + f"<div class=msranges>{range_buttons}</div>"
+            + "</section>"
+            + "<section aria-labelledby=ms-stats-heading>"
+            + "<h2 id=ms-stats-heading class=mssectitle>Overview</h2>"
+            + "<div id=ms-loading class=msloading aria-busy=true hidden>"
+            + "<span class=msspin></span>Loading merge statistics…</div>"
+            + "<div id=ms-error class=mserror role=alert hidden>"
+            + "<span class=msetext>Couldn't load merge statistics.</span>"
+            + "<button type=button id=ms-retry class=msretry>Retry</button></div>"
+            + "<div class=msgrid id=ms-stats-grid>"
+            + (f"<div class=mscard><div class=msbig id=ms-total aria-describedby=ms-total-label>"
+               f"{stats['total_merges']}</div><div class=mslabel id=ms-total-label>Total merges</div></div>")
+            + (f"<div class=mscard><div class=msbig id=ms-pr aria-describedby=ms-pr-label>"
+               f"{stats['pr_opened']}</div><div class=mslabel id=ms-pr-label>PRs opened</div></div>")
+            + (f"<div class=mscard><div class=msbig id=ms-sr aria-describedby=ms-sr-label>"
+               f"{html.escape(sr_str)}</div><div class=mslabel id=ms-sr-label>Success rate</div></div>")
+            + "</div>"
+            + "</section>"
+            + "</main>"
+            + script
+        )
+        return _wrap("Merge statistics", inner)
+
+    @app.get("/api/merge-stats")
+    def merge_stats_api():
+        """EU-158: merge statistics for a time window, aggregated from the audit log's land-outcome
+        events (`merged` / `pr_opened`). See ``compute_merge_stats`` for the aggregation itself."""
+        from flask import jsonify
+        time_range = request.args.get("time_range")
+        if time_range not in MERGE_STATS_TIME_RANGES:
+            return jsonify({
+                "error": (f"invalid time_range {time_range!r} — must be one of: "
+                          f"{'|'.join(MERGE_STATS_TIME_RANGES)}"),
+            }), 400
+        return jsonify(compute_merge_stats(cfg.audit_path, time_range))
 
     @app.post("/api/patrol")
     def patrol_api():

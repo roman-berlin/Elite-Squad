@@ -1,9 +1,12 @@
 """Usage governor — keep the always-on server frugal so it never hits the Max limit.
 
 Officer discussions already run on cheap models (Sonnet/Haiku); this also caps the *discretionary*
-chatter (corridor small-talk, spontaneous meetings) to a rolling-hour budget. The necessary daily
-muster and your interactive chats always run — only the optional extras defer when the hour is already
-busy. Tracked in a tiny append-only file beside the audit log; fully best-effort (never raises).
+extras (ad-hoc meetings) to a rolling-hour budget. The necessary daily muster and your interactive
+chats always run — only the optional extras defer when the hour is already busy. Tracked in a tiny
+append-only file beside the audit log; fully best-effort (never raises).
+
+EU-245: corridor small-talk (the old discretionary "spontaneous meeting" ceremony) was DELETED —
+see council.py's Phase-2 §2 marker. It is gone, not merely quiet; nothing here revives it.
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ def note_call(cfg: Config, n: int = 1) -> None:
     """Record n model calls happening now."""
     try:
         now = time.time()
-        # One locked append for all n lines: concurrent corridor/meeting bursts share this file, so an
+        # One locked append for all n lines: concurrent ceremony/meeting bursts share this file, so an
         # unlocked write can interleave and corrupt a row (the F8 pattern, now via the shared helper).
         block = "".join(json.dumps({"t": now}) + "\n" for _ in range(max(1, int(n))))
         locking.locked_append(_file(cfg), block)
