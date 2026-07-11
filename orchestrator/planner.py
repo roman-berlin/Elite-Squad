@@ -14,7 +14,9 @@ It reads the ticket + repo and produces a structured plan:
 
 Read-only (Read/Grep/Glob), Opus-tier, high effort. Fail-safe: any parse/agent error yields a
 BUILD verdict with empty fields, so a Planner hiccup never blocks a ticket — the Builder just
-proceeds from the raw ticket exactly as it does today when the Planner is disabled.
+proceeds from the raw ticket exactly as it does today when the Planner is disabled. That fail-safe
+result is flagged ``plan_extraction_failed=True`` (EU-266) so it's never mistaken for a legitimate
+0-AC plan; the loop logs it distinctly instead of the normal BUILD success line.
 """
 from __future__ import annotations
 
@@ -85,6 +87,10 @@ class PlannerResult:
     in_scope_files: list[str] = field(default_factory=list)
     answer: str = ""              # reply/reason for ANSWER/CLOSE/REFILE/SPLIT
     raw: str = ""
+    # EU-266: True ONLY when this result was fabricated because parsing or the agent call failed —
+    # never set for a genuine parsed plan, even one with a legitimately empty testable_ac. Lets the
+    # loop tell "the Planner hiccuped" apart from "this ticket really has 0 testable AC".
+    plan_extraction_failed: bool = False
     # burn accounting (the Planner replaces the Test Engineer's spend — so it must be countable)
     cost_usd: float = 0.0
     num_turns: int = 0
@@ -172,11 +178,14 @@ def parse_plan(text: str | None) -> PlannerResult:
     """Parse the Planner's reply into a PlannerResult. Unit-testable without an agent.
 
     Fail-safe: an empty/garbled reply, or a missing/invalid verdict, yields a BUILD result with
-    empty fields — so the Builder proceeds from the raw ticket and a Planner hiccup never blocks."""
+    empty fields — so the Builder proceeds from the raw ticket and a Planner hiccup never blocks.
+    A reply with NO parseable JSON object is a genuine extraction FAILURE (EU-266): the result sets
+    plan_extraction_failed=True so it's never mistaken for a legitimate 0-AC plan. A reply that DOES
+    parse — even to an empty testable_ac — is a real plan, so the flag stays False."""
     raw = (text or "").strip()
     obj = _first_json_object(raw)
     if not obj:
-        return PlannerResult(verdict="BUILD", raw=raw)
+        return PlannerResult(verdict="BUILD", raw=raw, plan_extraction_failed=True)
     verdict = str(obj.get("verdict", "BUILD")).strip().upper()
     if verdict not in VALID_VERDICTS:
         verdict = "BUILD"
@@ -220,13 +229,19 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
         res.provider = run.provider
         res.model_version = run.model_version
     except Exception as exc:  # noqa: BLE001 — the Planner must never break a run; default to BUILD
-        res = PlannerResult(verdict="BUILD", raw=f"(planner error: {type(exc).__name__}: {exc})")
+        res = PlannerResult(verdict="BUILD", raw=f"(planner error: {type(exc).__name__}: {exc})",
+                            plan_extraction_failed=True)
     if audit is not None:
         try:
             audit.record("planner", ticket_id=ticket.id, verdict=res.verdict,
                          testable_ac=len(res.testable_ac), in_scope_files=len(res.in_scope_files),
                          cost_usd=round(res.cost_usd, 6), provider=res.provider,
-                         model=res.model_version)
+                         model=res.model_version, plan_extraction_failed=res.plan_extraction_failed)
+            # EU-266: a fabricated result (parse/agent error) gets its OWN distinct audit event too —
+            # so it's grep-able in audit.jsonl as a failure, not just a flag riding the normal record.
+            if res.plan_extraction_failed:
+                print(f"  ⚠ planner · extraction failed for {ticket.id} — {res.raw[:200]}", flush=True)
+                audit.record("planner_extraction_failed", ticket_id=ticket.id, raw=res.raw[:600])
         except Exception:  # noqa: BLE001 — audit must never break a run
             pass
     return res

@@ -927,7 +927,15 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             brief = _pres.as_builder_brief()
             if brief:
                 adr = brief
-            if _pres.verdict not in ("BUILD", "SPLIT"):
+            # EU-266: an extraction failure (parse/agent error) is NOT a successful plan — it must
+            # never be logged/audited as if the Planner produced a real (even 0-AC) BUILD. The
+            # Builder still proceeds from the raw ticket (the standing fail-safe — the Planner never
+            # hard-blocks a run), but the empty AC contract is surfaced, not silently treated as normal.
+            if _pres.plan_extraction_failed:
+                audit.record("plan_extraction_failed", ticket_id=ticket.id, verdict=_pres.verdict)
+                print(f"  ⚠ planner · plan extraction FAILED for {ticket.id} — proceeding from the "
+                      "raw ticket with no design brief (not a real 0-AC plan)", flush=True)
+            elif _pres.verdict not in ("BUILD", "SPLIT"):
                 audit.record("planner_nonbuild_verdict", ticket_id=ticket.id,
                              verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
                 print(f"  planner · verdict {_pres.verdict} — building anyway (conservative; verdict "
