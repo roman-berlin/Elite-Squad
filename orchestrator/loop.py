@@ -710,6 +710,12 @@ def _changes_sig(changes: list[str]) -> str:
 # objections were NEW (moving goalposts), so passes beyond 2 buy objections, not convergence.
 HARD_MAX_PASSES = 2
 
+# EU-216 (2026-07-09 forensics, cause class 3/14): HARD_MAX_PASSES is calibrated for Opus. Weak
+# (non-Opus, e.g. GLM) backends get ONE extra pass — but only when the pass-2 review FAIL carries no
+# blocker-severity finding and the retry-stuck guard hasn't already tripped (see the weak-extra-pass
+# guard below, just before the retry rebuild). Not configurable past this ceiling either.
+HARD_MAX_PASSES_WEAK = 3
+
 
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None, commenter=None) -> TicketReport:
     if commenter is None:
@@ -819,7 +825,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         print("  gate · identical failure fingerprint two gates running — stopping rebuilds "
               "(PM triage next)", flush=True)
 
-    max_passes = min(cfg.max_iterations, HARD_MAX_PASSES)
+    # EU-216: a weak (non-Opus) backend is allowed to reach a 3rd pass — gated per-iteration below
+    # on FAIL severity, not unconditionally. Opus's range never changes (min(.., HARD_MAX_PASSES)).
+    weak_backend = backends.normalize(getattr(cfg, "model_backend", None)) != backends.NATIVE
+    max_passes = (min(cfg.max_iterations_weak, HARD_MAX_PASSES_WEAK) if weak_backend
+                  else min(cfg.max_iterations, HARD_MAX_PASSES))
     attempt_t0 = time.monotonic()
     for iteration in range(1, max_passes + 1):
         if stop_event is not None and stop_event.is_set():
@@ -1409,6 +1419,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                   "another unproductive pass", flush=True)
             break
         recent_reject_sigs.append(sig)
+
+        # EU-216: weak-backend 3rd pass gate. HARD_MAX_PASSES (2) is calibrated for Opus; on
+        # finishing pass 2, only continue on to pass 3 when this is a weak (non-Opus) backend AND
+        # the FAIL carries no blocker-severity finding — an Opus run, or a blocker on any backend,
+        # stops at 2 exactly as before (the retry-stuck guard above already ran and stays first).
+        if iteration >= HARD_MAX_PASSES:
+            if not (weak_backend and not blockers):
+                break
+            if iteration < max_passes:
+                audit.record("weak_extra_pass", ticket_id=ticket.id, iteration=iteration + 1,
+                             backend=getattr(cfg, "model_backend", None))
+                print(f"  ↻ weak backend + minor-only FAIL — granting an extra pass "
+                      f"{iteration + 1}/{max_passes}", flush=True)
+
         _bar(REVIEW, fail=REVIEW)
         print("  ↻ changes requested → rebuilding", flush=True)
 

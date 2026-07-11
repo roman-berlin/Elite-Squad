@@ -282,6 +282,11 @@ class Config:
     # --- loop bounds / cost ---
     # QW3: loop.HARD_MAX_PASSES clamps the effective value to 2 — raising this past 2 has no effect.
     max_iterations: int = 2
+    # EU-216: weak (non-Opus, e.g. GLM) backends get one extra review-fix pass — HARD_MAX_PASSES is
+    # calibrated for Opus; GLM needed more iterations in 3/14 2026-07-09 "max passes" escalations.
+    # loop.HARD_MAX_PASSES_WEAK clamps the effective value to 3 — raising this past 3 has no effect,
+    # and it only ever applies when the last review FAIL carries no blocker-severity finding.
+    max_iterations_weak: int = 3
     max_cost_usd: float = 0.0           # 0 = no cap (subscription). Set a number only for API billing.
     max_tickets_per_run: int = 1        # per app, per run
     # QW4 (2026-07-05): per-ticket budgets, checked before each pass; breach → BLOCKED + Telegram.
