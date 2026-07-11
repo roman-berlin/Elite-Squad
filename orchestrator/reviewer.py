@@ -102,6 +102,11 @@ def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = No
             parts.append("  decisions: " + "; ".join(build_artifact.decisions))
         if build_artifact.open_questions:
             parts.append("  open questions: " + "; ".join(build_artifact.open_questions))
+        # EU-267: caveats/limitations the builder flagged, surfaced independent of diff_digest's
+        # 500-char cap — a caveat buried past char 500 of the summary (e.g. AUTO-109's unverified-test
+        # admission) must still reach the Reviewer here even when diff_digest truncated it out.
+        if build_artifact.caveats:
+            parts.append("  caveats/limitations: " + "; ".join(build_artifact.caveats))
     parts += [
         "",
         "DIFF UNDER REVIEW (feature branch vs base):",
@@ -166,14 +171,18 @@ _RESOLVED_CTX_RE = re.compile(
 
 
 def _admitted_red_test_note(build_artifact: BuildArtifact | None) -> str | None:
-    """The offending sentence if the Builder's handoff (diff_digest/decisions/open_questions) admits
-    a genuinely UNRESOLVED failing/skipped/broken test, else None. A STRONG signal fires on its own;
-    a WEAK ("failing … test") signal fires only absent negation/resolution context in the same field
-    — so ordinary green summaries and already-fixed failures are not flagged (EU-249 iteration 2)."""
+    """The offending sentence if the Builder's handoff (diff_digest/decisions/open_questions/caveats)
+    admits a genuinely UNRESOLVED failing/skipped/broken test, else None. A STRONG signal fires on its
+    own; a WEAK ("failing … test") signal fires only absent negation/resolution context in the same
+    field — so ordinary green summaries and already-fixed failures are not flagged (EU-249 iteration 2).
+
+    EU-267: ``caveats`` is scanned too. The builder now routes limitation/caveat language into its own
+    field (uncapped by diff_digest's 500-char ceiling); an unresolved-test admission that lands there
+    must still trip this backstop, not slip past it because it wasn't in diff_digest."""
     if build_artifact is None:
         return None
     fields = ([build_artifact.diff_digest] + list(build_artifact.decisions or [])
-             + list(build_artifact.open_questions or []))
+             + list(build_artifact.open_questions or []) + list(build_artifact.caveats or []))
     for text in fields:
         if not text:
             continue

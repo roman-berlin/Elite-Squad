@@ -370,6 +370,22 @@ for _txt in _MUST_FIRE:
     chk(f"admitted-red: a genuinely unresolved failure/skip IS flagged — {_txt!r}",
         reviewer_mod._admitted_red_test_note(_ba) is not None, "not flagged")
 
+# EU-267: the same admission routed into the NEW `caveats` field (diff_digest/decisions/open_questions
+# clean) must still trip the backstop — caveats is scanned too, so it can't be a bypass channel.
+for _txt in _MUST_FIRE:
+    _ba = BuildArtifact(files_changed=["src/x.test.tsx"], diff_digest="clean green summary",
+                        decisions=[], open_questions=[], caveats=[_txt])
+    chk(f"admitted-red: an unresolved failure in caveats (only) IS flagged — {_txt!r}",
+        reviewer_mod._admitted_red_test_note(_ba) is not None, "not flagged")
+_caveat_only_ba = BuildArtifact(files_changed=["src/x.test.tsx"], diff_digest="clean green summary",
+                                decisions=[], open_questions=[],
+                                caveats=["test files were created but encountered test infrastructure "
+                                         "issues with localStorage mocking"])
+_caveat_only_res = asyncio.run(reviewer_mod.review("diff", _rtk, _rapp, _rcfg, build_artifact=_caveat_only_ba))
+chk("reviewer: an unresolved-test admission living ONLY in caveats forces FAIL (EU-267)",
+    _caveat_only_res.verdict == Verdict.FAIL and _caveat_only_res.blocking_issues,
+    str(_caveat_only_res.verdict))
+
 # Full review path: each MUST-NOT-FIRE success handoff stays PASS (not forced to FAIL).
 for _txt in ("Tests: 23 passed, 0 failed.", "No tests failed; suite green.",
              "Fixed the previously failing localStorage test, now passing."):
