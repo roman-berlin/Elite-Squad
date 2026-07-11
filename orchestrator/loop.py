@@ -1000,6 +1000,24 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                      tools=build.tools, summary=(build.summary or "")[:1000],
                      provider=build.provider, model=build.model_version)
         if not build.ok:
+            # EU-248: max-turns exhaustion (turnCount >= the pass's turn budget) surfaces as a
+            # builder process error indistinguishable from a real crash — agent.py now degrades the
+            # CLI's trailing raw ProcessError to a clean is_error return instead of raising, so this
+            # is the ONLY seam that sees it. Route it the same way the (now largely unreachable)
+            # exception-based turn-limit handler in _exception_report always has: the ticket was too
+            # big for one pass, so the Scrum Master splits it BEFORE this is misclassified as
+            # Outcome.ERRORED — which would wrongly tick the EU-219 consecutive-error counter toward
+            # Blocked and park a ticket that just needed to be split. Do NOT grep build.summary/raw
+            # for turn-limit text — a failed build's summary holds only the last assistant message,
+            # never the turn-limit phrase; num_turns is the only reliable signal.
+            if build.num_turns >= builder_mod.turns_for(cfg, eff):
+                split = await _try_scrum_split(
+                    cfg, app, ticket, audit,
+                    recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
+                    reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.",
+                    split_reason="turn-limit", iterations=iteration, cost=cost, branch=branch)
+                if split is not None:
+                    return _resolve(split)
             # EU-153: Post build error comment
             build_comment = commenter.summarize_gate_event(
                 "Build", "ERRORED",
