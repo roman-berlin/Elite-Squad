@@ -207,6 +207,11 @@ class BuildArtifact:
     diff_digest: str            # short (≤ 500 char) human-readable summary of the diff
     decisions: list[str]        # key design decisions made during the build
     open_questions: list[str]   # concerns the Builder couldn't resolve unilaterally
+    # EU-267: caveats/limitations the builder flagged (e.g. "tests are unverified in this
+    # environment but the implementation itself is correct"). Deliberately NOT subject to the
+    # diff_digest 500-char ceiling below — a caveat buried past char 500 of the summary must
+    # still reach the Reviewer, so this field is uncapped by design.
+    caveats: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Enforce the digest ceiling the docstring promises: the artifact is a SUMMARY, not a second
