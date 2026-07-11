@@ -1322,8 +1322,58 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             except Exception as exc:  # noqa: BLE001 - findings triage must never break the run
                 print(f"  · PM findings triage skipped: {exc}", flush=True)
 
+        # EU-215: advisory-only ship path. is_ship_ready() is False here ONLY because
+        # blocking_issues (contracts.py) counts "major" severity as blocking — so this fires
+        # exactly for the AUTO-98 class: verdict PASS, spec_met True, and every leftover
+        # quality_issue is minor/major (never "blocker"). A done deliverable must not strand on
+        # advisory/hygiene items (2026-07-09 forensics, 2/14 "max passes" escalations). File the
+        # leftovers as backlog tickets through the same route the PM-findings out-of-scope path
+        # uses (L1284-1293) and land anyway.
+        advisory_ship = (
+            review.verdict.value == "PASS"
+            and review.spec_met
+            and not review.is_ship_ready()
+            and not any(q.severity == "blocker" for q in review.quality_issues)
+        )
+        if advisory_ship:
+            filed_keys: list[str] = []
+            if review.quality_issues:
+                import json as _json
+                advisory_proposals = [
+                    {
+                        "title": f"[{q.severity.upper()}/{q.area}] {q.detail[:160]}",
+                        "type": "Bug",
+                        "severity": q.severity.upper(),
+                        "body": q.detail,
+                    }
+                    for q in review.quality_issues
+                ]
+                advisory_block = f"===TICKETS===\n{_json.dumps(advisory_proposals)}\n===END==="
+                if cfg.dry_run or ticket.ephemeral:
+                    titles = ", ".join(p["title"] for p in advisory_proposals)
+                    print(f"  filing · {len(advisory_proposals)} advisory finding(s) "
+                          f"(dry-run/ephemeral — not filed): {titles}", flush=True)
+                else:
+                    from . import filing as _filing
+                    filing_result = _filing.file_findings(app, "out-of-scope", advisory_block)
+                    filed_keys = list(filing_result.filed) + list(filing_result.deduped)
+                    if filing_result.lines:
+                        print("  filing · advisory findings (shipped-with-advisories):", flush=True)
+                        for ln in filing_result.lines:
+                            print(f"    {ln}", flush=True)
+                    if filing_result.failed:
+                        _notify(cfg, f"⚠️ {ticket.id} — {len(filing_result.failed)} advisory finding(s) "
+                                     "could not be filed:\n" +
+                                     "\n".join(f"• {t}: {e}" for t, e in filing_result.failed))
+            audit.record("shipped_with_advisories", ticket_id=ticket.id, iteration=iteration,
+                         filed=filed_keys,
+                         issues=[{"severity": q.severity, "area": q.area, "detail": q.detail}
+                                 for q in review.quality_issues])
+            print(f"  ✓ {ticket.id}: PASS + spec_met with only advisory findings — shipping "
+                  f"({len(filed_keys)} filed/deduped to backlog)", flush=True)
+
         # 4) DECIDE
-        if review.is_ship_ready():
+        if review.is_ship_ready() or advisory_ship:
             if stop_event is not None and stop_event.is_set():
                 audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-merge")
                 print(f"  ■ {ticket.id}: stopped before merge by Commander — DEV untouched.", flush=True)
