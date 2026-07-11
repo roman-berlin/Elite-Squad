@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -376,10 +377,219 @@ def _lock_drift_confirmed(app: AppConfig, candidates: list[tuple[str, str]]) -> 
     return kept
 
 
+# --------------------------------------------------------------------------- #
+# EU-249 — pre-merge, diff-scoped test-collectability + test-run gate.
+#
+# Grounded in the AUTO-97 -> AUTO-101 -> AUTO-95 audit chain: the automatixy gate was
+# typecheck-only (no test step actually ran), so (a) a diff whose Builder self-reported failing
+# tests merged with a green gate, and (b) two added test files landed at a doubled
+# 'apps/zeltivo-crm/apps/zeltivo-crm/...' path that matches no vitest include glob — invisible to
+# the test runner forever, so "tests pass" was a vacuous signal. This is the PRE-MERGE, diff-scoped
+# complement to the dormant full-suite AUTO-57/AUTO-122 post-merge gate (it does not replace it):
+# by running ONLY the files a diff actually ADDS, it is immune to the 22 pre-existing zeltivo-crm
+# suite failures that keep that full-suite gate dormant. Opt-in per app via
+# AppConfig.test_collectability_enabled — a no-op for any app that hasn't armed it.
+# --------------------------------------------------------------------------- #
+
+_TEST_FILE_RE = re.compile(r"\.(?:test|spec)\.[A-Za-z0-9]+$")
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
+_VITEST_CONFIG_NAMES = ("vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs")
+
+
+def added_test_files(diff: str) -> list[str]:
+    """Repo-relative paths of ADDED or RENAMED-TO ``*.test.*``/``*.spec.*`` files in a unified diff.
+    A test file merely MODIFIED in place is not returned — its collectability was already proven (or
+    not) whenever it was first added, so re-flagging it on every touch would be noise."""
+    out: list[str] = []
+    lines = (diff or "").splitlines()
+    i = 0
+    while i < len(lines):
+        m = _DIFF_GIT_HEADER_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        target = m.group(2)
+        block_added = False
+        j = i + 1
+        while j < len(lines) and not _DIFF_GIT_HEADER_RE.match(lines[j]):
+            ln = lines[j]
+            if ln.startswith("new file mode") or ln.startswith("--- /dev/null"):
+                block_added = True
+            rn = re.match(r"^rename to (.+)$", ln)
+            if rn:
+                block_added = True
+                target = rn.group(1).strip()
+            j += 1
+        if block_added and _TEST_FILE_RE.search(target):
+            out.append(target)
+        i = j
+    return out
+
+
+def phantom_nested_test_paths(paths: list[str]) -> list[str]:
+    """Flag any path whose ``apps/<x>`` root segment is DUPLICATED later in the same path (e.g.
+    ``apps/zeltivo-crm/apps/zeltivo-crm/src/foo.test.tsx``) — a phantom nested copy that matches no
+    test runner's include glob no matter how the app is configured. Pure string check, zero runner
+    cost (AUTO-101/AUTO-95: this exact shape landed on DEV twice with a green gate)."""
+    hits: list[str] = []
+    for p in paths:
+        parts = p.replace("\\", "/").split("/")
+        seen_roots: set[str] = set()
+        for i in range(len(parts) - 1):
+            if parts[i] == "apps" and parts[i + 1]:
+                root = f"apps/{parts[i + 1]}"
+                if root in seen_roots:
+                    hits.append(p)
+                    break
+                seen_roots.add(root)
+    return hits
+
+
+def _owning_app_root(path: str) -> str | None:
+    """The 'apps/<x>' directory owning a path, else None (a path not under apps/ at all)."""
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) >= 2 and parts[0] == "apps" and parts[1]:
+        return f"apps/{parts[1]}"
+    return None
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """Expand ONE level of brace alternation at a time (recursing on the result), e.g.
+    '*.{test,spec}.{ts,tsx}' -> the 4 concrete patterns micromatch/vitest would also expand."""
+    m = re.search(r"\{([^{}]*)\}", pattern)
+    if not m:
+        return [pattern]
+    out: list[str] = []
+    for opt in m.group(1).split(","):
+        out.extend(_expand_braces(pattern[:m.start()] + opt + pattern[m.end():]))
+    return out
+
+
+def _glob_to_regex(pattern: str) -> re.Pattern:
+    """Translate ONE brace-free glob (as used in vitest ``include``: ``**`` = any depth, ``*`` = any
+    chars within a path segment) into an anchored regex."""
+    i, n = 0, len(pattern)
+    out: list[str] = []
+    while i < n:
+        if pattern[i:i + 3] == "**/":
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern[i:i + 2] == "**":
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def glob_matches(pattern: str, relpath: str) -> bool:
+    """Whether ``relpath`` matches a vitest/micromatch-style ``include`` glob (``**``, ``*``,
+    ``{a,b}`` brace alternation)."""
+    return any(_glob_to_regex(p).match(relpath) for p in _expand_braces(pattern))
+
+
+def _parse_vitest_include(config_text: str) -> list[str]:
+    """Pull the ``include: [...]`` string literals out of a vitest.config.ts source. Static/textual
+    — this repo never executes an app's own config as code (zero runner cost, no supply-chain
+    exposure to a hostile config in the diff under review)."""
+    m = re.search(r"include\s*:\s*\[(.*?)\]", config_text, re.DOTALL)
+    if not m:
+        return []
+    return re.findall(r"[\"']([^\"']+)[\"']", m.group(1))
+
+
+def _vitest_includes(repo_root: str, app_root: str) -> list[str] | None:
+    """The vitest ``include`` globs declared for ``app_root``, or ``None`` when no vitest config (or
+    no ``include`` key) is found there — meaning there is nothing to validate a test path against,
+    so the caller should skip rather than false-flag (e.g. a non-monorepo app, or one not on Vitest)."""
+    for name in _VITEST_CONFIG_NAMES:
+        p = Path(repo_root) / app_root / name
+        if not p.exists():
+            continue
+        try:
+            includes = _parse_vitest_include(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — an unreadable config just skips the check for this app
+            return None
+        return includes or None
+    return None
+
+
+def test_collectability_problems(app: AppConfig, test_files: list[str], repo_root: str) -> list[str]:
+    """Human-readable collectability problems ([] = clean) for ADDED/RENAMED test files: a
+    phantom duplicated-app-root path, or a path matching none of its owning app's vitest ``include``
+    globs. A file whose owning app has no vitest config (nothing to validate against) is skipped."""
+    problems: list[str] = []
+    for f in test_files:
+        if phantom_nested_test_paths([f]):
+            problems.append(f"{f}: phantom nested path (a duplicated 'apps/<x>' root segment) — "
+                            "this file matches no test runner's include glob and will never be collected")
+            continue
+        root = _owning_app_root(f)
+        if root is None:
+            continue
+        includes = _vitest_includes(repo_root, root)
+        if includes is None:
+            continue
+        relpath = f[len(root) + 1:] if f.startswith(root + "/") else f
+        if not any(glob_matches(pat, relpath) for pat in includes):
+            problems.append(f"{f}: matches none of {root}'s vitest include globs {includes} "
+                            f"(checked as '{relpath}' relative to {root}) — the test runner will never collect it")
+    return problems
+
+
+def run_scoped_vitest(app: AppConfig, test_files: list[str], repo_root: str) -> GateResult:
+    """Run ONLY the given added test files via ``bunx vitest run`` in single-run mode (AUTO-57
+    lesson: vitest, not a bare ``bun test``), grouped and cwd'd by owning app — diff-scoped so it is
+    immune to pre-existing full-suite failures elsewhere in the app (AUTO-122's 22 zeltivo-crm
+    failures). Reuses ``run_commands`` for the shared timeout / EU-146 process-group cleanup."""
+    by_root: dict[str, list[str]] = {}
+    for f in test_files:
+        by_root.setdefault(_owning_app_root(f) or "", []).append(f)
+    failures: list[str] = []
+    for root, files in by_root.items():
+        rels = [f[len(root) + 1:] if root and f.startswith(root + "/") else f for f in files]
+        cmd = ("bunx vitest run " + " ".join(shlex.quote(r) for r in rels)
+              + " --pool=forks --poolOptions.forks.maxForks=2")
+        cwd = os.path.join(repo_root, root) if root else repo_root
+        res = run_commands(app, [cmd], cwd=cwd)
+        if not res.passed:
+            failures.append(f"[{root or '.'}] scoped vitest FAILED\n{res.report}")
+    if failures:
+        return GateResult(passed=False, report="\n\n".join(failures))
+    return GateResult(passed=True, report="scoped vitest run passed")
+
+
+def test_collectability_gate(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:
+    """EU-249 entry point. A no-op unless ``app.test_collectability_enabled`` is armed. For every
+    ADDED/RENAMED ``*.test.*``/``*.spec.*`` file in the diff: flag phantom-nested or include-glob
+    mismatches (zero runner cost), then run the survivors with a diff-scoped ``bunx vitest run`` and
+    fail on red, returning the vitest report text. A diff touching no (added) test files is a
+    zero-shell-out pass, unaffected by anything already broken elsewhere in the app."""
+    if not getattr(app, "test_collectability_enabled", False):
+        return GateResult(passed=True, report="(test-collectability gate not armed for this app)")
+    test_files = added_test_files(diff or "")
+    if not test_files:
+        return GateResult(passed=True, report="no added/renamed test files in this diff")
+    repo_root = app.workdir or app.repo_path
+    problems = test_collectability_problems(app, test_files, repo_root)
+    if problems:
+        return GateResult(passed=False, report="\n".join(f"  · {p}" for p in problems))
+    collectable = [f for f in test_files if not phantom_nested_test_paths([f])]
+    return run_scoped_vitest(app, collectable, repo_root)
+
+
 def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:
-    """§3 items 3–5, in order: lint → secret scan → lockfile sanity. Runs AFTER the test gate is
-    green and BEFORE any LLM reviewer; a failure feeds the Builder as plain text. All three are
-    cheap relative to one review round, and none can hallucinate."""
+    """§3 items 3–5, in order: lint → secret scan → lockfile sanity → (EU-249) diff-scoped
+    test-collectability. Runs AFTER the test gate is green and BEFORE any LLM reviewer; a failure
+    feeds the Builder as plain text. All are cheap relative to one review round, and none can
+    hallucinate."""
     reports: list[str] = []
     if getattr(app, "lint_commands", None):
         lint = run_commands(app, app.lint_commands)
@@ -393,6 +603,9 @@ def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str
     drift = _lock_drift_confirmed(app, candidates)   # verify REAL drift before failing (false-positive guard)
     if drift:
         reports.append("LOCKFILE gate failed:\n" + "\n".join(f"  · {_lockfile_problem(m, lk)}" for m, lk in drift))
+    tc = test_collectability_gate(app, changed_paths or [], diff or "")
+    if not tc.passed:
+        reports.append("TEST-COLLECTABILITY gate failed:\n" + tc.report)
     if reports:
         return GateResult(passed=False, report="\n\n".join(reports))
     return GateResult(passed=True, report="deterministic checks passed")
