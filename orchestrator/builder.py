@@ -61,6 +61,11 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   (fail-first — step 5): a test that stays green on the unchanged code is not covering your change.
   (Bun's test runner is light — unlike Vitest below it does not need worker bounding — but still
   scope it to the package you touched, not the whole monorepo.)
+  CI PARITY: `bun test` and `vitest` are DIFFERENT runners with different discovery/execution — a
+  `bun test` pass does NOT verify a `vitest` job. Before claiming any CI/test-running outcome
+  ("tests pass", "CI will go green"), check the app's package.json `test` script and CI workflow
+  (.github/workflows/*.yml) for the command CI actually runs, and verify with THAT command. Never
+  state a CI outcome you have not actually observed with CI's own runner.
 - SECURITY: never commit a secret (API key, token, password, private key, connection string).
   Keep queries parameterised and new routes behind their auth guard. (Phase-2 §2: the §1/§2/§3
   countersignature block was retired with the LLM security gate — a deterministic secret/dep scan
@@ -435,6 +440,27 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
             "You MUST address every point below; do not regress passing behaviour:",
             issues,
         ]
+    # EU-251: a CI-relevant ticket gets an explicit reminder to verify with CI's OWN runner (the
+    # package.json `test` script, e.g. `vitest run`) rather than `bun test` — AUTO-112 landed on a
+    # verbatim "CI will go green" / "verified with bun test" claim while CI (vitest) was red.
+    # Best-effort: should_run() failing (or cfg being unavailable in a caller that doesn't pass one)
+    # must never block a build.
+    try:
+        if cfg is not None:
+            from . import ci_conclusion
+            if ci_conclusion.should_run(cfg, req.ticket):
+                parts += [
+                    "",
+                    "CI VERIFICATION (this ticket is CI-relevant):",
+                    "  Verify with the SAME runner CI uses for this app — read the app's "
+                    "package.json `test` script (and .github/workflows/*.yml) and run THAT "
+                    "command, not `bun test`. `bun test` and `vitest` are different runners; a "
+                    "`bun test` pass does not verify a vitest-run CI job. Do not claim \"CI will "
+                    "go green\" or any CI outcome you have not actually observed with CI's own "
+                    "command.",
+                ]
+    except Exception:  # noqa: BLE001 — this reminder is best-effort, never blocks a build
+        pass
     parts += ["", "Implement the ticket now."]
     return "\n".join(parts)
 
