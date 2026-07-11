@@ -523,6 +523,23 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
 
     # Sonnet hit a cap-classified plan-limit error (or a transient one that survived every backoff
     # retry) — try Opus once to distinguish the limit type.
+    # EU-212: audit the activation itself (classification reason, original Sonnet error text, tag)
+    # so the cockpit can show WHY fallback is active — without reviving the deleted weekly-pin
+    # state machine (still per-call, still auto-exits next call). Best-effort: instrumentation must
+    # never break a run. Emitted only here, never on the transient backoff-and-retry-Sonnet path
+    # above (that path never reaches this line unless every retry escalated into cap handling).
+    if _AUDIT_SINK is not None:
+        try:
+            extra = {}
+            if ticket_id:
+                extra["ticket_id"] = str(ticket_id)
+            if pass_number is not None:
+                extra["pass_number"] = pass_number
+            _AUDIT_SINK.record("sonnet_fallback_activated", tag=tag or "", model=model,
+                               reason=result.plan_limit_kind, error=result.final, **extra)
+        except Exception:  # noqa: BLE001 — instrumentation must never break a run
+            pass
+
     # 2026-07-05 audit §6 defect 1: the old manual rebuild here dropped cwd, hooks (the guard
     # denylist) and disallowed_tools — the Opus probe ran in the orchestrator's own CWD with no
     # guard under the inherited bypassPermissions, and its output was used as the build result.
