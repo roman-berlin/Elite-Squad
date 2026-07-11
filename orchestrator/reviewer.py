@@ -218,6 +218,100 @@ def _enforce_admitted_red_tests(result: ReviewResult, build_artifact: BuildArtif
     return result
 
 
+# EU-268: a deterministic backstop for the AUTO-109 failure mode — the Reviewer is READ-ONLY
+# (allowed_tools=[Read, Grep, Glob], Bash disallowed — see the options built below) so it CANNOT run
+# Playwright, pytest, or any other test suite. Despite that, on AUTO-109 the GLM-4.6 reviewer set
+# spec_met=true/blocking=0 for an AC reading "All 6 Google Sync tests pass on Desktop Chrome and
+# Mobile Safari" from static inspection alone, and the ticket merged to DEV self-admittedly
+# unverified. This pair of pure helpers + the enforcement function below stop the Reviewer from
+# self-reporting spec_met=true on an execution-dependent AC unless the Builder's own handoff (or the
+# diff) carries actual execution evidence (a passing test log / gate report) — a genuinely verified
+# execution AC still passes; an AC that merely READS as satisfied from the diff does not.
+_EXECUTION_AC_RE = re.compile(
+    r"(?i)("
+    r"\ball\s+\d+\b[^.\n]{0,40}\btests?\b[^.\n]{0,10}\bpass"          # "all 6 ... tests ... pass"
+    r"|\btests?\s+pass(?:es|ing)?\s+on\b"                              # "tests pass on Desktop Chrome"
+    r"|\bdesktop\s+chrome\b|\bmobile\s+safari\b|\bmobile\s+chrome\b|\bdesktop\s+firefox\b|\bdesktop\s+safari\b"
+    r"|\bverify\s+(?:in|on)\s+(?:the\s+)?(?:browser|device|mobile|desktop)\b"
+    r"|\b(?:e2e|end-to-end|playwright|cypress)\b[^.\n]{0,30}\bpass"
+    r"|\ball\s+tests?\s+pass\b"                                       # "all tests pass"
+    r")"
+)
+
+# Markers that a passing-test-log / gate-report was actually ATTACHED to the handoff — the bar for
+# "verified", not merely asserted. Iteration-2 tightening (EU-268): restricted to attachment /
+# machine-shaped evidence only — a log/report citation, an "attached" artifact, or a machine-shaped
+# result file. The bare "verified passing" / "confirmed passing" PROSE alternations were dropped: per
+# unit doctrine the Builder's prose is untrusted, so a Builder must not be able to unlock the gate by
+# writing a sentence — the evidence has to be an attached passing test log / gate report / results
+# file. This also keeps an AC's own wording ("all tests pass") echoed back into the digest from
+# counting as its own evidence.
+_EXECUTION_EVIDENCE_RE = re.compile(
+    r"(?i)("
+    r"\btest\s*log\b"
+    r"|\bgate\s*report\b"
+    r"|\bplaywright[\s-]*report\b"
+    r"|\btest[\s-]*report\b"
+    r"|\bpassing\s+(?:test\s+)?log\b"
+    r"|\b(?:log|report)\s+attached\b"
+    r"|\battached\s+(?:the\s+)?(?:test\s+)?(?:log|report)\b"
+    r"|\btest[\s-]*results?\.(?:log|txt|json|xml)\b"
+    r")"
+)
+
+
+def _ac_requires_execution(ac: str) -> bool:
+    """True when an acceptance criterion's wording demands runtime/test execution to verify (e.g.
+    "all N tests pass", "tests pass on Desktop Chrome/Mobile Safari", "verify in browser/on device",
+    an e2e/Playwright/Cypress pass) — the kind of claim a READ-ONLY reviewer can never confirm by
+    reading the diff alone. A static AC ("function has a docstring") returns False."""
+    if not ac:
+        return False
+    return bool(_EXECUTION_AC_RE.search(ac))
+
+
+def _has_execution_evidence(build_artifact: BuildArtifact | None, diff: str | None = None) -> bool:
+    """True when the Builder's HANDOFF NARRATIVE carries a marker that a test suite was actually run
+    and passed (a test log / gate report), as opposed to the Builder merely asserting the AC's own
+    wording back at the Reviewer.
+
+    Iteration-2 scope tightening (EU-268): scans ONLY the free-text narrative fields of the
+    BuildArtifact (diff_digest / decisions / open_questions / caveats). The ``diff`` argument and
+    ``files_changed`` are INTENTIONALLY NOT sources: execution evidence is runtime OUTPUT that
+    belongs in the handoff, never in committed SOURCE. A Playwright ticket whose diff or config
+    legitimately contains 'playwright-report' or 'test-results.json' — or that commits such a path
+    into files_changed — must not silently disable the gate. ``diff`` is retained on the signature
+    for call-site symmetry/back-compat but is deliberately ignored."""
+    if build_artifact is None:
+        return False
+    fields: list[str] = [build_artifact.diff_digest or ""]
+    fields.extend(build_artifact.decisions or [])
+    fields.extend(build_artifact.open_questions or [])
+    fields.extend(build_artifact.caveats or [])
+    return any(_EXECUTION_EVIDENCE_RE.search(text) for text in fields if text)
+
+
+def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact: BuildArtifact | None,
+                            diff: str) -> ReviewResult:
+    """EU-268: force spec_met=False + FAIL (with a named spec gap) when the ticket has an
+    execution-dependent acceptance criterion and the handoff/diff carries no execution evidence —
+    even if the LLM verdict said spec_met=true. Does NOT grant the Reviewer any new capability
+    (Bash stays disallowed); it only stops the Reviewer's own verdict JSON from defaulting an
+    unverifiable AC to true. A genuinely evidenced execution AC (a test log/gate report present) is
+    left unchanged, so real verified passes still ship."""
+    exec_acs = [ac for ac in (ticket.acceptance_criteria or []) if _ac_requires_execution(ac)]
+    if not exec_acs or _has_execution_evidence(build_artifact, diff):
+        return result
+    for ac in exec_acs:
+        gap = (f"AC requires test execution but no passing test log/gate report attached — "
+               f"unverified: \"{ac}\"")
+        if gap not in result.spec_gaps:
+            result.spec_gaps = list(result.spec_gaps) + [gap]
+    result.spec_met = False
+    result.verdict = Verdict.FAIL
+    return result
+
+
 def _classify_diff(diff: str) -> tuple[str, str]:
     """Classify a diff as 'trivial' or 'production' based on size and content.
 
@@ -334,6 +428,7 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
 
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
+    result = _enforce_execution_gate(result, ticket, build_artifact, diff)   # EU-268 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking
