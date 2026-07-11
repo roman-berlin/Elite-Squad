@@ -63,6 +63,76 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
+# ── EU-187: cockpit terminal-panel hardening ────────────────────────────────────────────────────
+# POST /api/terminal used to run FREE-FORM shell (``subprocess.run(cmd, shell=True)``) — an
+# unauthenticated local RCE surface (2026-07-06 audit, finding N4). It is now constrained to a
+# vetted, no-shell allowlist executed with ``shell=False`` over an argv parsed by ``shlex``.
+#
+# HARD rules the allowlist enforces (see iteration-2 review feedback):
+#   · NO interpreters. python/python3/bun/node/sh/bash/… are equivalent to arbitrary code
+#     execution and can NEVER be part of a 'vetted no-shell' set — they are deliberately absent.
+#   · File-reading commands (cat/head/tail/grep/…) may ONLY read paths that resolve INSIDE the
+#     orchestrator working directory. Absolute paths and ``..`` traversal that escape the cwd are
+#     rejected, so the endpoint cannot exfiltrate /etc/passwd, ~/.ssh, or out-of-tree secrets.
+TERMINAL_ALLOWED_COMMANDS = frozenset({
+    "git", "ls", "pwd", "echo", "cat", "head", "tail", "grep", "wc",
+    "find", "date", "whoami", "uname", "df", "du", "which",
+})
+
+# Commands that take file/path operands — their operands are confined to the working directory.
+TERMINAL_PATH_COMMANDS = frozenset({"cat", "head", "tail", "grep", "wc", "find", "ls", "du"})
+
+
+def _terminal_validate(cmd: str, cwd: Path):
+    """Validate a cockpit-terminal command string against the EU-187 no-shell allowlist.
+
+    Returns ``(argv, None)`` when the command is safe to run with ``shell=False``, or
+    ``(None, error_message)`` when it must be rejected (caller returns HTTP 403). The command is
+    NEVER executed here — validation is purely structural so it can be unit-tested in isolation.
+    """
+    import shlex
+
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        return None, f"Could not parse command: {e}"
+    if not argv:
+        return None, "No command provided"
+
+    program = argv[0]
+    if program not in TERMINAL_ALLOWED_COMMANDS:
+        return None, (
+            f"Command {program!r} is not allowed. Only a vetted set of read-only commands may run "
+            f"in the terminal panel: {', '.join(sorted(TERMINAL_ALLOWED_COMMANDS))}."
+        )
+
+    # Confine file-reading commands to the working directory: reject any operand that resolves
+    # outside `cwd`. Flags (leading '-') and non-path tokens (e.g. a grep PATTERN) are left alone;
+    # a token is only path-checked when it actually names a filesystem path.
+    if program in TERMINAL_PATH_COMMANDS:
+        cwd_resolved = cwd.resolve()
+        for tok in argv[1:]:
+            if tok.startswith("-") or not tok:
+                continue
+            looks_like_path = tok.startswith(("/", "~", ".")) or "/" in tok
+            if not looks_like_path:
+                continue  # e.g. grep's PATTERN, or a subcommand word
+            candidate = Path(tok).expanduser()
+            try:
+                resolved = (candidate if candidate.is_absolute()
+                            else (cwd_resolved / candidate)).resolve()
+            except Exception:  # noqa: BLE001
+                return None, f"Invalid path operand: {tok!r}"
+            try:
+                resolved.relative_to(cwd_resolved)
+            except ValueError:
+                return None, (
+                    f"Path {tok!r} is outside the working directory. The terminal panel may only "
+                    "read files inside the orchestrator working directory."
+                )
+    return argv, None
+
+
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -82,6 +152,14 @@ def _first_shippable(cfg) -> str:
 
 
 MERGE_STATS_TIME_RANGES = ("today", "week", "month", "all")
+
+# Characters that enable shell chaining, substitution, redirection or globbing. Even though the
+# terminal endpoint runs with shell=False (so these have no special meaning to subprocess), a
+# command string containing them is rejected outright — a no-shell allowlisted command never needs
+# them, and rejecting keeps the intent ("no shell interpretation, ever") unambiguous.
+# (The allowlist itself — TERMINAL_ALLOWED_COMMANDS / _terminal_validate — lives above, near the
+# other terminal-panel hardening.)
+_TERMINAL_METACHARACTERS = set(";|&$`()<>\\*?")
 
 
 def compute_merge_stats(audit_path: str, time_range: str, now: float | None = None) -> dict:
@@ -385,20 +463,31 @@ def create_app(cfg: Config):
     def terminal_api():
         """Execute a command in the terminal panel and return the output.
 
-        EU-149: Integrated terminal in the cockpit — executes shell commands and returns
-        the combined stdout/stderr. Commands run in the orchestrator's working directory
-        with a 10-second timeout.
+        EU-149: Integrated terminal in the cockpit — executes commands and returns the combined
+        stdout/stderr. Commands run in the orchestrator's working directory with a 10-second
+        timeout.
+
+        EU-187: free-form shell execution was a local RCE surface (unauthenticated command
+        execution as the cockpit's user). The endpoint now NEVER invokes a shell: the input is
+        tokenised with ``shlex.split`` and validated against a fixed allowlist BEFORE anything
+        reaches ``subprocess`` — see ``TERMINAL_ALLOWED_COMMANDS`` / ``_terminal_validate`` above.
 
         Security:
+        * No shell — ``subprocess.run(argv, shell=False, ...)``, never a shell-interpreted string.
+        * Base command (argv[0]) must be in the module-level allowlist; anything else -> 403.
+          Interpreters (python/python3/bun/node/sh/…) are deliberately NOT on the allowlist — they
+          are equivalent to arbitrary code execution — so an interpreter-based RCE (e.g.
+          ``python3 -m http.server``, ``bun x pkg``) is rejected with 403 before reaching subprocess.
+        * File-reading commands (cat/tail/grep/…) are confined to the working directory — an operand
+          resolving to an absolute / out-of-tree path -> 403, so secrets can't be exfiltrated.
+        * Shell metacharacters (chaining/substitution/redirection/globbing) -> 403.
         * Commands are executed in a subprocess with a timeout.
-        * No interactive shells — each command is a one-shot execution.
         * Output is capped at 64KB to prevent memory issues.
 
         Returns JSON ``{"output": "<combined stdout/stderr>", "error": "<error message or null>"}``.
         """
         from flask import jsonify
         import subprocess
-        import shlex
 
         cmd = (request.form.get("cmd") or "").strip()
         if not cmd:
@@ -408,16 +497,33 @@ def create_app(cfg: Config):
         if any(c in cmd for c in ["\x00", "\n", "\r"]):
             return jsonify({"output": "", "error": "Invalid characters in command"}), 400
 
+        # EU-187: reject shell metacharacters outright — no chaining, substitution, redirection,
+        # or globbing is ever legitimate for a no-shell allowlisted command.
+        bad_chars = sorted(set(cmd) & _TERMINAL_METACHARACTERS)
+        if bad_chars:
+            return jsonify({
+                "output": "",
+                "error": f"Command contains disallowed shell character(s): {' '.join(bad_chars)}",
+            }), 403
+
+        run_cwd = Path(cfg.config_path).parent if hasattr(cfg, "config_path") else Path.cwd()
+
+        # EU-187: allowlist + path-confinement check BEFORE anything runs. A rejected command returns
+        # 403 and never reaches subprocess.run.
+        argv, err = _terminal_validate(cmd, run_cwd)
+        if err is not None:
+            return jsonify({"output": "", "error": err}), 403
+
         try:
-            # Execute command with timeout, capture both stdout and stderr
+            # Execute the validated argv WITHOUT a shell (shell=False), with a timeout.
             result = subprocess.run(
-                cmd,
-                shell=True,
+                argv,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=10,
-                cwd=str(Path(cfg.config_path).parent) if hasattr(cfg, "config_path") else None,
-                env=dict(os.environ)
+                cwd=str(run_cwd),
+                env=dict(os.environ),
             )
             output = result.stdout + result.stderr
             # Cap output at 64KB
