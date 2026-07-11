@@ -4,13 +4,17 @@ Wraps `claude_agent_sdk.query()`, collects the assistant text + cost/turn metada
 and (when a `tag` is given) streams a compact line per tool use so you can see the
 officer working in real time.
 
-EU-108 Sonnet-cap fallback:
+EU-108 Sonnet-cap fallback (EU-214: prose realigned to the per-call, self-clearing design —
+the old calendar-reset weekly-pin state machine was deleted in Phase-2 Task 2):
   When a Sonnet call hits a CAP-classified plan-limit error (the message names an exhausted
-  usage/plan/weekly quota), the fallback logic retries with Opus once to distinguish between:
-    • Sonnet sub-limit hit → Opus succeeds cleanly → activate fallback, stay on Opus until reset
+  usage/plan/weekly quota), the fallback logic retries with Opus once, per call, to distinguish
+  between:
+    • Sonnet sub-limit hit → Opus succeeds cleanly → return the Opus result for THIS call only;
+      nothing is persisted, so the very next call starts cheap on Sonnet again — the fallback
+      self-clears the moment Sonnet recovers, with no calendar-based reset of any kind.
     • All-models cap hit → Opus also 429s → pause (existing EU-82 governor behavior)
-  A transient per-minute 429 / 529 overload instead gets one backoff retry on Sonnet and never
-  arms the weekly fallback; a failed Opus probe (auth/network) never arms it either.
+  A transient per-minute 429 / 529 overload instead gets a bounded backoff retry on Sonnet and
+  never probes Opus; a failed Opus probe (auth/network) never changes any state either.
 """
 from __future__ import annotations
 
@@ -55,8 +59,8 @@ class AgentRun:
     is_plan_limit: bool = False
     # EU-108 hardening (2026-07-05 fake cap alert): how the plan-limit error classified —
     #   "cap"       → the message names an exhausted usage/plan/weekly quota (fallback-eligible)
-    #   "transient" → per-minute 429 / 529 overload (retry territory; must never arm the
-    #                 weekly Opus fallback, which is a ~1.7x cost amplifier until Friday)
+    #   "transient" → per-minute 429 / 529 overload (retry territory; must never trigger the
+    #                 one-shot Opus retry, which is a ~1.7x cost amplifier for that single call)
     #   ""          → not a plan-limit error. Additive field: is_plan_limit keeps its
     #                 EU-118 broad meaning for existing consumers.
     plan_limit_kind: str = ""
