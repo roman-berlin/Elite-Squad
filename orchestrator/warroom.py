@@ -275,11 +275,11 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     # Each card deep-links to a view scoped to the count it shows: the /tasks log auto-applies the
     # ?filter= (merged / needs / parked) so the destination honors the click, and Security blocks
     # opens the forensics view scoped to the security-block findings that produced the number.
-    # EU-150: "Merged total" card is retired — use "Merged → DEV today" which links to /tasks?filter=merged
-    # showing all merged tasks with statistics (today, this week, month, all time available in the view).
+    # EU-150: "Merged total" card is retired — use "Merged → DEV today". EU-159: it now links to the
+    # dedicated /merge-stats page (today's aggregated numbers) instead of the flat /tasks?filter=merged log.
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
-         "href": "/tasks?filter=merged", "sparkline": merges_series},  # EU-76: 14-day daily merge trend
+         "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate (all time)",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
          "security_block_findings": sec_blocks},  # EU-145: pass actual findings for interactive card
