@@ -1470,11 +1470,22 @@ def create_app(cfg: Config):
 
     @app.get("/merge-stats")
     def merge_stats_page():
-        """EU-159: the frontend merge-statistics page — the minimal shippable slice, "today" only.
+        """EU-159/EU-160: the frontend merge-statistics page with a four-way time-range selector
+        (today / this week / this month / all time). Reads ``?time_range=`` and validates it against
+        ``MERGE_STATS_TIME_RANGES``, falling back to 'today' when absent or invalid, then server-renders
+        the initial cards for that range so a bookmarked ``?time_range=week`` URL loads correctly. An
+        inline script lets the user switch ranges client-side via the existing JSON API
+        (GET /api/merge-stats?time_range=) without a full reload — it rewrites the card numbers, moves
+        the 'active'/aria-current marker to the clicked control, and updates the URL via
+        history.pushState so the range stays shareable/bookmarkable.
         Renders via ``_wrap`` (page title + '← cockpit' breadcrumb come from there for free)."""
-        stats = compute_merge_stats(cfg.audit_path, "today")
+        time_range = request.args.get("time_range")
+        if time_range not in MERGE_STATS_TIME_RANGES:
+            time_range = "today"
+        stats = compute_merge_stats(cfg.audit_path, time_range)
         sr = stats["success_rate"]
         sr_str = "—" if sr is None else f"{round(sr * 100)}%"
+        range_labels = {"today": "Today", "week": "This week", "month": "This month", "all": "All time"}
         style = (
             "<style>"
             ".msgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));"
@@ -1484,15 +1495,52 @@ def create_app(cfg: Config):
             ".msbig{color:var(--ink);font-size:32px;font-weight:750;margin:4px 0 6px}"
             ".mslabel{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
             "font-weight:700}"
+            ".msranges{display:flex;gap:8px;margin:10px 0}"
+            ".msrange{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);"
+            "color:var(--ink);padding:7px 14px;font-weight:600;cursor:pointer;font:inherit}"
+            ".msrange.active{background:var(--accent);border-color:var(--accent);color:#fff}"
             "</style>")
+        range_buttons = "".join(
+            f"<button type=button class='msrange{' active' if r == time_range else ''}' "
+            f"data-range='{r}'{' aria-current=page' if r == time_range else ''}>{html.escape(label)}</button>"
+            for r, label in range_labels.items()
+        )
+        script = (
+            "<script>"
+            "(function(){"
+            "var btns=document.querySelectorAll('.msrange');"
+            "function applyStats(s){"
+            "document.getElementById('ms-total').textContent=s.total_merges;"
+            "document.getElementById('ms-pr').textContent=s.pr_opened;"
+            "var sr=s.success_rate;"
+            "document.getElementById('ms-sr').textContent=(sr===null||sr===undefined)?'—':Math.round(sr*100)+'%';"
+            "}"
+            "btns.forEach(function(b){b.addEventListener('click',function(){"
+            "var r=b.getAttribute('data-range');"
+            "fetch('/api/merge-stats?time_range='+r).then(function(resp){return resp.json();}).then(function(s){"
+            "applyStats(s);"
+            "btns.forEach(function(x){"
+            "var active=x===b;"
+            "x.classList.toggle('active',active);"
+            "if(active){x.setAttribute('aria-current','page');}else{x.removeAttribute('aria-current');}"
+            "});"
+            "var url=new URL(window.location);"
+            "url.searchParams.set('time_range',r);"
+            "history.pushState({},'',url);"
+            "});"
+            "});});"
+            "})();"
+            "</script>")
         inner = (
             style
-            + "<p style='color:var(--dim);margin:-4px 0 4px'>Today’s land outcomes, aggregated from the audit log.</p>"
+            + "<p style='color:var(--dim);margin:-4px 0 4px'>Land outcomes, aggregated from the audit log.</p>"
+            + f"<div class=msranges>{range_buttons}</div>"
             + "<div class=msgrid>"
-            + f"<div class=mscard><div class=msbig>{stats['total_merges']}</div><div class=mslabel>Total merges</div></div>"
-            + f"<div class=mscard><div class=msbig>{stats['pr_opened']}</div><div class=mslabel>PRs opened</div></div>"
-            + f"<div class=mscard><div class=msbig>{html.escape(sr_str)}</div><div class=mslabel>Success rate</div></div>"
+            + f"<div class=mscard><div class=msbig id=ms-total>{stats['total_merges']}</div><div class=mslabel>Total merges</div></div>"
+            + f"<div class=mscard><div class=msbig id=ms-pr>{stats['pr_opened']}</div><div class=mslabel>PRs opened</div></div>"
+            + f"<div class=mscard><div class=msbig id=ms-sr>{html.escape(sr_str)}</div><div class=mslabel>Success rate</div></div>"
             + "</div>"
+            + script
         )
         return _wrap("Merge statistics", inner)
 
