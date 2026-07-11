@@ -34,6 +34,12 @@ try:  # tool-use block type name can vary across SDK versions
 except Exception:  # pragma: no cover
     ToolUseBlock = None
 
+try:  # EU-248: absent on some SDK-stub test harnesses that don't define every export — degrade
+    # gracefully; the isinstance() check below just never matches when ProcessError is None.
+    from claude_agent_sdk import ProcessError
+except Exception:  # pragma: no cover
+    ProcessError = None
+
 # Serialises the LOCAL-tier routing window: the Ollama base-URL/key swap is process-global env,
 # so overlapping routed calls must not interleave their save/restore (2026-07-06 review). Held
 # for the duration of one routed agent call; acquired via asyncio.to_thread so event loops in
@@ -70,6 +76,11 @@ class AgentRun:
     # QW4 (2026-07-05): wall-clock duration of this call — the forensic audit found NO duration
     # was recorded anywhere (0 duration fields across 2,555 audit events).
     duration_s: float = 0.0
+    # EU-248: true when this run hit the max-turns ceiling — ResultMessage.subtype == "error_max_turns"
+    # OR num_turns >= max_turns. Set straight off the structured ResultMessage (never from the SDK's
+    # racy _last_error_result_text replacement), so it stays correct even when the CLI's trailing raw
+    # ProcessError degrades to a clean is_error return below instead of raising.
+    is_turn_limit: bool = False
 
 
 # QW4: optional audit sink — when a process configures it (main/server startup, beside
@@ -278,6 +289,7 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     in_tok = 0
     out_tok = 0
     is_error = False
+    is_turn_limit = False
     is_plan_limit = False
     plan_limit_kind = ""
 
@@ -340,6 +352,14 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                 cost = message.total_cost_usd or 0.0
                 turns = message.num_turns
                 is_error = is_error or message.is_error
+                # EU-248: capture the turn-limit signal straight off the structured ResultMessage,
+                # BEFORE any exception handling — the CLI exits 1 by design after error_max_turns and
+                # the SDK's own structured-error replacement (_last_error_result_text) is racy, so this
+                # is the one reliable place to observe it.
+                subtype = getattr(message, "subtype", "") or ""
+                max_turns = getattr(options, "max_turns", None)
+                if subtype == "error_max_turns" or (max_turns and turns >= max_turns):
+                    is_turn_limit = True
                 if message.result:
                     final = message.result
                 # A provider-side terminal error rides in ResultMessage.result (NOT message.error) —
@@ -359,12 +379,27 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                     out_tok = int(u.get("output_tokens", 0) or 0)
     except Exception as exc:  # noqa: BLE001 — see below; genuine crashes re-raise
         # SDK quirk (claude_agent_sdk 0.2.x): after a CLI error result whose `errors` array is empty,
-        # the SDK raises "Claude Code returned an error result: {subtype}" — with subtype literally
-        # "success" — DISCARDING the real error text (which we already captured in `final` from the
-        # ResultMessage) and skipping metering/audit/transcript. 9 runs died that way since 06-21
-        # (EU-136 + AUTO-73 on 07-09 alone). If we already consumed the result, degrade to a normal
-        # is_error return so the loop posts the REAL failure and the run ends cleanly.
-        if saw_result and str(exc).startswith("Claude Code returned an error result"):
+        # the SDK raises "Claude Code returned an error result: success" — literally "success" —
+        # DISCARDING the real error text (which we already captured in `final` from the ResultMessage)
+        # and skipping metering/audit/transcript. 9 runs died that way since 06-21 (EU-136 + AUTO-73 on
+        # 07-09 alone). If we already consumed the result, degrade to a normal is_error return so the
+        # loop posts the REAL failure and the run ends cleanly. EU-248: narrowed from a broad
+        # startswith("...error result") to literally "...error result: success" — a genuine
+        # `error_during_execution` result must NOT be silently swallowed here; it still re-raises.
+        is_success_quirk = saw_result and str(exc).startswith(
+            "Claude Code returned an error result: success")
+        # EU-248: max-turns exhaustion surfaces as a raw ProcessError ("Command failed with exit code
+        # 1 … Check stderr output for details") trailing a result we already consumed — the CLI exits
+        # 1 by design after error_max_turns, and the SDK's structured-error replacement above is racy,
+        # so no informative exception ever arrives (claude_agent_sdk/_internal/transport/
+        # subprocess_cli.py). Degrade the same way as the quirk above: usage.record + the agent_call
+        # audit row below still fire, no exception escapes, and `is_turn_limit` (set from the
+        # ResultMessage branch above) survives onto the returned AgentRun. A ProcessError with NO
+        # result seen (saw_result False — a genuine mid-stream crash) is unaffected and still re-raises
+        # onto the existing infra/crash path.
+        is_trailing_process_error = (saw_result and ProcessError is not None
+                                     and isinstance(exc, ProcessError))
+        if is_success_quirk or is_trailing_process_error:
             is_error = True
         else:
             raise
@@ -409,7 +444,8 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                     num_turns=turns, is_error=is_error, tools=tools,
                     input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit,
                     plan_limit_kind=plan_limit_kind,
-                    provider=provider, model_version=model_version, duration_s=duration_s)
+                    provider=provider, model_version=model_version, duration_s=duration_s,
+                    is_turn_limit=is_turn_limit)
 
 
 # ── Sonnet-cap → one-shot Opus retry ─────────────────────────────────────────────────────────────────
