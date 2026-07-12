@@ -7,8 +7,9 @@ log); ``blocked``/``pending_decisions``/``usage_ledger`` still race and lose wri
 each rolled its own (or no) locking. This module lifts that pattern into two reusable
 primitives so every hot file can share one correct implementation:
 
-* :func:`locked_append` — append a single line to a ``.jsonl`` file.
-* :func:`locked_rmw`    — atomic read-modify-write of a ``.json`` file.
+* :func:`locked_append`   — append a single line to a ``.jsonl`` file.
+* :func:`locked_rmw`      — atomic read-modify-write of a ``.json`` file.
+* :func:`locked_text_rmw` — atomic read-modify-write of a plain text file (e.g. markdown).
 
 Both combine three layers of protection:
 
@@ -104,6 +105,44 @@ def locked_rewrite(path: str | Path, keep_fn: Callable[[list[str]], list[str]]) 
             finally:
                 if fcntl is not None:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def locked_text_rmw(path: str | Path, mutate_fn: Callable[[str], str], *, default: str = "") -> str:
+    """Atomically read-modify-write a plain TEXT file at ``path`` (the ``locked_rmw`` sibling for
+    files that aren't JSON, e.g. a markdown changelog).
+
+    Reads the current text (or ``default`` if the file is missing), passes it to ``mutate_fn``, and
+    writes whatever ``mutate_fn`` returns back atomically (temp file + :func:`os.replace`), under the
+    same cross-thread + cross-process sidecar-``.lock`` critical section as :func:`locked_rmw` — so a
+    concurrent read can never observe pre-write state and then clobber it. ``mutate_fn`` receives the
+    text read INSIDE the lock (never a pre-lock snapshot) and must return the full new file content;
+    it is responsible for any header/formatting the file needs.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with _lock_for(p):
+        # Sidecar lock, not the data file itself, for the same reason as locked_rmw: os.replace
+        # swaps the data file's inode mid-section and would strand a lock taken on the old inode.
+        lock_path = p.with_name(p.name + ".lock")
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+            current = p.read_text(encoding="utf-8") if p.exists() else default
+            new_value = mutate_fn(current)
+
+            tmp_path = p.with_name(p.name + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as tf:
+                tf.write(new_value)
+                tf.flush()
+                os.fsync(tf.fileno())
+            os.replace(tmp_path, p)
+            return new_value
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: Any = None,

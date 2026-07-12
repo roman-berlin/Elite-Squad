@@ -75,13 +75,18 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
     unit keeps a human-readable feature changelog. Deterministic, no LLM (the data already exists at the
     land site). Skipped for dry-run and ephemeral tickets. Best-effort: a write failure is swallowed and
     never raises, so it can't break the run. Appends, never loses history; newest entry first. Returns
-    True iff an entry was written."""
+    True iff an entry was written.
+
+    The read of existing entries and the write of the rebuilt file happen INSIDE one held lock via
+    ``locking.locked_text_rmw`` — two lands racing this call (two drains landing at once) must not
+    both read the same stale ``old`` list and clobber each other's append (EU-276)."""
     if cfg.dry_run or ticket.ephemeral:
         return False
     try:
         import datetime
 
         from . import dashboard as _D
+        from . import locking
         date = today or datetime.date.today().isoformat()
         what = _D.brief(summary, n=220) or (ticket.summary or "").strip()
         link = f" · 🔗 {test_url}" if test_url else ""
@@ -89,11 +94,14 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
         header = ("# Development Status\n\n"
                   "Feature changelog — one line per successful live land to the dev branch, newest "
                   "first. Maintained automatically by the Technical Writer (orchestrator/loop.py).\n")
-        path = Path(path) if path else _changelog_path()
-        old = ([ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.startswith("- ")]
-               if path.exists() else [])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(header + "\n" + "\n".join([entry, *old]) + "\n", encoding="utf-8")
+        target = Path(path) if path else _changelog_path()
+
+        def _mutate(current: str) -> str:
+            # `current` is read INSIDE the lock, never a pre-lock snapshot.
+            old = [ln for ln in current.splitlines() if ln.startswith("- ")]
+            return header + "\n" + "\n".join([entry, *old]) + "\n"
+
+        locking.locked_text_rmw(target, _mutate, default="")
         return True
     except Exception as exc:  # noqa: BLE001 - release-hygiene logging must never break the run
         print(f"  changelog skipped: {exc}", flush=True)
