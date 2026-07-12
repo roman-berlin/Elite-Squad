@@ -25,7 +25,7 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
-from .gate import base_gate_check, gate_fingerprint, run_deterministic_checks, run_gate
+from .gate import base_gate_check, extract_failure_evidence, gate_fingerprint, run_deterministic_checks, run_gate
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -1193,7 +1193,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 print("  gate · red once, green on confirmation re-run — flake, proceeding", flush=True)
                 gate = confirm
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
-                     report=("" if gate.passed else (gate.report or "")[:2500]))
+                     report=("" if gate.passed else extract_failure_evidence(gate.report or "")))
         if not gate.passed:
             # §3.1: same failure fingerprint as the previous failed gate → the rebuild didn't
             # move it; stop building and let PM triage/exhaustion handle it (EU-174's shape).
@@ -1224,7 +1224,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # feeds the Builder as plain text (a free review round).
         det = run_deterministic_checks(app, git.changed_paths(), git.diff_against_base())
         audit.record("deterministic_gate", ticket_id=ticket.id, iteration=iteration,
-                     passed=det.passed, report=("" if det.passed else (det.report or "")[:2500]))
+                     passed=det.passed, report=("" if det.passed else extract_failure_evidence(det.report or "")))
         if not det.passed:
             # §3.1: the stuck-fingerprint guard covers this stage too — an unchanging lint/
             # secret/lockfile failure must not burn the remaining pass budget (2026-07-06 review).
@@ -1526,13 +1526,28 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     if triage and triage.get("raw"):
         _route_out_of_scope(cfg, ticket, app, audit, triage["raw"], source="pm-triage")
 
-    # Commander decision (Phase-2, 2026-07-06): the PM RESOLVE requeue is RETIRED. It granted a
-    # ticket one extra capped attempt, silently re-opening the QW3 2-pass loop cap — and §2 folds
-    # PM triage into the Planner's single decision anyway. A RESOLVE verdict now escalates like
-    # everything else, carrying the PM's corrective instruction as the Commander's brief (the
-    # `esc` below already prefers triage text). SPLIT — a planning decision — is unchanged until
-    # the Planner absorbs it.
+    # Commander decision (Phase-2, 2026-07-06): the PM RESOLVE requeue is RETIRED for REVIEWER
+    # rejections. It granted a ticket one extra capped attempt, silently re-opening the QW3
+    # 2-pass loop cap — and §2 folds PM triage into the Planner's single decision anyway. A
+    # RESOLVE verdict on a reviewer FAIL now escalates like everything else, carrying the PM's
+    # corrective instruction as the Commander's brief (the `esc` below already prefers triage
+    # text). SPLIT — a planning decision — is unchanged until the Planner absorbs it.
+    #
+    # EU-217: narrowed back OFF the gate-exhaustion path. A gate that fails identically twice
+    # running (last_changes[0] set at the two "Verification failed…" sites above) is a build/CI
+    # health question, not a spec disagreement — when the PM diagnoses RESOLVE there ("pre-
+    # existing flake, deliverable done"), parking it on the Commander instead of requeuing was
+    # the dishonest escalation this ticket was filed to fix (2026-07-09 forensics). Requeue
+    # exactly ONCE: `_already_pm_triaged` (above) guarantees at most one triage per ticket, so
+    # this cannot loop — a still-stuck ticket escalates for real on its next exhaustion.
     if triage and triage["action"] == "RESOLVE":
+        if last_changes and last_changes[0].startswith("Verification failed"):
+            audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="RESOLVE",
+                         reason="gate-flake", instruction=(triage.get("text") or "")[:600])
+            print(f"  🎖️ {ticket.id}: PM said RESOLVE on a gate-exhaustion — requeuing once.",
+                  flush=True)
+            return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
+                                         notes="gate-flake — PM RESOLVE requeued once"))
         audit.record("pm_resolve_retired", ticket_id=ticket.id,
                      instruction=(triage.get("text") or "")[:600])
         print(f"  🎖️ {ticket.id}: PM said RESOLVE — requeue retired (Phase-2); escalating with "

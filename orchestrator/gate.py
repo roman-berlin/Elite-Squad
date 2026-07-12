@@ -247,6 +247,58 @@ def gate_fingerprint(report: str) -> str:
     return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
 
 
+# 'timed out' isn't covered by _FAIL_LINE (gate.py's own timeout report reads
+# "(timed out after Ns)" — no FAILED/ERROR/✗ token) — matched separately below.
+_TIMED_OUT = re.compile(r"(?i)\btimed out\b")
+
+
+def extract_failure_evidence(report: str, limit: int = 2500) -> str:
+    """A failure-first slice of a (possibly huge) gate report, for audit/PM/Commander eyes.
+
+    EU-217: a naive ``report[:2500]`` silently drops the failing suite whenever enough green
+    suites' output precedes it to fill the budget (EU-204/EU-206: the recorded audit event
+    showed nothing but green suites, so nobody downstream could see which suite actually
+    failed). Keeps every line carrying failure signal (the ``_FAIL_LINE`` pattern, plus a
+    'timed out' match it doesn't cover) and the run_all-style summary tail (from its first
+    ``====...`` banner line to EOF — ``HARNESSES: … / FAILED: … / ALL GREEN``), then pads with
+    as much head context as still fits, all capped at ``limit`` chars. Short reports pass
+    through unchanged.
+    """
+    text = report or ""
+    if len(text) <= limit:
+        return text
+    lines = text.splitlines()
+
+    def _is_fail(ln: str) -> bool:
+        return bool(_FAIL_LINE.search(ln)) or bool(_TIMED_OUT.search(ln))
+
+    keep = {i for i, ln in enumerate(lines) if _is_fail(ln)}
+    tail_start = next((i for i, ln in enumerate(lines)
+                        if ln.strip() and set(ln.strip()) == {"="}), None)
+    if tail_start is not None:
+        keep.update(range(tail_start, len(lines)))
+    if not keep:
+        return text[:limit]   # no failure signal at all — fall back to the plain head slice
+
+    evidence = "\n".join(lines[i] for i in sorted(keep))
+    if len(evidence) >= limit:
+        return evidence[:limit]
+
+    # Pad with head context (the report's natural lead-in) until the char budget is spent.
+    head: list[str] = []
+    used = len(evidence)
+    for i, ln in enumerate(lines):
+        if i in keep:
+            continue
+        if used + len(ln) + 1 > limit:
+            break
+        head.append(ln)
+        used += len(ln) + 1
+    if not head:
+        return evidence
+    return "\n".join(head) + "\n" + evidence
+
+
 # Deterministic secret patterns over ADDED diff lines — replaces the secrets half of the
 # per-diff Opus provost-gate call (161 calls / 8.0M tokens on the audited corpus). Matches are
 # MASKED in the report (provost doctrine: never print a real secret).
