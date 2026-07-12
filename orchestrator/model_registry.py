@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import locking
+from .secrets import Secrets
 
 # The only providers the registry currently understands. Kept as a tuple (not a set) so error
 # messages render in a stable, predictable order.
@@ -191,3 +192,30 @@ class ModelRegistry:
 
         locking.locked_rmw(self._path, _mutate, default=dict(_EMPTY_STORE), corrupt_to_default=True)
         return removed
+
+    # ------------------------------------------------------------- credentials (EU-234)
+
+    def _secrets_path(self) -> Path:
+        """The :class:`~orchestrator.secrets.Secrets` store lives next to this registry's own
+        file — same state directory, so both stay hermetic together under a test's tmp ``path=``,
+        exactly like the registry's own anchoring (see module docstring)."""
+        return self._path.parent / "secrets.json"
+
+    def set_credential(self, model_id: str, api_key: str) -> Optional[dict]:
+        """Store ``api_key`` in the standalone ``Secrets`` store and persist only a derived
+        ``credential_ref`` on the registry record — the raw key is never written to this file (the
+        ``_ALLOWED_FIELDS`` whitelist would strip it even if a caller tried). Returns the updated
+        record, or ``None`` if ``model_id`` doesn't exist (the secret is still stored regardless;
+        there is simply no record to attach the reference to)."""
+        ref = f"secret://{model_id}"
+        Secrets(path=self._secrets_path()).store(ref, api_key)
+        return self.update(model_id, {"credential_ref": ref})
+
+    def get_credential_for(self, model_id: str) -> Optional[str]:
+        """Resolve ``model_id``'s stored ``credential_ref`` through ``Secrets``. ``None`` if the
+        backend doesn't exist, has no ``credential_ref``, or the secret itself isn't stored."""
+        record = self.get(model_id)
+        ref = record.get("credential_ref") if record else None
+        if not ref:
+            return None
+        return Secrets(path=self._secrets_path()).get(ref)
