@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import locking
+from .secrets import Secrets
 
 # The only providers the registry currently understands. Kept as a tuple (not a set) so error
 # messages render in a stable, predictable order.
@@ -91,6 +92,11 @@ class ModelRegistry:
         else:
             audit = getattr(cfg, "audit_path", None) if cfg is not None else None
             self._path = Path(audit).resolve().parent / "model_registry.json" if audit else _default_path()
+        # EU-234: the credential store lives alongside the registry, anchored to the SAME state
+        # directory the registry itself resolved to — whatever combination of explicit path/cfg
+        # produced ``self._path`` above, so tests that build a registry against a tmp dir get a
+        # tmp secrets store too, never the operator's real one.
+        self._secrets = Secrets(path=self._path.parent / "secrets.yaml")
 
     @property
     def path(self) -> Path:
@@ -191,3 +197,22 @@ class ModelRegistry:
 
         locking.locked_rmw(self._path, _mutate, default=dict(_EMPTY_STORE), corrupt_to_default=True)
         return removed
+
+    # ------------------------------------------------------------- credentials (EU-234)
+
+    def set_credential(self, backend_id: str, api_key: str) -> Optional[dict]:
+        """Store ``api_key`` in the credential store and persist only a derived
+        ``credential_ref`` on the record — the raw key itself never touches this file. Returns the
+        updated record, or ``None`` if ``backend_id`` doesn't exist (the credential is still stored
+        in that case, matching ``update()``'s existing no-op-on-unknown-id contract)."""
+        ref = f"secret://{backend_id}"
+        self._secrets.store(ref, api_key)
+        return self.update(backend_id, {"credential_ref": ref})
+
+    def get_credential_for(self, backend_id: str) -> Optional[str]:
+        """The raw API key for ``backend_id``, looked up via its record's ``credential_ref``.
+        Returns ``None`` (never raises) if the backend, its ``credential_ref``, or the underlying
+        secret doesn't exist."""
+        record = self.get(backend_id)
+        ref = record.get("credential_ref") if record else None
+        return self._secrets.get(ref) if ref else None
