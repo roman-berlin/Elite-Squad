@@ -369,17 +369,38 @@ def backend_control(cfg, app_name: str | None = None) -> str:
     EU-223 adds an optional PER-PROJECT selector for ``app_name`` — defaults to "Inherit global"
     (selected when the app has no override) and posts ``app=<app_name>`` alongside ``backend=`` so
     only THAT project's pref changes — the two parallel drains (EU-103) can each pin a backend.
-    Never renders the token value."""
-    from . import backends as _bk, backend_pref
+    Never renders the token value.
+
+    EU-236: ALSO lists every user-defined model-registry backend as an additional ``<option>`` in
+    the global selector, alongside Claude/GLM — sourced live from ``ModelRegistry(cfg)`` (cfg-
+    anchored, same hermetic tmp-store convention as ``model_registry.py``) so a backend added via
+    the cockpit shows up immediately, with no code change or restart. Never renders a credential."""
+    from . import backend_pref
+    from . import backends as _bk
+    from .model_registry import ModelRegistry
     active = backend_pref.active(cfg)
     glm_ok = _bk.available("glm")
     show_glm = glm_ok or active == _bk.GLM     # keep a stale GLM choice visible even if key vanished
-    opts = f"<option value='opus' {'selected' if active == _bk.NATIVE else ''}>Opus (Claude)</option>"
-    if show_glm:
-        glm_label = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
-        opts += (f"<option value='glm' {'selected' if active == _bk.GLM else ''} "
-                 f'title="Sends prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
-                 f"{glm_label}</option>")
+    # EU-236: enumerate the selectable backends through backends.list_backends (the single source of
+    # truth — hardcoded opus/glm + every registry record), then render each; opus/glm keep their
+    # availability + third-party notes, registry records render as a plain custom option.
+    opts = ""
+    for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
+        _bid = _entry["id"]
+        if _bid == _bk.NATIVE:
+            opts += (f"<option value='opus' {'selected' if active == _bk.NATIVE else ''}>"
+                     "Opus (Claude)</option>")
+        elif _bid == _bk.GLM:
+            if not show_glm:
+                continue
+            glm_label = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
+            opts += (f"<option value='glm' {'selected' if active == _bk.GLM else ''} "
+                     f'title="Sends prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
+                     f"{glm_label}</option>")
+        else:
+            _label = html.escape(_entry.get("label") or _bid)
+            opts += (f"<option value='{html.escape(_bid)}' {'selected' if active == _bid else ''} "
+                     f'title="Custom model backend — {_label}">{_label}</option>')
     if active == _bk.GLM and not glm_ok:
         note = ("<span class=\"tbnote bad\" title=\"Set GLM_AUTH_TOKEN and restart\">"
                 "&#9888; GLM key missing — runs blocked</span>")

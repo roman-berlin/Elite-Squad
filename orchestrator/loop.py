@@ -434,7 +434,12 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     # var before awaiting the body — the body is one pure await-chain with no task/thread boundary,
     # so the value reaches every officer call (a future create_task/run_in_executor added *before*
     # this set would not inherit it — keep the set first).
-    _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE))
+    # EU-236: pass the cfg-anchored ModelRegistry so a registry-id pin (a custom backend) is both
+    # preserved by current() and resolved hermetically by apply() at the SDK seam — never against the
+    # live state/ store from within a test's tmp config.
+    from .model_registry import ModelRegistry
+    _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE),
+                                     registry=ModelRegistry(cfg))
     try:
         return await _run_inner(cfg, worklist, audit, stop_event)
     finally:

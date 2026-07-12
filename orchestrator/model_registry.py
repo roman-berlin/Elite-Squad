@@ -219,3 +219,22 @@ class ModelRegistry:
         if not ref:
             return None
         return Secrets(path=self._secrets_path()).get(ref)
+
+    # ------------------------------------------------------------------- EU-236 (dynamic backends)
+
+    def get_backend_config(self, model_id: str) -> Optional[dict]:
+        """A ready-to-use backend dict for :func:`orchestrator.backends.apply`:
+        ``{base_url, model_id, small_fast_model_id, auth_token}`` — ``auth_token`` resolved through
+        :meth:`get_credential_for` (never the raw ``credential_ref``). ``None`` if ``model_id`` isn't
+        a registry record. ``auth_token`` may itself be ``None`` when the credential is missing or
+        unresolvable — callers (``backends.apply``) must fail closed on that, exactly like the GLM
+        branch does for a missing ``GLM_AUTH_TOKEN``; this method only resolves, never validates."""
+        record = self.get(model_id)
+        if record is None:
+            return None
+        return {
+            "base_url": record.get("base_url"),
+            "model_id": record.get("model_id"),
+            "small_fast_model_id": record.get("small_fast_model_id") or record.get("model_id"),
+            "auth_token": self.get_credential_for(model_id),
+        }

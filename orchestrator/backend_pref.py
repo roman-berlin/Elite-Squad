@@ -33,6 +33,14 @@ from pathlib import Path
 from . import backends, locking
 
 
+def _registry(cfg=None):
+    """EU-236: the cfg-anchored :class:`ModelRegistry` used to tell a real registry id apart from an
+    unknown value, so a persisted/selected registry id is preserved instead of being flattened to
+    ``opus`` by :func:`backends.normalize`. Deferred import keeps module load cheap and cycle-free."""
+    from .model_registry import ModelRegistry
+    return ModelRegistry(cfg)
+
+
 def _legacy_file() -> Path:
     """The pre-EU-190-hermeticity repo-root store — read only by ``migrate()``."""
     return Path(__file__).resolve().parent.parent / "model_backend.json"
@@ -73,9 +81,11 @@ def _load(cfg=None) -> dict:
 
 
 def get(cfg=None) -> str | None:
-    """The persisted GLOBAL backend id (normalized), or ``None`` if never set / unreadable."""
+    """The persisted GLOBAL backend id, or ``None`` if never set / unreadable. EU-236: a valid
+    registry id is preserved verbatim (via :func:`backends.resolve_selection`); an alias is
+    canonicalized; an unknown/deleted id degrades safely to ``opus``."""
     bk = _load(cfg).get("backend")
-    return backends.normalize(bk) if bk else None
+    return backends.resolve_selection(bk, _registry(cfg)) if bk else None
 
 
 def get_apps(cfg=None) -> dict[str, str]:
@@ -86,7 +96,8 @@ def get_apps(cfg=None) -> dict[str, str]:
     apps = _load(cfg).get("apps")
     if not isinstance(apps, dict):
         return {}
-    return {name: backends.normalize(bk) for name, bk in apps.items()
+    reg = _registry(cfg)
+    return {name: backends.resolve_selection(bk, reg) for name, bk in apps.items()
             if isinstance(name, str) and bk}
 
 
@@ -108,6 +119,8 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
     ``autopilot.save_blocked`` — so two concurrent callers (e.g. a global write from one drain and
     a per-app write from another) can never race an unlocked read-then-overwrite and clobber or
     torn-read each other's update."""
+    reg = _registry(cfg)
+
     def _mutate(current: dict) -> dict:
         data = dict(current) if isinstance(current, dict) else {}
         if app_name:
@@ -115,10 +128,10 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
             if bk in _INHERIT:
                 apps.pop(app_name, None)
             else:
-                apps[app_name] = backends.normalize(bk)
+                apps[app_name] = backends.resolve_selection(bk, reg)
             data["apps"] = apps
         else:
-            data["backend"] = backends.normalize(bk)
+            data["backend"] = backends.resolve_selection(bk, reg)
         return data
 
     try:
@@ -129,10 +142,11 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
 
 def active(cfg=None, app_name: str | None = None) -> str:
     """The effective active backend for ``app_name`` (global when omitted): the app's own override,
-    else the persisted GLOBAL preference, else the ``config.yaml`` default, else Opus. Always a
-    canonical id (``'opus'`` | ``'glm'``)."""
+    else the persisted GLOBAL preference, else the ``config.yaml`` default, else Opus. Returns a
+    canonical id (``'opus'`` | ``'glm'``) or, EU-236, a registry record id when one is selected."""
     if app_name:
         override = get_apps(cfg).get(app_name)
         if override:
             return override
-    return get(cfg) or backends.normalize(getattr(cfg, "model_backend", backends.NATIVE))
+    return get(cfg) or backends.resolve_selection(
+        getattr(cfg, "model_backend", backends.NATIVE), _registry(cfg))
