@@ -247,10 +247,79 @@ def load_error_counts(cfg: Config) -> dict[str, int]:
         return {}
 
 
+def _ticket_project(ticket_id: str) -> str:
+    """Jira project key of a ticket id — the part before the first '-' ('EU-151' -> 'EU').
+
+    save_error_counts uses this to tell THIS drain's own keys apart from a concurrent drain's:
+    every project's backlog is drained by exactly one app's drain at a time (the per-project run
+    slot in server.py is single-writer, EU-64), so a key whose project this drain is currently
+    writing is unambiguously ours — to add, update, or intentionally drop — while a key of any
+    other project belongs to the other drain and must be preserved from the fresh on-disk read."""
+    return ticket_id.split("-", 1)[0]
+
+
+# EU-274: per-(file, thread) memory of the last `counts` snapshot THIS drain wrote. It is a SECONDARY
+# delete signal, only needed for the one case the primary (project-prefix) signal can't cover: a save
+# whose `counts` is EMPTY because the drain's last tracked ticket just parked/succeeded (its key
+# popped) — an empty dict carries no prefix to reveal which project it owns, so without this the drop
+# wouldn't propagate and the park-after-3 counter would never reset. Bounded by pruning rows of dead
+# threads on every save (see _prune_dead_error_counts_seen), so it can't grow with run-thread churn and
+# a recycled OS-thread ident can't inherit a dead predecessor's baseline; the value-match guard in the
+# merge is a second belt on ident reuse (a key is dropped via this path only if disk still holds the
+# exact value this thread last wrote).
+_error_counts_seen: dict[tuple[str, int], dict[str, int]] = {}
+_error_counts_seen_lock = threading.Lock()
+
+
+def _prune_dead_error_counts_seen(live_idents: set[int]) -> None:
+    """Drop _error_counts_seen rows for threads that have exited. Call under _error_counts_seen_lock."""
+    for key in [k for k in _error_counts_seen if k[1] not in live_idents]:
+        _error_counts_seen.pop(key, None)
+
+
 def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
+    # EU-274: route through locked_rmw (matching save_blocked) instead of a bare write_text. A plain
+    # overwrite of a full-dict snapshot taken at load time let a concurrent drain's stale write clobber
+    # increments made in between (a stale automatixy-drain snapshot erasing a fresh EU-151 count) — and
+    # even a lock around a blind overwrite only serialises the writes, it does not refresh the stale
+    # snapshot. locked_rmw re-reads the on-disk value under the lock so we MERGE onto the truth. A key
+    # on disk but absent from `counts` is deleted (an intentional pop: a ticket parked or succeeded)
+    # only when it is unambiguously THIS drain's — otherwise it is preserved as a concurrent drain's:
+    #
+    #   (a) its project is one this drain is writing right now — call-time context from `counts`, so it
+    #       needs no warm cache and already deletes a stale same-project key on a drain's very FIRST
+    #       save after a restart (this closes the cold-cache resurrection gap the earlier attempt had); or
+    #   (b) this same thread wrote the key last save at the value still on disk — the only extra case,
+    #       for when (a) has no signal because `counts` emptied as the last tracked ticket parked.
+    #
+    # A key whose project no other-writer touches and that neither signal claims stays put, so a
+    # concurrent foreign increment is never clobbered.
+    path = _error_counts_file(cfg)
+    cache_key = (str(path), threading.get_ident())
+    live = {t.ident for t in threading.enumerate()}
+    with _error_counts_seen_lock:
+        _prune_dead_error_counts_seen(live)
+        baseline = _error_counts_seen.get(cache_key, {})
+    owned = {_ticket_project(k) for k in counts}
+
+    def _merge(current):
+        current = current if isinstance(current, dict) else {}
+        merged: dict[str, int] = {}
+        for k, v in current.items():
+            k = str(k)
+            if k in counts:
+                continue                      # counts.update below is authoritative for tracked keys
+            if _ticket_project(k) in owned or baseline.get(k) == v:
+                continue                      # ours, intentionally dropped -> delete (skip)
+            merged[k] = v                     # another drain's key -> preserve from the fresh read
+        merged.update(counts)
+        return merged
+
     try:
-        _error_counts_file(cfg).write_text(json.dumps(counts, indent=2, sort_keys=True))
-    except OSError:
+        locking.locked_rmw(path, _merge, default={})
+        with _error_counts_seen_lock:
+            _error_counts_seen[cache_key] = dict(counts)
+    except (OSError, ValueError):
         pass
 
 
