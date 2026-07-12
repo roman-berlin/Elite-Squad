@@ -19,6 +19,21 @@ from .config import AppConfig
 from .contracts import GateResult
 
 
+def _subprocess_env(app: AppConfig) -> dict[str, str]:
+    """EU-255: the env for a gate subprocess — it runs the PRODUCT's own (untrusted) test/build/
+    lint commands, the same boundary the officer SDK seam minimizes via
+    ``backends.secret_strip_overrides``. Inherits PATH/HOME/TMPDIR/toolchain and the active
+    backend's model auth (anything NOT flagged sensitive) plus ``app.gate_env``, but OMITS
+    JIRA_*/TELEGRAM_*/GENERAL_COCKPIT_PROMOTE — those live only in the orchestrator's own process
+    and a gate never legitimately needs them. Unlike ``backends.secret_strip_overrides`` (which must
+    BLANK because the SDK merges options.env OVER os.environ), here we build the dict ourselves, so
+    the sensitive keys are simply left out."""
+    from . import backends as _backends
+    env = {k: v for k, v in os.environ.items() if not _backends.is_sensitive_key(k)}
+    env.update(app.gate_env)
+    return env
+
+
 def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) -> GateResult:
     """Run a list of shell commands in the app's worktree; fail on the first non-zero exit.
     Shared by the pre-review gate and the post-merge SRE.
@@ -37,7 +52,7 @@ def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) ->
             proc = subprocess.Popen(
                 cmd, shell=True, cwd=where,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env={**os.environ, **app.gate_env},
+                env=_subprocess_env(app),   # EU-255: minimized — no Jira/Telegram creds
                 start_new_session=True,  # Creates new session/group on Unix; ignored on Windows
             )
             try:
@@ -104,7 +119,7 @@ def preflight_imports(app: AppConfig, commands: list[str] | None = None) -> Gate
         proc = subprocess.run(
             [interp, "-c", "import " + ", ".join(mods)],
             capture_output=True, text=True, timeout=min(app.gate_timeout_sec, 120),
-            env={**os.environ, **app.gate_env},
+            env=_subprocess_env(app),   # EU-255: minimized — no Jira/Telegram creds
         )
     except Exception as exc:  # noqa: BLE001 - a broken/missing interpreter IS the finding
         return GateResult(passed=False, report=f"gate health check: cannot run interpreter '{interp}': {exc}")

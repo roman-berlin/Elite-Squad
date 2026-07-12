@@ -10,9 +10,10 @@ A run pins ONE backend via a run-scoped ``contextvars.ContextVar`` set at the to
 from ``cfg.model_backend``. The single SDK seam (``agent._run_agent_unrouted``) calls
 ``apply(options)`` just before ``query()``:
 
-* **Opus (native)** — a pure no-op. ``options.env`` is left empty, so the SDK subprocess inherits
-  the parent environment (the Max subscription via ``claude login`` / ``CLAUDE_CODE_OAUTH_TOKEN``)
-  exactly as today.
+* **Opus (native)** — a pure no-op. ``options.env`` is left empty by ``apply``, so the SDK
+  subprocess inherits the parent environment (the Max subscription via ``claude login`` /
+  ``CLAUDE_CODE_OAUTH_TOKEN``) exactly as today. (The EU-255 Jira/Telegram credential scrub is a
+  separate step applied at the SDK seam AFTER ``apply`` — see ``secret_strip_overrides`` below.)
 * **GLM** — writes the z.ai endpoint + bearer into ``options.env`` for THAT ONE subprocess. The SDK
   transport builds ``process_env = {**os.environ, ..., **options.env, ...}`` (verified against
   claude_agent_sdk 0.2.101), so ``options.env`` overrides the inherited env for the child process
@@ -36,6 +37,13 @@ Safety
   through to the stored Anthropic OAuth and leak the Max token to a third party.
 * **Credential isolation.** A GLM call blanks ``ANTHROPIC_API_KEY`` and ``CLAUDE_CODE_OAUTH_TOKEN``
   in ``options.env`` so Anthropic subscription creds are never forwarded to z.ai.
+* **Untrusted-execution minimization (EU-255).** The SDK seam (``agent._run_agent_unrouted``)
+  merges :func:`secret_strip_overrides` into ``options.env`` right AFTER ``apply`` — for BOTH
+  backends — blanking ``JIRA_EMAIL``/``JIRA_API_TOKEN``/``TELEGRAM_BOT_TOKEN``/``TELEGRAM_CHAT_ID``/
+  ``GENERAL_COCKPIT_PROMOTE`` (and any other ``JIRA_``/``TELEGRAM_``-prefixed var), since the
+  officer subprocess builds/tests untrusted product code and Jira/Telegram calls only ever happen
+  in the orchestrator's own process. Kept out of ``apply`` so ``apply`` stays a pure model/backend
+  transform; ``gate.py`` omits the same keys via :func:`is_sensitive_key` at its own subprocess seam.
 * **No shared mutable state.** The contextvar is per-run; ``apply`` builds a fresh dict every call.
 """
 from __future__ import annotations
@@ -89,6 +97,36 @@ def current() -> str:
     return _BACKEND.get()
 
 
+# EU-255: keys/prefixes that must NEVER reach an officer subprocess building untrusted product
+# code. Jira/Telegram calls happen ONLY in the orchestrator's own (parent) process — an officer
+# subprocess never legitimately needs them, yet the SDK builds `{**os.environ, **options.env}`
+# (subprocess_cli.py), so the full parent env — including these — is inherited unless blanked here.
+SENSITIVE_KEYS: frozenset[str] = frozenset({
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "GENERAL_COCKPIT_PROMOTE",
+})
+SENSITIVE_PREFIXES: tuple[str, ...] = ("JIRA_", "TELEGRAM_")
+
+
+def is_sensitive_key(key: str) -> bool:
+    """True if ``key`` is one of the credentials an untrusted-code subprocess must never see."""
+    return key in SENSITIVE_KEYS or any(key.startswith(p) for p in SENSITIVE_PREFIXES)
+
+
+def secret_strip_overrides() -> dict[str, str]:
+    """Blank overrides for every sensitive key PRESENT in the parent env, to merge into an officer
+    subprocess's ``options.env`` right before spawn (done at the single SDK seam
+    ``agent._run_agent_unrouted``, NOT here in :func:`apply`, which stays a pure model/backend
+    transform). Blanking (not omitting) is required because the SDK merges ``options.env`` OVER the
+    inherited ``os.environ`` — a key simply absent from ``options.env`` still comes through from the
+    parent. A fresh dict every call; os.environ itself is never touched, so orchestrator-side
+    Jira/Telegram calls in THIS process are unaffected."""
+    return {k: "" for k in os.environ if is_sensitive_key(k)}
+
+
 def _glm_token() -> str:
     return (os.environ.get("GLM_AUTH_TOKEN") or "").strip()
 
@@ -137,6 +175,10 @@ def apply(options, backend: str | None = None) -> str:
 
     Returns the EFFECTIVE backend id actually applied (:data:`NATIVE` or :data:`GLM`) so the caller
     can label the ledger/audit. For NATIVE this is a pure no-op (env untouched, model unchanged).
+
+    Credential minimization (EU-255) is a SEPARATE concern and is applied AT THE SEAM
+    (``agent._run_agent_unrouted``, via :func:`secret_strip_overrides`) right after this call — so
+    ``apply`` remains a pure model/backend transform and both backends get the same env scrub.
 
     Fail-closed: GLM with no ``GLM_AUTH_TOKEN`` falls back to NATIVE with a warning rather than
     pointing the subprocess at z.ai with an empty bearer.

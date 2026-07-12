@@ -299,6 +299,18 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     # backend actually applied (fail-closed to Opus if GLM is unconfigured).
     from . import backends as _backends
     effective_backend = _backends.apply(options)
+    # EU-255: credential-minimize THIS officer subprocess (it builds/tests injection-prone,
+    # untrusted product code). The SDK builds the child env as {**os.environ, **options.env}
+    # (subprocess_cli.py), so blank the orchestrator-only Jira/Telegram creds in options.env — a
+    # key merely ABSENT from options.env still inherits from the parent. Applied at this single
+    # seam (after apply(), for both backends) rather than inside apply(), which stays a pure
+    # model/backend transform. Model auth (CLAUDE_CODE_OAUTH_TOKEN / the GLM z.ai bearer) is not
+    # sensitive by this predicate, so it passes through untouched.
+    _strip = _backends.secret_strip_overrides()
+    if _strip:
+        _merged_env = dict(getattr(options, "env", None) or {})
+        _merged_env.update(_strip)
+        options.env = _merged_env
     # EU-123: capture provider info — label from the backend actually applied, not a global sniff.
     from . import provider as _provider
     model = getattr(options, "model", "") or ""
