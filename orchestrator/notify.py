@@ -12,10 +12,14 @@ Setup (one time):
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+from pathlib import Path
 
 import requests
+
+from . import locking
 
 # Phone reports (EU-62): a verbose report is SUMMARISED into a COMPLETE bulleted brief — every decision,
 # action item, and blocker in tight bullets — never a truncated prefix that ends with "…(full report in
@@ -144,23 +148,99 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list:
 
 # EU-118: plan-limit alert sent flag (one-shot per session to avoid spam)
 _plan_limit_alert_sent = False
+# EU-213: identity of the episode the flag above was set for — the signature of the specific cap
+# (which limits are over + when they reset). Paired with _plan_limit_alert_sent so suppression is
+# scoped to ONE episode: a genuinely new cap must alert even if a stale "sent" flag lingers.
+_plan_limit_alert_episode: str | None = None
+
+# EU-213: the in-memory flag above resets to False on every process restart, so a fresh autopilot
+# process could re-fire the SAME alert the previous process already sent (dedup was per-session
+# only). Persist the flag to this small JSON sidecar too; a module-level constant so tests can
+# point it at a tempdir. Lives beside the other small state sidecars under state/ (gitignored).
+# The file also records the episode signature, so a stale on-disk flag from a PRIOR (resolved)
+# episode cannot suppress the alert for a genuinely NEW cap — only a matching episode suppresses.
+_PLAN_LIMIT_DEDUP_FILE = Path(__file__).resolve().parent.parent / "state" / "sonnet_alert_dedup.json"
+
+
+def _episode_signature(over_limits: list, reset_times: list[str]) -> str:
+    """Stable identity of a cap episode (EU-213): the sorted set of over-limit keys/labels plus the
+    sorted reset times. A genuinely new episode — different limits hit, or a later reset time —
+    yields a different signature, so a stale on-disk 'already sent' flag from a prior (resolved)
+    episode can never suppress the alert for a NEW one. Order-independent so the same cap produces
+    the same signature regardless of how the caller ordered the lists."""
+    keys = sorted(
+        str((limit or {}).get("key") or (limit or {}).get("label") or "")
+        for limit in (over_limits or [])
+    )
+    resets = sorted(str(r) for r in (reset_times or []))
+    return "||".join(keys) + "::" + "||".join(resets)
+
+
+def _plan_limit_dedup_read() -> tuple[bool, str | None]:
+    """Best-effort read of the on-disk dedup: ``(sent, episode_signature)``. Missing/corrupt file
+    reads as ``(False, None)`` — losing the dedup on a bad read is far safer than silently
+    suppressing a real alert."""
+    try:
+        data = json.loads(_PLAN_LIMIT_DEDUP_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return bool(data.get("plan_limit_alert_sent")), data.get("episode")
+    except (OSError, ValueError):
+        pass
+    return False, None
+
+
+def _plan_limit_dedup_loaded() -> bool:
+    """Back-compat shim: True when the on-disk flag says an alert was already sent (ignores
+    episode identity). Prefer ``_plan_limit_dedup_read`` for episode-scoped decisions."""
+    return _plan_limit_dedup_read()[0]
+
+
+def _plan_limit_dedup_write(sent: bool, episode: str | None = None) -> None:
+    """Best-effort persist of the dedup flag + its episode signature — never raises
+    (instrumentation must never break a notification). Clearing (``sent=False``) also drops the
+    episode so a later cap starts from a clean slate."""
+    payload = {"plan_limit_alert_sent": sent, "episode": episode if sent else None}
+    try:
+        locking.locked_rmw(_PLAN_LIMIT_DEDUP_FILE, lambda _: payload,
+                           default={}, corrupt_to_default=True)
+    except OSError:
+        pass
 
 
 def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
     """Send a SEVERE Telegram alert when a Claude plan limit is hit.
 
-    Returns True if sent, False if not configured or failed. Only sends ONCE per
-    session (resets on process restart) to avoid spamming the Commander every
-    autopilot cycle while the limit is active.
+    Returns True if sent, False if not configured or failed. Only sends ONCE per limit episode —
+    the sent flag (and the episode's signature) is persisted to disk (EU-213) as well as in-memory,
+    so a process restart while the SAME limit is still active does NOT re-fire the alert. Crucially,
+    suppression is scoped to the episode: a stale on-disk flag left over from a PRIOR (resolved)
+    cap does not eat the alert for a genuinely NEW cap — a different episode always alerts.
+    ``reset_plan_limit_alert()`` clears both so a future limit hit can alert again.
 
     Args:
         over_limits: List of limit dicts that are hit (from ``usage.plan_limit_hit``)
         reset_times: List of human-readable reset times like "Mon Jun 30 14:30 UTC"
     """
-    global _plan_limit_alert_sent
+    global _plan_limit_alert_sent, _plan_limit_alert_episode
 
-    # Only alert once per session
+    sig = _episode_signature(over_limits, reset_times)
+
+    # Which episode (if any) have we already alerted for? In-memory first, else the on-disk record
+    # left by a prior (now restarted) process. Only that exact episode is suppressed.
+    sent_episode: str | None = None
     if _plan_limit_alert_sent:
+        sent_episode = _plan_limit_alert_episode
+    else:
+        disk_sent, disk_episode = _plan_limit_dedup_read()
+        if disk_sent:
+            sent_episode = disk_episode
+            # Adopt the on-disk state in memory ONLY when it matches the current episode; a stale
+            # flag for a different episode is left untouched so this new cap alerts and overwrites it.
+            if disk_episode == sig:
+                _plan_limit_alert_sent = True
+                _plan_limit_alert_episode = disk_episode
+
+    if sent_episode is not None and sent_episode == sig:
         return False
 
     if not configured():
@@ -185,6 +265,8 @@ def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
     sent = send(message)
     if sent:
         _plan_limit_alert_sent = True
+        _plan_limit_alert_episode = sig
+        _plan_limit_dedup_write(True, sig)
 
     return sent
 
@@ -192,10 +274,14 @@ def plan_limit_alert(over_limits: list, reset_times: list[str]) -> bool:
 def reset_plan_limit_alert() -> None:
     """Clear the plan-limit alert sent flag — e.g. after the limit resets.
 
-    Allows a new alert to be sent if the limit is hit again in a future billing period.
+    Allows a new alert to be sent if the limit is hit again in a future billing period. Clears
+    the in-memory flag, its episode signature, and the on-disk dedup (EU-213) so a restarted
+    process doesn't adopt stale "already sent" state.
     """
-    global _plan_limit_alert_sent
+    global _plan_limit_alert_sent, _plan_limit_alert_episode
     _plan_limit_alert_sent = False
+    _plan_limit_alert_episode = None
+    _plan_limit_dedup_write(False)
 
 
 # EU-122: dual-provider low-watermark alert sent flag (one-shot per provider per session)

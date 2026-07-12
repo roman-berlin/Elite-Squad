@@ -61,6 +61,11 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   (fail-first — step 5): a test that stays green on the unchanged code is not covering your change.
   (Bun's test runner is light — unlike Vitest below it does not need worker bounding — but still
   scope it to the package you touched, not the whole monorepo.)
+  CI PARITY: `bun test` and `vitest` are DIFFERENT runners with different discovery/execution — a
+  `bun test` pass does NOT verify a `vitest` job. Before claiming any CI/test-running outcome
+  ("tests pass", "CI will go green"), check the app's package.json `test` script and CI workflow
+  (.github/workflows/*.yml) for the command CI actually runs, and verify with THAT command. Never
+  state a CI outcome you have not actually observed with CI's own runner.
 - SECURITY: never commit a secret (API key, token, password, private key, connection string).
   Keep queries parameterised and new routes behind their auth guard. (Phase-2 §2: the §1/§2/§3
   countersignature block was retired with the LLM security gate — a deterministic secret/dep scan
@@ -282,16 +287,121 @@ def _section_bullets(text: str, heading: str) -> list[str]:
     return items
 
 
+# EU-267: phrase markers that flag a sentence/line as a caveat/limitation admission — e.g. AUTO-109's
+# "the e2e tests have broader environmental issues ... but the implementation is correct and ready
+# for use", which sat ~1.8k chars into the summary and was truncated out of diff_digest (capped at 500
+# chars) before it ever reached the Reviewer. Matched case-insensitively over the FULL summary text
+# (never truncated) so a caveat buried anywhere in a long summary still survives into the artifact.
+#
+# Two tiers (iteration 2): STRONG markers are unambiguous limitation vocabulary and fire on their own.
+# WEAK markers ("however", "not fully", "known issue") are ambiguous in isolation — "However, I also
+# updated the README" is not a caveat — so they fire ONLY when the same chunk also carries genuine
+# limitation-shaped context (a test/verification/coverage/incompleteness word). This mirrors reviewer
+# .py's _RESOLVED_CTX_RE guard: precision over a blunt keyword match, so benign prose isn't flagged.
+_CAVEAT_STRONG = re.compile(
+    r"\b("
+    r"caveat|limitation|unverified|not tested|untested|"
+    r"environmental issue|broader\s+\S+\s+issues?|"
+    r"ready for use but|edge case not|"
+    r"does not cover|out of scope for this|manual verification"
+    r")\b",
+    re.IGNORECASE,
+)
+_CAVEAT_WEAK = re.compile(
+    r"\b(however|not fully|known issue)\b",
+    re.IGNORECASE,
+)
+# Limitation-shaped context that promotes a WEAK marker to a caveat. Deliberately excludes the bare
+# word "issue" (it is part of "known issue" and would self-satisfy) — it looks for something being
+# incomplete/unverified/untested/broken, not just any mention.
+_CAVEAT_CONTEXT = re.compile(
+    r"\b("
+    r"tests?|verif\w*|cover\w*|fail\w*|skip\w*|broken|"
+    r"limitation|caveat|unresolved|incomplete|todo|missing|"
+    r"environment\w*|not\s+\w+"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Bound the extracted caveats consistently with builder.py's _FEEDBACK_MAX_ITEMS / _FEEDBACK_MAX_CHARS
+# pattern, so a pathologically verbose summary can't balloon the reviewer prompt. Keep the FIRST items
+# (a summary leads with its most salient caveats) and clip any single over-long entry.
+_CAVEAT_MAX_ITEMS = 12
+_CAVEAT_MAX_CHARS = 6000
+_CAVEAT_ITEM_MAX_CHARS = 1000
+
+
+def _bound_caveats(items: list[str]) -> list[str]:
+    """Cap the extracted caveats by item count, per-item length, and total chars — mirroring the
+    _cap_feedback bounding so a verbose summary can't grow the reviewer prompt without limit. Keeps the
+    FIRST items (leading caveats are the salient ones) and appends a marker line noting any elision."""
+    kept: list[str] = []
+    total = 0
+    dropped = 0
+    for item in items:
+        if len(kept) >= _CAVEAT_MAX_ITEMS:
+            dropped = len(items) - len(kept)
+            break
+        clipped = item if len(item) <= _CAVEAT_ITEM_MAX_CHARS else item[: _CAVEAT_ITEM_MAX_CHARS - 1].rstrip() + "…"
+        if total + len(clipped) > _CAVEAT_MAX_CHARS and kept:
+            dropped = len(items) - len(kept)
+            break
+        kept.append(clipped)
+        total += len(clipped)
+    if dropped:
+        kept.append(f"(+{dropped} further caveat(s) elided to bound context)")
+    return kept
+
+
+def _caveats(summary: str) -> list[str]:
+    """Scan the FULL builder summary (never truncated to 500 chars, unlike diff_digest) for
+    caveat/limitation language, returning the matching sentences/lines verbatim. Combines a
+    phrase-marker scan (catches free-form admissions anywhere in the text, however deep) with the
+    existing ``Caveats:``/``Limitations:`` bullet sections (structured callouts). De-duplicated,
+    order-preserving, and bounded (item count + chars). Returns [] when the builder flagged nothing —
+    a STRONG marker fires alone, a WEAK marker only alongside limitation context (no false positives)."""
+    text = summary or ""
+    found: list[str] = []
+
+    # Structured sections first (e.g. "Limitations:\n  - ...").
+    for heading in ("caveat", "limitation"):
+        found.extend(_section_bullets(text, heading))
+
+    # Free-form phrase scan over the WHOLE text — split into sentences/lines so each hit is reported
+    # with enough surrounding context to be useful, not just the bare marker word.
+    chunks = re.split(r"(?<=[.!?])\s+|\n+", text)
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if _CAVEAT_STRONG.search(chunk):
+            found.append(chunk)
+        elif _CAVEAT_WEAK.search(chunk) and _CAVEAT_CONTEXT.search(chunk):
+            found.append(chunk)
+
+    # De-dupe while preserving first-seen order (a phrase-scan hit may overlap a section bullet).
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in found:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return _bound_caveats(deduped)
+
+
 def _build_artifact(result: BuildResult) -> BuildArtifact:
     """Distil a BuildResult into the typed BuildArtifact handoff (EU-72). ``files_changed`` is left
     empty for the loop to stamp (it owns git); the digest and any Decisions/Open-questions sections
-    come from the builder's own summary."""
+    come from the builder's own summary. ``caveats`` (EU-267) scans the FULL summary — independent of
+    the 500-char diff_digest cap — so a caveat buried deep in a long summary still reaches the
+    Reviewer."""
     summary = result.summary or result.raw or ""
     return BuildArtifact(
         files_changed=[],
         diff_digest=_digest(summary),
         decisions=_section_bullets(summary, "decision"),
         open_questions=_section_bullets(summary, "open question"),
+        caveats=_caveats(summary),
     )
 
 
@@ -330,6 +440,27 @@ def _prompt(req: BuildRequest, cfg=None, spec: SpecArtifact | None = None) -> st
             "You MUST address every point below; do not regress passing behaviour:",
             issues,
         ]
+    # EU-251: a CI-relevant ticket gets an explicit reminder to verify with CI's OWN runner (the
+    # package.json `test` script, e.g. `vitest run`) rather than `bun test` — AUTO-112 landed on a
+    # verbatim "CI will go green" / "verified with bun test" claim while CI (vitest) was red.
+    # Best-effort: should_run() failing (or cfg being unavailable in a caller that doesn't pass one)
+    # must never block a build.
+    try:
+        if cfg is not None:
+            from . import ci_conclusion
+            if ci_conclusion.should_run(cfg, req.ticket):
+                parts += [
+                    "",
+                    "CI VERIFICATION (this ticket is CI-relevant):",
+                    "  Verify with the SAME runner CI uses for this app — read the app's "
+                    "package.json `test` script (and .github/workflows/*.yml) and run THAT "
+                    "command, not `bun test`. `bun test` and `vitest` are different runners; a "
+                    "`bun test` pass does not verify a vitest-run CI job. Do not claim \"CI will "
+                    "go green\" or any CI outcome you have not actually observed with CI's own "
+                    "command.",
+                ]
+    except Exception:  # noqa: BLE001 — this reminder is best-effort, never blocks a build
+        pass
     parts += ["", "Implement the ticket now."]
     return "\n".join(parts)
 

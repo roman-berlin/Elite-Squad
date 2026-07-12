@@ -61,6 +61,15 @@ Rules for the verdict:
   set verdict to FAIL.
 """
 
+REVIEWER_SYSTEM += """
+EU-249 hard rule — admitted-red tests are ALWAYS blocking: if the Builder's own handoff (the
+diff_digest/decisions/open_questions you were given) admits that a test is failing, was skipped, or
+hit a "test infrastructure issue" it didn't resolve, you MUST record that as a blocker/major quality
+issue (area "tests") and the verdict CANNOT be PASS. Do not let confident prose about the rest of the
+diff talk you into passing a self-reported red or skipped test — a diff whose own author says the
+tests didn't run/pass ships nothing verified, regardless of how the rest of the diff reads.
+"""
+
 # EU-42: give the Reviewer the out-of-scope findings channel. A real-but-off-spec issue it notices
 # while judging the diff (a bug/risk outside THIS ticket's scope) is emitted as the shared
 # ===TICKETS=== block, which loop._route_out_of_scope parses off review.raw and routes into the
@@ -93,6 +102,11 @@ def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = No
             parts.append("  decisions: " + "; ".join(build_artifact.decisions))
         if build_artifact.open_questions:
             parts.append("  open questions: " + "; ".join(build_artifact.open_questions))
+        # EU-267: caveats/limitations the builder flagged, surfaced independent of diff_digest's
+        # 500-char cap — a caveat buried past char 500 of the summary (e.g. AUTO-109's unverified-test
+        # admission) must still reach the Reviewer here even when diff_digest truncated it out.
+        if build_artifact.caveats:
+            parts.append("  caveats/limitations: " + "; ".join(build_artifact.caveats))
     parts += [
         "",
         "DIFF UNDER REVIEW (feature branch vs base):",
@@ -103,6 +117,199 @@ def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = No
         "Review it now. Read any files you need for context, then emit the JSON verdict.",
     ]
     return "\n".join(parts)
+
+
+# EU-249: a deterministic backstop for the AUTO-97 failure mode — the Builder's OWN handoff admitted
+# "test files were created but encountered test infrastructure issues with localStorage mocking" and
+# the LLM reviewer still emitted PASS with blocking:0. The system-prompt rule above is the primary
+# defence; this pair of regexes is the safety net that doesn't depend on the model noticing, so it
+# can't silently regress.
+#
+# Iteration-2 narrowing: the v1 regex was too broad — it flagged ordinary GREEN summaries like
+# "Tests: 23 passed, 0 failed." and explicitly RESOLVED failures like "Fixed the failing test, now
+# green", bouncing perfectly good diffs. The detector now fires only on a genuinely UNRESOLVED
+# admission and deliberately ignores negation/resolution contexts:
+#   • STRONG signals fire unconditionally — an unambiguous unresolved admission (test infra issue,
+#     "still failing", "not passing", "couldn't get … to pass", "had to skip", "never ran").
+#   • WEAK signals (a bare "failing/broken/skipped … test") fire ONLY when the same field carries NO
+#     negation/resolution context ("no", "0", "zero", "none", "fixed", "resolved", "now pass/green",
+#     "all tests pass", "nothing broke") — so "0 failed", "No tests failed", "Fixed the failing test,
+#     now green" and friends stay PASS.
+# A false positive costs one extra builder pass; a false negative ships an unverified diff — but the
+# earlier over-broad version was itself parking valid diffs, so precision here IS the fix.
+_UNRESOLVED_STRONG_RE = re.compile(
+    r"(?i)("
+    r"\btest(?:s|ing)?\s+infra(?:structure)?\b"                          # "test infrastructure issues"
+    r"|\binfra(?:structure)?\s+issues?\b[^.\n]{0,40}\btests?\b"
+    r"|\btests?\b[^.\n]{0,40}\binfra(?:structure)?\s+issues?\b"
+    r"|\bstill\s+(?:fail\w*|broken|red|not\s+pass\w*)\b"                 # "still failing"
+    r"|\bnot\s+passing\b|\bnot\s+green\b"
+    r"|\b(?:won'?t|can'?t|cannot|couldn'?t|could\s+not|unable\s+to)\b[^.\n]{0,40}\bpass\w*\b"
+    r"|\bhad\s+to\s+skip\b"
+    r"|\btests?\b[^.\n]{0,40}\bnever\s+(?:ran|passed|run)\b"
+    r")"
+)
+# A bare "failing/broken/skipped … test" — ambiguous on its own (could be "Fixed the failing test").
+_WEAK_RED_TEST_RE = re.compile(
+    r"(?i)("
+    r"\b(?:fail(?:ing|ed|s)?|broken)\b[^.\n]{0,30}\btests?\b"
+    r"|\btests?\b[^.\n]{0,30}\b(?:fail(?:ing|ed|s)?|broken)\b"
+    r"|\bskip(?:ped|ping|s)?\b[^.\n]{0,30}\btests?\b"
+    r"|\btests?\b[^.\n]{0,30}\bskip(?:ped|ping|s)?\b"
+    r")"
+)
+# Negation / resolution wording that clears a WEAK signal (the failure was reported as GONE).
+_RESOLVED_CTX_RE = re.compile(
+    r"(?i)("
+    r"\bfixed\b|\bresolved\b|\bcorrected\b"
+    r"|\bnow\s+(?:pass\w*|green|work\w*)\b"
+    r"|\ball\s+tests?\s+(?:pass\w*|green)\b"
+    r"|\bnothing\s+(?:broke\w*|fail\w*)\b"
+    r"|\bno\b|\bnone\b|\bzero\b|\b0\b"
+    r")"
+)
+
+
+def _admitted_red_test_note(build_artifact: BuildArtifact | None) -> str | None:
+    """The offending sentence if the Builder's handoff (diff_digest/decisions/open_questions/caveats)
+    admits a genuinely UNRESOLVED failing/skipped/broken test, else None. A STRONG signal fires on its
+    own; a WEAK ("failing … test") signal fires only absent negation/resolution context in the same
+    field — so ordinary green summaries and already-fixed failures are not flagged (EU-249 iteration 2).
+
+    EU-267: ``caveats`` is scanned too. The builder now routes limitation/caveat language into its own
+    field (uncapped by diff_digest's 500-char ceiling); an unresolved-test admission that lands there
+    must still trip this backstop, not slip past it because it wasn't in diff_digest."""
+    if build_artifact is None:
+        return None
+    fields = ([build_artifact.diff_digest] + list(build_artifact.decisions or [])
+             + list(build_artifact.open_questions or []) + list(build_artifact.caveats or []))
+    for text in fields:
+        if not text:
+            continue
+        if _UNRESOLVED_STRONG_RE.search(text):
+            return text.strip()
+        if _WEAK_RED_TEST_RE.search(text) and not _RESOLVED_CTX_RE.search(text):
+            return text.strip()
+    return None
+
+
+def _enforce_admitted_red_tests(result: ReviewResult, build_artifact: BuildArtifact | None) -> ReviewResult:
+    """EU-249: force FAIL (with a recorded blocker) when the Builder's own handoff admits a failing,
+    skipped, or infrastructure-broken test — even if the LLM verdict said PASS with no blocking
+    issues. A self-reported red/skipped test is categorically blocking, not prose the reviewer's
+    overall impression can wave through (the exact AUTO-97 shape)."""
+    note = _admitted_red_test_note(build_artifact)
+    if note is None:
+        return result
+    if result.verdict != Verdict.PASS and result.blocking_issues:
+        return result   # already failing on this diff for another reason — nothing to force
+    forced = QualityIssue(
+        severity="blocker", area="tests",
+        detail=("Builder's own handoff admits a failing/skipped/broken test: "
+                f"\"{note[:300]}\" — a self-reported red or skipped test is an automatic blocking "
+                "finding (EU-249) and cannot ship PASS."),
+    )
+    result.quality_issues = list(result.quality_issues) + [forced]
+    result.required_changes = list(result.required_changes) + [
+        "Fix the failing/skipped test admitted in the build handoff (or remove the dead test) and "
+        "confirm it actually runs green before resubmitting."
+    ]
+    result.verdict = Verdict.FAIL
+    return result
+
+
+# EU-268: a deterministic backstop for the AUTO-109 failure mode — the Reviewer is READ-ONLY
+# (allowed_tools=[Read, Grep, Glob], Bash disallowed — see the options built below) so it CANNOT run
+# Playwright, pytest, or any other test suite. Despite that, on AUTO-109 the GLM-4.6 reviewer set
+# spec_met=true/blocking=0 for an AC reading "All 6 Google Sync tests pass on Desktop Chrome and
+# Mobile Safari" from static inspection alone, and the ticket merged to DEV self-admittedly
+# unverified. This pair of pure helpers + the enforcement function below stop the Reviewer from
+# self-reporting spec_met=true on an execution-dependent AC unless the Builder's own handoff (or the
+# diff) carries actual execution evidence (a passing test log / gate report) — a genuinely verified
+# execution AC still passes; an AC that merely READS as satisfied from the diff does not.
+_EXECUTION_AC_RE = re.compile(
+    r"(?i)("
+    r"\ball\s+\d+\b[^.\n]{0,40}\btests?\b[^.\n]{0,10}\bpass"          # "all 6 ... tests ... pass"
+    r"|\btests?\s+pass(?:es|ing)?\s+on\b"                              # "tests pass on Desktop Chrome"
+    r"|\bdesktop\s+chrome\b|\bmobile\s+safari\b|\bmobile\s+chrome\b|\bdesktop\s+firefox\b|\bdesktop\s+safari\b"
+    r"|\bverify\s+(?:in|on)\s+(?:the\s+)?(?:browser|device|mobile|desktop)\b"
+    r"|\b(?:e2e|end-to-end|playwright|cypress)\b[^.\n]{0,30}\bpass"
+    r"|\ball\s+tests?\s+pass\b"                                       # "all tests pass"
+    r")"
+)
+
+# Markers that a passing-test-log / gate-report was actually ATTACHED to the handoff — the bar for
+# "verified", not merely asserted. Iteration-2 tightening (EU-268): restricted to attachment /
+# machine-shaped evidence only — a log/report citation, an "attached" artifact, or a machine-shaped
+# result file. The bare "verified passing" / "confirmed passing" PROSE alternations were dropped: per
+# unit doctrine the Builder's prose is untrusted, so a Builder must not be able to unlock the gate by
+# writing a sentence — the evidence has to be an attached passing test log / gate report / results
+# file. This also keeps an AC's own wording ("all tests pass") echoed back into the digest from
+# counting as its own evidence.
+_EXECUTION_EVIDENCE_RE = re.compile(
+    r"(?i)("
+    r"\btest\s*log\b"
+    r"|\bgate\s*report\b"
+    r"|\bplaywright[\s-]*report\b"
+    r"|\btest[\s-]*report\b"
+    r"|\bpassing\s+(?:test\s+)?log\b"
+    r"|\b(?:log|report)\s+attached\b"
+    r"|\battached\s+(?:the\s+)?(?:test\s+)?(?:log|report)\b"
+    r"|\btest[\s-]*results?\.(?:log|txt|json|xml)\b"
+    r")"
+)
+
+
+def _ac_requires_execution(ac: str) -> bool:
+    """True when an acceptance criterion's wording demands runtime/test execution to verify (e.g.
+    "all N tests pass", "tests pass on Desktop Chrome/Mobile Safari", "verify in browser/on device",
+    an e2e/Playwright/Cypress pass) — the kind of claim a READ-ONLY reviewer can never confirm by
+    reading the diff alone. A static AC ("function has a docstring") returns False."""
+    if not ac:
+        return False
+    return bool(_EXECUTION_AC_RE.search(ac))
+
+
+def _has_execution_evidence(build_artifact: BuildArtifact | None, diff: str | None = None) -> bool:
+    """True when the Builder's HANDOFF NARRATIVE carries a marker that a test suite was actually run
+    and passed (a test log / gate report), as opposed to the Builder merely asserting the AC's own
+    wording back at the Reviewer.
+
+    Iteration-2 scope tightening (EU-268): scans ONLY the free-text narrative fields of the
+    BuildArtifact (diff_digest / decisions / open_questions / caveats). The ``diff`` argument and
+    ``files_changed`` are INTENTIONALLY NOT sources: execution evidence is runtime OUTPUT that
+    belongs in the handoff, never in committed SOURCE. A Playwright ticket whose diff or config
+    legitimately contains 'playwright-report' or 'test-results.json' — or that commits such a path
+    into files_changed — must not silently disable the gate. ``diff`` is retained on the signature
+    for call-site symmetry/back-compat but is deliberately ignored."""
+    if build_artifact is None:
+        return False
+    fields: list[str] = [build_artifact.diff_digest or ""]
+    fields.extend(build_artifact.decisions or [])
+    fields.extend(build_artifact.open_questions or [])
+    fields.extend(build_artifact.caveats or [])
+    return any(_EXECUTION_EVIDENCE_RE.search(text) for text in fields if text)
+
+
+def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact: BuildArtifact | None,
+                            diff: str) -> ReviewResult:
+    """EU-268: force spec_met=False + FAIL (with a named spec gap) when the ticket has an
+    execution-dependent acceptance criterion and the handoff/diff carries no execution evidence —
+    even if the LLM verdict said spec_met=true. Does NOT grant the Reviewer any new capability
+    (Bash stays disallowed); it only stops the Reviewer's own verdict JSON from defaulting an
+    unverifiable AC to true. A genuinely evidenced execution AC (a test log/gate report present) is
+    left unchanged, so real verified passes still ship."""
+    exec_acs = [ac for ac in (ticket.acceptance_criteria or []) if _ac_requires_execution(ac)]
+    if not exec_acs or _has_execution_evidence(build_artifact, diff):
+        return result
+    for ac in exec_acs:
+        gap = (f"AC requires test execution but no passing test log/gate report attached — "
+               f"unverified: \"{ac}\"")
+        if gap not in result.spec_gaps:
+            result.spec_gaps = list(result.spec_gaps) + [gap]
+    result.spec_met = False
+    result.verdict = Verdict.FAIL
+    return result
 
 
 def _classify_diff(diff: str) -> tuple[str, str]:
@@ -220,6 +427,8 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer", cfg=cfg, routing_tier=routing_tier)
 
     result = _parse(run.final or run.text)
+    result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
+    result = _enforce_execution_gate(result, ticket, build_artifact, diff)   # EU-268 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking

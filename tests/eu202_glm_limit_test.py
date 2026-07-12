@@ -5,6 +5,11 @@ Tests that:
 1. agent._classify_plan_limit() recognizes GLM/z.ai error patterns (quota, credit, balance, etc.)
 2. cockpit_views._plan_limit_banner() offers Continue-on for BOTH Opus→GLM AND GLM→Opus
 3. The banner correctly labels which backend hit the limit
+
+EU-220: the bare tokens "credit"/"balance"/"billing"/"insufficient"/"quota" from the original
+EU-202 patch were too broad — an unrelated "insufficient permissions" or "load balancer" message
+would substring-match and wrongly classify as a plan cap. The GLM/z.ai patterns below are now
+CONTEXTUAL phrases (see agent._CAP_PATTERNS); the assertions here were updated to match.
 """
 from __future__ import annotations
 
@@ -32,18 +37,21 @@ def test_classify_plan_limit_glm_errors():
     """Test that _classify_plan_limit recognizes GLM/z.ai quota error patterns.
 
     GLM/z.ai may return errors with different message formats than Anthropic's
-    "usage limit" / "plan limit" patterns. This test verifies that GLM-specific
-    patterns (quota, credit, balance, billing, insufficient) are also detected.
+    "usage limit" / "plan limit" patterns. EU-220 narrowed the bare tokens
+    ("quota", "credit", "balance", "billing", "insufficient") to CONTEXTUAL phrases
+    so an unrelated "insufficient permissions" or "load balancer" error can't
+    substring-match — see test_classify_plan_limit_negative_contextual below.
     """
     glm_error_patterns = [
-        "quota exceeded",           # Generic quota exhausted
-        "quota",                   # Just "quota" in error
-        "credit",                  # Credit/billing related
-        "balance",                 # Account balance issues
-        "billing",                 # Billing problems
-        "insufficient",            # Insufficient funds/quota
-        "InsufficientBalance",     # API-style balance error
-        "quota credit low",        # Combined quota + credit message
+        "quota exceeded",                       # Generic quota exhausted
+        "insufficient balance",                 # z.ai-style balance exhaustion
+        "insufficient quota",                    # z.ai-style quota exhaustion
+        "insufficient credit",                   # z.ai-style credit exhaustion
+        "account balance",                       # Account balance issues
+        "account balance too low",               # Real z.ai quota-exhaustion sample (AC2)
+        "billing issue",                         # Billing problems, now contextual
+        "payment required",                      # 402-style payment-required message
+        "insufficient balance, quota exceeded",  # Combined quota + balance message
     ]
 
     for err in glm_error_patterns:
@@ -51,6 +59,29 @@ def test_classify_plan_limit_glm_errors():
         assert kind == "cap", f"GLM error '{err}' should classify as 'cap', got '{kind}'"
 
     print("  ✓ GLM/z.ai quota errors are classified as 'cap' for graceful pause")
+
+
+def test_classify_plan_limit_negative_contextual():
+    """EU-220: bare tokens must NOT false-positive on unrelated errors.
+
+    The original EU-202 patterns included bare "insufficient", "balance", "quota",
+    "credit", "billing" — broad enough that "insufficient permissions" (an auth error)
+    or "load balancer" (an infra error, "balancer" contains "balance" as a substring)
+    would wrongly classify as a plan cap and pause a run. Now that the classifier also
+    runs over ResultMessage.result text (since 95042c2), a false positive here can pause
+    a run mid-drain for the wrong reason.
+    """
+    negative_patterns = [
+        "insufficient permissions",   # auth/authz error, not a quota
+        "load balancer error",        # infra error; "balancer" contains "balance"
+        "load balancer timeout",
+    ]
+
+    for err in negative_patterns:
+        kind = agent._classify_plan_limit(err)
+        assert kind == "", f"Non-cap error '{err}' should classify as '', got '{kind}'"
+
+    print("  ✓ 'insufficient permissions' / 'load balancer' do NOT classify as a plan cap")
 
 
 def test_classify_plan_limit_transient_glm_errors():
@@ -215,6 +246,7 @@ def main():
 
     print("\n--- GLM error pattern classification ---")
     test_classify_plan_limit_glm_errors()
+    test_classify_plan_limit_negative_contextual()
     test_classify_plan_limit_transient_glm_errors()
     test_classify_plan_limit_non_glm_errors()
 

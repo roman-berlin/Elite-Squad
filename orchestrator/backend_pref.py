@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import backends
+from . import backends, locking
 
 
 def _legacy_file() -> Path:
@@ -101,10 +101,15 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
     Without ``app_name``: sets the GLOBAL ``backend`` key, leaving any ``apps`` overrides intact.
     With ``app_name``: writes/clears ONE entry under ``apps`` — ``bk`` in
     ``(None, "", "inherit")`` REMOVES that app's override (it then inherits the global pref) —
-    while preserving the global ``backend`` and every other app's entry untouched."""
-    try:
-        target = _file(cfg)
-        data = _load(cfg)
+    while preserving the global ``backend`` and every other app's entry untouched.
+
+    EU-275: the read-modify-write goes through :func:`locking.locked_rmw` (temp-file +
+    ``os.replace`` under the shared cross-thread/cross-process lock), mirroring
+    ``autopilot.save_blocked`` — so two concurrent callers (e.g. a global write from one drain and
+    a per-app write from another) can never race an unlocked read-then-overwrite and clobber or
+    torn-read each other's update."""
+    def _mutate(current: dict) -> dict:
+        data = dict(current) if isinstance(current, dict) else {}
         if app_name:
             apps = dict(data.get("apps") or {})
             if bk in _INHERIT:
@@ -114,9 +119,11 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
             data["apps"] = apps
         else:
             data["backend"] = backends.normalize(bk)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
+        return data
+
+    try:
+        locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
         pass
 
 

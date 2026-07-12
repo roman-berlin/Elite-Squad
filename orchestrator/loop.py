@@ -25,8 +25,10 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
-from .gate import base_gate_check, gate_fingerprint, run_deterministic_checks, run_gate
+from .gate import base_gate_check, extract_failure_evidence, gate_fingerprint, run_deterministic_checks, run_gate
 from . import jira_adapter as jira_commenter
+from . import cockpit_state
+from . import run_logger
 from .git_ops import Git, GitError
 from .officers import display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW
@@ -73,13 +75,18 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
     unit keeps a human-readable feature changelog. Deterministic, no LLM (the data already exists at the
     land site). Skipped for dry-run and ephemeral tickets. Best-effort: a write failure is swallowed and
     never raises, so it can't break the run. Appends, never loses history; newest entry first. Returns
-    True iff an entry was written."""
+    True iff an entry was written.
+
+    The read of existing entries and the write of the rebuilt file happen INSIDE one held lock via
+    ``locking.locked_text_rmw`` — two lands racing this call (two drains landing at once) must not
+    both read the same stale ``old`` list and clobber each other's append (EU-276)."""
     if cfg.dry_run or ticket.ephemeral:
         return False
     try:
         import datetime
 
         from . import dashboard as _D
+        from . import locking
         date = today or datetime.date.today().isoformat()
         what = _D.brief(summary, n=220) or (ticket.summary or "").strip()
         link = f" · 🔗 {test_url}" if test_url else ""
@@ -87,11 +94,14 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
         header = ("# Development Status\n\n"
                   "Feature changelog — one line per successful live land to the dev branch, newest "
                   "first. Maintained automatically by the Technical Writer (orchestrator/loop.py).\n")
-        path = Path(path) if path else _changelog_path()
-        old = ([ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.startswith("- ")]
-               if path.exists() else [])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(header + "\n" + "\n".join([entry, *old]) + "\n", encoding="utf-8")
+        target = Path(path) if path else _changelog_path()
+
+        def _mutate(current: str) -> str:
+            # `current` is read INSIDE the lock, never a pre-lock snapshot.
+            old = [ln for ln in current.splitlines() if ln.startswith("- ")]
+            return header + "\n" + "\n".join([entry, *old]) + "\n"
+
+        locking.locked_text_rmw(target, _mutate, default="")
         return True
     except Exception as exc:  # noqa: BLE001 - release-hygiene logging must never break the run
         print(f"  changelog skipped: {exc}", flush=True)
@@ -496,23 +506,65 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                                             notes="deferred — worktree busy (another run active)"))
                 continue
             backlog = None   # pre-bind: an exception before assignment must not NameError the handler
+            # EU-253: bracket THIS ticket with a per-ticket log file before any work starts, and
+            # close it once the ticket is done (success OR caught exception — so even a
+            # ticket_exception leaves a per-ticket transcript on disk). Every drain funnels through
+            # this one bracket — cockpit /api/run, /api/run-tickets, AND automode's autopilot loop —
+            # so automode lands (which never went through server.py's manual open/close) finally get
+            # logs/<app>/<YYYY-MM-DD>/<TICKET>-<HHMMSS>.log.
+            #
+            # The handle MUST be registered under the SAME key cockpit_state._Tee.write looks up, or
+            # the captured stdout lands under a key with no open handle and the file stays empty (the
+            # iteration-1 bug: it keyed on app.name while a unit-wide drain's Tee keys on None). _Tee
+            # attributes each line to active_runs()[0] when exactly one run is active, else None —
+            # so we compute the SAME effective key here. The on-disk PATH still comes from the
+            # ticket's app.name (run_logger derives the path from app_name, the registry key from
+            # run_key). Open/close are best-effort: a log I/O problem must never abort a build.
+            _active = cockpit_state.active_runs()
+            _log_key = _active[0] if len(_active) == 1 else None
+            _log_opened = False
             try:
-                if app.name not in gits:
-                    gits[app.name] = _make_git(cfg, app)
-                git = gits[app.name]
-                # Ephemeral (free-text) tickets have no tracker -> no creds needed.
-                if ticket.ephemeral:
-                    backlog = NoneBacklog()
+                if len(_active) > 1:
+                    # Concurrent drains: _Tee collapses attribution to the shared None key, so a
+                    # dedicated per-ticket handle can't own only THIS drain's lines (and two drains
+                    # both registering under None would clobber each other). Drop a dated note file
+                    # instead of a silently-empty one, then leave the shared stream alone.
+                    run_logger.write_note_log(
+                        cfg, app.name, ticket.id,
+                        f"[EU-253] {len(_active)} runs active {_active!r} at start of {ticket.id} "
+                        f"({app.name}) — the live stdout stream attributes lines to the shared drain "
+                        f"(None) key while multiple runs are in flight, so a dedicated per-ticket log "
+                        f"can't be isolated for this ticket. Consult the shared drain log; per-ticket "
+                        f"separation is only available when a single run is active.")
                 else:
-                    if app.name not in backlogs:
-                        backlogs[app.name] = make_backlog(app)
-                    backlog = backlogs[app.name]
-                if app.name not in ensured:
-                    git.ensure_clean()
-                    ensured.add(app.name)
-                report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
-            except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
-                report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
+                    run_logger.open_run_log(cfg, app.name, ticket.id, run_key=_log_key)
+                    _log_opened = True
+            except Exception:  # noqa: BLE001 — log setup must never block a run
+                _log_opened = False
+            try:
+                try:
+                    if app.name not in gits:
+                        gits[app.name] = _make_git(cfg, app)
+                    git = gits[app.name]
+                    # Ephemeral (free-text) tickets have no tracker -> no creds needed.
+                    if ticket.ephemeral:
+                        backlog = NoneBacklog()
+                    else:
+                        if app.name not in backlogs:
+                            backlogs[app.name] = make_backlog(app)
+                        backlog = backlogs[app.name]
+                    if app.name not in ensured:
+                        git.ensure_clean()
+                        ensured.add(app.name)
+                    report = await process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event)
+                except Exception as exc:  # noqa: BLE001 - one bad ticket must not kill the run
+                    report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
+            finally:
+                if _log_opened:
+                    try:
+                        run_logger.close_run_log(run_key=_log_key)
+                    except Exception:  # noqa: BLE001 — log teardown must never block a run
+                        pass
             reports.append(report)
 
             # EU-201: After a split, inject the fragments into the worklist at the current position
@@ -710,6 +762,12 @@ def _changes_sig(changes: list[str]) -> str:
 # objections were NEW (moving goalposts), so passes beyond 2 buy objections, not convergence.
 HARD_MAX_PASSES = 2
 
+# EU-216 (2026-07-09 forensics, cause class 3/14): HARD_MAX_PASSES is calibrated for Opus. Weak
+# (non-Opus, e.g. GLM) backends get ONE extra pass — but only when the pass-2 review FAIL carries no
+# blocker-severity finding and the retry-stuck guard hasn't already tripped (see the weak-extra-pass
+# guard below, just before the retry rebuild). Not configurable past this ceiling either.
+HARD_MAX_PASSES_WEAK = 3
+
 
 async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_event=None, commenter=None) -> TicketReport:
     if commenter is None:
@@ -819,7 +877,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         print("  gate · identical failure fingerprint two gates running — stopping rebuilds "
               "(PM triage next)", flush=True)
 
-    max_passes = min(cfg.max_iterations, HARD_MAX_PASSES)
+    # EU-216: a weak (non-Opus) backend is allowed to reach a 3rd pass — gated per-iteration below
+    # on FAIL severity, not unconditionally. Opus's range never changes (min(.., HARD_MAX_PASSES)).
+    weak_backend = backends.normalize(getattr(cfg, "model_backend", None)) != backends.NATIVE
+    max_passes = (min(cfg.max_iterations_weak, HARD_MAX_PASSES_WEAK) if weak_backend
+                  else min(cfg.max_iterations, HARD_MAX_PASSES))
     attempt_t0 = time.monotonic()
     for iteration in range(1, max_passes + 1):
         if stop_event is not None and stop_event.is_set():
@@ -990,6 +1052,24 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                      tools=build.tools, summary=(build.summary or "")[:1000],
                      provider=build.provider, model=build.model_version)
         if not build.ok:
+            # EU-248: max-turns exhaustion (turnCount >= the pass's turn budget) surfaces as a
+            # builder process error indistinguishable from a real crash — agent.py now degrades the
+            # CLI's trailing raw ProcessError to a clean is_error return instead of raising, so this
+            # is the ONLY seam that sees it. Route it the same way the (now largely unreachable)
+            # exception-based turn-limit handler in _exception_report always has: the ticket was too
+            # big for one pass, so the Scrum Master splits it BEFORE this is misclassified as
+            # Outcome.ERRORED — which would wrongly tick the EU-219 consecutive-error counter toward
+            # Blocked and park a ticket that just needed to be split. Do NOT grep build.summary/raw
+            # for turn-limit text — a failed build's summary holds only the last assistant message,
+            # never the turn-limit phrase; num_turns is the only reliable signal.
+            if build.num_turns >= builder_mod.turns_for(cfg, eff):
+                split = await _try_scrum_split(
+                    cfg, app, ticket, audit,
+                    recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
+                    reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.",
+                    split_reason="turn-limit", iterations=iteration, cost=cost, branch=branch)
+                if split is not None:
+                    return _resolve(split)
             # EU-153: Post build error comment
             build_comment = commenter.summarize_gate_event(
                 "Build", "ERRORED",
@@ -1113,7 +1193,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 print("  gate · red once, green on confirmation re-run — flake, proceeding", flush=True)
                 gate = confirm
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
-                     report=("" if gate.passed else (gate.report or "")[:2500]))
+                     report=("" if gate.passed else extract_failure_evidence(gate.report or "")))
         if not gate.passed:
             # §3.1: same failure fingerprint as the previous failed gate → the rebuild didn't
             # move it; stop building and let PM triage/exhaustion handle it (EU-174's shape).
@@ -1144,7 +1224,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # feeds the Builder as plain text (a free review round).
         det = run_deterministic_checks(app, git.changed_paths(), git.diff_against_base())
         audit.record("deterministic_gate", ticket_id=ticket.id, iteration=iteration,
-                     passed=det.passed, report=("" if det.passed else (det.report or "")[:2500]))
+                     passed=det.passed, report=("" if det.passed else extract_failure_evidence(det.report or "")))
         if not det.passed:
             # §3.1: the stuck-fingerprint guard covers this stage too — an unchanging lint/
             # secret/lockfile failure must not burn the remaining pass budget (2026-07-06 review).
@@ -1322,8 +1402,58 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             except Exception as exc:  # noqa: BLE001 - findings triage must never break the run
                 print(f"  · PM findings triage skipped: {exc}", flush=True)
 
+        # EU-215: advisory-only ship path. is_ship_ready() is False here ONLY because
+        # blocking_issues (contracts.py) counts "major" severity as blocking — so this fires
+        # exactly for the AUTO-98 class: verdict PASS, spec_met True, and every leftover
+        # quality_issue is minor/major (never "blocker"). A done deliverable must not strand on
+        # advisory/hygiene items (2026-07-09 forensics, 2/14 "max passes" escalations). File the
+        # leftovers as backlog tickets through the same route the PM-findings out-of-scope path
+        # uses (L1284-1293) and land anyway.
+        advisory_ship = (
+            review.verdict.value == "PASS"
+            and review.spec_met
+            and not review.is_ship_ready()
+            and not any(q.severity == "blocker" for q in review.quality_issues)
+        )
+        if advisory_ship:
+            filed_keys: list[str] = []
+            if review.quality_issues:
+                import json as _json
+                advisory_proposals = [
+                    {
+                        "title": f"[{q.severity.upper()}/{q.area}] {q.detail[:160]}",
+                        "type": "Bug",
+                        "severity": q.severity.upper(),
+                        "body": q.detail,
+                    }
+                    for q in review.quality_issues
+                ]
+                advisory_block = f"===TICKETS===\n{_json.dumps(advisory_proposals)}\n===END==="
+                if cfg.dry_run or ticket.ephemeral:
+                    titles = ", ".join(p["title"] for p in advisory_proposals)
+                    print(f"  filing · {len(advisory_proposals)} advisory finding(s) "
+                          f"(dry-run/ephemeral — not filed): {titles}", flush=True)
+                else:
+                    from . import filing as _filing
+                    filing_result = _filing.file_findings(app, "out-of-scope", advisory_block)
+                    filed_keys = list(filing_result.filed) + list(filing_result.deduped)
+                    if filing_result.lines:
+                        print("  filing · advisory findings (shipped-with-advisories):", flush=True)
+                        for ln in filing_result.lines:
+                            print(f"    {ln}", flush=True)
+                    if filing_result.failed:
+                        _notify(cfg, f"⚠️ {ticket.id} — {len(filing_result.failed)} advisory finding(s) "
+                                     "could not be filed:\n" +
+                                     "\n".join(f"• {t}: {e}" for t, e in filing_result.failed))
+            audit.record("shipped_with_advisories", ticket_id=ticket.id, iteration=iteration,
+                         filed=filed_keys,
+                         issues=[{"severity": q.severity, "area": q.area, "detail": q.detail}
+                                 for q in review.quality_issues])
+            print(f"  ✓ {ticket.id}: PASS + spec_met with only advisory findings — shipping "
+                  f"({len(filed_keys)} filed/deduped to backlog)", flush=True)
+
         # 4) DECIDE
-        if review.is_ship_ready():
+        if review.is_ship_ready() or advisory_ship:
             if stop_event is not None and stop_event.is_set():
                 audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-merge")
                 print(f"  ■ {ticket.id}: stopped before merge by Commander — DEV untouched.", flush=True)
@@ -1359,6 +1489,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                   "another unproductive pass", flush=True)
             break
         recent_reject_sigs.append(sig)
+
+        # EU-216: weak-backend 3rd pass gate. HARD_MAX_PASSES (2) is calibrated for Opus; on
+        # finishing pass 2, only continue on to pass 3 when this is a weak (non-Opus) backend AND
+        # the FAIL carries no blocker-severity finding — an Opus run, or a blocker on any backend,
+        # stops at 2 exactly as before (the retry-stuck guard above already ran and stays first).
+        if iteration >= HARD_MAX_PASSES:
+            if not (weak_backend and not blockers):
+                break
+            if iteration < max_passes:
+                audit.record("weak_extra_pass", ticket_id=ticket.id, iteration=iteration + 1,
+                             backend=getattr(cfg, "model_backend", None))
+                print(f"  ↻ weak backend + minor-only FAIL — granting an extra pass "
+                      f"{iteration + 1}/{max_passes}", flush=True)
+
         _bar(REVIEW, fail=REVIEW)
         print("  ↻ changes requested → rebuilding", flush=True)
 
@@ -1382,13 +1526,28 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     if triage and triage.get("raw"):
         _route_out_of_scope(cfg, ticket, app, audit, triage["raw"], source="pm-triage")
 
-    # Commander decision (Phase-2, 2026-07-06): the PM RESOLVE requeue is RETIRED. It granted a
-    # ticket one extra capped attempt, silently re-opening the QW3 2-pass loop cap — and §2 folds
-    # PM triage into the Planner's single decision anyway. A RESOLVE verdict now escalates like
-    # everything else, carrying the PM's corrective instruction as the Commander's brief (the
-    # `esc` below already prefers triage text). SPLIT — a planning decision — is unchanged until
-    # the Planner absorbs it.
+    # Commander decision (Phase-2, 2026-07-06): the PM RESOLVE requeue is RETIRED for REVIEWER
+    # rejections. It granted a ticket one extra capped attempt, silently re-opening the QW3
+    # 2-pass loop cap — and §2 folds PM triage into the Planner's single decision anyway. A
+    # RESOLVE verdict on a reviewer FAIL now escalates like everything else, carrying the PM's
+    # corrective instruction as the Commander's brief (the `esc` below already prefers triage
+    # text). SPLIT — a planning decision — is unchanged until the Planner absorbs it.
+    #
+    # EU-217: narrowed back OFF the gate-exhaustion path. A gate that fails identically twice
+    # running (last_changes[0] set at the two "Verification failed…" sites above) is a build/CI
+    # health question, not a spec disagreement — when the PM diagnoses RESOLVE there ("pre-
+    # existing flake, deliverable done"), parking it on the Commander instead of requeuing was
+    # the dishonest escalation this ticket was filed to fix (2026-07-09 forensics). Requeue
+    # exactly ONCE: `_already_pm_triaged` (above) guarantees at most one triage per ticket, so
+    # this cannot loop — a still-stuck ticket escalates for real on its next exhaustion.
     if triage and triage["action"] == "RESOLVE":
+        if last_changes and last_changes[0].startswith("Verification failed"):
+            audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="RESOLVE",
+                         reason="gate-flake", instruction=(triage.get("text") or "")[:600])
+            print(f"  🎖️ {ticket.id}: PM said RESOLVE on a gate-exhaustion — requeuing once.",
+                  flush=True)
+            return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
+                                         notes="gate-flake — PM RESOLVE requeued once"))
         audit.record("pm_resolve_retired", ticket_id=ticket.id,
                      instruction=(triage.get("text") or "")[:600])
         print(f"  🎖️ {ticket.id}: PM said RESOLVE — requeue retired (Phase-2); escalating with "
@@ -1586,9 +1745,26 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                         f"• DEV is live with a failing smoke.\n"
                         f"• {smnote[:900]}")
 
+        # CI-conclusion (EU-251): for CI-relevant tickets, poll the REAL GitHub Actions conclusion
+        # for the merge commit instead of certifying the Builder's self-report ("CI will go green")
+        # — AUTO-112 landed on exactly that false claim with nothing in the land path ever
+        # consulting GitHub Actions. Complementary to the SRE/smoke LOCAL re-run gates (AUTO-57/83):
+        # this reads the REMOTE conclusion, the only thing that catches CI-environment-only
+        # failures. A complete no-op (zero `gh` calls) for a non-CI ticket; best-effort — a `gh`
+        # hiccup here must never unwind an already-successful land.
+        ci_note = ""
+        try:
+            from . import ci_conclusion
+            if ci_conclusion.should_run(cfg, ticket):
+                ci_result = ci_conclusion.check(cfg, app, ticket, merge_sha, audit)
+                ci_note = ci_conclusion.report(cfg, app, ticket, backlog, ci_result, audit)
+        except Exception as exc:  # noqa: BLE001 — best-effort, like sentinel/smoke
+            print(f"  🔎 CI · conclusion check skipped ({exc})", flush=True)
+
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
-                            + (", Done" if cfg.mark_done_on_merge else ", awaiting QA") + smoke_note)
+                            + (", Done" if cfg.mark_done_on_merge else ", awaiting QA")
+                            + smoke_note + ci_note)
 
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)

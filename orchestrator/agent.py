@@ -4,13 +4,17 @@ Wraps `claude_agent_sdk.query()`, collects the assistant text + cost/turn metada
 and (when a `tag` is given) streams a compact line per tool use so you can see the
 officer working in real time.
 
-EU-108 Sonnet-cap fallback:
+EU-108 Sonnet-cap fallback (EU-214: prose realigned to the per-call, self-clearing design —
+the old calendar-reset weekly-pin state machine was deleted in Phase-2 Task 2):
   When a Sonnet call hits a CAP-classified plan-limit error (the message names an exhausted
-  usage/plan/weekly quota), the fallback logic retries with Opus once to distinguish between:
-    • Sonnet sub-limit hit → Opus succeeds cleanly → activate fallback, stay on Opus until reset
+  usage/plan/weekly quota), the fallback logic retries with Opus once, per call, to distinguish
+  between:
+    • Sonnet sub-limit hit → Opus succeeds cleanly → return the Opus result for THIS call only;
+      nothing is persisted, so the very next call starts cheap on Sonnet again — the fallback
+      self-clears the moment Sonnet recovers, with no calendar-based reset of any kind.
     • All-models cap hit → Opus also 429s → pause (existing EU-82 governor behavior)
-  A transient per-minute 429 / 529 overload instead gets one backoff retry on Sonnet and never
-  arms the weekly fallback; a failed Opus probe (auth/network) never arms it either.
+  A transient per-minute 429 / 529 overload instead gets a bounded backoff retry on Sonnet and
+  never probes Opus; a failed Opus probe (auth/network) never changes any state either.
 """
 from __future__ import annotations
 
@@ -29,6 +33,12 @@ try:  # tool-use block type name can vary across SDK versions
     from claude_agent_sdk import ToolUseBlock
 except Exception:  # pragma: no cover
     ToolUseBlock = None
+
+try:  # EU-248: absent on some SDK-stub test harnesses that don't define every export — degrade
+    # gracefully; the isinstance() check below just never matches when ProcessError is None.
+    from claude_agent_sdk import ProcessError
+except Exception:  # pragma: no cover
+    ProcessError = None
 
 # Serialises the LOCAL-tier routing window: the Ollama base-URL/key swap is process-global env,
 # so overlapping routed calls must not interleave their save/restore (2026-07-06 review). Held
@@ -55,8 +65,8 @@ class AgentRun:
     is_plan_limit: bool = False
     # EU-108 hardening (2026-07-05 fake cap alert): how the plan-limit error classified —
     #   "cap"       → the message names an exhausted usage/plan/weekly quota (fallback-eligible)
-    #   "transient" → per-minute 429 / 529 overload (retry territory; must never arm the
-    #                 weekly Opus fallback, which is a ~1.7x cost amplifier until Friday)
+    #   "transient" → per-minute 429 / 529 overload (retry territory; must never trigger the
+    #                 one-shot Opus retry, which is a ~1.7x cost amplifier for that single call)
     #   ""          → not a plan-limit error. Additive field: is_plan_limit keeps its
     #                 EU-118 broad meaning for existing consumers.
     plan_limit_kind: str = ""
@@ -66,6 +76,11 @@ class AgentRun:
     # QW4 (2026-07-05): wall-clock duration of this call — the forensic audit found NO duration
     # was recorded anywhere (0 duration fields across 2,555 audit events).
     duration_s: float = 0.0
+    # EU-248: true when this run hit the max-turns ceiling — ResultMessage.subtype == "error_max_turns"
+    # OR num_turns >= max_turns. Set straight off the structured ResultMessage (never from the SDK's
+    # racy _last_error_result_text replacement), so it stays correct even when the CLI's trailing raw
+    # ProcessError degrades to a clean is_error return below instead of raising.
+    is_turn_limit: bool = False
 
 
 # QW4: optional audit sink — when a process configures it (main/server startup, beside
@@ -93,9 +108,15 @@ def configure_audit(audit) -> None:
 # retry — the primary false-alarm defect from the audit. A "cap" now requires EXPLICIT
 # plan/weekly/usage/quota (or GLM billing) language; anything that is only status/rate-limit
 # language falls through to the transient class and gets a backoff retry, never a weekly fallback.
+# EU-220: the EU-202 GLM patterns above were themselves too broad — bare "credit", "balance",
+# "billing", "insufficient", "quota" substring-match unrelated errors ("insufficient permissions",
+# "load balancer" — "balancer" contains "balance") and would wrongly classify them as a plan cap.
+# This is higher-stakes since 95042c2: the classifier also runs over ResultMessage.result text
+# (where a GLM/z.ai provider-side error lands), so a false positive there can pause a live drain
+# for the wrong reason. Replaced with CONTEXTUAL phrases that still cover real z.ai quota text.
 _CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit",
-                 "quota exceeded", "quota",
-                 "credit", "balance", "billing", "insufficient")
+                 "quota exceeded", "insufficient balance", "insufficient quota",
+                 "insufficient credit", "account balance", "billing issue", "payment required")
 _TRANSIENT_PATTERNS = ("rate limit", "rate_limit", "too many requests",
                        "overloaded", "429", "529")
 
@@ -274,6 +295,7 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     in_tok = 0
     out_tok = 0
     is_error = False
+    is_turn_limit = False
     is_plan_limit = False
     plan_limit_kind = ""
 
@@ -283,6 +305,18 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     # backend actually applied (fail-closed to Opus if GLM is unconfigured).
     from . import backends as _backends
     effective_backend = _backends.apply(options)
+    # EU-255: credential-minimize THIS officer subprocess (it builds/tests injection-prone,
+    # untrusted product code). The SDK builds the child env as {**os.environ, **options.env}
+    # (subprocess_cli.py), so blank the orchestrator-only Jira/Telegram creds in options.env — a
+    # key merely ABSENT from options.env still inherits from the parent. Applied at this single
+    # seam (after apply(), for both backends) rather than inside apply(), which stays a pure
+    # model/backend transform. Model auth (CLAUDE_CODE_OAUTH_TOKEN / the GLM z.ai bearer) is not
+    # sensitive by this predicate, so it passes through untouched.
+    _strip = _backends.secret_strip_overrides()
+    if _strip:
+        _merged_env = dict(getattr(options, "env", None) or {})
+        _merged_env.update(_strip)
+        options.env = _merged_env
     # EU-123: capture provider info — label from the backend actually applied, not a global sniff.
     from . import provider as _provider
     model = getattr(options, "model", "") or ""
@@ -336,6 +370,14 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                 cost = message.total_cost_usd or 0.0
                 turns = message.num_turns
                 is_error = is_error or message.is_error
+                # EU-248: capture the turn-limit signal straight off the structured ResultMessage,
+                # BEFORE any exception handling — the CLI exits 1 by design after error_max_turns and
+                # the SDK's own structured-error replacement (_last_error_result_text) is racy, so this
+                # is the one reliable place to observe it.
+                subtype = getattr(message, "subtype", "") or ""
+                max_turns = getattr(options, "max_turns", None)
+                if subtype == "error_max_turns" or (max_turns and turns >= max_turns):
+                    is_turn_limit = True
                 if message.result:
                     final = message.result
                 # A provider-side terminal error rides in ResultMessage.result (NOT message.error) —
@@ -355,12 +397,27 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                     out_tok = int(u.get("output_tokens", 0) or 0)
     except Exception as exc:  # noqa: BLE001 — see below; genuine crashes re-raise
         # SDK quirk (claude_agent_sdk 0.2.x): after a CLI error result whose `errors` array is empty,
-        # the SDK raises "Claude Code returned an error result: {subtype}" — with subtype literally
-        # "success" — DISCARDING the real error text (which we already captured in `final` from the
-        # ResultMessage) and skipping metering/audit/transcript. 9 runs died that way since 06-21
-        # (EU-136 + AUTO-73 on 07-09 alone). If we already consumed the result, degrade to a normal
-        # is_error return so the loop posts the REAL failure and the run ends cleanly.
-        if saw_result and str(exc).startswith("Claude Code returned an error result"):
+        # the SDK raises "Claude Code returned an error result: success" — literally "success" —
+        # DISCARDING the real error text (which we already captured in `final` from the ResultMessage)
+        # and skipping metering/audit/transcript. 9 runs died that way since 06-21 (EU-136 + AUTO-73 on
+        # 07-09 alone). If we already consumed the result, degrade to a normal is_error return so the
+        # loop posts the REAL failure and the run ends cleanly. EU-248: narrowed from a broad
+        # startswith("...error result") to literally "...error result: success" — a genuine
+        # `error_during_execution` result must NOT be silently swallowed here; it still re-raises.
+        is_success_quirk = saw_result and str(exc).startswith(
+            "Claude Code returned an error result: success")
+        # EU-248: max-turns exhaustion surfaces as a raw ProcessError ("Command failed with exit code
+        # 1 … Check stderr output for details") trailing a result we already consumed — the CLI exits
+        # 1 by design after error_max_turns, and the SDK's structured-error replacement above is racy,
+        # so no informative exception ever arrives (claude_agent_sdk/_internal/transport/
+        # subprocess_cli.py). Degrade the same way as the quirk above: usage.record + the agent_call
+        # audit row below still fire, no exception escapes, and `is_turn_limit` (set from the
+        # ResultMessage branch above) survives onto the returned AgentRun. A ProcessError with NO
+        # result seen (saw_result False — a genuine mid-stream crash) is unaffected and still re-raises
+        # onto the existing infra/crash path.
+        is_trailing_process_error = (saw_result and ProcessError is not None
+                                     and isinstance(exc, ProcessError))
+        if is_success_quirk or is_trailing_process_error:
             is_error = True
         else:
             raise
@@ -405,7 +462,8 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                     num_turns=turns, is_error=is_error, tools=tools,
                     input_tokens=in_tok, output_tokens=out_tok, is_plan_limit=is_plan_limit,
                     plan_limit_kind=plan_limit_kind,
-                    provider=provider, model_version=model_version, duration_s=duration_s)
+                    provider=provider, model_version=model_version, duration_s=duration_s,
+                    is_turn_limit=is_turn_limit)
 
 
 # ── Sonnet-cap → one-shot Opus retry ─────────────────────────────────────────────────────────────────
@@ -523,6 +581,23 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
 
     # Sonnet hit a cap-classified plan-limit error (or a transient one that survived every backoff
     # retry) — try Opus once to distinguish the limit type.
+    # EU-212: audit the activation itself (classification reason, original Sonnet error text, tag)
+    # so the cockpit can show WHY fallback is active — without reviving the deleted weekly-pin
+    # state machine (still per-call, still auto-exits next call). Best-effort: instrumentation must
+    # never break a run. Emitted only here, never on the transient backoff-and-retry-Sonnet path
+    # above (that path never reaches this line unless every retry escalated into cap handling).
+    if _AUDIT_SINK is not None:
+        try:
+            extra = {}
+            if ticket_id:
+                extra["ticket_id"] = str(ticket_id)
+            if pass_number is not None:
+                extra["pass_number"] = pass_number
+            _AUDIT_SINK.record("sonnet_fallback_activated", tag=tag or "", model=model,
+                               reason=result.plan_limit_kind, error=result.final, **extra)
+        except Exception:  # noqa: BLE001 — instrumentation must never break a run
+            pass
+
     # 2026-07-05 audit §6 defect 1: the old manual rebuild here dropped cwd, hooks (the guard
     # denylist) and disallowed_tools — the Opus probe ran in the orchestrator's own CWD with no
     # guard under the inherited bypassPermissions, and its output was used as the build result.

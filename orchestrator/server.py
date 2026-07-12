@@ -207,6 +207,49 @@ def create_app(cfg: Config):
                             httponly=True, samesite="Lax")
         return resp
 
+    # ----------------------------------------------------------------------------------------------
+    # EU-254 — CSRF/Origin/Host guard on every state-changing route. form-urlencoded/multipart POSTs
+    # are CORS "simple requests" (no preflight), so WITHOUT this a page open in Roman's browser — or
+    # an attacker domain DNS-rebound to 127.0.0.1:8787 — could drive the unit (run, model switch,
+    # stop, approve) cross-origin. Generalizes EU-187's /api/terminal-only allowlist to all ~30
+    # state-changing POST routes (this file has no PUT/PATCH/DELETE today; guarded anyway so a future
+    # one is covered for free). Same-origin check: if an Origin header is present it must name an
+    # allowed cockpit host; else if a Referer is present its host must match; and in ALL cases the
+    # Host header itself must be one of the allowed hosts (closes DNS-rebinding — Host is otherwise
+    # unvalidated and an attacker page cannot forge the browser's real Origin/Referer, but DNS
+    # rebinding lets them control what the server sees as Host while the socket still lands on
+    # 127.0.0.1:8787). "localhost" (no port) is allowed alongside the real bind so the Flask test
+    # client's default synthetic Host keeps working — the dev server never actually listens on the
+    # default HTTP port, so that value can't arise from a real request.
+    # ----------------------------------------------------------------------------------------------
+    _ALLOWED_HOSTS = {"127.0.0.1:8787", "localhost:8787", "localhost"}
+    _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+    def _origin_host(value: str) -> str:
+        from urllib.parse import urlsplit
+        try:
+            return (urlsplit(value).netloc or "").lower()
+        except Exception:  # noqa: BLE001 — a malformed header is just treated as "no match"
+            return ""
+
+    @app.before_request
+    def _csrf_origin_guard():
+        if request.method not in _STATE_CHANGING_METHODS:
+            return None
+        if (request.host or "").lower() not in _ALLOWED_HOSTS:
+            return Response("Forbidden: mismatched Host header.", status=403, mimetype="text/plain")
+        origin = request.headers.get("Origin")
+        if origin:
+            if _origin_host(origin) not in _ALLOWED_HOSTS:
+                return Response("Forbidden: cross-origin request rejected.", status=403,
+                                mimetype="text/plain")
+            return None
+        referer = request.headers.get("Referer")
+        if referer and _origin_host(referer) not in _ALLOWED_HOSTS:
+            return Response("Forbidden: cross-origin request rejected.", status=403,
+                            mimetype="text/plain")
+        return None
+
     def _ensure_tabs(ws):
         """Ensure every configured app has a tab, and restore last-active on first load."""
         if getattr(cfg, "apps", None):
@@ -1011,18 +1054,6 @@ def create_app(cfg: Config):
         # alternate backend (GLM) if Opus hits its limit.
         _state["last_run"] = {"app": app_name, "tickets": list(keys)}
 
-        # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
-        # Derive the label from the first ticket's id; fall back gracefully so test stubs never crash.
-        try:
-            _ticket_label = worklist[0][1].id if worklist else (keys[0] if keys else "run")
-        except (IndexError, AttributeError, TypeError):
-            _ticket_label = keys[0] if keys else "run"
-        try:
-            from . import run_logger as _rl
-            _rl.open_run_log(rcfg, app_name, _ticket_label)
-        except Exception:  # noqa: BLE001 — log setup must never block a run
-            pass
-
         def _bg():
             st["last_msg"] = ""
             ev = threading.Event()
@@ -1043,12 +1074,6 @@ def create_app(cfg: Config):
             finally:
                 if audit is not None:
                     audit.record("run_end", tickets=len(reports or []))
-                # EU-106: close the run log before releasing the run slot.
-                try:
-                    from . import run_logger as _rl
-                    _rl.close_run_log(app_name or None)
-                except Exception:  # noqa: BLE001
-                    pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
@@ -1121,19 +1146,6 @@ def create_app(cfg: Config):
             st["last_msg"] = f"could not start: {exc}"
             return redirect("/")
 
-        # EU-106: open a per-run log file so every Tee-captured stdout line lands on disk.
-        # Derive the label from the first ticket's id; fall back gracefully to the run kind so test
-        # stubs (which may return plain strings as worklist items) never crash the request.
-        try:
-            _ticket_label = worklist[0][1].id if worklist else kind
-        except (IndexError, AttributeError, TypeError):
-            _ticket_label = kind
-        try:
-            from . import run_logger as _rl
-            _rl.open_run_log(rcfg, app_name, _ticket_label)
-        except Exception:  # noqa: BLE001 — log setup must never block a run
-            pass
-
         def _bg():
             st["last_msg"] = ""
             ev = threading.Event()
@@ -1154,12 +1166,6 @@ def create_app(cfg: Config):
             finally:
                 if audit is not None:
                     audit.record("run_end", tickets=len(reports or []))
-                # EU-106: close the run log before releasing the run slot.
-                try:
-                    from . import run_logger as _rl
-                    _rl.close_run_log(app_name or None)
-                except Exception:  # noqa: BLE001
-                    pass
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
@@ -3041,11 +3047,13 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
     # Two-way decisions: watch Telegram for replies that resume paused tickets. EU-185 (Wave 0):
     # only the ELECTED poller host polls — a second poller on the same bot token splits/loses the
     # Commander's messages (getUpdates is single-consumer). A non-poller host runs cockpit-only.
+    # EU-257: route through ensure_poll_loop, the process-level singleton — serve's startup is one
+    # of TWO spawn sites (the other is autopilot()/each cockpit drain), and without the singleton
+    # each per-app drain Start on this host would add its own immortal poller thread.
     from . import decisions, notify
     _poll, _why = decisions.should_poll_telegram(cfg)
     if _poll:
-        threading.Thread(target=decisions.poll_loop, args=(cfg, AuditLog(cfg.audit_path)),
-                         daemon=True).start()
+        decisions.ensure_poll_loop(cfg, AuditLog(cfg.audit_path))
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
     elif notify.configured():
         print(f"  decision listener: OFF — {_why} (cockpit-only on this host)")

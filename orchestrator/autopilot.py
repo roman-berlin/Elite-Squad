@@ -247,10 +247,79 @@ def load_error_counts(cfg: Config) -> dict[str, int]:
         return {}
 
 
+def _ticket_project(ticket_id: str) -> str:
+    """Jira project key of a ticket id — the part before the first '-' ('EU-151' -> 'EU').
+
+    save_error_counts uses this to tell THIS drain's own keys apart from a concurrent drain's:
+    every project's backlog is drained by exactly one app's drain at a time (the per-project run
+    slot in server.py is single-writer, EU-64), so a key whose project this drain is currently
+    writing is unambiguously ours — to add, update, or intentionally drop — while a key of any
+    other project belongs to the other drain and must be preserved from the fresh on-disk read."""
+    return ticket_id.split("-", 1)[0]
+
+
+# EU-274: per-(file, thread) memory of the last `counts` snapshot THIS drain wrote. It is a SECONDARY
+# delete signal, only needed for the one case the primary (project-prefix) signal can't cover: a save
+# whose `counts` is EMPTY because the drain's last tracked ticket just parked/succeeded (its key
+# popped) — an empty dict carries no prefix to reveal which project it owns, so without this the drop
+# wouldn't propagate and the park-after-3 counter would never reset. Bounded by pruning rows of dead
+# threads on every save (see _prune_dead_error_counts_seen), so it can't grow with run-thread churn and
+# a recycled OS-thread ident can't inherit a dead predecessor's baseline; the value-match guard in the
+# merge is a second belt on ident reuse (a key is dropped via this path only if disk still holds the
+# exact value this thread last wrote).
+_error_counts_seen: dict[tuple[str, int], dict[str, int]] = {}
+_error_counts_seen_lock = threading.Lock()
+
+
+def _prune_dead_error_counts_seen(live_idents: set[int]) -> None:
+    """Drop _error_counts_seen rows for threads that have exited. Call under _error_counts_seen_lock."""
+    for key in [k for k in _error_counts_seen if k[1] not in live_idents]:
+        _error_counts_seen.pop(key, None)
+
+
 def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
+    # EU-274: route through locked_rmw (matching save_blocked) instead of a bare write_text. A plain
+    # overwrite of a full-dict snapshot taken at load time let a concurrent drain's stale write clobber
+    # increments made in between (a stale automatixy-drain snapshot erasing a fresh EU-151 count) — and
+    # even a lock around a blind overwrite only serialises the writes, it does not refresh the stale
+    # snapshot. locked_rmw re-reads the on-disk value under the lock so we MERGE onto the truth. A key
+    # on disk but absent from `counts` is deleted (an intentional pop: a ticket parked or succeeded)
+    # only when it is unambiguously THIS drain's — otherwise it is preserved as a concurrent drain's:
+    #
+    #   (a) its project is one this drain is writing right now — call-time context from `counts`, so it
+    #       needs no warm cache and already deletes a stale same-project key on a drain's very FIRST
+    #       save after a restart (this closes the cold-cache resurrection gap the earlier attempt had); or
+    #   (b) this same thread wrote the key last save at the value still on disk — the only extra case,
+    #       for when (a) has no signal because `counts` emptied as the last tracked ticket parked.
+    #
+    # A key whose project no other-writer touches and that neither signal claims stays put, so a
+    # concurrent foreign increment is never clobbered.
+    path = _error_counts_file(cfg)
+    cache_key = (str(path), threading.get_ident())
+    live = {t.ident for t in threading.enumerate()}
+    with _error_counts_seen_lock:
+        _prune_dead_error_counts_seen(live)
+        baseline = _error_counts_seen.get(cache_key, {})
+    owned = {_ticket_project(k) for k in counts}
+
+    def _merge(current):
+        current = current if isinstance(current, dict) else {}
+        merged: dict[str, int] = {}
+        for k, v in current.items():
+            k = str(k)
+            if k in counts:
+                continue                      # counts.update below is authoritative for tracked keys
+            if _ticket_project(k) in owned or baseline.get(k) == v:
+                continue                      # ours, intentionally dropped -> delete (skip)
+            merged[k] = v                     # another drain's key -> preserve from the fresh read
+        merged.update(counts)
+        return merged
+
     try:
-        _error_counts_file(cfg).write_text(json.dumps(counts, indent=2, sort_keys=True))
-    except OSError:
+        locking.locked_rmw(path, _merge, default={})
+        with _error_counts_seen_lock:
+            _error_counts_seen[cache_key] = dict(counts)
+    except (OSError, ValueError):
         pass
 
 
@@ -510,6 +579,15 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         pass
     from . import cockpit_state
     from .git_ops import clear_parked_repos
+    # EU-253: install the stdout Tee here too, idempotently. server.serve() only installs it in the
+    # cockpit process (server.py's `if not isinstance(sys.stdout, _Tee)` guard) — an external/CLI
+    # daemon running `general autopilot` standalone (main.py -> this function, no cockpit process)
+    # never got a Tee, so run_logger.write_line() (fed only by _Tee.write) never received a single
+    # line and every automode per-ticket log came out empty. Same guard as server.py: a no-op when
+    # this IS the cockpit process (stdout is already wrapped), so it can never double-wrap.
+    import sys
+    if not isinstance(sys.stdout, cockpit_state._Tee):
+        sys.stdout = cockpit_state._Tee(sys.stdout)
     run_key = app_name or None
     owns_run_state = False    # set True only once claim_run succeeds; gates release in the finally
     run_state = None
@@ -545,10 +623,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
         # EU-185 (Wave 0): only the elected poller host polls, so an autopilot run on a non-poller
         # host doesn't fight the VPS poller over the one bot token (getUpdates is single-consumer).
+        # EU-257: route through ensure_poll_loop, the process-level singleton shared with serve's
+        # startup — a cockpit drain Start runs THIS function inside the serve process (server.py's
+        # asyncio.run(ap.autopilot(...))), so without the singleton every per-app Start on this host
+        # would add its own immortal poller thread. Pass THIS run's stop_event so, if this call is
+        # the one that actually starts the poller (no serve/other-drain poller already live), the
+        # poller stands down when this finite run stops.
         from . import decisions
         _ap_poll, _ap_why = decisions.should_poll_telegram(cfg)
         if _ap_poll:
-            threading.Thread(target=decisions.poll_loop, args=(cfg, audit), daemon=True).start()
+            decisions.ensure_poll_loop(cfg, audit, stop_event=stop_event)
         elif notify.configured():
             print(f"  · Telegram listener OFF — {_ap_why}", flush=True)
 
@@ -770,24 +854,31 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 save_blocked(cfg, blocked)
                 notify.send("▶️ Resuming (answered on Jira): " + ", ".join(sorted(resumed)))
                 audit.record("decision_resumed", tickets=sorted(resumed), via="jira-comment")
-            # Three-tier worklist assembly (EU-87): In Progress → answered/unblocked → To Do.
-            # Pull more than cap so the blocked filter still leaves enough to fill the cap, then cap
-            # the DRAWN (new) work here — `cap` bounds only how much fresh backlog a cycle pulls.
+            # Three-tier worklist assembly (EU-87, cap contract fixed by EU-252): In Progress →
+            # answered/unblocked → To Do. Pull more than cap so the blocked filter still leaves
+            # enough to fill the cap. `cap` bounds only how much FRESH To Do work a cycle pulls —
+            # it must never truncate the drawn window before the tier split runs, or a jql override
+            # that ranks an In Progress fragment low (by priority/Rank) gets clipped off before
+            # tier-1 can rescue it, starving already-in-flight work behind newer To Do filings
+            # (EU-252: EU-233..237 sat 29h unpicked this way). So filter blocked over the FULL
+            # drawn window first, split tiers over that full window, and cap ONLY the To Do slice.
             # Answered/resumed tickets (Tier-2 below) are work already in flight that the Commander
             # explicitly replied to, so they ride ON TOP of the cap and are never dropped — this is
             # the pre-EU-87 contract eu61_autopilot_resume_queue_test.py pins (capping the *combined*
             # list instead silently truncated the To Do tail when cap was small).
             raw = intake.from_drain(cfg, app_name, cap + len(blocked) + len(resumed) + 5)
-            raw = [(a, t) for (a, t) in raw if t.id not in blocked][:cap]
+            raw = [(a, t) for (a, t) in raw if t.id not in blocked]
 
             # Tier-1: tickets the board already shows as In Progress — always run these first so
-            # a ticket we started in a previous cycle is never delayed by new To Do items.
+            # a ticket we started in a previous cycle is never delayed by new To Do items. Never
+            # bounded by `cap` (EU-252) — an In Progress resume must never be starved by fresh work.
             # Use getattr for robustness in tests / adapters that return plain namespaces.
             in_progress = [(a, t) for (a, t) in raw
                            if (s := getattr(t, "status", None)) and "progress" in s.lower()]
-            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order.
+            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order. `cap` bounds
+            # only this fresh-backlog slice (EU-252) — In Progress and answered resumes are additive.
             to_do = [(a, t) for (a, t) in raw
-                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())]
+                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())][:cap]
 
             # Tier-2: parked tickets the Commander answered directly on Jira. They sit between
             # In Progress and To Do so a replied-to ticket is never left behind a fresh To Do.
@@ -799,7 +890,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             answered_items = [v for k, v in resumed.items() if k not in in_drain]
 
             # Final ordering: In Progress → answered → To Do. The cap was already applied to the
-            # drawn work above; answered resumes are intentionally additive (see note above).
+            # To Do slice above (EU-252); In Progress and answered resumes are intentionally
+            # additive/uncapped (see notes above).
             worklist = in_progress + answered_items + to_do
 
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed

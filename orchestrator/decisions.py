@@ -617,22 +617,33 @@ def _write_offset(cfg, update_id: int) -> None:
 
 def poll_once(cfg, audit) -> int:
     """Fetch new Telegram messages and resume any answered decisions. Returns the
-    number of replies handled."""
+    number of replies handled.
+
+    EU-257: the whole fetch-then-ack sequence (read the offset -> ``getUpdates`` -> route each
+    message -> advance the offset) is run under the cross-thread + cross-process lock keyed on
+    the offset file (``locking.locked_call``), so two pollers racing this window — e.g. a
+    leaked second poller thread, or two processes on a misconfigured host — can never both
+    fetch the same update batch and each run route_message's side effects on it."""
     if not notify.configured():
         return 0
-    last = _read_offset(cfg)
-    updates = notify.get_updates(offset=(last + 1) if last is not None else None, timeout=0)
-    handled = 0
-    for uid, text, origin in notify.incoming_texts(updates, cfg):
-        if uid is not None:
-            _write_offset(cfg, uid)
-        if origin != "ops":
-            # Defensive only: incoming_texts emits nothing but "ops" since the EU-65 liaison
-            # channel was DELETED (Phase-2 §2, 2026-07-06). Anything else is dropped, never routed.
-            continue
-        if route_message(cfg, audit, text):
-            handled += 1
-    return handled
+
+    def _fetch_and_route() -> int:
+        last = _read_offset(cfg)
+        updates = notify.get_updates(offset=(last + 1) if last is not None else None, timeout=0)
+        handled = 0
+        for uid, text, origin in notify.incoming_texts(updates, cfg):
+            if uid is not None:
+                _write_offset(cfg, uid)
+            if origin != "ops":
+                # Defensive only: incoming_texts emits nothing but "ops" since the EU-65 liaison
+                # channel was DELETED (Phase-2 §2, 2026-07-06). Anything else is dropped, never
+                # routed.
+                continue
+            if route_message(cfg, audit, text):
+                handled += 1
+        return handled
+
+    return locking.locked_call(_offset_file(cfg), _fetch_and_route)
 
 
 def should_poll_telegram(cfg) -> tuple[bool, str]:
@@ -663,11 +674,80 @@ def should_poll_telegram(cfg) -> tuple[bool, str]:
     return False, f"host '{hid}' is not the poller ('{poller}' owns it; set GENERAL_TELEGRAM_POLLER=1 to override)"
 
 
-def poll_loop(cfg, audit, interval: int = 5) -> None:
-    """Background loop for the control panel: watch Telegram for decision replies."""
-    while True:
-        try:
-            poll_once(cfg, audit)
-        except Exception:  # noqa: BLE001 - never let the listener die
-            pass
-        time.sleep(interval)
+def poll_loop(cfg, audit, interval: int = 5, stop_event: threading.Event | None = None) -> None:
+    """Background loop for the control panel: watch Telegram for decision replies.
+
+    EU-257: accepts an optional ``stop_event`` so a poller owned by a finite run (a CLI
+    ``autopilot`` invocation, or a cockpit per-app drain) stands down when THAT run stops,
+    instead of running forever regardless of who started it. With no stop_event (the ``serve``
+    startup path, whose natural lifetime IS the poller's) it runs until the process exits, same
+    as before. On exit it clears the module-level singleton registration (see
+    :func:`ensure_poll_loop`) so a later start can re-establish a poller rather than finding a
+    dead thread wedged in the registry forever."""
+    me = threading.current_thread()
+    try:
+        while not (stop_event is not None and stop_event.is_set()):
+            try:
+                poll_once(cfg, audit)
+            except Exception:  # noqa: BLE001 - never let the listener die
+                pass
+            if stop_event is not None:
+                stop_event.wait(interval)
+            else:
+                time.sleep(interval)
+    finally:
+        _clear_poller_registration(me)
+
+
+# EU-257: process-level poller singleton. should_poll_telegram elects ONE HOST (EU-185); this
+# tracks the ONE live poll_loop thread on that host. Without it, every spawn site that passes
+# should_poll_telegram (serve's startup, plus each autopilot()/cockpit-drain invocation on the
+# same elected host) starts its own poll_loop thread — serve's poller plus one more per drain
+# Start — all racing on the same unlocked offset file.
+_poller_lock = threading.Lock()
+_poller_thread: threading.Thread | None = None
+
+
+def _clear_poller_registration(thread: threading.Thread) -> None:
+    """Drop the module-level registration IFF it still points at ``thread`` — called from
+    poll_loop's finally on exit. The identity check means a thread that lost the singleton race
+    (never actually registered) can't accidentally clear a DIFFERENT, currently-live poller."""
+    global _poller_thread
+    with _poller_lock:
+        if _poller_thread is thread:
+            _poller_thread = None
+
+
+def ensure_poll_loop(cfg, audit, stop_event: threading.Event | None = None,
+                      interval: int = 5) -> threading.Thread | None:
+    """Start the ONE process-level Telegram poller, or no-op if one is already live.
+
+    EU-257: the single entry point BOTH spawn sites (serve.py's startup and every
+    autopilot()/cockpit-drain invocation) must call, instead of unconditionally starting their
+    own ``threading.Thread(target=poll_loop, ...)``. Re-checks :func:`should_poll_telegram`
+    itself (cheap, side-effect-free) so it's safe to call unconditionally; returns ``None``
+    without touching the registry if this host shouldn't poll at all. Otherwise, under
+    ``_poller_lock``, returns the existing thread if one is alive, else starts and registers a
+    new daemon thread named ``"telegram-poll-loop"`` and returns it.
+
+    ``stop_event`` is honoured only if THIS call is the one that actually starts the poller —
+    a no-op call (a poller already live) does not retroactively attach a new stop_event to the
+    running thread. That matches the design: the poller's lifetime is owned by whichever run
+    started it first (serve's own lifetime if serve started first; a drain's stop_event if a
+    drain started first), and repeated Starts on the same host never grow the thread count.
+    """
+    poll, _reason = should_poll_telegram(cfg)
+    if not poll:
+        return None
+    with _poller_lock:
+        global _poller_thread
+        if _poller_thread is not None and _poller_thread.is_alive():
+            return _poller_thread
+        t = threading.Thread(
+            target=poll_loop, args=(cfg, audit),
+            kwargs={"interval": interval, "stop_event": stop_event},
+            name="telegram-poll-loop", daemon=True,
+        )
+        _poller_thread = t
+        t.start()
+        return t
