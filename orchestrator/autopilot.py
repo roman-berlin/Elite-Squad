@@ -623,10 +623,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # Single always-on brain: also listen to Telegram (/unblock, /council, decision replies).
         # EU-185 (Wave 0): only the elected poller host polls, so an autopilot run on a non-poller
         # host doesn't fight the VPS poller over the one bot token (getUpdates is single-consumer).
+        # EU-257: route through ensure_poll_loop, the process-level singleton shared with serve's
+        # startup — a cockpit drain Start runs THIS function inside the serve process (server.py's
+        # asyncio.run(ap.autopilot(...))), so without the singleton every per-app Start on this host
+        # would add its own immortal poller thread. Pass THIS run's stop_event so, if this call is
+        # the one that actually starts the poller (no serve/other-drain poller already live), the
+        # poller stands down when this finite run stops.
         from . import decisions
         _ap_poll, _ap_why = decisions.should_poll_telegram(cfg)
         if _ap_poll:
-            threading.Thread(target=decisions.poll_loop, args=(cfg, audit), daemon=True).start()
+            decisions.ensure_poll_loop(cfg, audit, stop_event=stop_event)
         elif notify.configured():
             print(f"  · Telegram listener OFF — {_ap_why}", flush=True)
 

@@ -10,6 +10,8 @@ primitives so every hot file can share one correct implementation:
 * :func:`locked_append`   — append a single line to a ``.jsonl`` file.
 * :func:`locked_rmw`      — atomic read-modify-write of a ``.json`` file.
 * :func:`locked_text_rmw` — atomic read-modify-write of a plain text file (e.g. markdown).
+* :func:`locked_call`     — run an arbitrary critical section (e.g. fetch-then-ack) under the
+  same lock, for callers whose critical section isn't a single read-modify-write.
 
 Both combine three layers of protection:
 
@@ -139,6 +141,35 @@ def locked_text_rmw(path: str | Path, mutate_fn: Callable[[str], str], *, defaul
                 os.fsync(tf.fileno())
             os.replace(tmp_path, p)
             return new_value
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
+def locked_call(path: str | Path, fn: Callable[[], Any]) -> Any:
+    """Run ``fn()`` while holding the cross-thread + cross-process lock keyed on ``path``'s
+    sidecar ``.lock`` file — the same guarantee as :func:`locked_rmw`/:func:`locked_text_rmw`
+    (a process-wide ``threading.Lock`` plus an ``fcntl.flock`` on a sidecar file), but for a
+    critical section that is neither a JSON nor a plain-text read-modify-write.
+
+    EU-257: the Telegram poller's fetch-then-ack sequence (read the offset -> ``getUpdates`` ->
+    route each message -> advance the offset, possibly writing it more than once per batch) is
+    exactly this shape against the plain-text offset file. Two pollers racing that window could
+    both fetch the same ``getUpdates`` batch and each run route_message's side effects (ticket
+    resume, Jira comment/transition, council reply) on the same update. Wrapping the whole
+    sequence in ``locked_call`` keyed on the offset file serialises it across threads AND
+    processes, so only one poller ever runs it at a time.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with _lock_for(p):
+        lock_path = p.with_name(p.name + ".lock")
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            return fn()
         finally:
             if fcntl is not None:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
