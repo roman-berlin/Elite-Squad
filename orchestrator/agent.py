@@ -108,9 +108,15 @@ def configure_audit(audit) -> None:
 # retry — the primary false-alarm defect from the audit. A "cap" now requires EXPLICIT
 # plan/weekly/usage/quota (or GLM billing) language; anything that is only status/rate-limit
 # language falls through to the transient class and gets a backoff retry, never a weekly fallback.
+# EU-220: the EU-202 GLM patterns above were themselves too broad — bare "credit", "balance",
+# "billing", "insufficient", "quota" substring-match unrelated errors ("insufficient permissions",
+# "load balancer" — "balancer" contains "balance") and would wrongly classify them as a plan cap.
+# This is higher-stakes since 95042c2: the classifier also runs over ResultMessage.result text
+# (where a GLM/z.ai provider-side error lands), so a false positive there can pause a live drain
+# for the wrong reason. Replaced with CONTEXTUAL phrases that still cover real z.ai quota text.
 _CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit",
-                 "quota exceeded", "quota",
-                 "credit", "balance", "billing", "insufficient")
+                 "quota exceeded", "insufficient balance", "insufficient quota",
+                 "insufficient credit", "account balance", "billing issue", "payment required")
 _TRANSIENT_PATTERNS = ("rate limit", "rate_limit", "too many requests",
                        "overloaded", "429", "529")
 
