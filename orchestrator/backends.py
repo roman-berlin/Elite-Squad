@@ -59,11 +59,24 @@ GLM = "glm"       # Z.ai GLM via the Anthropic-compatible endpoint.
 # Run-scoped selection. Default NATIVE so any SDK call outside a run (meetings, ad-hoc) stays Opus.
 _BACKEND: contextvars.ContextVar[str] = contextvars.ContextVar("model_backend", default=NATIVE)
 
+# EU-236: the run-scoped ModelRegistry that apply() resolves a registry-id pin against — set by
+# loop.run alongside the backend id. Keeping it run-scoped (cfg-anchored) is what lets apply() stay
+# hermetic when it is called at the SDK seam with NO explicit registry (agent._run_agent_unrouted):
+# it resolves against THIS run's store, not the live state/ store. Default None -> apply() falls
+# back to a live-anchored ModelRegistry().
+_REGISTRY: contextvars.ContextVar = contextvars.ContextVar("model_registry", default=None)
+
 # GLM defaults — overridable via env. The token has NO default: it must be provided or GLM is off.
 _GLM_BASE_URL_DEFAULT = "https://api.z.ai/api/anthropic"
 _GLM_MODEL_DEFAULT = "glm-4.6"
 _GLM_SMALL_FAST_DEFAULT = "glm-4.5-air"   # EU-190: the SDK's background/small-fast model under GLM
 _GLM_TIMEOUT_DEFAULT = "3000000"
+
+# The literal aliases normalize() recognizes for each canonical id. Extracted as constants (rather
+# than inlined in normalize()) so EU-236's apply() can tell "an explicit opus/glm alias" apart from
+# "an unrecognized id that might be a registry backend" without re-deriving normalize()'s rules.
+_GLM_ALIASES = ("glm", "zai", "z.ai", "z-ai")
+_NATIVE_ALIASES = ("", "opus", "native", "anthropic", "claude")
 
 
 def normalize(value: str | None) -> str:
@@ -74,22 +87,82 @@ def normalize(value: str | None) -> str:
     NATIVE — never silently to GLM.
     """
     v = (value or "").strip().lower()
-    if v in ("glm", "zai", "z.ai", "z-ai"):
+    if v in _GLM_ALIASES:
         return GLM
     return NATIVE
 
 
-def set_backend(value: str | None):
-    """Pin the backend for the current run context. Returns a token for :func:`reset_backend`."""
-    return _BACKEND.set(normalize(value))
+def resolve_selection(value: str | None, registry=None) -> str:
+    """EU-236: resolve a raw backend selection (a cockpit form value or a persisted preference) to a
+    persist/run-ready id — WITHOUT flattening a registry id.
+
+    An ``opus``/``glm`` alias maps to its canonical id; a value that is a KNOWN registry record id
+    (per ``registry``) is returned VERBATIM; anything else degrades SAFELY to :data:`NATIVE`. Unlike
+    :func:`normalize` (which collapses every non-alias to NATIVE), this preserves custom-backend ids
+    so they can thread through ``backend_pref`` / the run pin / :func:`apply`; unlike a blind
+    pass-through, an unknown/deleted id still falls back to NATIVE — never silently to GLM.
+    """
+    v = (value or "").strip()
+    if not v:
+        return NATIVE
+    vl = v.lower()
+    if vl in _GLM_ALIASES:
+        return GLM
+    if vl in _NATIVE_ALIASES:
+        return NATIVE
+    if registry is not None:
+        try:
+            if registry.get(v) is not None:
+                return v
+        except Exception:  # noqa: BLE001 - a corrupt/unreadable registry must never break selection
+            pass
+    return NATIVE
+
+
+def _pin_value(value: str | None) -> str:
+    """Canonicalize a RUN PIN for the contextvar: an ``opus``/``glm`` alias -> its canonical id; any
+    other non-empty value (an EU-236 registry-id candidate) is preserved VERBATIM so :func:`current`
+    (and thus :func:`apply`) can resolve it — ``apply`` fails closed if the id resolves to no
+    backend. Empty/None -> NATIVE. NEVER maps an unknown value to GLM."""
+    v = (value or "").strip()
+    if not v:
+        return NATIVE
+    vl = v.lower()
+    if vl in _GLM_ALIASES:
+        return GLM
+    if vl in _NATIVE_ALIASES:
+        return NATIVE
+    return v
+
+
+def set_backend(value: str | None, registry=None):
+    """Pin the backend for the current run context. Returns a token for :func:`reset_backend`.
+
+    ``value`` may be an ``opus``/``glm`` alias OR (EU-236) a model-registry record id — the id is
+    preserved verbatim (see :func:`_pin_value`) so :func:`current`/:func:`apply` can resolve it.
+
+    ``registry`` (EU-236, optional): the cfg-anchored :class:`ModelRegistry` this run resolves its
+    registry ids against; stored run-scoped so :func:`apply`, called at the SDK seam with no explicit
+    registry, stays hermetic instead of reaching the live ``state/`` store.
+    """
+    reg_token = _REGISTRY.set(registry)
+    bk_token = _BACKEND.set(_pin_value(value))
+    return (bk_token, reg_token)
 
 
 def reset_backend(token) -> None:
-    """Restore the backend contextvar. Best-effort — a token from another context is ignored."""
+    """Restore the backend + registry contextvars from the ``(backend, registry)`` token pair
+    returned by :func:`set_backend`. Best-effort — a token from another context (or the wrong shape)
+    is ignored."""
     try:
-        _BACKEND.reset(token)
-    except (ValueError, LookupError):  # pragma: no cover - token from a different context
-        pass
+        bk_token, reg_token = token
+    except (TypeError, ValueError):  # pragma: no cover - a non-pair token (bad caller)
+        return
+    for var, tok in ((_BACKEND, bk_token), (_REGISTRY, reg_token)):
+        try:
+            var.reset(tok)
+        except (ValueError, LookupError):  # pragma: no cover - token from a different context
+            pass
 
 
 def current() -> str:
@@ -170,32 +243,111 @@ def _glm_env() -> dict[str, str]:
     }
 
 
-def apply(options, backend: str | None = None) -> str:
+def _registry_backend_env(cfg: dict) -> dict[str, str]:
+    """The ``options.env`` overrides for ONE registry-backed subprocess — built exactly like
+    :func:`_glm_env` (same keys, same native-credential blanking), just sourced from a
+    :meth:`ModelRegistry.get_backend_config` dict instead of the hardcoded GLM env vars."""
+    return {
+        "ANTHROPIC_BASE_URL": cfg["base_url"],
+        "ANTHROPIC_AUTH_TOKEN": cfg["auth_token"],
+        "ANTHROPIC_SMALL_FAST_MODEL": cfg.get("small_fast_model_id") or cfg["model_id"],
+        # Blank the native-subscription creds for THIS call so they never reach the custom endpoint.
+        "ANTHROPIC_API_KEY": "",
+        "CLAUDE_CODE_OAUTH_TOKEN": "",
+    }
+
+
+def _apply_registry(options, model_id: str, registry=None) -> str:
+    """EU-236: apply a registry-backed id (neither NATIVE nor GLM) to ``options``.
+
+    ``registry`` lets callers/tests inject a :class:`~orchestrator.model_registry.ModelRegistry`
+    (or a cfg-anchored/tmp-store one) so this stays hermetic; the default constructs a plain
+    ``ModelRegistry()`` anchored to the live ``state/model_registry.json``.
+
+    Fail-closed exactly like the GLM branch: an unknown id, or a known id with no resolvable
+    credential, falls back to NATIVE with a warning — never a subprocess aimed at a custom endpoint
+    with an empty bearer.
+    """
+    from .model_registry import ModelRegistry  # deferred: avoid a hard import cycle at module load
+    reg = registry if registry is not None else ModelRegistry()
+    cfg = reg.get_backend_config(model_id)
+    if not cfg or not cfg.get("base_url") or not cfg.get("auth_token"):
+        print(f"  ⚠ model-backend: {model_id!r} is not a known/configured registry backend — "
+              "falling back to Opus (Claude).", flush=True)
+        return NATIVE
+    merged = dict(getattr(options, "env", None) or {})
+    merged.update(_registry_backend_env(cfg))
+    options.env = merged
+    options.model = cfg["model_id"]
+    return model_id
+
+
+def apply(options, backend: str | None = None, registry=None) -> str:
     """Apply the selected backend to ONE ``ClaudeAgentOptions`` right before the SDK call.
 
-    Returns the EFFECTIVE backend id actually applied (:data:`NATIVE` or :data:`GLM`) so the caller
-    can label the ledger/audit. For NATIVE this is a pure no-op (env untouched, model unchanged).
+    Returns the EFFECTIVE backend id actually applied — :data:`NATIVE`, :data:`GLM`, or (EU-236) a
+    registry record id — so the caller can label the ledger/audit. For NATIVE this is a pure no-op
+    (env untouched, model unchanged).
 
     Credential minimization (EU-255) is a SEPARATE concern and is applied AT THE SEAM
     (``agent._run_agent_unrouted``, via :func:`secret_strip_overrides`) right after this call — so
     ``apply`` remains a pure model/backend transform and both backends get the same env scrub.
 
-    Fail-closed: GLM with no ``GLM_AUTH_TOKEN`` falls back to NATIVE with a warning rather than
-    pointing the subprocess at z.ai with an empty bearer.
+    Fail-closed: GLM with no ``GLM_AUTH_TOKEN``, or a registry id with no resolvable credential,
+    falls back to NATIVE with a warning rather than pointing the subprocess at a third-party
+    endpoint with an empty bearer.
+
+    ``registry`` (EU-236, optional): a :class:`~orchestrator.model_registry.ModelRegistry` to
+    consult for a ``backend`` that is neither a NATIVE nor a GLM alias. When omitted, the run-scoped
+    registry pinned by :func:`set_backend` is used (so the seam call ``apply(options)`` resolves
+    against THIS run's cfg-anchored store and stays hermetic); with none pinned, a live-anchored
+    ``ModelRegistry()`` is the last resort. Ignored for NATIVE/GLM.
     """
-    chosen = normalize(backend) if backend is not None else current()
-    if chosen != GLM:
+    raw = backend if backend is not None else current()
+    v = (raw or "").strip().lower()
+    if v in _GLM_ALIASES:
+        if not _glm_token():
+            print("  ⚠ model-backend: GLM selected but GLM_AUTH_TOKEN is not set — falling back to "
+                  "Opus (Claude). Set GLM_AUTH_TOKEN in .env to enable GLM.", flush=True)
+            return NATIVE
+        # Merge the GLM overrides over any existing options.env — a brand-new dict, never shared.
+        merged = dict(getattr(options, "env", None) or {})
+        merged.update(_glm_env())
+        options.env = merged
+        options.model = glm_model()
+        return GLM
+    if v in _NATIVE_ALIASES:
         return NATIVE
-    if not _glm_token():
-        print("  ⚠ model-backend: GLM selected but GLM_AUTH_TOKEN is not set — falling back to "
-              "Opus (Claude). Set GLM_AUTH_TOKEN in .env to enable GLM.", flush=True)
-        return NATIVE
-    # Merge the GLM overrides over any existing options.env — a brand-new dict, never shared.
-    merged = dict(getattr(options, "env", None) or {})
-    merged.update(_glm_env())
-    options.env = merged
-    options.model = glm_model()
-    return GLM
+    # Not a recognized opus/glm alias — EU-236: try it as a registry backend id. When the caller
+    # gave no explicit registry (the seam call apply(options)), resolve against the run-scoped,
+    # cfg-anchored registry pinned by set_backend — so runs and tests stay hermetic.
+    if registry is None:
+        registry = _REGISTRY.get()
+    return _apply_registry(options, raw.strip(), registry=registry)
+
+
+def list_backends(registry=None) -> list[dict]:
+    """EU-236: every backend a run could pick — the hardcoded defaults (:data:`NATIVE`,
+    :data:`GLM`) PLUS every record in the model registry, as ``{"id", "label"}`` dicts (in that
+    order; registry records oldest-first, same order as :meth:`ModelRegistry.list`).
+
+    ``registry`` lets callers inject a hermetic tmp-store registry for tests; the default is a
+    plain ``ModelRegistry()`` anchored to the live store. A missing/corrupt
+    ``state/model_registry.json`` degrades gracefully (``ModelRegistry._read`` never raises), so
+    this always returns at least the two hardcoded defaults.
+    """
+    out = [
+        {"id": NATIVE, "label": "Opus (Claude)"},
+        {"id": GLM, "label": "GLM (Z.ai)"},
+    ]
+    from .model_registry import ModelRegistry  # deferred: avoid a hard import cycle at module load
+    reg = registry if registry is not None else ModelRegistry()
+    for record in reg.list():
+        rid = record.get("id")
+        if not rid:
+            continue
+        out.append({"id": rid, "label": record.get("display_name") or rid})
+    return out
 
 
 def is_glm(cfg=None) -> bool:

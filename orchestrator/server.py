@@ -932,15 +932,18 @@ def create_app(cfg: Config):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
-        raw = (request.form.get("backend") or "").strip().lower()
+        raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
-        if app_param and raw in ("inherit", ""):
+        if app_param and raw.lower() in ("inherit", ""):
             # "Inherit global" — clear this app's override; it now resolves the global pick.
             backend_pref.set_active(None, cfg, app_name=app_param)
             _state.pop("model_alert", None)
             get_state(None)["last_msg"] = f"{app_param}: Model now inherits the global pick."
             return redirect("/")
-        bk = backends.normalize(raw)
+        # EU-236: resolve against the registry so a KNOWN custom-backend id is persisted VERBATIM,
+        # not flattened to opus by normalize(); opus/glm aliases still canonicalize, unknown -> opus.
+        from .model_registry import ModelRegistry
+        bk = backends.resolve_selection(raw, ModelRegistry(cfg))
         if bk == backends.GLM:
             ok, detail = backends.glm_test_connection()
             if not ok:
@@ -953,7 +956,13 @@ def create_app(cfg: Config):
         else:
             backend_pref.set_active(bk, cfg)
         _state.pop("model_alert", None)
-        _label = "GLM (Z.ai) — connection OK." if bk == backends.GLM else "Opus (Claude)."
+        if bk == backends.GLM:
+            _label = "GLM (Z.ai) — connection OK."
+        elif bk == backends.NATIVE:
+            _label = "Opus (Claude)."
+        else:
+            _rec = ModelRegistry(cfg).get(bk)
+            _label = f"{(_rec or {}).get('display_name') or bk} (custom backend)."
         get_state(None)["last_msg"] = (
             f"{app_param}: Model set to {_label} (this project only)." if app_param
             else "Model backend set to " + _label)
