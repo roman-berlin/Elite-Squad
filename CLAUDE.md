@@ -64,6 +64,9 @@ Everything under `Documentation/` (these are the only files there — keep this 
 - `Documentation/SYSTEM_AUDIT_2026-07-06.md` — the 2026-07-06 four-surface full-system audit (Local /
   Server / Telegram / Cockpit), risk-ranked findings, the alert table, the scale-up go/no-go, and the
   wave-sequenced combat-readiness implementation plan.
+- `Documentation/DELTA_AUDIT_2026-07-12.md` — the 2026-07-12 delta-audit index of findings (EU-262):
+  root-cause of the max-turns-exhaustion crash class (EU-248), delta metrics, economics, the 14 new
+  EU tickets it filed (EU-248..EU-261), and the 7-ticket AUTO product-quality sample.
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them
