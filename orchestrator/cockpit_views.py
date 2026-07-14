@@ -952,6 +952,7 @@ _CHAT_STYLE = ("<style>"
                ".msg.unit .bub{background:var(--panel2);border:1px solid var(--line2);border-bottom-left-radius:4px}"
                ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
                ".cempty{color:var(--dim);padding:30px 8px;text-align:center;font-size:13px}"
+               ".typing{max-width:780px;margin:0 auto 8px;color:var(--faint);font-size:12px;font-style:italic}"
                ".composer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--line);padding:12px 30px}"
                ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
                ".composer input.cerr{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}"
@@ -970,10 +971,10 @@ def _chat_tabs(active: str, npend: int = 0) -> str:
 
 def _group_inner(cfg: Config) -> str:
     from . import council
-    msgs = council.group_messages(cfg, limit=200)
+    msgs = council.group_messages(cfg, limit=30)   # EU-287: window to the recent messages, not the whole log
     if not msgs:
-        return ('<div class=cempty>No messages yet. Ask the unit anything — the relevant officers '
-                'weigh in, others can add a comment. (The CTO is your 1:1 chat.)</div>')
+        return ('<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant officers '
+                'weigh in. (The CTO is your 1:1 chat.)</div>')
     out = ""
     for who, text in msgs:
         side = "you" if who == "you" else "unit"

@@ -41,8 +41,8 @@ chk("group-chat options = bypassPermissions", go.permission_mode == "bypassPermi
 # every inline ClaudeAgentOptions in council.py is bypass too (source-level guard against regressions)
 src = Path("./orchestrator/council.py").read_text()
 chk("zero 'default' gates remain in council.py", 'permission_mode="default"' not in src)
-chk("council.py has 8 bypass officers (7 + the light daily_brief CTO synthesis, 2026-07-07)",
-    src.count('permission_mode="bypassPermissions"') == 8,
+chk("council.py has 9 bypass officers (8 + the EU-287 group-chat triage classifier, 2026-07-14)",
+    src.count('permission_mode="bypassPermissions"') == 9,
     str(src.count('permission_mode="bypassPermissions"')))
 
 # the other read-only officers (adjutant/drillmaster/reviewer/squad) are flipped as well

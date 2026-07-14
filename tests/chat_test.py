@@ -37,7 +37,11 @@ check("all-PASS greeting still gets a reply (room not dead)", len(replies) >= 1,
 check("the fallback reply isn't a PASS", replies and "PASS" not in replies[0][1])
 
 # --- group room: an in-lane officer answers normally ---
+# EU-287: group_chat now triages to the 1-2 relevant officers before polling anyone, so the stub
+# must answer the "group-triage" call with the officer it wants selected.
 async def scout_answers(prompt, opts, tag=""):
+    if tag == "group-triage":
+        return R("QA Engineer")
     return R("DEV smoke is green; nothing flaky today.") if tag.startswith("group-scout") else R("PASS")
 council.run_agent = scout_answers
 replies = asyncio.run(council.group_chat(cfg, "is DEV stable right now?"))

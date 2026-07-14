@@ -892,21 +892,98 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Group chat — the Commander consults the whole unit (brainstorm). The relevant
-# officers answer; others may add a short comment; off-lane officers PASS. The
-# The CTO is NOT in this room — the Commander talks to the CTO 1:1 in /chat.
+# Group chat — the Commander consults the unit. A cheap triage step (EU-287) routes to the 1–2
+# officers whose lane actually owns the message; everyone else stays silent — a real Telegram
+# group, not a roundtable where every officer writes a paragraph. The CTO is NOT in this room —
+# the Commander talks to the CTO 1:1 in /chat.
 # --------------------------------------------------------------------------- #
 _GROUP_SYSTEM = (
     "You are an officer of an ELITE autonomous software unit in a GROUP CHAT with the Commander "
     "(Roman) — he is consulting the unit / brainstorming or just talking, not filing a ticket. Speak "
-    "in character, plainly, no markdown, conversationally — short. If the question touches your lens, "
-    "ANSWER directly (2–4 sentences) with a concrete, useful take. If it only partly touches your "
-    "lane, add a brief comment. Reply with exactly 'PASS' ONLY when another officer is clearly better "
-    "placed and you'd add nothing — NEVER for a greeting, a general or social message, or small talk, "
-    "where a short friendly in-character reply is exactly right. Build on what fellow officers already "
-    "said — agree and extend, or disagree with a reason; never repeat them. Ground claims in the "
-    "unit's record and the files you can read; no invention. Do not write or edit files."
+    "in character, plainly, no markdown, conversationally — like a real chat, not a memo: AT MOST 2 "
+    "SHORT SENTENCES, always. If the message is genuinely your lane, answer directly and concretely. "
+    "If you were addressed 1:1 (a message just to you), answer briefly even if it's a greeting or "
+    "small talk — never leave a direct message unanswered. Otherwise, if it is not your lane, reply "
+    "with exactly 'PASS' — do NOT chime in with a partial comment just because it touches your lane a "
+    "little; the officer whose lane it actually is will answer, and bystanders stay quiet. Build on a "
+    "fellow officer's reply only if you're genuinely answering too — agree and extend, or disagree "
+    "with a reason, briefly; never repeat them. Ground claims in the unit's record and the files you "
+    "can read; no invention. Do not write or edit files."
 )
+
+_TRIAGE_SYSTEM = (
+    "You are a fast triage classifier for an elite software unit's group chat. Given a message from "
+    "the Commander and the roster of officers with their lanes, pick AT MOST 2 officers whose lane "
+    "genuinely owns this message — the ones who should actually answer; most messages need only ONE. "
+    "If it's a greeting, small talk, or no lane clearly owns it, answer exactly 'NONE'. Output ONLY "
+    "the officer rank name(s) exactly as given, comma-separated if two, nothing else — no "
+    "explanation, no punctuation beyond the comma."
+)
+
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _brief(text: str, max_sentences: int = 2) -> str:
+    """Length guard (EU-287): trims a reply to at most `max_sentences` sentences so the group room
+    reads like a chat, not a memo — even if a stubbed/verbose officer returns a multi-paragraph reply."""
+    text = " ".join((text or "").split()).strip()
+    if not text:
+        return text
+    return " ".join(_SENT_SPLIT.split(text)[:max_sentences]).strip()
+
+
+def _triage_prompt(message: str, tail: str) -> str:
+    roster = "\n".join(f"- {rank} ({lens_role})" for rank, lens_role, _ in COUNCIL)
+    parts = ["Officers and their lanes:", roster, ""]
+    if tail:
+        parts += ["Recent group chat (context):", tail, ""]
+    parts += [f'The Commander says to the group: "{message}"', "",
+              "Which officer(s) (at most 2) should answer? Reply with their rank name(s) only, or 'NONE'."]
+    return "\n".join(parts)
+
+
+async def _triage_officers(cfg: Config, message: str, tail: str) -> list[str]:
+    """Cheap Haiku triage (EU-287): picks at most 2 officer ranks whose lane owns `message`. Empty
+    list means no lane owner (greeting/small talk) — group_chat then falls back to the host officer."""
+    try:
+        run = await run_agent(
+            _triage_prompt(message, tail),
+            ClaudeAgentOptions(model=cfg.smalltalk_model, system_prompt=_TRIAGE_SYSTEM,
+                               cwd=_general_root(), permission_mode="bypassPermissions",
+                               allowed_tools=[], disallowed_tools=["Write", "Edit", "NotebookEdit",
+                                                                    "Bash", "Task", "Agent"],
+                               setting_sources=["project"], max_turns=1, effort="low"),
+            tag="group-triage")
+    except Exception:  # noqa: BLE001 — triage must never crash the room; treat as no lane owner
+        return []
+    text = (run.final or run.text or "").strip()
+    if not text or text.lower().rstrip(".!").strip() == "none":
+        return []
+    return [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()][:2]
+
+
+def _match_officers(picks: list[str]) -> list[tuple[str, str, str]]:
+    """Match triage picks to COUNCIL officers by key/name, in pick order, capped at 2. Unlike
+    `_select_officers` (used for the explicit /group?officer= 1:1 mode, where 'no match' should mean
+    'show me everyone'), a triage miss must NOT fall back to the whole roster — that would silently
+    reopen the noisy whole-council path this ticket closes."""
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for p in picks:
+        pl = str(p).lower().strip()
+        if not pl:
+            continue
+        for o in COUNCIL:
+            key = _officer_key(o[0])
+            if key in seen:
+                continue
+            if pl in o[0].lower() or pl in key or o[0].lower() in pl:
+                out.append(o)
+                seen.add(key)
+                break
+        if len(out) >= 2:
+            break
+    return out
 
 
 def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
@@ -951,16 +1028,27 @@ def _group_tail(cfg: Config, n: int = 12) -> str:
 
 async def group_chat(cfg: Config, message: str, officers=None, audit=None,
                      echo: bool = True) -> list[tuple[str, str]]:
-    """The Commander consults the unit. Each relevant officer replies (others PASS). Persists the
-    exchange to group_chat.jsonl and returns the officers' replies as [(rank, text)]. `echo=False`
-    when the caller already recorded the Commander's message (so the web UI can echo instantly)."""
+    """The Commander consults the unit — like a real Telegram group, not a roundtable (EU-287).
+
+    When `officers` is given (the explicit /group?officer= 1:1 mode), that officer alone answers —
+    unchanged, no triage. Otherwise a cheap Haiku triage picks the 1–2 officers whose lane actually
+    owns `message`; everyone else stays silent (no whole-council poll, no 'partly relevant' bystander
+    comments). Each reply is length-guarded to <=2 sentences. If triage finds no lane owner (a
+    greeting / small talk), the host officer answers in exactly one short sentence so the room is
+    never empty. Persists the exchange to group_chat.jsonl and returns the officers' replies as
+    [(rank, text)]. `echo=False` when the caller already recorded the Commander's message (so the
+    web UI can echo instantly)."""
     digest = format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)
     tail = _group_tail(cfg, 12)
-    roster = _select_officers(officers)
     cwd = _general_root()
     if echo:
         _append_group(cfg, "you", message)        # the Commander's message leads the thread
+    if officers:
+        roster = _select_officers(officers)        # explicit 1:1 — that officer always answers
+    else:
+        picks = await _triage_officers(cfg, message, tail)
+        roster = _match_officers(picks)             # capped at 2; [] means no lane owner
     replies: list[tuple[str, str]] = []
     for rank, lens_role, voice in roster:
         prompt = "\n".join([
@@ -970,30 +1058,34 @@ async def group_chat(cfg: Config, message: str, officers=None, audit=None,
             *(["Fellow officers have already replied to this message:\n"
                + "\n".join(f"— {w}: {t}" for w, t in replies) + "\n"] if replies else []),
             f'The Commander says to the group: "{message}"', "",
-            "Reply per your rules: answer if it's your lane, a short comment if it partly is, else 'PASS'.",
+            "Reply per your rules: at most 2 short sentences, answer only if it's genuinely your "
+            "lane (or you were addressed 1:1), else 'PASS'.",
         ])
         run = await run_agent(prompt, _group_options(cfg, voice, cwd),
                               tag="group-" + _officer_key(rank))
         s = (run.final or run.text or "").strip()
         if not s or s.lower().rstrip(".!").strip() in _SKIP:
             continue
+        s = _brief(s, max_sentences=2)
         replies.append((rank, s))
         _append_group(cfg, rank, s)
         print(f"  · {rank} weighed in", flush=True)
     if not replies:
         # Nobody claimed it (a greeting / small talk / off-lane aside) — the room must never look
-        # dead. The host officer answers warmly so the Commander always gets a reply.
-        rank, lens_role, voice = roster[0]
+        # dead. The host officer answers warmly, in one short sentence, so the Commander always gets
+        # a reply.
+        rank, lens_role, voice = roster[0] if roster else COUNCIL[0]
         prompt = "\n".join([
             f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
             *([f"Recent group chat:\n{tail}\n"] if tail else []),
             f'The Commander says to the group: "{message}"', "",
-            "No formal lane owns this. Reply warmly and briefly in character (1–3 sentences) — and if "
-            "it helps, gently point him to what the unit can take on. Do NOT say PASS.",
+            "No formal lane owns this. Reply warmly in character, in exactly ONE short sentence. Do "
+            "NOT say PASS.",
         ])
         run = await run_agent(prompt, _group_options(cfg, voice, cwd), tag="group-host")
         s = (run.final or run.text or "").strip()
         if s and s.lower().rstrip(".!").strip() not in _SKIP:
+            s = _brief(s, max_sentences=1)
             replies.append((rank, s))
             _append_group(cfg, rank, s)
     if audit is not None:
