@@ -31,7 +31,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import memory
 from .agent import run_agent
 from .config import Config
-from .drillmaster import collect_signals, format_signals
+from .signals import collect_signals, format_signals
 from .officers import OFFICER_NAMES, display
 from . import notify
 
