@@ -253,7 +253,7 @@ class JiraAdapter(BacklogAdapter):
 
     # -- filing (officers raise their own tickets) ------------------------ #
     def create_task(self, summary: str, description: str, labels=None,
-                    issue_type: str = "Task") -> str | None:
+                    issue_type: str = "Task", priority: str | None = None) -> str | None:
         fields: dict[str, Any] = {
             "project": {"key": self.project},
             "summary": summary[:240],
@@ -266,6 +266,10 @@ class JiraAdapter(BacklogAdapter):
         fields["assignee"] = {"accountId": self.assignee or ROMAN_ACCOUNT_ID}
         if labels:
             fields["labels"] = [str(l).replace(" ", "-") for l in labels]
+        # EU-284: an explicit priority (mapped from the finding's severity) overrides the project
+        # default; leaving it unset (None/empty) keeps Jira's own default (Medium) untouched.
+        if priority:
+            fields["priority"] = {"name": priority}
         r = self.session.post(self._url("issue"), json={"fields": fields})
         r.raise_for_status()
         return r.json().get("key")
