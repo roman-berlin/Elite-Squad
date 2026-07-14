@@ -423,8 +423,16 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 # needs.summary(cfg, app_name) already scopes per app (EU-129 pattern): NOT a single global list.
 _MERGED_RECENCY_SECS = 30 * 60   # a just-merged ticket lingers ~30m on the board, then drops off
 
+# EU-315: per-tone row colour, keyed off dashboard.pipeline_stage_tone(task) — reuses the same
+# palette vars _token_css() already defines, so Blocked / Needs-you / Errored are each visually
+# distinct at a glance instead of identical --dim grey text.
+_STAGE_TONE_COLOR = {
+    "bad": "var(--bad)", "warn": "var(--warn)", "blocked": "var(--info)", "ok": "var(--ok)",
+}
 
-def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None) -> str:
+
+def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None,
+                    blocked_set: set[str] | None = None) -> str:
     """Render the active tab's pipeline board: one row per ticket — id, current stage, age.
 
     ``tasks`` is the caller's already-loaded ``dashboard.load_tasks(cfg.audit_path)`` result (one
@@ -433,14 +441,32 @@ def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None) -> str
     ``_row_matches_app`` uses (the row's own ``app`` field, else a ticket-key prefix match) — pass
     a falsy ``app_name`` to show every project (unscoped).
 
+    ``blocked_set`` (EU-315): the REAL parked set — the ticket ids in blocked_tickets.json
+    (``warroom._load_blocked``). A row whose ticket is a member renders with the distinct Blocked
+    tone/label and, once past ``warroom.STALE_BLOCK_CUTOFF_S``, greyed as ``(stale)``. Blocked-ness
+    is membership in this set, NOT a run ``outcome`` (there is no ``blocked`` outcome). When
+    ``None``, the board loads the set itself from ``cfg`` so a direct caller still gets the real
+    state; pass an explicit set (even empty) to override that self-load.
+
     Age-filter rule: every non-terminal / needs-you row always shows; a ``merged→dev`` row shows
     only while recent (< ``_MERGED_RECENCY_SECS`` since it ended), so a just-landed ticket lingers
-    briefly instead of vanishing the instant it merges. ``cfg`` is accepted (unused directly) only
-    to match the ``needs.summary(cfg, app_name)`` calling convention this board mirrors.
+    briefly instead of vanishing the instant it merges. ``cfg`` is accepted (used to self-load the
+    parked set) and otherwise matches the ``needs.summary(cfg, app_name)`` convention this mirrors.
     """
     from datetime import datetime
 
     from . import needs as _needs
+
+    if blocked_set is None:
+        blocked_set = set()
+        if cfg is not None:
+            try:
+                from . import warroom as _wr
+                blocked_set = {str(b) for b in _wr._load_blocked(cfg)}
+            except Exception:  # noqa: BLE001 - the board must never break on a bad parked-set read
+                blocked_set = set()
+    else:
+        blocked_set = {str(b) for b in blocked_set}
 
     app_prefix = str(app_name).strip().upper() if app_name else ""
     now_naive = datetime.now()
@@ -460,14 +486,30 @@ def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None) -> str
             continue  # no timestamp at all — nothing to show an age for
         if (t.get("outcome") or "") == "merged→dev" and age_secs >= _MERGED_RECENCY_SECS:
             continue  # merged AND old — the one row kind the board drops (the recency rule)
-        tid = html.escape(str(t.get("ticket_id") or ""))
-        stage = html.escape(D.derive_pipeline_stage(t))
+        raw_tid = str(t.get("ticket_id") or "")
+        is_blocked = raw_tid in blocked_set
+        tid = html.escape(raw_tid)
+        stage_text = D.derive_pipeline_stage(t, is_blocked=is_blocked)
         age = html.escape(D._human_dur(age_secs))
+        # EU-315: freshness hardening — a parked (blocked) row past the staleness cutoff is NEVER
+        # shown as a plain active Blocked row; it stays visible (greyed), not silently dropped, so
+        # the Commander can still see it aged out rather than losing the signal entirely. Blocked-
+        # ness + its staleness are both derived from the real parked set (blocked_set membership),
+        # never from a run outcome.
+        stale = D.is_blocked_stale(t, is_blocked=is_blocked)
+        if stale:
+            tone_cls, color = "pbstale", "var(--faint)"
+            stage_text += " (stale)"
+        else:
+            tone = D.pipeline_stage_tone(t, is_blocked=is_blocked)
+            tone_cls = f"pbstage-{tone}" if tone else "pbstage-default"
+            color = _STAGE_TONE_COLOR.get(tone, "var(--dim)")
+        stage = html.escape(stage_text)
         rows.append(
             '<div class=pbrow style="display:flex;align-items:center;gap:var(--s-3);'
             'padding:var(--s-2) 0;border-top:1px solid var(--border)">'
             f'<span class="mono pbid" style="font-weight:600">{tid}</span>'
-            f'<span class=pbstage style="color:var(--dim);flex:1">{stage}</span>'
+            f'<span class="pbstage {tone_cls}" style="color:{color};flex:1">{stage}</span>'
             f'<span class=pbage style="color:var(--faint);font-size:var(--t-xs)">{age}</span>'
             '</div>'
         )
