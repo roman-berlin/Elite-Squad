@@ -43,7 +43,7 @@ class FakeBacklog:
     mode = "file"   # "file" -> create new; "dedupe" -> all already-open; "fail" -> create_task raises
     def find_open_by_summary(self, title):
         return "AUTO-999" if FakeBacklog.mode == "dedupe" else None
-    def create_task(self, title, body, labels=None, issue_type="Task"):
+    def create_task(self, title, body, labels=None, issue_type="Task", priority=None):
         if FakeBacklog.mode == "fail":
             raise RuntimeError("403 Forbidden — bad token")
         FakeBacklog.created += 1

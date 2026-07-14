@@ -1892,6 +1892,12 @@ def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
             if result.failed:
                 _notify(cfg, f"⚠️ {ticket.id} — {len(result.failed)} out-of-scope finding(s) could not be "
                              "filed:\n" + "\n".join(f"• {t}: {e}" for t, e in result.failed))
+            # EU-284: a CRITICAL out-of-scope finding must not rot silently — the class is normally
+            # AUTO-FILED with no page (EU-92), but a critical discovery pages the Commander once,
+            # naming every newly-filed critical key+title. MEDIUM/LOW stay silent (current behavior).
+            if result.filed_critical:
+                names = "\n".join(f"• {k} — {t}" for k, t in result.filed_critical)
+                _notify(cfg, f"🚨 {ticket.id} — CRITICAL out-of-scope finding auto-filed ({source}):\n{names}")
         else:
             titles = "\n".join(f"• [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
             question = ("Out-of-scope findings surfaced while working this ticket — file them as their own "

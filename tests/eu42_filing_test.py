@@ -38,7 +38,7 @@ class StubBacklog:
         self.dedup_lookups.append(summary)
         return self._open.get(str(summary).strip().lower())
 
-    def create_task(self, summary, description, labels=None, issue_type="Task"):
+    def create_task(self, summary, description, labels=None, issue_type="Task", priority=None):
         key = f"EU-{900 + len(self.created)}"
         self.created.append((summary, list(labels or []), issue_type, self.assignee))
         return key

@@ -19,16 +19,20 @@ from .config import AppConfig
 class FilingResult:
     """The real outcome of filing a batch of findings — not just a count of proposals.
 
-    `filed`   — keys of tickets newly created this run.
-    `deduped` — keys of already-open tickets a finding matched (nothing created).
-    `failed`  — (title, error) for findings that could not be filed (create error /
-                backend can't file). These must be escalated, never buried.
-    `lines`   — the human-readable per-finding result lines (kept for Telegram display).
+    `filed`          — keys of tickets newly created this run.
+    `deduped`        — keys of already-open tickets a finding matched (nothing created).
+    `failed`         — (title, error) for findings that could not be filed (create error /
+                       backend can't file). These must be escalated, never buried.
+    `lines`          — the human-readable per-finding result lines (kept for Telegram display).
+    `filed_critical` — (key, title) for findings NEWLY filed (not deduped) whose declared severity
+                       was CRITICAL — EU-284: lets the caller alert the Commander on a critical
+                       out-of-scope finding without re-parsing the report.
     """
     filed: list[str] = field(default_factory=list)
     deduped: list[str] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)
+    filed_critical: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def filed_n(self) -> int:
@@ -58,6 +62,16 @@ minor notes. If nothing warrants a ticket, emit an empty list:
 ===END==="""
 
 _BLOCK = re.compile(r"===TICKETS===\s*(.*?)\s*===END===", re.DOTALL)
+
+# EU-284: an officer's declared severity maps to a Jira-native priority so a CRITICAL finding
+# doesn't rot at the project's default (Medium) priority. Absent/unknown severity -> None, which
+# leaves the backend's own default untouched (see JiraAdapter.create_task).
+_SEVERITY_TO_PRIORITY = {
+    "CRITICAL": "Highest",
+    "HIGH": "High",
+    "MEDIUM": "Medium",
+    "LOW": "Low",
+}
 
 
 def parse_tickets(report: str) -> tuple[list[dict], str]:
@@ -89,6 +103,8 @@ def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResu
         title = str(p.get("title", "")).strip()
         if not title:
             continue
+        severity = str(p.get("severity", "") or "").strip().upper()
+        priority = _SEVERITY_TO_PRIORITY.get(severity)
         try:
             existing = backlog.find_open_by_summary(title)
             if existing:
@@ -97,10 +113,13 @@ def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResu
                 continue
             key = backlog.create_task(title, str(p.get("body", "")),
                                       labels=[officer_label, "autofiled"],
-                                      issue_type=str(p.get("type", "Task")) or "Task")
+                                      issue_type=str(p.get("type", "Task")) or "Task",
+                                      priority=priority)
             if key:
                 res.filed.append(key)
                 res.lines.append(f"✓ {key} filed — {title}")
+                if severity == "CRITICAL":
+                    res.filed_critical.append((key, title))
             else:
                 res.failed.append((title, "filing not supported"))
                 res.lines.append(f"✗ filing not supported — {title}")
