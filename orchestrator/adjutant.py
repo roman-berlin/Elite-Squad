@@ -18,7 +18,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import memory, models
 from .agent import run_agent
 from .config import Config
-from .drillmaster import collect_signals, format_signals
+from .signals import collect_signals, format_signals
 
 ADJUTANT_SYSTEM = """\
 You are the Engineering Manager (S-1) — the Elite Unit's personnel officer, reporting to THE CTO.
