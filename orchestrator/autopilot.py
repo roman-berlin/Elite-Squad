@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import intake, locking, notify, usage
+from . import infra_classify, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
@@ -526,6 +526,107 @@ def _park_errored_on_tracker(cfg: Config, by_id: dict, newly: list, errored: set
             pass
 
 
+def _tally_errored(reports, error_counts: dict[str, int]):
+    """EU-228: update `error_counts` IN PLACE for this cycle's reports, splitting ERRORED reports
+    into park-worthy (hit `_MAX_TICKET_ERRORS`), retrying, and infra/outage.
+
+    An ERRORED report whose notes classify as infra (network/DNS/timeout/5xx — see
+    ``infra_classify.classify``; a turn-limit is NEVER infra, that's EU-248's job) contributes NO
+    strike at all: `error_counts` is left exactly as it was for that ticket, so a DNS blip can
+    never park — or even nudge the counter toward parking — a healthy ticket (the 2026-07-10
+    16:29:47 evidence: one blip charged 4 tickets a strike each before this fix).
+
+    Returns ``(park_now_additions, errored_ids, retrying_ids, infra_ids, counts_changed)``. A
+    ticket that made progress (no longer ERRORED) still has its tally reset, same as before.
+    """
+    park_now: list[str] = []
+    errored: set[str] = set()
+    retrying: list[str] = []
+    infra: set[str] = set()
+    counts_changed = False
+    for r in reports:
+        if r.outcome is Outcome.ERRORED:
+            errored.add(r.ticket_id)
+            if infra_classify.classify(r.notes):
+                infra.add(r.ticket_id)
+                continue   # no strike, no counter touch — see docstring
+            n = error_counts.get(r.ticket_id, 0) + 1
+            if n >= _MAX_TICKET_ERRORS:
+                park_now.append(r.ticket_id)
+                error_counts.pop(r.ticket_id, None)   # parked -> reset for a future /unblock
+            else:
+                error_counts[r.ticket_id] = n
+                retrying.append(r.ticket_id)
+            counts_changed = True
+        elif error_counts.pop(r.ticket_id, None) is not None:
+            counts_changed = True   # made progress (didn't error) -> reset its tally
+    return park_now, errored, retrying, infra, counts_changed
+
+
+def _enter_offline_hold(cfg: Config, audit: "AuditLog", infra_ids, already_active: bool) -> bool:
+    """EU-228: raise ONE offline-hold alert for this cycle's infra-classified errors and return
+    True (now/still active). A no-op when there's nothing infra-classed this cycle, and a no-op
+    alert-wise when a hold is already active — a single DNS blip that errors several tickets in
+    the same cycle must produce ONE Telegram message, not one per ticket."""
+    if not infra_ids:
+        return already_active
+    if not already_active:
+        ids = ", ".join(sorted(infra_ids))
+        notify.send(f"🌐 Autopilot offline-hold — infra/outage error(s) on {ids} "
+                    "(network/DNS/timeout, not a ticket defect). No error strikes were charged; "
+                    "holding new tickets and auto-resuming once connectivity returns.")
+        audit.record("infra_offline_hold", tickets=sorted(infra_ids))
+        print(f"  🌐 offline-hold — infra error(s) on {ids}; no strikes charged, "
+              "auto-resume on connectivity.", flush=True)
+    return True
+
+
+def _offline_hold_recheck(cfg: Config, audit: "AuditLog", active: bool) -> bool:
+    """EU-228: while an offline-hold is active, probe connectivity (Jira base URL + `git
+    ls-remote`) and clear the hold — with one resume alert — the moment it passes. No human
+    `/unblock` needed. Returns the (possibly updated) active state."""
+    if not active:
+        return False
+    if infra_classify.connectivity_probe(cfg):
+        notify.send("✅ Connectivity restored — autopilot resuming normal operation.")
+        audit.record("infra_offline_resume")
+        print("  ✅ connectivity restored — resuming normal operation.", flush=True)
+        return False
+    return True
+
+
+def _apply_toolchain_holds(cfg: Config, audit: "AuditLog", worklist, held: frozenset):
+    """EU-228: filter `worklist` to drop tickets for any app whose gate/worktree-setup toolchain
+    is missing a binary under the daemon's real environment (``infra_classify.missing_toolchain``)
+    — a missing binary would otherwise burn every one of that app's tickets an error strike on an
+    environment problem, not a real failure. HOLDS the whole app instead, with exactly ONE alert
+    per app per hold (and one resume alert once the toolchain is fixed again); touches NO per-
+    ticket counters. Only checks apps that actually have tickets in `worklist` this cycle — cheap,
+    since a hit toolchain is the common case. Returns ``(filtered_worklist, updated_held)``."""
+    apps_in_play = {a.name: a for a, _ in worklist}
+    currently: set[str] = set()
+    for name, app in apps_in_play.items():
+        missing = infra_classify.missing_toolchain(app)
+        if not missing:
+            continue
+        currently.add(name)
+        if name not in held:
+            notify.send(f"🛠️ Autopilot holding {name} — missing toolchain binaries on this "
+                        f"machine: {', '.join(missing)}. No tickets were charged; it resumes "
+                        "automatically once the toolchain is fixed.")
+            audit.record("infra_toolchain_hold", app=name, missing=missing)
+            print(f"  🛠️ holding {name} — missing toolchain binaries: {', '.join(missing)} "
+                  "(no tickets charged).", flush=True)
+    recovered = held - currently
+    if recovered:
+        names = ", ".join(sorted(recovered))
+        notify.send(f"✅ Toolchain restored — resuming: {names}")
+        audit.record("infra_toolchain_resume", apps=sorted(recovered))
+        print(f"  ✅ toolchain restored — resuming: {names}", flush=True)
+    filtered = [(a, t) for (a, t) in worklist if a.name not in currently]
+    return filtered, frozenset(currently)
+
+
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
     """After a productive cycle, fold any new recurring rejection-lessons into Unit Memory and prune it
     — FREE + deterministic (no model call), so memory compounds every cycle instead of only at the
@@ -680,12 +781,28 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # emits exactly one alert per run, not one per cycle. Start empty so the first cycle
         # announces repos detected as missing during preflight.
         repos_announced: frozenset[str] = frozenset()
+        # EU-228: infra/outage state. `offline_hold` pauses ALL new work (a Jira/git outage — see
+        # _enter_offline_hold/_offline_hold_recheck); `toolchain_held` HOLDS only the specific
+        # app(s) missing a gate/worktree-setup binary (see _apply_toolchain_holds). Neither touches
+        # per-ticket error_counts — that's the point of this ticket.
+        offline_hold = False
+        toolchain_held: frozenset[str] = frozenset()
 
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
                 break
+
+            # EU-228: infra/outage hold — a Jira/git-remote outage errored one or more tickets last
+            # cycle (see _enter_offline_hold below). Hold ALL new work until connectivity_probe
+            # passes again; no per-ticket counter was touched, so nothing needs a human /unblock.
+            offline_hold = _offline_hold_recheck(cfg, audit, offline_hold)
+            if offline_hold:
+                if once:
+                    break
+                _sleep(max(10, interval), stop_event)
+                continue
 
             # Cost governor: never let a runaway loop eat the day's token budget. Pause new tickets
             # once today's burn hits the ceiling (resumes after midnight / when the ceiling is raised).
@@ -894,6 +1011,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # additive/uncapped (see notes above).
             worklist = in_progress + answered_items + to_do
 
+            # EU-228: hold any app whose gate/worktree-setup toolchain is missing a binary on this
+            # machine — one alert for the WHOLE app, its tickets simply don't run this cycle (no
+            # error strike, no park).
+            worklist, toolchain_held = _apply_toolchain_holds(cfg, audit, worklist, toolchain_held)
+
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed
             # to prevent re-picking the same ticket forever. Track previewed tickets so they're
             # skipped in subsequent cycles, but valid apps still drain.
@@ -968,21 +1090,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
             # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
-            errored = {r.ticket_id for r in reports if r.outcome is Outcome.ERRORED}
-            retrying: list[str] = []
-            counts_changed = False
-            for r in reports:
-                if r.outcome is Outcome.ERRORED:
-                    n = error_counts.get(r.ticket_id, 0) + 1
-                    if n >= _MAX_TICKET_ERRORS:
-                        park_now.append(r.ticket_id)
-                        error_counts.pop(r.ticket_id, None)   # parked -> reset for a future /unblock
-                    else:
-                        error_counts[r.ticket_id] = n
-                        retrying.append(r.ticket_id)
-                    counts_changed = True
-                elif error_counts.pop(r.ticket_id, None) is not None:
-                    counts_changed = True   # made progress (didn't error) -> reset its tally
+            # EU-228: infra-classified ERRORED reports (network/DNS/timeout/5xx — a turn-limit is
+            # NEVER infra, see infra_classify.classify) contribute no strike at all.
+            extra_park, errored, retrying, infra_errored, counts_changed = \
+                _tally_errored(reports, error_counts)
+            park_now += extra_park
             if counts_changed:
                 save_error_counts(cfg, error_counts)
 
@@ -990,6 +1102,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 print(f"  · ERRORED, retrying next cycle (not parked): "
                       + ", ".join(f"{t} [{error_counts[t]}/{_MAX_TICKET_ERRORS}]" for t in retrying),
                       flush=True)
+
+            # EU-228: one or more tickets errored on infra/outage this cycle — hold ALL new work
+            # (not just these tickets) until connectivity_probe passes again; no counter touched.
+            offline_hold = _enter_offline_hold(cfg, audit, infra_errored, offline_hold)
 
             # Re-read straight from disk right before the write-back instead of trusting the snapshot
             # taken at the top of the loop (~:219). The Telegram poller may have run /unblock mid-cycle;
