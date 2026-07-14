@@ -666,10 +666,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     open_logs_html = ""
     if is_mac:
         log_folder = str(getattr(cfg, "log_folder", None) or "logs/")
-        open_logs_html = (
-            f'<a class="btn" href="/api/open-logs?path={html.escape(quote(log_folder))}" '
-            f'title="Open the run-logs folder in Finder">&#128194; Open logs</a>'
-        )
+        open_logs_html = _btn(
+            "&#128194; Open logs", tag="a",
+            attrs=(f' href="/api/open-logs?path={html.escape(quote(log_folder))}" '
+                   f'title="Open the run-logs folder in Finder"'))
 
     # Render plan-limit banner BEFORE the control bar (if active)
     plan_banner = _plan_limit_banner(_state, cfg)
@@ -735,6 +735,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .btn:disabled{{opacity:.5;cursor:not-allowed}}
 .tbar .panel a{{display:flex;align-items:center}}
 .tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:var(--faint);font-size:11px;font-weight:400}}
+/* EU-299 (EU-285d) — toolbar clusters: group the flat button row into labeled sections
+   (build · QA · nav) instead of one flat emoji row. Spacing uses the EU-296 --s-* scale;
+   labels use the --t-xs type token — no new ad-hoc px literals. */
+.tbar .tclu{{display:inline-flex;align-items:center;gap:var(--s-2)}}
+.tbar .tclabel{{font-size:var(--t-xs);font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-right:var(--s-1)}}
+.tbar .tcrow{{display:inline-flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}}
 /* EU-103 — per-project Autopilot section */
 .tbar .tbap{{display:inline-flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--panel2)}}
 .tbar .tbap.on{{border-color:var(--okline);background:var(--okbg)}}
@@ -766,49 +772,64 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 }}
 </style>
 <div class=tbar>
-  <details class=menu>
-    <summary class=btn>&#43; New task</summary>
-    <div class="panel form">
-      <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
-        <input type=hidden name=kind value=task>
-        <div class=row style="gap:16px;margin-bottom:3px">
-          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
-          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
+  <div class=tclu>
+    <span class=tclabel>build</span>
+    <div class=tcrow>
+      <details class=menu>
+        {_btn("&#43; New task", tag="summary")}
+        <div class="panel form">
+          <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
+            <input type=hidden name=kind value=task>
+            <div class=row style="gap:16px;margin-bottom:3px">
+              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
+              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
+            </div>
+            <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
+            <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
+            <div class=row>
+              <select name=app title=project style="flex:1">{apps}</select>
+              <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
+            </div>
+            <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
+            <button {run_dis}>&#9654; Run</button>
+          </form>
         </div>
-        <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
-        <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
-        <div class=row>
-          <select name=app title=project style="flex:1">{apps}</select>
-          <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
+      </details>
+      {backend_control(cfg, app0)}
+      {ap_html}
+      {ship_html}
+    </div>
+  </div>
+
+  <div class=tclu>
+    <span class=tclabel>QA</span>
+    <div class=tcrow>
+      <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128225; Patrol", attrs=f' {busy("patrolling")}' if busy("patrolling") else "")}</form>
+      <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128640; Ship review", attrs=f' {busy("shipreview")}' if busy("shipreview") else "")}</form>
+    </div>
+  </div>
+
+  <div class=tclu>
+    <span class=tclabel>nav</span>
+    <div class=tcrow>
+      {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
+      <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
+      {open_logs_html}
+      <details class=menu>
+        {_btn("&#128202; Reports", tag="summary")}
+        <div class="panel right">
+          <a href="/tasks">&#128203; Task log{fr_tasks}</a>
+          <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
+          <a href="/memory">&#128221; Unit memory{fr_mem}</a>
+          <a href="/usage">&#128202; Token usage{fr_usage}</a>
+          <a href="/budget">&#128176; Budget monitor</a>
+          <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
+          <a href="/roster-doc">&#128101; Unit roster</a>
+          <a href="/drill">&#127894; Last drill{fr_drill}</a>
         </div>
-        <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
-        <button {run_dis}>&#9654; Run</button>
-      </form>
+      </details>
     </div>
-  </details>
-  {backend_control(cfg, app0)}
-
-  <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
-  <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
-  <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
-  <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
-  {ship_html}
-  {ap_html}
-  {open_logs_html}
-
-  <details class=menu>
-    <summary class=btn>&#128202; Reports</summary>
-    <div class="panel right">
-      <a href="/tasks">&#128203; Task log{fr_tasks}</a>
-      <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
-      <a href="/memory">&#128221; Unit memory{fr_mem}</a>
-      <a href="/usage">&#128202; Token usage{fr_usage}</a>
-      <a href="/budget">&#128176; Budget monitor</a>
-      <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
-      <a href="/roster-doc">&#128101; Unit roster</a>
-      <a href="/drill">&#127894; Last drill{fr_drill}</a>
-    </div>
-  </details>
+  </div>
 
   <span class=grow></span>
   {status}
