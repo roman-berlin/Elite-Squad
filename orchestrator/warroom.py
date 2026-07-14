@@ -29,14 +29,13 @@ from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
-# from the officer key (builder=field_engineer, reviewer=inspector, drill=drillmaster). Display names are
+# from the officer key (builder=field_engineer, reviewer=inspector). Display names are
 # NEVER hard-coded below — they're resolved from the single source of truth via display(), so renaming an
 # officer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
 _OFFICER_KEY = {
     "general": "general", "adjutant": "adjutant", "pm": "pm",
     "builder": "field_engineer", "reviewer": "inspector", "scout": "scout",
     "provost": "provost", "quartermaster": "quartermaster", "sentinel": "sentinel",
-    "drill": "drillmaster",
 }
 
 # (cockpit key, role line). Order = chain of command. The display-name column is built from the SOT below.
@@ -50,7 +49,6 @@ _OFFICER_ROLES = [
     ("provost",       "Security gate"),
     ("quartermaster", "S-4 · deploy"),
     ("sentinel",      "S-3 · integration & rollback"),
-    ("drill",         "Doctrine / training"),
 ]
 
 # The roster: (key, display name, role line). Display name resolved from officers.OFFICER_NAMES (SOT).
@@ -404,7 +402,6 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
         "scout": rpt("scout-report.md"),
         "provost": last.get("security_block") or rpt("provost-report.md"),
         "quartermaster": rpt("quartermaster-report.md"),
-        "drill": rpt("drill-report.md") or council_ts,
     }
     # An active run means the Builder/Reviewer are on duty right now.
     on_duty = {"builder", "reviewer"} if active else set()

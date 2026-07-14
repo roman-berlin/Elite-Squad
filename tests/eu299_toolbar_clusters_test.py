@@ -104,7 +104,7 @@ chk("Autopilot form preserved (/api/autopilot)", "action=/api/autopilot" in bar)
 chk("Open logs link preserved (is_mac=True)", "&#128194; Open logs" in bar and "open-logs" in bar)
 
 for _href in ("/tasks", "/council", "/memory", "/usage", "/budget", "/forensics",
-             "/roster-doc", "/drill"):
+             "/roster-doc"):
     chk(f"Reports menu link preserved: {_href}", f'href="{_href}"' in bar)
 
 # ---------------------------------------------------------------------------
