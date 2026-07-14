@@ -128,6 +128,56 @@ def _charged() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+# ── REUSABLE PARTIALS (EU-297 / EU-285b) ───────────────────────────────────────
+# The first slice that actually *consumes* the EU-296 foundation tokens (--s-*/--t-*/
+# --surface/--r-xl) instead of just defining them. Each partial inlines its tokens
+# directly on the element it returns, so the partial's OWN output always carries them —
+# independent of whichever stylesheet happens to be loaded around a given call site.
+# Full rollout to every card/panel/button on every screen is a later slice; these three
+# are wired into one real call site each as proof-of-integration (see _kpi_html /
+# _actbtn here, and the "Talk to the unit" panel in warroom.py).
+
+def _btn(label: str, *, cls: str = "", tag: str = "button", attrs: str = "") -> str:
+    """Reusable toolbar-button partial: a shared ``.btn`` base carrying ``--s-*`` padding,
+    ``--r-xl`` radius and ``--t-md`` type, so toolbar screens stop hand-rolling their own inline
+    button CSS. ``cls`` layers extra tone/colour classes (e.g. ``actbtn``) on top of the base."""
+    classes = ("btn " + cls).strip()
+    return (f'<{tag} class="{classes}" style="border-radius:var(--r-xl);'
+            f'padding:var(--s-2) var(--s-3);font-size:var(--t-md)"{attrs}>{label}</{tag}>')
+
+
+def _kpi_metric(value, label, tone: str = "", href: str | None = None, extra: str = "") -> str:
+    """Reusable KPI-numeral partial: renders a headline number + its label at the EU-296
+    ``--t-2xl`` type-scale token instead of a raw 30px/40px inline font-size literal — reducing
+    numeral weight per the parent ticket's direction. ``extra`` appends trusted HTML (e.g. a
+    gauge/sparkline) inside the wrapping tag before it closes. The distinctive ``kpim`` marker
+    class proves a call site renders through this partial rather than duplicating the numeral
+    markup inline."""
+    tag, attr, link = ("a", f' href="{html.escape(href)}"', " link") if href else ("div", "", "")
+    return (
+        f'<{tag} class="kpim kpi {tone}{link}"{attr}>'
+        f'<div class=kv style="font-size:var(--t-2xl);font-weight:500">{html.escape(str(value))}</div>'
+        f'<div class=kl>{html.escape(str(label))}</div>{extra}</{tag}>'
+    )
+
+
+def _card(title: str, body: str, freshness: str | None = None) -> str:
+    """Reusable card/panel partial: consistent padding (the EU-296 ``--s-*`` spacing scale),
+    border, ``--r-xl`` radius and ``--surface`` background, so KPI cards and panels stop being
+    hand-rolled per screen. ``body`` is trusted HTML (caller-controlled, same contract as the
+    other partials in this module); ``freshness`` renders an optional small caption (e.g.
+    'updated 2m ago') under the body."""
+    fresh_html = (f'<div class=card-fresh style="font-size:var(--t-xs);color:var(--dim);'
+                  f'margin-top:var(--s-2)">{html.escape(freshness)}</div>' if freshness else "")
+    return (
+        '<div class=card style="background:var(--surface);border:1px solid var(--border);'
+        'border-radius:var(--r-xl);padding:var(--s-4)">'
+        f'<div class=card-title style="font-size:var(--t-lg);font-weight:600;'
+        f'margin-bottom:var(--s-2)">{html.escape(title)}</div>'
+        f'<div class=card-body>{body}</div>{fresh_html}</div>'
+    )
+
+
 def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
     """A single on-page officer-action button (POST form). These actions used to live in the
     'Unit' toolbar menu; they now sit on the page that shows their result, so each activity
@@ -135,15 +185,16 @@ def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
     hidden = f'<input type=hidden name=app value="{html.escape(app)}">' if app else ""
     onsub = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
     return (f"<form method=post action={action} style='margin:0'{onsub}>{hidden}"
-            f"<button class=actbtn>{label}</button></form>")
+            f"{_btn(label, cls='actbtn')}</form>")
 
 
 def _actbar(*items: str) -> str:
-    """A row of on-page officer-action controls."""
+    """A row of on-page officer-action controls. Buttons render via ``_btn`` (EU-297); this
+    style block adds only the ``actbtn`` tone/colour on top of the shared ``.btn`` base."""
     return ("<style>.actbar{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}"
-            ".actbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);"
-            "border-radius:var(--r-md);padding:9px 14px;font:inherit;font-size:14px;font-weight:600;"
-            "cursor:pointer;text-decoration:none;display:inline-block;transition:background var(--t-fast)}"
+            ".btn{font:inherit;font-weight:600;cursor:pointer;text-decoration:none;"
+            "display:inline-block;transition:background var(--t-fast)}"
+            ".actbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink)}"
             ".actbtn:hover{background:var(--line)}"
             ".actbtn:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
             "<div class=actbar>" + "".join(items) + "</div>")
