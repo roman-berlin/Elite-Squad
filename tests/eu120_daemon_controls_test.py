@@ -145,11 +145,15 @@ def _test_drain_calls_launchctl_bootout() -> None:
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     # Create a fake plist path that exists for the test
-    fake_plist = _TMP / "Library" / "LaunchAgents" / "com.romanberlin.general.autopilot.plist"
+    fake_plist = _TMP / "Library" / "LaunchAgents" / f"{autopilot.LAUNCHD_LABEL}.plist"
     fake_plist.parent.mkdir(parents=True, exist_ok=True)
     fake_plist.write_text("test plist content")
 
-    with patch("orchestrator.autopilot.daemon_running", return_value=True), \
+    # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout to VERIFY the daemon
+    # actually exited, rather than trusting launchctl's exit code — daemon_is_external() is patched
+    # independently above/below (doesn't route through daemon_running), so False here means "the
+    # daemon is confirmed gone", resolving the poll to True immediately with no real delay.
+    with patch("orchestrator.autopilot.daemon_running", return_value=False), \
          patch("orchestrator.autopilot.daemon_is_external", return_value=True), \
          patch("platform.system", return_value="Darwin"), \
          patch("pathlib.Path.home", return_value=_TMP), \
@@ -201,11 +205,15 @@ def _test_stop_calls_launchctl_bootout() -> None:
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     # Create a fake plist path that exists for the test
-    fake_plist = _TMP / "Library" / "LaunchAgents" / "com.romanberlin.general.autopilot.plist"
+    fake_plist = _TMP / "Library" / "LaunchAgents" / f"{autopilot.LAUNCHD_LABEL}.plist"
     fake_plist.parent.mkdir(parents=True, exist_ok=True)
     fake_plist.write_text("test plist content")
 
-    with patch("orchestrator.autopilot.daemon_running", return_value=True), \
+    # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout to VERIFY the daemon
+    # actually exited, rather than trusting launchctl's exit code — daemon_is_external() is patched
+    # independently above/below (doesn't route through daemon_running), so False here means "the
+    # daemon is confirmed gone", resolving the poll to True immediately with no real delay.
+    with patch("orchestrator.autopilot.daemon_running", return_value=False), \
          patch("orchestrator.autopilot.daemon_is_external", return_value=True), \
          patch("platform.system", return_value="Darwin"), \
          patch("pathlib.Path.home", return_value=_TMP), \

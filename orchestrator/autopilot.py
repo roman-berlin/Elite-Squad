@@ -121,15 +121,33 @@ def daemon_is_external() -> bool:
     return daemon_running() and not _pid_file_holds_our_pid()
 
 
-def _stop_launchd_daemon() -> bool:
-    """Stop the launchd KeepAlive daemon using launchctl.
+# EU-232: single shared launchd label. scripts/install-mac-autopilot-daemon.sh derives its LABEL=
+# from this exact constant (``python3 -c 'from orchestrator.autopilot import LAUNCHD_LABEL; ...'``),
+# so the installer and this stopper can never drift apart again — tests/eu232_launchd_label_test.py
+# asserts the installer's LABEL= line matches this string byte-for-byte. Previously these were two
+# independent literals: the installer wrote "com.roman.general.autopilot-keepalive" but this file
+# targeted the stale "com.romanberlin.general.autopilot", so _stop_launchd_daemon booted out a label
+# that was never installed and silently claimed success while KeepAlive respawned the real daemon.
+LAUNCHD_LABEL = "com.roman.general.autopilot-keepalive"
+
+
+def _stop_launchd_daemon(poll_timeout: float = 10.0, poll_interval: float = 0.5) -> bool:
+    """Stop the launchd KeepAlive daemon using launchctl, and VERIFY it actually exited.
 
     Tries launchctl bootout (modern macOS) first, then falls back to launchctl unload (older macOS).
     This is the ONLY way to durably stop a KeepAlive daemon — a plain 'launchctl stop' is respawned.
-    Returns True on success, False on failure (best-effort: the daemon may already be gone).
 
-    EU-120: cockpit's "Finish & stop" (drain) calls this for external daemons so the stop sticks.
-    The plist path matches scripts/install-mac-autopilot-daemon.sh.
+    EU-232: launchctl's exit code is optimistic — bootout/unload can return success while the daemon
+    is still mid-ticket (or launchd itself is lagging) — so this used to claim success unconditionally
+    the moment the subprocess call didn't raise. Now, once launchctl has actually run, poll
+    ``daemon_running()`` (the same source of truth as the cockpit badge) for up to ``poll_timeout``
+    seconds, checking every ``poll_interval``, and return True ONLY once the daemon is confirmed gone
+    — False if it's still alive when the deadline passes. Returns False immediately, with no poll,
+    when launchctl itself couldn't be invoked at all (platform mismatch / missing plist / subprocess
+    failure) — there's nothing to verify in that case.
+
+    EU-120: cockpit's "Finish & stop" (drain) and "Stop" call this for external daemons so the stop
+    sticks. The plist path/label matches scripts/install-mac-autopilot-daemon.sh (LAUNCHD_LABEL).
     """
     import platform
     import subprocess
@@ -137,35 +155,48 @@ def _stop_launchd_daemon() -> bool:
     if platform.system() != "Darwin":
         return False
 
-    # Path from install-mac-autopilot-daemon.sh
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.romanberlin.general.autopilot.plist"
+    # Path from install-mac-autopilot-daemon.sh (same LAUNCHD_LABEL, so this can't drift again)
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
     if not plist_path.exists():
         # No plist installed — nothing to unload
         return False
 
+    launchctl_ran = False
     try:
         # Modern macOS (10.10+): use bootout, which removes the service *and* stops it
-        result = subprocess.run(
-            ["launchctl", "bootout", f"gui/{os.getuid()}/com.romanberlin.general.autopilot"],
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        # bootout returns 0 even if the service wasn't running (idempotent)
-        return True
+        launchctl_ran = True
     except (OSError, subprocess.TimeoutExpired):
         # bootout failed or not available — fall back to unload (older macOS)
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ["launchctl", "unload", str(plist_path)],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            return result.returncode == 0
+            launchctl_ran = True
         except (OSError, subprocess.TimeoutExpired):
+            launchctl_ran = False
+
+    if not launchctl_ran:
+        return False
+
+    # EU-232: don't trust launchctl's exit code — poll daemon_running() until it agrees the daemon
+    # is actually gone (or the deadline passes), so callers get a verified outcome, not a guess.
+    deadline = time.monotonic() + poll_timeout
+    while True:
+        if not daemon_running():
+            return True
+        if time.monotonic() >= deadline:
             return False
+        time.sleep(poll_interval)
 
 
 # `PARKED` (the outcomes that park a ticket IMMEDIATELY — a human decision / a PR is waiting, no point
@@ -661,10 +692,20 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     if stop_event is None:
         stop_event = threading.Event()
 
+    # EU-232: WHY this run stood down, recorded on the terminal autopilot_stop audit event (see the
+    # finally below). Set as early as possible on every exit path — the top-of-loop stop_event check,
+    # the SIGTERM handler (before it sets stop_event, so the loop's own check doesn't overwrite it),
+    # the budget/plan-limit "once" breaks, and the except clauses. Defaults to "once-complete" at
+    # record time for every other break (a normal --once cycle finishing, or a hold's once-break) —
+    # see the ``stop_reason or "once-complete"`` in the finally.
+    stop_reason: str | None = None
+
     def _handle_sigterm(signum, frame):  # noqa: ANN001 — signal-handler signature
         """SIGTERM (e.g. a launchd unload of the keepalive daemon) → graceful stand-down: set the stop Event and let
         the loop notice it, finish any in-flight ticket, and run its finally (PID-file cleanup,
         run-state release). Mirrors the cockpit Stop toggle and Ctrl-C."""
+        nonlocal stop_reason
+        stop_reason = "sigterm"   # EU-232: set BEFORE stop_event, so the loop's own check never overwrites it
         stop_event.set()
 
     audit = AuditLog(cfg.audit_path)
@@ -791,6 +832,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
+                # EU-232: sigterm already claimed this reason via nonlocal above; anything else that
+                # set the same stop_event (the cockpit Stop/Drain toggle) is a cockpit-stop.
+                if stop_reason is None:
+                    stop_reason = "cockpit-stop"
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
                 break
 
@@ -817,6 +862,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                           "tickets (resumes after midnight, or raise daily_token_budget).", flush=True)
                     budget_paused = True
                 if once:
+                    stop_reason = "budget"   # EU-232
                     break
                 _sleep(max(30, interval), stop_event)
                 continue
@@ -867,6 +913,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                           f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
                     plan_limit_paused = True
                 if once:
+                    stop_reason = "plan-limit"   # EU-232
                     break
                 _sleep(max(30, interval), stop_event)
                 continue
@@ -1134,11 +1181,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 previewed_tickets.update(processed_ids)
 
             if once:
+                stop_reason = "once-complete"   # EU-232
                 break
             # A transient error gets a short backoff before the next look; otherwise a brief breath.
             _sleep(_ERROR_BACKOFF_SEC if retrying else 3, stop_event)
     except KeyboardInterrupt:
+        stop_reason = "keyboard-interrupt"   # EU-232
         print("\n🛸 Autopilot stood down. Nothing left mid-flight.", flush=True)
+    except Exception as exc:   # noqa: BLE001 — record WHAT broke, then let it propagate unchanged
+        stop_reason = f"exception:{type(exc).__name__}"   # EU-232
+        raise
     finally:
         # EU-103: the autopilot loop has stood down — clear THIS app's autopilot signal so the cockpit
         # control reflects OFF, independent of who owns the run-state release. (Idempotent: the cockpit
@@ -1165,5 +1217,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # skipped it, leaving an unpaired autopilot_start and a phantom "Working" card (the Jul-1 signature).
         # Gated on `started`: a setup failure BEFORE autopilot_start must NOT record an unpaired stop
         # (the mirror-image invariant break the 2026-07-06 review caught).
+        # EU-232: every autopilot_stop now carries a reason= — cockpit-stop / sigterm / once-complete /
+        # plan-limit / budget / keyboard-interrupt / exception:<type> — set at the exit path above.
+        # Falls back to "once-complete" for the handful of other `if once: break` holds (git/pre-flight/
+        # graceful-stop/idle-queue) that don't set their own reason — still a genuine --once completion.
         if started:
-            audit.record("autopilot_stop")
+            audit.record("autopilot_stop", reason=stop_reason or "once-complete")

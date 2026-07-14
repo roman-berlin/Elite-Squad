@@ -33,12 +33,16 @@ if [[ -z "$APP" ]]; then
 fi
 
 ACTION="${2:-install}"
-LABEL="com.roman.general.autopilot-keepalive"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# EU-232: derive LABEL from the SAME source orchestrator/autopilot.py's _stop_launchd_daemon() reads
+# (LAUNCHD_LABEL), so the installer and the stopper can never drift apart again — the label mismatch
+# that made "Stop" silently no-op against a keepalive daemon it never actually targeted. Overridable
+# via GENERAL_LAUNCHD_LABEL for tests/CI where python3 -> orchestrator isn't importable.
+LABEL="${GENERAL_LAUNCHD_LABEL:-$(cd "$HERE" && python3 -c 'from orchestrator.autopilot import LAUNCHD_LABEL; print(LAUNCHD_LABEL)')}"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/General"
 LOG_FILE="$LOG_DIR/autopilot-keepalive.log"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GENERAL_BIN="$HERE/general"
 
 # ── Uninstall path ──────────────────────────────────────────────────────────
