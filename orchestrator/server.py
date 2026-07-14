@@ -778,9 +778,13 @@ def create_app(cfg: Config):
             _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
+        # EU-314: pass cfg + the resolved active project so render_html renders the per-project
+        # pipeline board for THIS tab; switching the ?app= tab (via _tab_bar) changes _appq and
+        # therefore the board's ticket set.
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
-                             active_filter=flt, blocked=blocked, needs_count=_needs_cnt)
+                             active_filter=flt, blocked=blocked, needs_count=_needs_cnt,
+                             cfg=cfg, app_name=_appq)
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
         # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').

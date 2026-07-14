@@ -416,6 +416,66 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
+# ── EU-314: per-project pipeline board ──────────────────────────────────────────
+# One consolidated board for the ACTIVE project tab only — every in-flight/recent ticket with its
+# current stage (dashboard.derive_pipeline_stage) and age — so the Commander stops cross-reading
+# KPI cards / /tasks / /needs to see "what's happening right now". Scoped exactly like
+# needs.summary(cfg, app_name) already scopes per app (EU-129 pattern): NOT a single global list.
+_MERGED_RECENCY_SECS = 30 * 60   # a just-merged ticket lingers ~30m on the board, then drops off
+
+
+def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None) -> str:
+    """Render the active tab's pipeline board: one row per ticket — id, current stage, age.
+
+    ``tasks`` is the caller's already-loaded ``dashboard.load_tasks(cfg.audit_path)`` result (one
+    entry per RUN, newest run first) — never reloaded here, mirroring ``needs.py``'s "load once,
+    filter many" contract. Filtered to ``app_name`` with the SAME rule ``needs.py``'s
+    ``_row_matches_app`` uses (the row's own ``app`` field, else a ticket-key prefix match) — pass
+    a falsy ``app_name`` to show every project (unscoped).
+
+    Age-filter rule: every non-terminal / needs-you row always shows; a ``merged→dev`` row shows
+    only while recent (< ``_MERGED_RECENCY_SECS`` since it ended), so a just-landed ticket lingers
+    briefly instead of vanishing the instant it merges. ``cfg`` is accepted (unused directly) only
+    to match the ``needs.summary(cfg, app_name)`` calling convention this board mirrors.
+    """
+    from datetime import datetime
+
+    from . import needs as _needs
+
+    app_prefix = str(app_name).strip().upper() if app_name else ""
+    now_naive = datetime.now()
+
+    def _age_secs(ref) -> float | None:
+        if ref is None:
+            return None
+        now = datetime.now(ref.tzinfo) if getattr(ref, "tzinfo", None) else now_naive
+        return max((now - ref).total_seconds(), 0.0)
+
+    rows = []
+    for t in tasks:
+        if app_name and not _needs._row_matches_app(t, app_name, app_prefix):
+            continue
+        age_secs = _age_secs(t.get("ended") or t.get("started"))
+        if age_secs is None:
+            continue  # no timestamp at all — nothing to show an age for
+        if (t.get("outcome") or "") == "merged→dev" and age_secs >= _MERGED_RECENCY_SECS:
+            continue  # merged AND old — the one row kind the board drops (the recency rule)
+        tid = html.escape(str(t.get("ticket_id") or ""))
+        stage = html.escape(D.derive_pipeline_stage(t))
+        age = html.escape(D._human_dur(age_secs))
+        rows.append(
+            '<div class=pbrow style="display:flex;align-items:center;gap:var(--s-3);'
+            'padding:var(--s-2) 0;border-top:1px solid var(--border)">'
+            f'<span class="mono pbid" style="font-weight:600">{tid}</span>'
+            f'<span class=pbstage style="color:var(--dim);flex:1">{stage}</span>'
+            f'<span class=pbage style="color:var(--faint);font-size:var(--t-xs)">{age}</span>'
+            '</div>'
+        )
+    body = ("".join(rows) if rows else
+            '<div class=pbempty style="color:var(--dim)">No in-flight tickets right now.</div>')
+    return _card("Pipeline", body)
+
+
 def backend_control(cfg, app_name: str | None = None) -> str:
     """EU-190/EU-223: the STICKY model-backend selectors for the cockpit control bar.
 
