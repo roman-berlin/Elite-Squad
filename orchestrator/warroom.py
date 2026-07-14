@@ -228,6 +228,16 @@ def _last_council(cfg) -> Optional[datetime]:
 # --------------------------------------------------------------------------- #
 # Data (JSON-safe primitives)
 
+# EU-313: freshness window for the "Security blocks" KPI card — a security_block event
+# older than this (with no newer event for its ticket) no longer counts as an active block.
+STALE_BLOCK_CUTOFF_S = 24 * 3600
+
+# Event types that resolve/supersede an earlier security_block for the same ticket_id: another
+# security_block (a fresh gate hit), any dashboard-terminal outcome (merged/PR/escalated/etc — the
+# ticket moved on), or a plain "build" (the Builder re-attempted the ticket).
+_RESOLVING_EVENTS = D._TERMINAL | {"build", "security_block"}
+
+
 def _load_security_blocks(cfg) -> list[dict]:
     """Load all security_block events from the audit log, newest first.
 
@@ -254,6 +264,50 @@ def _load_security_blocks(cfg) -> list[dict]:
     return blocks
 
 
+def _active_security_blocks(cfg, blocks: list[dict]) -> list[dict]:
+    """Subset of `blocks` (from _load_security_blocks) still counted as "active" (EU-313).
+
+    A block is active when both hold:
+      - it is within STALE_BLOCK_CUTOFF_S of now (freshness window), AND
+      - no later event for the SAME ticket_id has superseded it (see _RESOLVING_EVENTS).
+
+    Fixes the KPI card counting a block from days ago as if it were still live: previously
+    `sec_block_count` was simply `len(_load_security_blocks(cfg))` — every security_block ever
+    recorded, all-time. Preserves the input order (newest-first, inherited from the caller).
+    """
+    if not blocks:
+        return []
+    # Latest resolving-event ts per ticket_id, in one pass over the audit log. ts strings are all
+    # written by audit.py with the same "%Y-%m-%dT%H:%M:%S%z" format, so lexical comparison orders
+    # them correctly — same convention _load_security_blocks already relies on for its sort.
+    latest_resolving: dict[str, str] = {}
+    for line in D.audit_lines(cfg.audit_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") not in _RESOLVING_EVENTS:
+            continue
+        tid = ev.get("ticket_id")
+        ts = ev.get("ts", "")
+        if not tid or not ts:
+            continue
+        if ts > latest_resolving.get(tid, ""):
+            latest_resolving[tid] = ts
+
+    active = []
+    for b in blocks:
+        if _age_secs(_parse(b.get("ts", ""))) >= STALE_BLOCK_CUTOFF_S:
+            continue  # outside the freshness window
+        if latest_resolving.get(b.get("ticket_id", ""), "") > b.get("ts", ""):
+            continue  # superseded by a later event for this ticket
+        active.append(b)
+    return active
+
+
 def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     ts = _scope(tasks, app)
     today = datetime.now().strftime("%Y-%m-%d")
@@ -264,8 +318,16 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    sec_blocks = _load_security_blocks(cfg)
-    sec_block_count = len(sec_blocks)
+    sec_blocks = _load_security_blocks(cfg)  # all-time — still feeds the interactive findings list
+    active_sec_blocks = _active_security_blocks(cfg, sec_blocks)  # EU-313: only still-live blocks count
+    sec_block_count = len(active_sec_blocks)
+    # EU-313: age of the most recent still-active block, for the card to surface inline (e.g.
+    # "1 · 3h ago") — kept as its own field rather than "hint" since EU-152 retired hint-line
+    # rendering for every KPI card (incl. Security blocks) and that decision stays in force here.
+    sec_block_age = None
+    if active_sec_blocks:
+        # newest-first order is inherited from _load_security_blocks, so [0] is the most recent.
+        sec_block_age = _rel(_parse(active_sec_blocks[0].get("ts", "")))
 
     # EU-76: pre-compute sparkline series for the Merged→DEV and cost/burn KPI cards.
     # Both helpers are best-effort: an empty audit or absent ledger yields all-zeros, which
@@ -281,9 +343,10 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
          "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
-        {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate (all time)",
+        {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
-         "security_block_findings": sec_blocks},  # EU-145: pass actual findings for interactive card
+         "security_block_findings": sec_blocks,  # EU-145: pass actual findings for interactive card
+         "active_age": sec_block_age},  # EU-313: age of the most recent active block (None if none)
     ]
 
     # EU-145 — merged token KPI card (today + week in one, UX best practice).
@@ -835,9 +898,15 @@ def _kpi_html(cards: list[dict]) -> str:
         if is_security_card:
             # Always render interactive card, even when empty
             issues_html = _security_issues_html(findings) if findings else '<div class=secempty>No security blocks recorded yet.</div>'
+            # EU-313: surface the age of the most recent still-active block (e.g. "1 · 3h ago") right
+            # in the headline number, so freshness is visible at a glance. Deliberately NOT a separate
+            # class=kh hint line — EU-152 retired third-line hints from every KPI card and that
+            # decision stays in force; this appends inline into the existing kv div instead.
+            age = c.get("active_age")
+            kv_text = f'{_esc(c["value"])} · {_esc(age)}' if age else _esc(c["value"])
             out.append(
                 f'<details class="kpi {tone}" open>'
-                f'<summary class=kpisum><div class=kv>{_esc(c["value"])}</div>'
+                f'<summary class=kpisum><div class=kv>{kv_text}</div>'
                 f'<div class=kl>{_esc(c["label"])}</div></summary>'
                 f'{issues_html}'
                 f'</details>')
