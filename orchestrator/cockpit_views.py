@@ -37,7 +37,14 @@ _TOKENS_FALLBACK = (
     "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
     "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
     "--shadow-3:0 16px 40px rgba(0,0,0,.55);"
-    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease}")
+    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease;"
+    # 8pt spacing scale (EU-296) — mirrors _PAGE's :root block, kept byte-identical.
+    "--s-1:4px;--s-2:8px;--s-3:16px;--s-4:24px;--s-5:32px;--s-6:48px;"
+    # modular type scale (EU-296) — px-equivalents/usage documented on the _PAGE mirror.
+    "--t-xs:11px;--t-sm:12.5px;--t-md:14px;--t-lg:18px;--t-xl:24px;--t-2xl:32px;"
+    # semantic color-role aliases (EU-296) — map onto the existing palette above.
+    "--surface:var(--panel);--border:var(--line);--text:var(--ink);"
+    "--positive:var(--ok);--critical:var(--bad)}")
 
 
 def _token_css() -> str:
