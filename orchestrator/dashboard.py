@@ -347,6 +347,47 @@ def _badge(outcome: Optional[str]) -> str:
     return f'<span class="b {cls}">{html.escape(outcome or "running…")}</span>'
 
 
+# ── EU-314: pipeline-stage helper ──────────────────────────────────────────────
+# Sub-ticket 1 of the EU-288 split was meant to land a canonical `derive_pipeline_stage()` (a
+# fuller stage machine) BEFORE this ticket needed it — but a repo-wide grep finds no such helper
+# anywhere yet. To keep THIS ticket independently-shippable (the split's stated intent), a small
+# local stand-in lives here: it derives a stage label purely from the fields already on a run row
+# (`outcome`, `verdict`, `passes`). `cockpit_views._pipeline_board()` calls this one. The moment
+# Sub-ticket 1's real helper exists, swap the caller over and delete this stand-in.
+_OUTCOME_STAGE = {
+    "merged→dev": "Merged → dev",
+    "PR / needs you": "PR opened — needs review",
+    "escalated": "Escalated — needs you",
+    "dry-run": "Dry run complete",
+    "errored": "Errored — needs you",
+    "awaiting decision": "Awaiting your decision",
+    "re-queued": "Re-queued",
+    "split": "Split into sub-tickets",
+}
+
+
+def derive_pipeline_stage(task: dict[str, Any]) -> str:
+    """Best-effort pipeline-stage label for one run row — see the module note above (TEMPORARY
+    stand-in for Sub-ticket 1's canonical helper). Never raises; always returns a non-empty label.
+
+    A finished run (``outcome`` set) maps straight through ``_OUTCOME_STAGE``. A still-running run
+    (no ``outcome`` yet) is inferred from the latest Reviewer ``verdict`` and how many Builder
+    ``passes`` it has been through.
+    """
+    outcome = task.get("outcome")
+    if outcome:
+        return _OUTCOME_STAGE.get(outcome, str(outcome))
+    verdict = str(task.get("verdict") or "").strip().upper()
+    if verdict == "FAIL":
+        return "Revising (Reviewer requested changes)"
+    if verdict == "PASS":
+        return "Reviewed — landing"
+    passes = task.get("passes") or 0
+    if passes:
+        return f"Building (pass {passes})"
+    return "Building"
+
+
 def _detail_html(t: dict[str, Any]) -> str:
     if not t["passes_list"]:
         return '<div class=det><span class=muted>no transcript captured</span></div>'
@@ -497,7 +538,10 @@ def needs_chat_summary(t: dict[str, Any]) -> str:
 
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
-                needs_count: int | None = None) -> str:
+                needs_count: int | None = None, cfg=None, app_name: str | None = None) -> str:
+    # EU-314: the pipeline board renders from the FULL run set for the active tab, same as the KPI
+    # cards below — never the ?filter= narrowed `tasks` local gets reassigned to further down.
+    _all_tasks = tasks
     # Cards summarize the FULL run set, regardless of any active scope filter.
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
@@ -602,7 +646,23 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
                   f'· <a href="/tasks">show all</a></div>')
     empty = "No tasks match this filter." if flt else "No tasks yet — run the CTO."
     rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>{empty}</td></tr>'
-    return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{PANEL}}", panel)
+
+    # EU-314: the per-project pipeline board — the DEFAULT-view overview of the active tab. Rendered
+    # only when the caller identifies an active project tab (``app_name``); a page with no scoped
+    # project (e.g. the static `general dashboard` command, or an unscoped call) gets no board, same
+    # as before this ticket. It is ALSO suppressed while a KPI deep-link filter (``?filter=``) is
+    # active: those views are focused drill-downs ("show me only the merged/parked rows"), so an
+    # unfiltered board beside them would contradict the filter and re-surface rows the filter hides.
+    board_html = ""
+    if app_name and not flt:
+        try:
+            from . import cockpit_views as _cv
+            board_html = _cv._pipeline_board(cfg, _all_tasks, app_name)
+        except Exception:  # noqa: BLE001 - the board must never break the whole /tasks page render
+            board_html = ""
+
+    return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{BOARD}}", board_html)
+            .replace("{{PANEL}}", panel)
             .replace("{{FILTER}}", banner)
             .replace("{{HEAD}}", "".join(head)).replace("{{ROWS}}", rows_html)
             .replace("{{GEN}}", datetime.now().strftime("%Y-%m-%d %H:%M")))
@@ -647,6 +707,7 @@ th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-
 </style></head><body>
 <header><h1>★ CTO — cockpit</h1><div class=sub>generated {{GEN}} · re-run <code>./general dashboard</code> (or use <code>./general serve</code>) · click a row for the full transcript</div></header>
 <div class=cards>{{CARDS}}</div>
+{{BOARD}}
 {{FILTER}}
 {{PANEL}}
 <div class=wrap>

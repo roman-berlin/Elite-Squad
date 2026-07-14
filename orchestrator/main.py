@@ -648,6 +648,11 @@ async def _main(argv: list[str]) -> int:
             _needs_cnt = _needs_mod.count(cfg)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
+        # EU-314: the static `general dashboard` command writes a single global HTML file with no
+        # active-project tab concept (no _tab_bar, no ?app= to switch). The per-project pipeline
+        # board is scoped to an active tab, so it is intentionally NOT rendered here — app_name is
+        # left unset and render_html emits no board, exactly as before. The board is a live-cockpit
+        # (/tasks) feature; the static file stays the unscoped multi-project overview.
         out.write_text(D.render_html(tasks, show_cost=charged, needs_count=_needs_cnt), encoding="utf-8")
         print(f"dashboard written: {out}  ({len(tasks)} task(s))")
         if getattr(args, "open", False):
