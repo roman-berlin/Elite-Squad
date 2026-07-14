@@ -954,6 +954,9 @@ _CHAT_STYLE = ("<style>"
                ".cempty{color:var(--dim);padding:30px 8px;text-align:center;font-size:13px}"
                ".composer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--line);padding:12px 30px}"
                ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
+               ".composer input.cerr{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}"
+               ".chaterr{display:none;max-width:780px;margin:0 auto 7px;color:var(--bad);font-size:12px;font-weight:600}"
+               ".chaterr.on{display:block}"
                "</style>")
 
 
