@@ -710,6 +710,47 @@ async def _consult_pm(cfg, ticket, app, audit, halt_report: str):
         return None
 
 
+async def _pm_decide_before_park(cfg, ticket, app, audit, backlog, question: str, iteration: int):
+    """EU-230: consult the automode PM before parking a needs_human-shaped decision (reviewer
+    review.needs_human, or the EU-90 pm-findings 'decisions' bucket) — decide-first, mirroring the
+    builder-halt path's inject+comment+continue machinery (loop.py ~1097-1122). Callers guard this
+    with the shared per-ticket ``pm_used`` flag so the PM is consulted at most once per ticket.
+
+    On DECIDE: returns (new_ticket, None) — the caller replaces its local ``ticket`` with new_ticket
+    and ``continue``s the build loop; the decision is already injected into the ticket description,
+    the durable '🤖 Automode' Jira comment (automode) already posted, and a `pm_decided` audit event
+    already recorded. Roman is NOT paged.
+
+    On explicit ESCALATE, or when the PM is unavailable/errors (_consult_pm returns None): returns
+    (None, pm_outcome) so the caller falls through to its existing park-on-Commander code. When
+    pm_outcome carries a 'why' (the EU-92 WHY-CANNOT-RESOLVE line), the caller should prepend it to
+    the parked proposal."""
+    pm_outcome = await _consult_pm(cfg, ticket, app, audit, question)
+    if pm_outcome is not None and pm_outcome["verdict"] == "DECIDE":
+        from dataclasses import replace
+        auto = bool(getattr(cfg, "auto_mode", False))
+        new_ticket = replace(ticket, description=(ticket.description or "")
+            + "\n\n---\nPRODUCT MANAGER DECISION (resolves the open product question — "
+              "act on it, do not re-raise it):\n" + pm_outcome["body"])
+        audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration, automode=auto)
+        # Automode: the PM decided WITHOUT waiting for you. Leave a durable trail on the
+        # ticket so you can review it (and reverse — it's on DEV, never production).
+        if auto and not cfg.dry_run and not ticket.ephemeral:
+            try:
+                backlog.add_comment(ticket,
+                    "🤖 Automode — PM decided autonomously (DEV only — review & reverse if needed).\n\n"
+                    + pm_outcome["body"][:1200])
+            except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                pass
+        head = ("🤖 Automode — the PM decided autonomously" if auto
+                else "🧭 the PM made the product call")
+        _notify(cfg, f"{head}; {ticket.id} continuing:\n\n{pm_outcome['body'][:800]}")
+        print(f"  {'🤖' if auto else '🧭'} {ticket.id}: PM decided — re-building with "
+              "the decision.", flush=True)
+        return new_ticket, None
+    return None, pm_outcome
+
+
 def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     """True if this ticket already got its ONE PM triage — so a genuinely-stuck ticket escalates for
     real next time instead of looping triage -> re-queue forever."""
@@ -1295,17 +1336,35 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # go to the backlog — auto-filed or proposed for you — instead of being lost.
         _route_out_of_scope(cfg, ticket, app, audit, review.raw, source="reviewer")
 
-        # A product/scope decision only the Commander can make -> stop and ask, don't loop.
+        # A product/scope decision only the Commander can make -> EU-230: consult the automode PM
+        # FIRST (decide-first, mirroring the builder-halt path) instead of parking straight on
+        # Roman. Guarded by the shared per-ticket pm_used flag so a needs_human retry doesn't
+        # re-invoke the PM. Park to the Commander ONLY on an explicit PM ESCALATE (or the PM being
+        # unavailable/errored).
         if review.needs_human:
-            decisions.add(cfg, ticket, app.name, review.question or review.summary)
-            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{await _decision_brief(cfg, ticket.id, review.question or review.summary)}"
+            question = review.question or review.summary
+            pm_outcome = None
+            if not pm_used:
+                pm_used = True
+                new_ticket, pm_outcome = await _pm_decide_before_park(
+                    cfg, ticket, app, audit, backlog, question, iteration)
+                if new_ticket is not None:
+                    ticket = new_ticket
+                    continue
+            proposal = question
+            # EU-92: prepend the WHY PM CANNOT RESOLVE line so the Commander immediately sees the
+            # specific authority/context that's missing, mirroring the builder-halt path.
+            if pm_outcome is not None and pm_outcome.get("why"):
+                proposal = f"WHY PM CANNOT RESOLVE: {pm_outcome['why']}\n\n{proposal}"
+            decisions.add(cfg, ticket, app.name, proposal)
+            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{await _decision_brief(cfg, ticket.id, proposal)}"
                          f"\n\n{decisions.reply_hint(ticket.id)}")
             if not cfg.dry_run and not ticket.ephemeral:
                 # decisions.add already parked it to 'Blocked' (EU-61) — just record the open question.
-                backlog.add_comment(ticket, f"Needs a product decision: {review.question}")
-            audit.record("needs_human", ticket_id=ticket.id, question=review.question)
+                backlog.add_comment(ticket, f"Needs a product decision: {proposal}")
+            audit.record("needs_human", ticket_id=ticket.id, question=proposal)
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
-                                         notes=f"needs decision: {review.question[:140]}"))
+                                         notes=f"needs decision: {proposal[:140]}"))
 
         # EU-90: PM findings triage — when the Reviewer returns FAIL with quality_issues,
         # classify each finding into: in-scope fixes (Builder retries these unchanged),
@@ -1388,6 +1447,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     )
                     question = ("Reviewer raised scope/product ambiguities that need your call:\n"
                                 + bullets)
+                    # EU-230: consult the automode PM before paging the Commander — decide-first,
+                    # mirroring the builder-halt + reviewer needs_human paths. Guarded by the shared
+                    # per-ticket pm_used flag. On DECIDE the loop injects the decision and re-builds;
+                    # decisions.add/notify below are skipped entirely — Roman is not paged.
+                    pm_outcome = None
+                    if not pm_used:
+                        pm_used = True
+                        new_ticket, pm_outcome = await _pm_decide_before_park(
+                            cfg, ticket, app, audit, backlog, question, iteration)
+                        if new_ticket is not None:
+                            ticket = new_ticket
+                            continue
+                    if pm_outcome is not None and pm_outcome.get("why"):
+                        question = f"WHY PM CANNOT RESOLVE: {pm_outcome['why']}\n\n{question}"
                     # Page the Commander ONLY when this parks a genuinely NEW decision. On a repeated
                     # retry the same question hits the EU-89 dedup gate, so decisions.add returns the id
                     # of the EXISTING entry (no new row is written) rather than a fresh one — re-paging
