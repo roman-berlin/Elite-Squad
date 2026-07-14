@@ -877,9 +877,14 @@ def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
     start = max(end - window_limit, 0)
     window = all_bubbles[start:end]
     bubbles = ""
-    for who, text in window:
+    for i, (who, text) in enumerate(window):
+        # EU-305: stamp each bubble with its absolute index in the full transcript so the
+        # auto-refresh poll can append-only (diff on data-seq) instead of replacing #cinner
+        # wholesale. Stable across the default window and any 'load earlier' offset batch,
+        # since it's always start + i into the same all_bubbles list.
+        seq = start + i
         label = "You" if who == "you" else "CTO"
-        bubbles += (f'<div class="msg {who}"><div class=who>{label}</div>'
+        bubbles += (f'<div class="msg {who}" data-seq="{seq}"><div class=who>{label}</div>'
                     f'<div class=bub>{html.escape(text)}</div></div>')
 
     if offset:

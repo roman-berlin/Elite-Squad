@@ -2685,10 +2685,51 @@ def create_app(cfg: Config):
                 f'<input type=text name=text autocomplete=off autofocus value="{prefill}" '
                 'placeholder="Message the CTO…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
+                # EU-305 — append/patch only what's new instead of wholesale-replacing #cinner
+                # innerHTML every 5s (which jank-reset scroll position on every tick). The
+                # .pending 'needs-your-call' cards are cheap and sit above the thread, so they're
+                # just swapped in whole; the .thread is diffed on each bubble's data-seq (its
+                # stable absolute index into the transcript, EU-305/cockpit_views._chat_inner) and
+                # only bubbles newer than what's already on screen are appended — existing nodes
+                # are never rewritten, so scroll position is never disturbed by the poll itself.
                 'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
-                'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
-                'document.getElementById("cinner").innerHTML=await r.text();'
-                'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},5000);'
+                'if(!r.ok)return;'
+                'var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
+                'var frag=document.createElement("div");frag.innerHTML=await r.text();'
+                'var cinner=document.getElementById("cinner");'
+                'var newPending=frag.querySelector(".pending"),oldPending=cinner.querySelector(".pending");'
+                # EU-305 iter2 — only swap the .pending block when it actually changed, so text the
+                # Commander is mid-typing into a pending card's reply input isn't wiped every tick.
+                'if(newPending){if(oldPending){if(oldPending.outerHTML!==newPending.outerHTML)'
+                'oldPending.outerHTML=newPending.outerHTML;}'
+                'else cinner.insertBefore(newPending,cinner.firstChild);}'
+                'else if(oldPending)oldPending.remove();'
+                'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
+                'if(newThread&&oldThread){'
+                'var maxSeq=-1;'
+                'oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s>maxSeq)maxSeq=s;});'
+                'if(maxSeq===-1)oldThread.innerHTML="";'
+                'newThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'if(parseInt(m.dataset.seq,10)>maxSeq)oldThread.appendChild(m);});}'
+                # EU-305 iter2 — reconcile the EU-304 'load earlier' control against the LIVE window.
+                # The poller appends new bubbles, so the on-screen window grows and the button's
+                # original offset goes stale; a click at a stale offset would prepend duplicates.
+                # Anchor it to the true boundary: offset = (server total) - (oldest on-screen seq),
+                # where total = max fetched data-seq + 1. Insert the control when it newly appears,
+                # remove it when the fetched fragment no longer has one, update its offset otherwise.
+                'var newLE=frag.querySelector(".load-earlier"),oldLE=cinner.querySelector(".load-earlier");'
+                'if(newLE){var minSeq=Infinity,total=0;'
+                'if(oldThread)oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s<minSeq)minSeq=s;});'
+                'frag.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s+1>total)total=s+1;});'
+                'var off=(minSeq===Infinity)?parseInt(newLE.dataset.offset||"0",10):(total-minSeq);'
+                'if(oldLE){oldLE.dataset.offset=off;oldLE.dataset.limit=newLE.dataset.limit;}'
+                'else{newLE.dataset.offset=off;cinner.insertBefore(newLE,oldThread||null);}}'
+                'else if(oldLE)oldLE.remove();'
+                'if(near)window.scrollTo(0,document.body.scrollHeight);'
+                '}catch(e){}},5000);'
                 # EU-304 — 'load earlier': fetch the next-older batch (offset grows by its own
                 # data-limit each click) and prepend it into the live .thread, no reload. An empty
                 # response means there's nothing older left, so the button removes itself.
