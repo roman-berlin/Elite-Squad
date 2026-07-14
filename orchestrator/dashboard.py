@@ -28,6 +28,12 @@ _OUTCOME = {
     "scrum_split": "split",     # too big → decomposed into sub-tickets, parent closed (a terminal outcome,
                                 # not a run still in flight — else the parent shows "running…" forever)
 }
+# EU-315: "blocked" is NOT a run outcome — no audit event ever reconstructs to it (that was the
+# iteration-1 defect: a phantom outcome the pipeline never produced). A ticket is "blocked/parked"
+# when it is a MEMBER of blocked_tickets.json (warroom._load_blocked / autopilot.load_blocked),
+# orthogonal to whatever terminal outcome its last run recorded (usually escalated / PR). The board
+# derives Blocked tone + freshness from that membership via the ``is_blocked`` flag below, never
+# from ``outcome``.
 _NEEDS_YOU = {"PR / needs you", "escalated", "errored", "awaiting decision"}
 
 
@@ -163,7 +169,11 @@ def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
         return {"ticket_id": tid, "app": ev.get("app"), "branch": ev.get("branch"),
                 "started": None, "ended": None, "passes": 0, "turns": 0, "cost": 0.0,
                 "verdict": None, "outcome": None, "pr_url": None, "dry_run": None,
-                "note": "", "detail": {}}
+                "note": "", "detail": {},
+                # EU-136/EU-315: latest structural phase ("build"/"gate") + the last gate's
+                # pass/fail, so a build that follows a FAILED gate can be recognised as a retry
+                # instead of the stage getting stuck showing a bare 'Gate' state.
+                "phase": None, "gate_passed": None, "gate_retry": False}
 
     # Each `ticket_start` begins a SEPARATE run — so a re-run of the same ticket (e.g. a dry-run
     # then a live run) does NOT merge the earlier run's phases/verdict into the new one.
@@ -195,6 +205,12 @@ def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
             runs.append(t)
             cur[tid] = t
         if kind == "build":
+            # EU-136: a build that arrives while the last recorded gate for this ticket was a
+            # FAILURE is a retry attempt — sticky for the run, so the board keeps showing the
+            # retry indicator even once this build itself moves on to a later phase.
+            if t.get("gate_passed") is False:
+                t["gate_retry"] = True
+            t["phase"] = "build"
             it = ev.get("iteration", 0)
             t["passes"] = max(t["passes"], it)
             t["turns"] += ev.get("turns", 0) or 0
@@ -203,6 +219,12 @@ def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
             d["effort"] = ev.get("effort")
             d["tools"] = ev.get("tools", []) or []
             d["build_summary"] = ev.get("summary", "")
+        elif kind == "gate":
+            # EU-136: record the gate's phase + result only — never map straight to a "Gate" stage
+            # label. derive_pipeline_stage() below decides what to show, and a subsequent "build"
+            # event (the normal retry-after-fail path) always wins over a stale gate phase.
+            t["phase"] = "gate"
+            t["gate_passed"] = ev.get("passed")
         elif kind == "review":
             it = ev.get("iteration", 0)
             t["verdict"] = ev.get("verdict", t["verdict"])
@@ -366,14 +388,27 @@ _OUTCOME_STAGE = {
 }
 
 
-def derive_pipeline_stage(task: dict[str, Any]) -> str:
+def derive_pipeline_stage(task: dict[str, Any], is_blocked: bool = False) -> str:
     """Best-effort pipeline-stage label for one run row — see the module note above (TEMPORARY
     stand-in for Sub-ticket 1's canonical helper). Never raises; always returns a non-empty label.
 
-    A finished run (``outcome`` set) maps straight through ``_OUTCOME_STAGE``. A still-running run
-    (no ``outcome`` yet) is inferred from the latest Reviewer ``verdict`` and how many Builder
-    ``passes`` it has been through.
+    ``is_blocked`` (EU-315): the ticket is a member of the parked set (blocked_tickets.json). That
+    membership is the SINGLE source of the Blocked state — a parked ticket is labelled "Blocked"
+    regardless of the terminal outcome its last run happens to carry (usually escalated / PR). It
+    wins over every other label so the Commander sees WHY the ticket is stuck.
+
+    Otherwise: a finished run (``outcome`` set) maps straight through ``_OUTCOME_STAGE``. A still-
+    running run (no ``outcome`` yet) is inferred from the latest Reviewer ``verdict``, the latest
+    gate result, and how many Builder ``passes`` it has been through.
+
+    EU-136 hardening: a ``build`` event that follows a FAILED ``gate`` always wins over the gate's
+    own phase — the stage keeps reading "Building" (with a retry marker), never a bare "Gate"
+    label the run could get stuck showing. Only when the run is CURRENTLY sitting at a just-failed
+    gate (no rebuild recorded yet) does the label mention verification is pending — and even then
+    it never uses the literal word "Gate".
     """
+    if is_blocked:
+        return "Blocked"
     outcome = task.get("outcome")
     if outcome:
         return _OUTCOME_STAGE.get(outcome, str(outcome))
@@ -383,9 +418,59 @@ def derive_pipeline_stage(task: dict[str, Any]) -> str:
     if verdict == "PASS":
         return "Reviewed — landing"
     passes = task.get("passes") or 0
+    if task.get("phase") == "gate" and task.get("gate_passed") is False:
+        label = "Verifying — retry pending"
+        return f"{label} (pass {passes})" if passes else label
     if passes:
-        return f"Building (pass {passes})"
+        label = f"Building (pass {passes})"
+        return f"{label} · retry" if task.get("gate_retry") else label
     return "Building"
+
+
+def pipeline_stage_tone(task: dict[str, Any], is_blocked: bool = False) -> str:
+    """EU-315: the pipeline board's per-row colour TONE — so ``Blocked`` / ``Needs-you`` /
+    ``Errored`` rows each render visually distinct instead of identical grey text. Reuses the same
+    tone vocabulary ``_kpi_metric(..., tone=...)`` already uses (``ok``/``warn``/``bad``), plus a
+    board-specific ``blocked`` tone.
+
+    ``is_blocked`` (membership in blocked_tickets.json) is the SINGLE source of the Blocked tone —
+    it is derived from the real parked set the caller passes in, NOT from ``outcome`` (there is no
+    ``blocked`` outcome; see the note by ``_OUTCOME``). It wins over the outcome-based tones below
+    so a parked ticket reads Blocked even though its last run's outcome was escalated / PR.
+
+    ``errored`` gets its OWN tone ('bad'), split out from the rest of ``_NEEDS_YOU`` ('warn') — the
+    ticket calls for Errored to be distinct from generic Needs-you, even though both are members of
+    ``_NEEDS_YOU`` for the digest/needs-panel purpose. Returns "" (no special tone) for an
+    in-flight/building/dry-run/etc. row."""
+    if is_blocked:
+        return "blocked"
+    outcome = task.get("outcome")
+    if outcome == "errored":
+        return "bad"
+    if outcome in _NEEDS_YOU:
+        return "warn"
+    if outcome == "merged→dev":
+        return "ok"
+    return ""
+
+
+def is_blocked_stale(task: dict[str, Any], is_blocked: bool = False,
+                     now: Optional[datetime] = None) -> bool:
+    """EU-315: true when a PARKED (blocked) row's latest event is older than the freshness cutoff,
+    so a block from days ago never renders forever as a plain ACTIVE Blocked row. ``is_blocked`` is
+    the ticket's membership in blocked_tickets.json (the real parked set) — the same signal that
+    drives ``pipeline_stage_tone``; a non-parked row is never flagged stale by this Blocked-specific
+    check (each outcome has its own lifecycle). Reuses ``warroom.STALE_BLOCK_CUTOFF_S`` (EU-313's
+    24h window) rather than duplicating the constant — imported lazily to avoid the warroom ->
+    cockpit_views/dashboard import cycle (same pattern as ``cockpit_views._token_css``)."""
+    if not is_blocked:
+        return False
+    ref = task.get("ended") or task.get("started")
+    if ref is None:
+        return False  # no timestamp at all — can't judge age, fail open (never falsely stale)
+    from . import warroom
+    now = now or (datetime.now(ref.tzinfo) if getattr(ref, "tzinfo", None) else datetime.now())
+    return (now - ref).total_seconds() >= warroom.STALE_BLOCK_CUTOFF_S
 
 
 def _detail_html(t: dict[str, Any]) -> str:
@@ -657,7 +742,13 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     if app_name and not flt:
         try:
             from . import cockpit_views as _cv
-            board_html = _cv._pipeline_board(cfg, _all_tasks, app_name)
+            # EU-315: the Blocked state is membership in the parked set (blocked_tickets.json), NOT
+            # a run outcome. The default board view carries no ``blocked`` (server.py only loads it
+            # for the ?filter=parked drill-down), so load the real parked set here and pass it in so
+            # parked tickets render with the distinct Blocked class + freshness handling.
+            from . import warroom as _wr
+            _board_blocked = {str(b) for b in (_wr._load_blocked(cfg) if cfg is not None else [])}
+            board_html = _cv._pipeline_board(cfg, _all_tasks, app_name, _board_blocked)
         except Exception:  # noqa: BLE001 - the board must never break the whole /tasks page render
             board_html = ""
 
