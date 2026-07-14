@@ -219,6 +219,19 @@ def append_chat(cfg: Config, role: str, text: str) -> None:
         pass
 
 
+def _last_chat_line(cfg: Config) -> str:
+    """The last raw line of the cockpit chat transcript (or '' if none) — used to dedup an echo the
+    cockpit already wrote synchronously (EU-307) against respond_to_commander()'s own leading append."""
+    p = _chat_file(cfg)
+    if not p.exists():
+        return ""
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    return lines[-1].strip() if lines else ""
+
+
 def chat_transcript(cfg: Config, lines: int = 400) -> str:
     """Recent cockpit chat turns (full Q/A), newest kept. Falls back to the (truncated) commander notes
     if no chat file exists yet, so existing history still shows."""
@@ -775,7 +788,12 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     """The CTO answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, logs the exchange
     as standing guidance, and — when the reply implies concrete work — opens a deduped ticket."""
-    append_chat(cfg, "Q", message)   # show the Commander's message in the cockpit chat right away
+    # Show the Commander's message in the cockpit chat right away — UNLESS the cockpit's /api/chat
+    # handler already echoed it synchronously (EU-307, so the view sticks to the just-sent message
+    # without waiting on this bg reply). Skip the append when the transcript already ends with this
+    # exact Q so a freeform message isn't duplicated; Telegram / other callers still append normally.
+    if _last_chat_line(cfg) != ("Q: " + " ".join((message or "").split()).strip()):
+        append_chat(cfg, "Q", message)
     latest = history(cfg, limit=1)
     context = transcript_text(cfg, latest[0]["file"]) if latest else format_signals(collect_signals(cfg))
     notes = recent_commander_notes(cfg)

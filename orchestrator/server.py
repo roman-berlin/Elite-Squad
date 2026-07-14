@@ -2681,8 +2681,9 @@ def create_app(cfg: Config):
         prefill = html.escape((request.args.get("prefill") or "")[:800], quote=True)
         body = (_CHAT_STYLE + _chat_tabs("general", npend)
                 + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
-                '<div class=composer><form method=post action=/api/chat>'
-                f'<input type=text name=text autocomplete=off autofocus value="{prefill}" '
+                '<div class=composer><div id=chaterr class=chaterr></div>'
+                '<form id=chatform method=post action=/api/chat>'
+                f'<input type=text id=chatinput name=text autocomplete=off autofocus value="{prefill}" '
                 'placeholder="Message the CTO…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
                 # EU-305 — append/patch only what's new instead of wholesale-replacing #cinner
@@ -2692,9 +2693,13 @@ def create_app(cfg: Config):
                 # stable absolute index into the transcript, EU-305/cockpit_views._chat_inner) and
                 # only bubbles newer than what's already on screen are appended — existing nodes
                 # are never rewritten, so scroll position is never disturbed by the poll itself.
-                'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
+                # EU-307 — pulled the poll body into refreshChat(force) so the Enter-to-send handler
+                # below can await the same patch-in-place refresh (force=true skips the "near
+                # bottom" check, since the Commander's own just-sent message should always pull the
+                # view down) instead of duplicating the #cinner reconciliation logic.
+                'async function refreshChat(force){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
                 'if(!r.ok)return;'
-                'var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
+                'var near=force||((window.innerHeight+window.scrollY)>=document.body.scrollHeight-140);'
                 'var frag=document.createElement("div");frag.innerHTML=await r.text();'
                 'var cinner=document.getElementById("cinner");'
                 'var newPending=frag.querySelector(".pending"),oldPending=cinner.querySelector(".pending");'
@@ -2729,7 +2734,36 @@ def create_app(cfg: Config):
                 'else{newLE.dataset.offset=off;cinner.insertBefore(newLE,oldThread||null);}}'
                 'else if(oldLE)oldLE.remove();'
                 'if(near)window.scrollTo(0,document.body.scrollHeight);'
-                '}catch(e){}},5000);'
+                '}catch(e){}}'
+                'setInterval(function(){refreshChat(false);},5000);'
+                # EU-307 — Telegram-style Enter-to-send: intercept the composer's submit so Enter
+                # (or the Send button) posts via fetch instead of a native form submit (which would
+                # full-page-reload /chat and drop scroll position / any in-flight poll). After the
+                # POST resolves, clear the input, patch-in-place refresh #cinner via the same
+                # refreshChat() the poller uses (so it degrades gracefully to the full-log render
+                # if EU-286a windowing isn't present), then re-focus the input and stick the view to
+                # the newest message (own message included).
+                'var chatform=document.getElementById("chatform"),chatinput=document.getElementById("chatinput"),'
+                'chaterr=document.getElementById("chaterr");'
+                'if(chatform)chatform.addEventListener("submit",async function(ev){'
+                'ev.preventDefault();'
+                'var text=chatinput.value;if(!text.trim())return;'
+                # POST the send; treat a network throw OR a non-ok HTTP status as failure. On
+                # failure DO NOT clear the input — keep the Commander's typed text so it can be
+                # retried — surface a visible inline error, and leave focus in the box so a
+                # re-press of Enter re-sends. Only on success do we clear + refresh + stick down.
+                'var ok=false;'
+                'try{var r=await fetch("/api/chat",{method:"POST",body:new FormData(chatform)});ok=!!(r&&r.ok);}'
+                'catch(e){ok=false;}'
+                'if(!ok){chatinput.classList.add("cerr");'
+                'if(chaterr){chaterr.textContent="Message not sent — check your connection and press Enter to retry.";'
+                'chaterr.classList.add("on");}chatinput.focus();return;}'
+                'chatinput.classList.remove("cerr");if(chaterr)chaterr.classList.remove("on");'
+                'chatinput.value="";'
+                'await refreshChat(true);'
+                'chatinput.focus();'
+                'window.scrollTo(0,document.body.scrollHeight);'
+                '});'
                 # EU-304 — 'load earlier': fetch the next-older batch (offset grows by its own
                 # data-limit each click) and prepend it into the live .thread, no reload. An empty
                 # response means there's nothing older left, so the button removes itself.
@@ -2808,6 +2842,19 @@ def create_app(cfg: Config):
         tid = (request.form.get("ticket") or "").strip()
         if text:
             msg = f"{tid}: {text}" if tid else text
+
+            # EU-307 — echo the Commander's freeform message into the chat transcript
+            # SYNCHRONOUSLY, before the (double-threaded) CTO reply path runs, so the
+            # client's post-send refreshChat() immediately sees the own message and can
+            # stick the view to it — closing the 'own message included' race deterministically
+            # rather than hoping the bg reply lands first. respond_to_commander() dedups its
+            # own leading append against this echo (council._last_chat_line). Only freeform
+            # composer messages are chat bubbles: a pending-decision reply (tid set) resolves
+            # via handle_reply and a '/command' is dispatched — neither renders as a Q bubble,
+            # so don't echo those.
+            if not tid and not text.startswith("/"):
+                from . import council
+                council.append_chat(cfg, "Q", msg)
 
             def _bg():
                 try:
