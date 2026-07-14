@@ -134,8 +134,8 @@ chk("governor/note_call: concurrent bursts all counted (no torn/lost rows)",
 # ---------------------------------------------------------------------------------------------------
 # (6) approvals — the 2026-07-05 audit §7.4 HIGH race, closed via locking.locked_rmw.
 #     proposals.json: N distinct enqueues from N threads racing approves/denies on other batches
-#     lose nothing, and no actioned batch reverts to pending. approvals.json: a concurrent
-#     approve('drill') + disapprove('adjutant') keeps BOTH kinds' records.
+#     lose nothing, and no actioned batch reverts to pending. approvals.json: a concurrent write
+#     to a second dict key + disapprove('adjutant') keeps BOTH keys' records.
 # ---------------------------------------------------------------------------------------------------
 from orchestrator import approvals, filing
 
@@ -174,23 +174,26 @@ chk("approvals/approve+deny+enqueue race: no actioned batch reverts, none lost",
     f"statuses={[by_id.get(b, {}).get('status') for b in approve_ids + deny_ids]}, "
     f"pending={len(approvals.pending_proposals(cfg6))}")
 
-# approvals.json: concurrent approve/disapprove of DIFFERENT kinds keeps both records.
+# approvals.json: concurrent writes to two DIFFERENT dict keys never clobber each other.
 # disapprove() is sync; drive the state write the same way approve() does, via its marker path.
-(Path(cfg6.audit_path).with_name("drill-report.md")).write_text("drill body", encoding="utf-8")
+# EU-328 removed the "drill" KINDS entry (adjutant is now the only real approval kind), but the
+# underlying lock is keyed on arbitrary dict keys — a synthetic second key still proves the same
+# contract: locked_rmw must not lose one writer's key to the other's read-modify-write.
 (Path(cfg6.audit_path).with_name("adjutant-report.md")).write_text("adj body", encoding="utf-8")
 
 
-def _approve_drill():
-    # approve() awaits drillmaster.apply + does git I/O; pin the RMW itself instead, exactly
-    # as approve() calls it, so the state-write interleaving is what's under test.
+def _approve_other_kind():
+    # Simulates a second concurrent state-writer (not a real approval kind) hitting the SAME
+    # approvals.json file at the same time as disapprove(adjutant) below — pinned directly at
+    # the RMW, exactly as approve() calls it, so the state-write interleaving is what's under test.
     approvals._mutate_state(
-        cfg6, lambda st: {**st, "drill": {"hash": "h1", "action": "approved", "ts": 1.0}})
+        cfg6, lambda st: {**st, "_other": {"hash": "h1", "action": "approved", "ts": 1.0}})
 
 
-_run([_approve_drill, (lambda: approvals.disapprove(cfg6, "adjutant", "not now"))] * 3)
+_run([_approve_other_kind, (lambda: approvals.disapprove(cfg6, "adjutant", "not now"))] * 3)
 st6 = approvals._load(cfg6)
-chk("approvals/state: concurrent drill-approve + adjutant-disapprove keeps BOTH kinds",
-    st6.get("drill", {}).get("action") == "approved"
+chk("approvals/state: concurrent writes to two different keys keep BOTH",
+    st6.get("_other", {}).get("action") == "approved"
     and st6.get("adjutant", {}).get("action") == "disapproved", str(st6))
 
 # Regression tripwire: the writers must stay on locking.locked_rmw (a quiet revert to bare

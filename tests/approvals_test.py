@@ -14,12 +14,12 @@ results = []
 def check(n, c, d=""):
     results.append((n, bool(c), d))
 
-from orchestrator import approvals, drillmaster, notify, council
+from orchestrator import approvals, adjutant, notify, council
 from orchestrator.config import Config, AppConfig
 notify.send = lambda *a, **k: None
 approvals._commit_push = lambda msg: "committed + pushed to origin"   # don't touch real git
-async def _fake_drill_apply(cfg): return "Applied. edited officers/engineer.md"
-drillmaster.apply = _fake_drill_apply
+async def _fake_adjutant_apply(cfg): return "Applied. edited officers/engineer.md"
+adjutant.apply = _fake_adjutant_apply
 notes = []
 council.add_commander_note = lambda cfg, txt: notes.append(txt)
 
@@ -31,19 +31,23 @@ cfg = Config(apps=[app], audit_path=str(d / "audit.jsonl"), use_worktree=False)
 
 check("no reports -> nothing pending", approvals.pending(cfg) == [])
 
-(d / "drill-report.md").write_text("## Proposal: harden the Engineer's exit gate\nblah", encoding="utf-8")
+(d / "adjutant-report.md").write_text("## Propose: recruit a DB soldier", encoding="utf-8")
 pend = approvals.pending(cfg)
-check("a drill report -> 1 pending (drill)", len(pend) == 1 and pend[0]["kind"] == "drill", str(pend))
+check("an adjutant report -> 1 pending (adjutant)", len(pend) == 1 and pend[0]["kind"] == "adjutant", str(pend))
 
-res = asyncio.run(approvals.approve(cfg, "drill"))
+res = asyncio.run(approvals.approve(cfg, "adjutant"))
 check("approve applies + pushes", "edited officers" in res and "pushed" in res, res[:80])
 check("approved report is no longer pending", approvals.pending(cfg) == [])
 
-(d / "drill-report.md").write_text("## DIFFERENT proposal: refresher drill on tenant isolation", encoding="utf-8")
+(d / "adjutant-report.md").write_text("## DIFFERENT proposal: retire a stale specialist", encoding="utf-8")
 check("a new/changed report becomes pending again", len(approvals.pending(cfg)) == 1)
 
-(d / "adjutant-report.md").write_text("## Propose: recruit a DB soldier", encoding="utf-8")
-check("adjutant report also pending (2 now)", len(approvals.pending(cfg)) == 2)
+# EU-328: drill wiring was removed — a stale "drill" request is simply rejected, never imports
+# drillmaster (that module is gone; approve() must not even try).
+res_drill = asyncio.run(approvals.approve(cfg, "drill"))
+check("approve('drill') is rejected as an unknown kind (no drillmaster import)",
+      res_drill == "unknown approval kind: drill", res_drill)
+
 approvals.disapprove(cfg, "adjutant", "roster is fine for now")
 check("disapprove clears adjutant from pending", all(p["kind"] != "adjutant" for p in approvals.pending(cfg)))
 check("disapprove logs the reason to Unit Memory", any("roster is fine" in n for n in notes), str(notes))

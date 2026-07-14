@@ -21,7 +21,6 @@ from .config import Config
 
 # kind -> (label, report filename). Each report maps to an officer `apply` coroutine.
 KINDS = {
-    "drill": ("Engineering Coach — doctrine upgrade", "drill-report.md"),
     "adjutant": ("Engineering Manager — personnel action", "adjutant-report.md"),
 }
 
@@ -96,7 +95,7 @@ def _commit_push(msg: str) -> str:
 
 
 async def approve(cfg: Config, kind: str) -> str:
-    """Apply the recommendation (drill/adjutant --apply), then commit + push the doctrine."""
+    """Apply the recommendation (adjutant --apply), then commit + push the doctrine."""
     if kind not in KINDS:
         return f"unknown approval kind: {kind}"
     p = _report_path(cfg, kind)
@@ -104,12 +103,8 @@ async def approve(cfg: Config, kind: str) -> str:
         return f"no pending {kind} report to apply"
     body = p.read_text(encoding="utf-8")
     h = _hash(body)
-    if kind == "drill":
-        from . import drillmaster
-        summary = await drillmaster.apply(cfg)
-    else:
-        from . import adjutant
-        summary = await adjutant.apply(cfg)
+    from . import adjutant
+    summary = await adjutant.apply(cfg)
     pushed = _commit_push(f"{KINDS[kind][0]} — applied (Commander-approved)")
 
     def _mark(st: dict) -> dict:
@@ -151,7 +146,7 @@ def disapprove(cfg: Config, kind: str, reason: str = "") -> None:
 # batch lands in this queue so the Commander can Approve (file to the board,
 # de-duped, with slice-1's Roman-default create) — optionally only a chosen
 # subset of the tickets — or Deny (discard). This is separate state from the
-# drill/adjutant KINDS above (those are single-report-hash approvals); a batch
+# adjutant KINDS above (those are single-report-hash approvals); a batch
 # is many tickets the Commander can pick through.
 # --------------------------------------------------------------------------- #
 

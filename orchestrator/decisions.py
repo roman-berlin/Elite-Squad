@@ -468,7 +468,7 @@ def handle_command(cfg, audit, text: str) -> bool:
     if cmd in ("help", "start"):
         notify.send("Commands:\n/daily — quick daily stand-up (cheap)\n/standup — deterministic report\n"
                     "/status — recent tasks\n"
-                    "/drill — train the unit\n/council [topic] — deep WEEKLY council\n"
+                    "/council [topic] — deep WEEKLY council\n"
                     "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
                     "/unblock <id> — retry a parked (escalated) ticket\n"
@@ -488,18 +488,6 @@ def handle_command(cfg, audit, text: str) -> bool:
         notify.send(D.standup(cfg))
     elif cmd == "status":
         notify.send(D.render_status(D.load_tasks(cfg.audit_path), limit=10, show_cost=False))
-    elif cmd == "drill":
-        notify.send("🎖️ Engineering Coach working…")
-
-        def _d():
-            try:
-                from . import drillmaster
-                rep = asyncio.run(drillmaster.drill(cfg))
-                Path(cfg.audit_path).with_name("drill-report.md").write_text(rep, encoding="utf-8")
-                notify.send("🎖️ Drill report:\n\n" + rep[:3500])
-            except Exception as exc:  # noqa: BLE001
-                notify.send(f"⚠️ drill failed: {exc}")
-        threading.Thread(target=_d, daemon=True).start()
     elif cmd == "council":
         notify.send("🎖️ Convening the daily council…")
 

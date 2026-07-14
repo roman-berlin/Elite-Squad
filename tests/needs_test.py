@@ -32,7 +32,7 @@ check("empty side panel says 'All clear'", "All clear" in warroom._needs_side_ht
 # --- seed all three streams ---
 (d / "pending_decisions.json").write_text(json.dumps(
     [{"id": "AUTO-9", "app": "automatixy", "question": "DD/MM or MM/DD?", "summary": "date format"}]))
-(d / "drill-report.md").write_text("## Proposal: tighten the Engineer exit gate", encoding="utf-8")
+(d / "adjutant-report.md").write_text("## Proposal: tighten the Engineer exit gate", encoding="utf-8")
 dashboard.load_tasks = lambda p: [{"ticket_id": "AUTO-7", "outcome": "errored", "app": "automatixy",
                                    "note": "build blew up", "started": datetime.now()}]
 dashboard.load_dismissed = lambda p: {}
@@ -46,7 +46,7 @@ check("count() matches total", needs.count(cfg) == 3)
 
 side = warroom._needs_side_html(s)
 check("side panel shows the decision", "DD/MM" in side)
-check("side panel shows the approval", "Engineering Coach" in side)
+check("side panel shows the approval", "Engineering Manager" in side)
 check("side panel shows the failed run", "AUTO-7" in side and "errored" in side)
 check("side panel links to the inbox", "/needs" in side and "Open inbox" in side)
 
