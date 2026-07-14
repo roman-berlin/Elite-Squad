@@ -2782,8 +2782,10 @@ def create_app(cfg: Config):
     @app.get("/group")
     def group_page():
         officer = (request.args.get("officer") or "").strip()
-        busy = ('<div class=cempty>&#128225; the unit is weighing in… replies appear below.</div>'
-                if _state.get("grouping") else "")
+        # EU-287: a lightweight typing indicator (not a banner) — the officer(s) triage picked are
+        # composing. `_state['grouping']` already tracks the in-flight window (set in group_api below).
+        busy = (f'<div class=typing>&middot; {html.escape(officer) if officer else "an officer"} '
+                'is weighing in&hellip;</div>' if _state.get("grouping") else "")
         aim = (f'<div class=aim>Consulting <b>{html.escape(officer)}</b> directly — only they answer. '
                '<a href="/group">ask the whole unit instead</a></div>') if officer else ""
         oin = f'<input type=hidden name=officer value="{html.escape(officer)}">' if officer else ""
