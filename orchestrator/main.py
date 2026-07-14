@@ -77,9 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
     st = sub.add_parser("standup", help="daily-meeting report (shipped / needs-you / decisions)")
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
-    dr = sub.add_parser("drill", help="Engineering Coach: review the unit's record, propose officer upgrades")
-    dr.add_argument("--telegram", action="store_true", help="also send a summary to Telegram")
-    dr.add_argument("--apply", action="store_true", help="EXECUTE the approved drill (writes the officer/squad edits; originals backed up first)")
     sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
     cnl = sub.add_parser("council", help="deep WEEKLY council (officers muster, brief you) — for the daily use `daily`")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
@@ -454,23 +451,6 @@ async def _main(argv: list[str]) -> int:
         print(report)
         if getattr(args, "telegram", False):
             notify.send(report)
-        return 0
-
-    if args.command == "drill":
-        from . import drillmaster, notify
-        if getattr(args, "apply", False):
-            out = await drillmaster.apply(cfg)
-            print(out)
-            if getattr(args, "telegram", False):
-                notify.send("🎖️ Drill applied:\n\n" + out[:1500])
-            return 0
-        report = await drillmaster.drill(cfg)
-        print(report)
-        out = Path(cfg.audit_path).with_name("drill-report.md")
-        out.write_text(report, encoding="utf-8")
-        print(f"\n(written to {out})")
-        if getattr(args, "telegram", False):
-            notify.send("🎖️ Engineering Coach report ready:\n\n" + report[:1500])
         return 0
 
     if args.command == "daily":
