@@ -2689,6 +2689,18 @@ def create_app(cfg: Config):
                 'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
                 'document.getElementById("cinner").innerHTML=await r.text();'
                 'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},5000);'
+                # EU-304 — 'load earlier': fetch the next-older batch (offset grows by its own
+                # data-limit each click) and prepend it into the live .thread, no reload. An empty
+                # response means there's nothing older left, so the button removes itself.
+                'async function loadEarlierChat(btn){'
+                'var off=parseInt(btn.dataset.offset||"0",10),lim=parseInt(btn.dataset.limit||"20",10);'
+                'btn.disabled=true;var prev=btn.textContent;btn.textContent="Loading…";'
+                'try{var r=await fetch("/api/chat-thread?offset="+off,{cache:"no-store"});'
+                'var t=r.ok?await r.text():"";'
+                'if(t.trim()){var th=document.querySelector("#cinner .thread"),f=document.createElement("div");'
+                'f.innerHTML=t;while(f.lastChild){th.insertBefore(f.lastChild,th.firstChild);}'
+                'btn.dataset.offset=off+lim;btn.disabled=false;btn.textContent=prev;}'
+                'else{btn.remove();}}catch(e){btn.disabled=false;btn.textContent=prev;}}'
                 '</script>')
         return _wrap("Chat with the CTO", body)
 
@@ -2743,7 +2755,11 @@ def create_app(cfg: Config):
     @app.get("/api/chat-thread")
     def chat_thread_api():
         from flask import Response
-        return Response(_chat_inner(cfg), mimetype="text/html")
+        try:
+            offset = max(int(request.args.get("offset") or 0), 0)
+        except ValueError:
+            offset = 0
+        return Response(_chat_inner(cfg, offset=offset), mimetype="text/html")
 
     @app.post("/api/chat")
     def chat_api():

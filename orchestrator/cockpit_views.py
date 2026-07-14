@@ -855,8 +855,38 @@ def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
     return out
 
 
-def _chat_inner(cfg: Config) -> str:
+def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
+    """Render the CTO chat thread, windowed to the last ``limit`` regular messages (EU-304).
+
+    ``offset`` counts how many of the most-recent regular messages to skip before taking the next
+    ``limit``-sized window going backwards — 0 (the default) is "the last ``limit`` messages" (used
+    for the normal page render and the 5s auto-refresh poll); ``offset=limit`` is the next-older
+    batch the 'load earlier' control fetches, ``offset=2*limit`` the one after that, and so on.
+
+    When ``offset`` is non-zero this returns a BARE fragment (just ``.msg`` bubbles, no pinned
+    cards, no ``.thread``/composer wrapper) meant to be prepended into the existing thread by the
+    client — an empty string means there are no older messages left. The default (``offset=0``)
+    render is unchanged in shape: pinned cards on top, then the ``.thread`` wrapper, plus a
+    'load earlier' control when older messages exist.
+    """
     from . import council, decisions
+    all_bubbles = _chat_bubbles(_safe_chat_transcript(cfg))
+    total = len(all_bubbles)
+    window_limit = limit if limit and limit > 0 else total
+    end = max(total - max(offset, 0), 0)
+    start = max(end - window_limit, 0)
+    window = all_bubbles[start:end]
+    bubbles = ""
+    for who, text in window:
+        label = "You" if who == "you" else "CTO"
+        bubbles += (f'<div class="msg {who}"><div class=who>{label}</div>'
+                    f'<div class=bub>{html.escape(text)}</div></div>')
+
+    if offset:
+        # 'load earlier' batch fetch — just the older bubbles, nothing else, so the client can
+        # prepend them into the live .thread without disturbing pinned cards or the composer.
+        return bubbles
+
     try:
         pend = decisions.load(cfg)
     except Exception:  # noqa: BLE001
@@ -872,19 +902,24 @@ def _chat_inner(cfg: Config) -> str:
                   f'<input type=text name=text placeholder="your decision for {tid}…" autocomplete=off>'
                   '<button>Send</button></form></div>')
     pending_html = f'<div class=pending>{cards}</div>' if cards else ""
-    try:
-        notes = council.chat_transcript(cfg, lines=400)
-    except Exception:  # noqa: BLE001
-        notes = ""
-    bubbles = ""
-    for who, text in _chat_bubbles(notes):
-        label = "You" if who == "you" else "CTO"
-        bubbles += (f'<div class="msg {who}"><div class=who>{label}</div>'
-                    f'<div class=bub>{html.escape(text)}</div></div>')
+
     if not bubbles and not cards:
         bubbles = ('<div class=cempty>No messages yet. When an officer needs a decision it shows '
                    'up here — or send the CTO a message below.</div>')
-    return pending_html + f'<div class=thread>{bubbles}</div>'
+    load_earlier = ""
+    if start > 0:
+        load_earlier = (f'<button type=button class=load-earlier data-offset="{window_limit}" '
+                         f'data-limit="{window_limit}" onclick="loadEarlierChat(this)">'
+                         '&#8593; Load earlier messages</button>')
+    return pending_html + load_earlier + f'<div class=thread>{bubbles}</div>'
+
+
+def _safe_chat_transcript(cfg: Config) -> str:
+    from . import council
+    try:
+        return council.chat_transcript(cfg, lines=400)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 _CHAT_STYLE = ("<style>"
@@ -899,6 +934,11 @@ _CHAT_STYLE = ("<style>"
                ".pcard .ph2{color:var(--warn);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
                ".pcard .pq{color:var(--ink);font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:var(--mono);line-height:1.5}"
                ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
+               ".load-earlier{display:block;margin:14px auto 0;background:var(--panel2);"
+               "border:1px solid var(--line2);color:var(--dim);border-radius:var(--r-pill);"
+               "padding:7px 15px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}"
+               ".load-earlier:hover{background:var(--line);color:var(--ink)}"
+               ".load-earlier:disabled{opacity:.6;cursor:default}"
                ".thread{display:flex;flex-direction:column;gap:9px;margin:16px 0 96px}"
                ".msg{display:flex;flex-direction:column;max-width:80%}"
                ".msg.you{align-self:flex-end;align-items:flex-end}.msg.unit{align-self:flex-start}"
