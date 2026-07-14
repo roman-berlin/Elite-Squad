@@ -650,7 +650,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     fr_tasks = _fresh(_tkdt)
     fr_council = _fresh(_wr._last_council(cfg))
     fr_standup = _fresh(_wr._mtime(_base.with_name("last-standup.md")))
-    fr_drill = _fresh(_wr._mtime(_base.with_name("drill-report.md")))
     try:
         from . import memory as _mem
         fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
@@ -927,7 +926,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
           <a href="/budget">&#128176; Budget monitor</a>
           <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
           <a href="/roster-doc">&#128101; Unit roster</a>
-          <a href="/drill">&#127894; Last drill{fr_drill}</a>
         </div>
       </details>
     </div>
