@@ -624,13 +624,13 @@ def create_app(cfg: Config):
             # This must happen AFTER ev.set() so graceful shutdown happens first.
             if ap.daemon_is_external():
                 stopped = ap._stop_launchd_daemon()
+                # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout, so this is a
+                # verified outcome (not launchctl's optimistic exit code) — surface it to the operator.
                 if stopped:
-                    # Success — the daemon will finish its in-flight work and exit
-                    pass
+                    st["last_msg"] = "✓ external launchd daemon confirmed stopped — it will not respawn."
                 else:
-                    # launchctl failed — the stop_event is still set, so graceful shutdown proceeds,
-                    # but KeepAlive may respawn it. Log this but don't block the redirect.
-                    pass
+                    st["last_msg"] = ("⚠ couldn't confirm the external launchd daemon stopped — "
+                                      "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         if action == "stop" and ap_on:
@@ -645,13 +645,12 @@ def create_app(cfg: Config):
             # doesn't actually stop it—the KeepAlive respawn makes the button a no-op for external runs.
             if ap.daemon_is_external():
                 stopped = ap._stop_launchd_daemon()
+                # EU-232: verified outcome (see the drain branch above) — surface it to the operator.
                 if stopped:
-                    # Success — the daemon will finish its in-flight work and exit
-                    pass
+                    st["last_msg"] = "✓ external launchd daemon confirmed stopped — it will not respawn."
                 else:
-                    # launchctl failed — the stop_event is still set, so graceful shutdown proceeds,
-                    # but KeepAlive may respawn it. Log this but don't block the redirect.
-                    pass
+                    st["last_msg"] = ("⚠ couldn't confirm the external launchd daemon stopped — "
+                                      "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         # toggle / unknown action → no-op (the mode persist above already took effect).

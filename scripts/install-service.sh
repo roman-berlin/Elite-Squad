@@ -29,6 +29,7 @@ cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=Elite Unit — cockpit + Telegram listener
 After=network-online.target
+Wants=network-online.target
 # EU-184 (Wave 0): bound the restart storm. Without a start-limit, a main deploy that crashes on
 # startup restarts forever (Restart=always + RestartSec=5 → ~864 restarts/min was observed on
 # 2026-07-05). After StartLimitBurst restarts within StartLimitIntervalSec, systemd gives up and
