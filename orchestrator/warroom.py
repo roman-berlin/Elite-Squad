@@ -1728,7 +1728,29 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --shadow-3:0 16px 40px rgba(0,0,0,.55);
 /* keyboard-focus ring + motion — shared so focus & transitions are uniform (a11y) */
 --ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);
---t-fast:.15s ease}
+--t-fast:.15s ease;
+/* 8pt spacing scale (EU-296) — additive foundation; nothing is rewired to consume these yet */
+--s-1:4px; /* micro gap: icon-to-label spacing, tight inline gaps */
+--s-2:8px; /* small gap: control padding, chip/tag spacing */
+--s-3:16px; /* base gap: card padding, row gaps, standard margins */
+--s-4:24px; /* medium gap: section padding, panel gutters */
+--s-5:32px; /* large gap: section margin, major block spacing */
+--s-6:48px; /* xl gap: page-level section margin, hero spacing */
+/* modular type scale (EU-296) — will replace raw inline font-size numerals (e.g. the
+   30/40px KPI numerals) in a later slice; additive only for now */
+--t-xs:11px; /* micro labels, meta text, tags, timestamps */
+--t-sm:12.5px; /* secondary body text, chips, list meta */
+--t-md:14px; /* base body copy (matches body font-size) */
+--t-lg:18px; /* section/run titles */
+--t-xl:24px; /* group headers */
+--t-2xl:32px; /* hero KPI numerals (e.g. the 30-40px inline KPI stat figures) */
+/* semantic color-role aliases (EU-296) — map onto the existing palette so consumers
+   read intent, not raw color; --warn already exists above and is reused as-is */
+--surface:var(--panel); /* default elevated surface background */
+--border:var(--line); /* default hairline border */
+--text:var(--ink); /* default body text color */
+--positive:var(--ok); /* success / good-state accent */
+--critical:var(--bad)} /* error / bad-state accent */
 *{box-sizing:border-box}
 /* Keyboard focus is visible on every interactive board surface (a11y): mouse clicks
    stay clean (:focus-visible), but Tab navigation lands on a clear accent ring. */
