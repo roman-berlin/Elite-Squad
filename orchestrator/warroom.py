@@ -22,6 +22,7 @@ from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Optional
 
+from . import cockpit_views as CV
 from . import dashboard as D
 from .officers import display as _display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW
@@ -842,7 +843,6 @@ def _kpi_html(cards: list[dict]) -> str:
                 f'</details>')
             continue
 
-        tag, attr, link = ("a", f' href="{href}"', " link") if href else ("div", "", "")
         # Optional inline gauge bar (EU-75 tokens-today/cap card). Rendered via inline
         # style so the existing CSS block is untouched; bar colour tracks the card tone.
         gauge_html = ""
@@ -869,10 +869,11 @@ def _kpi_html(cards: list[dict]) -> str:
                 "var(--info)"
             )
             spark_html = _kpi_sparkline_svg(sp, stroke=sp_stroke)
-        out.append(
-            f'<{tag} class="kpi {tone}{link}"{attr}><div class=kv>{_esc(c["value"])}</div>'
-            f'<div class=kl>{_esc(c["label"])}</div>'
-            f'{gauge_html}{spark_html}</{tag}>')
+        # EU-297: numeral + label render via the shared cockpit_views._kpi_metric partial
+        # (--t-2xl token scale) instead of duplicating the <div class=kv>/<div class=kl> markup
+        # inline per card.
+        out.append(CV._kpi_metric(c["value"], c.get("label", ""), tone=tone, href=href,
+                                   extra=f"{gauge_html}{spark_html}"))
     return "".join(out)
 
 
@@ -1581,7 +1582,10 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<div class=term>{_terminal_html()}</div></section>'
         '</div>'
         f'<div class=col-side>'
-        f'<section class=panel><div class=ph>Talk to the unit</div>{_TALK_HTML}</section>'
+        # EU-297: proof-of-integration call site for the cockpit_views._card partial —
+        # consistent --s-* padding / --r-xl radius / --surface background instead of a
+        # hand-rolled <section class=panel><div class=ph>…</div>…</section> pair.
+        f'{CV._card("Talk to the unit", _TALK_HTML)}'
         '</div>'
         '</div>')
 
