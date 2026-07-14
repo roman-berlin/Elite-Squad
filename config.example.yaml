@@ -20,6 +20,15 @@ max_iterations: 2            # build<->review cycles before escalating to you (h
 max_cost_usd: 0             # 0 = no cap (subscription/Max). Set a number only for per-token API billing.
 max_tickets_per_run: 1      # per app; raise once you trust it
 
+# --- EU-221: per-call wall-clock timeout ---
+# Bounds ONE agent call's SDK stream consumption, independent of max_turns — a stalled provider
+# stream (GLM/z.ai has been observed hanging with zero output) can otherwise pin a drain for 30+
+# min even on a 3-turn planner call. On expiry the CLI subprocess is terminated and the call
+# returns a clean error (no exception) so the normal fail-safe paths handle it like any other
+# officer/builder error.
+officer_timeout_s: 900       # planner/reviewer/pm/adjutant/council/etc. (low-effort roles), seconds
+builder_timeout_s: 3600      # builder — real code changes legitimately run long, seconds
+
 # --- usage governor: daily token budget (autopilot auto-pause) ---
 # On the Max plan there's no per-call dollar charge, so the meaningful runaway guard is TOKEN
 # throughput. The autopilot sums today's ledger burn (input + output, incl. cache reads) and PAUSES

@@ -440,6 +440,7 @@ async def _main(argv: list[str]) -> int:
     # QW4: every agent call also lands an `agent_call` audit event (model, tokens, duration).
     from . import agent as _agent
     _agent.configure_audit(AuditLog(cfg.audit_path))
+    _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
 
     if args.command == "serve":
         from . import server

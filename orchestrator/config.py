@@ -303,6 +303,16 @@ class Config:
     per_ticket_token_budget: int = 3_000_000  # input+output tokens across all officers of one attempt
     per_ticket_time_budget_min: int = 30      # wall-clock minutes per attempt
 
+    # --- EU-221: per-call wall-clock timeout (a stalled provider stream — GLM/z.ai has been
+    #     observed hanging with zero output — otherwise pins the whole drain until the OS/SDK
+    #     gives up, sometimes 30+ min). Bounds ONE agent.run_agent() call, independent of its
+    #     max_turns cap: a 3-turn planner call can still hang on a wedged stream. On expiry the
+    #     CLI subprocess is terminated and the call returns a clean is_error AgentRun instead of
+    #     an exception, so the normal fail-safe paths handle it (planner->BUILD, reviewer->retry,
+    #     builder->ERRORED+retry) — see orchestrator/agent.py `_timeout_for_tag`. ---
+    officer_timeout_s: int = 900        # planner/reviewer/pm/adjutant/council/etc. (low-effort roles)
+    builder_timeout_s: int = 3600       # builder — real code changes legitimately run long
+
     # --- merge behaviour (auto-merge to dev if green) ---
     merge_to_dev: bool = True           # merge feature -> dev when review passes & dev stays green
     open_pr_on_block: bool = True       # if it can't merge safely, open a PR into dev instead

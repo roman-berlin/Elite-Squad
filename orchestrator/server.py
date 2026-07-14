@@ -177,6 +177,7 @@ def create_app(cfg: Config):
     # QW4: every agent call also lands an `agent_call` audit event (model, tokens, duration).
     from . import agent as _agent
     _agent.configure_audit(audit)
+    _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
 
     # ----------------------------------------------------------------------------------------------
     # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`

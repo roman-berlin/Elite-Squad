@@ -97,6 +97,35 @@ def configure_audit(audit) -> None:
     _AUDIT_SINK = audit
 
 
+# EU-221: wall-clock budgets for SDK stream consumption. Officer calls had turn caps
+# (max_turns) but no wall-clock bound — a stalled provider stream (z.ai/GLM has been observed
+# hanging with zero output; AUTO-108's planner call ran 30+ min silent on 2026-07-10, and
+# EU-228's build hit the same class live on 2026-07-14) could otherwise pin a drain
+# indefinitely. Defaults apply even when configure_timeouts() is never called (tests, ad-hoc
+# scripts, any entrypoint that forgets to wire it) so the guard is never silently off.
+_OFFICER_TIMEOUT_S = 900     # planner/reviewer/pm/etc. — low-effort officer roles
+_BUILDER_TIMEOUT_S = 3600    # builder — real code changes legitimately run long
+
+
+def configure_timeouts(cfg) -> None:
+    """Point wall-clock timeout budgets at the run config. Call once at process start
+    (main.py / server.py), alongside configure_audit. `getattr` with the existing default
+    as fallback so an older/test Config stand-in that doesn't define these fields is fine."""
+    global _OFFICER_TIMEOUT_S, _BUILDER_TIMEOUT_S
+    _OFFICER_TIMEOUT_S = int(getattr(cfg, "officer_timeout_s", _OFFICER_TIMEOUT_S) or _OFFICER_TIMEOUT_S)
+    _BUILDER_TIMEOUT_S = int(getattr(cfg, "builder_timeout_s", _BUILDER_TIMEOUT_S) or _BUILDER_TIMEOUT_S)
+
+
+def _timeout_for_tag(tag: str) -> float:
+    """Per-role wall-clock budget (EU-221). The builder tag gets the larger budget — real
+    code changes legitimately run long; every other officer tag (planner/reviewer/pm/adjutant/
+    drillmaster/council/...) gets the shorter default, which is where the observed stalls
+    (2026-07-10 GLM planner, 2026-07-08 AUTO-93 75-min review) happened."""
+    if tag == "builder":
+        return _BUILDER_TIMEOUT_S
+    return _OFFICER_TIMEOUT_S
+
+
 # EU-108 hardening: split the old catch-all plan-limit patterns into two classes. A genuine
 # quota exhaustion names the cap ("Claude usage limit reached", "weekly limit", "plan limit");
 # a transient per-minute 429 or 529 overload only carries status/rate-limit language. Cap
@@ -326,75 +355,94 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     _t0 = _time.monotonic()
 
     saw_result = False
+    import asyncio as _asyncio
+    budget_s = _timeout_for_tag(tag)
     try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                parts: list[str] = []
-                for b in message.content:
-                    if isinstance(b, TextBlock):
-                        parts.append(b.text)
-                        # EU-197: write officer reasoning to transcript
-                        try:
-                            from . import transcript
-                            transcript.write_text(b.text)
-                        except Exception:  # noqa: BLE001 — best-effort
-                            pass
-                    elif ToolUseBlock is not None and isinstance(b, ToolUseBlock):
-                        brief = _tool_brief(getattr(b, "name", ""), getattr(b, "input", None),
-                                         cwd=getattr(options, "cwd", None))
-                        tools.append(brief)
-                        if tag:
-                            print(f"      · {tag}: {brief}", flush=True)
-                        # EU-197: write full tool input to transcript
-                        try:
-                            from . import transcript
-                            tool_name = getattr(b, "name", "")
-                            tool_input = getattr(b, "input", None)
-                            transcript.write_tool_use(tool_name, tool_input)
-                        except Exception:  # noqa: BLE001 — best-effort
-                            pass
-                text = "".join(parts)
-                if text:
-                    chunks.append(text)
-                    final = text
-                # EU-118: detect plan-limit errors in message errors
-                if getattr(message, "error", None):
-                    is_error = True
-                    kind = _classify_plan_limit(str(getattr(message, "error", "")))
-                    if kind:
-                        is_plan_limit = True
-                        if plan_limit_kind != "cap":  # a cap sighting outranks a transient one
-                            plan_limit_kind = kind
-            elif isinstance(message, ResultMessage):
-                saw_result = True
-                cost = message.total_cost_usd or 0.0
-                turns = message.num_turns
-                is_error = is_error or message.is_error
-                # EU-248: capture the turn-limit signal straight off the structured ResultMessage,
-                # BEFORE any exception handling — the CLI exits 1 by design after error_max_turns and
-                # the SDK's own structured-error replacement (_last_error_result_text) is racy, so this
-                # is the one reliable place to observe it.
-                subtype = getattr(message, "subtype", "") or ""
-                max_turns = getattr(options, "max_turns", None)
-                if subtype == "error_max_turns" or (max_turns and turns >= max_turns):
-                    is_turn_limit = True
-                if message.result:
-                    final = message.result
-                # A provider-side terminal error rides in ResultMessage.result (NOT message.error) —
-                # that's where GLM/z.ai quota text lands. Classify it here or the EU-82/EU-191 pause
-                # never engages for GLM caps (the EU-202 blind spot, 2026-07-09).
-                if message.is_error and message.result:
-                    kind = _classify_plan_limit(str(message.result))
-                    if kind:
-                        is_plan_limit = True
-                        if plan_limit_kind != "cap":
-                            plan_limit_kind = kind
-                u = getattr(message, "usage", None)
-                if isinstance(u, dict):
-                    in_tok = (int(u.get("input_tokens", 0) or 0)
-                              + int(u.get("cache_read_input_tokens", 0) or 0)
-                              + int(u.get("cache_creation_input_tokens", 0) or 0))
-                    out_tok = int(u.get("output_tokens", 0) or 0)
+        # EU-221: bound total stream-consumption wall-clock time. A stalled provider stream
+        # (zero messages for the whole budget) is the case this exists for, but the budget is a
+        # simple overall cap on the loop below — not a per-message idle timer — which also
+        # contains a stream that produces a few tokens then wedges. asyncio.timeout() cancels
+        # THIS task on expiry; that cancellation is thrown into query()'s __anext__() while it's
+        # suspended deep inside the SDK (InternalClient.process_query -> Query.close ->
+        # transport.close()), whose own try/finally chain terminates + reaps the CLI subprocess
+        # as the cancellation unwinds — before the TimeoutError below ever runs.
+        async with _asyncio.timeout(budget_s):
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    parts: list[str] = []
+                    for b in message.content:
+                        if isinstance(b, TextBlock):
+                            parts.append(b.text)
+                            # EU-197: write officer reasoning to transcript
+                            try:
+                                from . import transcript
+                                transcript.write_text(b.text)
+                            except Exception:  # noqa: BLE001 — best-effort
+                                pass
+                        elif ToolUseBlock is not None and isinstance(b, ToolUseBlock):
+                            brief = _tool_brief(getattr(b, "name", ""), getattr(b, "input", None),
+                                             cwd=getattr(options, "cwd", None))
+                            tools.append(brief)
+                            if tag:
+                                print(f"      · {tag}: {brief}", flush=True)
+                            # EU-197: write full tool input to transcript
+                            try:
+                                from . import transcript
+                                tool_name = getattr(b, "name", "")
+                                tool_input = getattr(b, "input", None)
+                                transcript.write_tool_use(tool_name, tool_input)
+                            except Exception:  # noqa: BLE001 — best-effort
+                                pass
+                    text = "".join(parts)
+                    if text:
+                        chunks.append(text)
+                        final = text
+                    # EU-118: detect plan-limit errors in message errors
+                    if getattr(message, "error", None):
+                        is_error = True
+                        kind = _classify_plan_limit(str(getattr(message, "error", "")))
+                        if kind:
+                            is_plan_limit = True
+                            if plan_limit_kind != "cap":  # a cap sighting outranks a transient one
+                                plan_limit_kind = kind
+                elif isinstance(message, ResultMessage):
+                    saw_result = True
+                    cost = message.total_cost_usd or 0.0
+                    turns = message.num_turns
+                    is_error = is_error or message.is_error
+                    # EU-248: capture the turn-limit signal straight off the structured ResultMessage,
+                    # BEFORE any exception handling — the CLI exits 1 by design after error_max_turns and
+                    # the SDK's own structured-error replacement (_last_error_result_text) is racy, so this
+                    # is the one reliable place to observe it.
+                    subtype = getattr(message, "subtype", "") or ""
+                    max_turns = getattr(options, "max_turns", None)
+                    if subtype == "error_max_turns" or (max_turns and turns >= max_turns):
+                        is_turn_limit = True
+                    if message.result:
+                        final = message.result
+                    # A provider-side terminal error rides in ResultMessage.result (NOT message.error) —
+                    # that's where GLM/z.ai quota text lands. Classify it here or the EU-82/EU-191 pause
+                    # never engages for GLM caps (the EU-202 blind spot, 2026-07-09).
+                    if message.is_error and message.result:
+                        kind = _classify_plan_limit(str(message.result))
+                        if kind:
+                            is_plan_limit = True
+                            if plan_limit_kind != "cap":
+                                plan_limit_kind = kind
+                    u = getattr(message, "usage", None)
+                    if isinstance(u, dict):
+                        in_tok = (int(u.get("input_tokens", 0) or 0)
+                                  + int(u.get("cache_read_input_tokens", 0) or 0)
+                                  + int(u.get("cache_creation_input_tokens", 0) or 0))
+                        out_tok = int(u.get("output_tokens", 0) or 0)
+    except TimeoutError:
+        # EU-221: the budget elapsed with the stream stalled (partial or zero output) — the SDK
+        # has already reaped the subprocess (see the comment above). Classify as a clean,
+        # non-exceptional error result (transient/infra, deliberately NOT is_plan_limit — this is
+        # not a quota exhaustion) so the existing fail-safe paths handle it exactly like any other
+        # error return: planner -> BUILD, reviewer -> retry/fail-safe, builder -> ERRORED + retry.
+        is_error = True
+        final = f"wall-clock timeout after {budget_s}s"
     except Exception as exc:  # noqa: BLE001 — see below; genuine crashes re-raise
         # SDK quirk (claude_agent_sdk 0.2.x): after a CLI error result whose `errors` array is empty,
         # the SDK raises "Claude Code returned an error result: success" — literally "success" —
