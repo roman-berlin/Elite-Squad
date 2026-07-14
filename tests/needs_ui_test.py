@@ -74,6 +74,31 @@ chk("/chat pre-fills the composer value", 'value="AUTO-14 ended here ' in body2)
 r3 = client.get("/chat"); body3 = r3.get_data(as_text=True)
 chk("/chat with no prefill -> empty value (unchanged behaviour)", 'value=""' in body3)
 
+# --- 4. EU-307: composer — Enter-to-send, refocus, autoscroll (no native page reload) ---
+chk("/chat composer intercepts submit (no native reload)",
+    'addEventListener("submit"' in body3 and "preventDefault()" in body3)
+chk("/chat composer posts to /api/chat via fetch", 'fetch("/api/chat"' in body3)
+chk("/chat composer re-fetches /api/chat-thread into #cinner on success",
+    "/api/chat-thread" in body3 and 'getElementById("cinner")' in body3)
+chk("/chat composer refocuses the input after send", ".focus()" in body3)
+chk("/chat composer scrolls to newest after send",
+    body3.count("window.scrollTo(0,document.body.scrollHeight)") >= 2)
+chk("/chat composer still has a real form (no-JS fallback / EU-286a independence)",
+    "<form" in body3 and "method=post action=/api/chat>" in body3)
+
+r4 = client.get("/group"); body4 = r4.get_data(as_text=True)
+chk("/group returns 200", r4.status_code == 200, str(r4.status_code))
+chk("/group composer intercepts submit (no native reload)",
+    'addEventListener("submit"' in body4 and "preventDefault()" in body4)
+chk("/group composer posts to /api/group via fetch", 'fetch("/api/group"' in body4)
+chk("/group composer re-fetches /api/group-thread into #ginner on success",
+    "/api/group-thread" in body4 and 'getElementById("ginner")' in body4)
+chk("/group composer refocuses the input after send", ".focus()" in body4)
+chk("/group composer scrolls to newest after send",
+    body4.count("window.scrollTo(0,document.body.scrollHeight)") >= 2)
+chk("/group composer still has a real form (no-JS fallback)",
+    "<form" in body4 and "method=post action=/api/group>" in body4)
+
 print("\n=============== NEEDS-YOU UX QA ===============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
