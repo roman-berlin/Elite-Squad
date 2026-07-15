@@ -35,29 +35,55 @@ from .loop import run as run_loop
 # (scripts/install-mac-autopilot-daemon.sh) relies on this file for external status checks.
 _PID_FILE = Path("/tmp/general-autopilot.pid")
 
+# Refcount of live in-process autopilot() runs holding the (process-wide) PID file. The cockpit
+# runs each per-app drain as a thread of the ONE serve process, so every drain writes the SAME
+# pid — a bare contents==getpid() ownership check let the FIRST drain to exit delete the file
+# while a sibling drain was still live, flipping daemon_running() (the cockpit badge's single
+# source of truth, EU-73) to False mid-run and opening the daemon_is_external() start guards to
+# a second conflicting daemon. _remove_pid() now unlinks only when the LAST in-process holder
+# exits; the cross-process ownership check below still protects a foreign daemon's file.
+_pid_holders = 0
+_pid_lock = threading.Lock()
+
 
 def _write_pid() -> None:
-    """Write the current process PID to _PID_FILE (best-effort; failure is non-fatal)."""
-    try:
-        _PID_FILE.write_text(str(os.getpid()))
-    except OSError:
-        pass
+    """Register this autopilot run as a PID-file holder and (re)write the file (best-effort).
+
+    Callers MUST pair every _write_pid() with exactly one _remove_pid() — autopilot() does this
+    via its wrote_pid flag — or the refcount drifts and the file outlives / predeceases the runs.
+    """
+    global _pid_holders
+    with _pid_lock:
+        _pid_holders += 1
+        try:
+            _PID_FILE.write_text(str(os.getpid()))
+        except OSError:
+            pass
 
 
 def _remove_pid() -> None:
-    """Remove the PID file on clean exit — but ONLY when it still points at THIS process.
+    """Drop one PID-file hold; unlink only when the LAST in-process holder exits — and even then
+    ONLY when the file still points at THIS process.
 
-    Best-effort (failure is non-fatal). The ownership check hardens the single-instance design: if a
-    second autopilot ever overwrote the file with its own PID, this exiting instance must NOT delete it
-    — otherwise daemon_running() (the single source of truth for the cockpit badge, EU-73) would read
-    'not running' while that other instance is still alive. We own the file only when its contents equal
-    os.getpid(); a missing or garbled file simply means there is nothing of ours to remove.
+    Best-effort (failure is non-fatal). Two guards, each covering what the other can't:
+      * the holder refcount keeps overlapping per-app drains in ONE process (cockpit threads,
+        EU-103) from deleting the shared file while a sibling drain is still live;
+      * the contents==os.getpid() ownership check keeps THIS process from deleting a file a
+        DIFFERENT process (detached daemon / launchd keepalive) has since overwritten —
+        otherwise daemon_running() would read 'not running' while that instance is alive.
+    A missing or garbled file simply means there is nothing of ours to remove.
     """
-    try:
-        if _PID_FILE.read_text().strip() == str(os.getpid()):
-            _PID_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    global _pid_holders
+    with _pid_lock:
+        if _pid_holders > 0:
+            _pid_holders -= 1
+        if _pid_holders > 0:
+            return   # a sibling in-process drain still runs — the file must outlive THIS exit
+        try:
+            if _PID_FILE.read_text().strip() == str(os.getpid()):
+                _PID_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def daemon_running() -> bool:
@@ -814,6 +840,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     run_state = None
     started = False           # EU-175: gates autopilot_stop so a setup failure BEFORE autopilot_start
                               # never records an UNPAIRED stop (the mirror image of the ghost-session bug).
+    wrote_pid = False         # gates the finally's _remove_pid(): every _write_pid() must be paired with
+                              # exactly ONE _remove_pid() (the holder refcount), so a raise BEFORE the
+                              # write must not decrement a sibling drain's hold on the shared file.
     try:
         # Write the PID file FIRST, inside the try, so the finally's _remove_pid() always runs — even
         # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
@@ -821,6 +850,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # daemon_running() True forever (EU-73 — this is the single source of truth for the cockpit badge).
         _alert_unclean_restart(audit)   # QW5: a restart after a crash is never silent
         _write_pid()
+        wrote_pid = True
         if _on_main_thread:
             _orig_sigterm = signal.getsignal(signal.SIGTERM)
             signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -1372,9 +1402,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             cockpit_state.release_run(run_key)
             if run_state is not None:
                 run_state["dry_run"] = None
-        # Remove the PID file on any clean exit path (KeyboardInterrupt, stop_event, budget halt, once=True).
-        # The launchd daemon treats a missing PID file as "not running" — this is the handshake.
-        _remove_pid()
+        # Drop this run's PID-file hold on any exit path (KeyboardInterrupt, stop_event, budget halt,
+        # once=True). The file itself is unlinked only by the LAST in-process holder — overlapping
+        # per-app drains (cockpit threads, EU-103) share one process-wide file, and the first drain
+        # to exit must not flip daemon_running() False while a sibling is still live. The launchd
+        # daemon treats a missing PID file as "not running" — this is the handshake.
+        if wrote_pid:
+            _remove_pid()
         # Restore the original SIGTERM handler — main thread only, mirroring the registration guard
         # above (signal.signal() raises ValueError off the main thread, e.g. the cockpit _bg path).
         if _on_main_thread and _orig_sigterm is not None:

@@ -147,6 +147,9 @@ chk("run_agent wrote one ledger line", usage.rollup(None, 0)["total"] == 800 + 2
 #     tickets (never reaches intake); raising the cap above the burn lets it resume past the gate. ---
 from orchestrator import autopilot
 ap_dir = Path(tempfile.mkdtemp())
+# NEVER touch the machine-global /tmp/general-autopilot.pid — the two REAL autopilot() runs below
+# would overwrite (then delete) a live daemon's PID file and flip its cockpit badge OFF mid-run.
+autopilot._PID_FILE = ap_dir / "general-autopilot.pid"
 ap_audit = ap_dir / "audit.jsonl"
 usage.configure(str(ap_audit))                 # ledger → ap_dir/usage_ledger.jsonl
 usage.record("claude-opus-4-8", 5000, 5000, 0.0, "builder")   # today = 10000 tokens

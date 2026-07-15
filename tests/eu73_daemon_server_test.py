@@ -112,10 +112,17 @@ def _test_write_pid_silences_oserror() -> None:
 
 
 def _test_remove_pid_calls_unlink() -> None:
-    """_remove_pid() unlinks the PID file when it holds OUR PID (== os.getpid())."""
+    """_remove_pid() unlinks the PID file when it holds OUR PID (== os.getpid()).
+
+    Each remove-case pins _pid_holders to exactly ONE live hold: _remove_pid() is refcounted
+    (overlapping per-app drains in one process share the file — the 2026-07-15 vanish class),
+    so it unlinks only when the LAST holder exits. The paired write/remove contract means a
+    real exit path always decrements from ≥1; the earlier _write_pid cases above leaked extra
+    unpaired holds, which is exactly what the pin isolates each case from."""
     mock_path = MagicMock()
     mock_path.read_text.return_value = str(os.getpid())   # file points at THIS process → we own it
-    with patch.object(_ap_mod, "_PID_FILE", mock_path):
+    with patch.object(_ap_mod, "_PID_FILE", mock_path), \
+         patch.object(_ap_mod, "_pid_holders", 1):
         _ap_mod._remove_pid()
     mock_path.unlink.assert_called_once_with(missing_ok=True)
     chk(
@@ -130,7 +137,8 @@ def _test_remove_pid_silences_oserror() -> None:
     mock_path = MagicMock()
     mock_path.read_text.return_value = str(os.getpid())   # ours → reach the unlink whose OSError must be swallowed
     mock_path.unlink.side_effect = OSError("read-only fs")
-    with patch.object(_ap_mod, "_PID_FILE", mock_path):
+    with patch.object(_ap_mod, "_PID_FILE", mock_path), \
+         patch.object(_ap_mod, "_pid_holders", 1):
         try:
             _ap_mod._remove_pid()
             chk("_remove_pid() silences OSError (non-fatal)", True)
@@ -146,7 +154,8 @@ def _test_remove_pid_skips_foreign_pid() -> None:
     """
     mock_path = MagicMock()
     mock_path.read_text.return_value = str(os.getpid() + 1)   # someone else's PID
-    with patch.object(_ap_mod, "_PID_FILE", mock_path):
+    with patch.object(_ap_mod, "_PID_FILE", mock_path), \
+         patch.object(_ap_mod, "_pid_holders", 1):
         _ap_mod._remove_pid()
     chk(
         "_remove_pid() leaves a PID file owned by another process untouched",
@@ -159,7 +168,8 @@ def _test_remove_pid_silences_read_error() -> None:
     """_remove_pid() must not raise (and must not unlink) when the PID file is already gone."""
     mock_path = MagicMock()
     mock_path.read_text.side_effect = FileNotFoundError("gone")
-    with patch.object(_ap_mod, "_PID_FILE", mock_path):
+    with patch.object(_ap_mod, "_PID_FILE", mock_path), \
+         patch.object(_ap_mod, "_pid_holders", 1):
         try:
             _ap_mod._remove_pid()
             _raised = False

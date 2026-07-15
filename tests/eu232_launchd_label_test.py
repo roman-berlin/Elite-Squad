@@ -66,6 +66,12 @@ sys.path.insert(0, ".")
 from orchestrator import autopilot
 from orchestrator.config import Config
 
+# NEVER touch the machine-global /tmp/general-autopilot.pid: the reason-coverage cases below run the
+# REAL autopilot() seven times, and each run writes THIS suite's pid over a live daemon's file and
+# then deletes it in the finally — which is exactly what vanished the cockpit drain's PID file
+# mid-run on 2026-07-15 (the EU-321 build's gate ran this suite while pid 40582 was still draining).
+autopilot._PID_FILE = Path(tempfile.mkdtemp()) / "general-autopilot.pid"
+
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install-mac-autopilot-daemon.sh"
 SYSTEMD_INSTALLER = ROOT / "scripts" / "install-service.sh"
