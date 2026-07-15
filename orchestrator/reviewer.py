@@ -6,6 +6,7 @@ but physically cannot edit it. It judges BOTH spec conformance and quality.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -310,6 +311,67 @@ def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact
     result.spec_met = False
     result.verdict = Verdict.FAIL
     return result
+
+
+# EU-350 (auto-split from EU-321): a classifier over the REVIEWER'S OWN FINDING text — a
+# `QualityIssue.detail` / spec-gap string the reviewer is about to raise as blocking — not the
+# ticket's AC text (that's `_ac_requires_execution` above). A READ-ONLY reviewer (no Bash, no
+# browser/renderer) can never actually confirm a "looks like" / pixel-drift / cross-browser-render
+# claim by reading a diff; this flags findings on that surface with a stable lens key so a future
+# ticket can route them differently. Additive only in EU-350 — nothing in `review()` consumes this
+# yet, so no verdict/blocking_issues behaviour changes.
+_UNVERIFIABLE_SURFACE_RE = re.compile(
+    r"(?i)("
+    r"(?P<ui_visual>"
+    r"\blooks?\s+(?:off|wrong|misaligned|broken|different|odd|weird)\b"
+    r"|\bscreenshot\b"
+    r"|\bvisually\b"
+    r"|\bwrong\s+colou?r\b|\bcolou?r\s+(?:is|looks)\s+wrong\b"
+    r"|\bmisaligned\b"
+    r")"
+    r"|(?P<layout_pixel>"
+    r"\b\d+\s*px\b"
+    r"|\bpixel[\s-]*(?:perfect|drift|diff)\b"
+    r"|\blayout\s+(?:shifts?|breaks?|is\s+broken)\b"
+    r"|\bviewport\b"
+    r"|\bresponsive\b"
+    r")"
+    r"|(?P<browser_behavior>"
+    r"\brenders?\s+(?:incorrectly|differently|wrong)\b"
+    r"|\bin\s+(?:desktop\s+chrome|mobile\s+safari|mobile\s+chrome|desktop\s+firefox|desktop\s+safari)\b"
+    r"|\bcross[\s-]*browser\b"
+    r"|\bbrowser\s+render(?:ing)?\b"
+    r")"
+    r")"
+)
+
+
+def _classify_unverifiable_finding(text: str | None) -> str | None:
+    """Classify a reviewer FINDING (a `QualityIssue.detail` / spec-gap string) as being on a surface
+    a READ-ONLY reviewer structurally cannot execute or render — UI/visual ('looks off',
+    'screenshot'), pixel/layout ('4px', 'viewport', 'responsive'), or browser-render
+    ('Mobile Safari', 'renders incorrectly') — and return the matching stable lens key
+    ('ui_visual' | 'layout_pixel' | 'browser_behavior'). Returns `None` for ordinary logic/data/test
+    findings, or falsy input. Mirrors `_ac_requires_execution`, but over the reviewer's OWN finding
+    text rather than the ticket's AC text."""
+    if not text:
+        return None
+    m = _UNVERIFIABLE_SURFACE_RE.search(text)
+    if not m:
+        return None
+    return next(name for name, val in m.groupdict().items() if val is not None)
+
+
+def _finding_fingerprint(lens: str, detail: str) -> str:
+    """A stable, order-independent, whitespace/case-tolerant fingerprint of a classified finding
+    (lens, detail), so the SAME underlying finding re-raised with trivial wording drift can be
+    recognised as identical. Reuses the normalization STYLE of `_changes_sig` in loop.py (lowercase,
+    collapse whitespace, cap the detail to a prefix) without importing from loop.py — reviewer.py
+    stays self-contained. Pure/deterministic: same (lens, detail) modulo whitespace/case always
+    yields the same fingerprint; a genuinely different lens or detail yields a different one."""
+    norm_lens = " ".join((lens or "").lower().split())
+    norm_detail = " ".join((detail or "").lower().split())[:160]
+    return hashlib.sha256(f"{norm_lens}|{norm_detail}".encode("utf-8")).hexdigest()
 
 
 def _classify_diff(diff: str) -> tuple[str, str]:
