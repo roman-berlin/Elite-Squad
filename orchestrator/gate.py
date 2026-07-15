@@ -185,11 +185,10 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
         app: App configuration (gate commands, env, timeout, etc.).
         changed_paths: Paths modified by the diff; used to select per-app gate groups.
 
-    Note (EU-85): the gate no longer carries a domain-gap note. Domain-gap classification
-    lives in ONE place — the squad delegation path (``squad._plan`` → ``detect_domain_gap``),
-    where it actually routes provisioning — so the gate doesn't re-run the classifier just to
-    attach an advisory line (which was inaccurate whenever delegation was off or the ticket was
-    too small to delegate).
+    Note (EU-85 / EU-326): the gate no longer carries a domain-gap note. Domain-gap
+    classification was removed entirely in the Phase-2 collapse — it never belonged on the gate
+    anyway (the advisory line was inaccurate whenever delegation was off or the ticket was too
+    small to delegate).
     """
     # EU-54: fail fast and clearly if the gate interpreter can't even import its deps, before we
     # spend the whole suite producing a confusing mid-run ModuleNotFoundError.

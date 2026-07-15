@@ -125,8 +125,8 @@ chk("review iteration tracks the build iteration one-for-one",
 # ============ SOURCE: every officer the ticket named routes through the ladder (fix #3) ============ #
 # pm/scrum/drillmaster/quartermaster were the calls the ticket flagged as still hardcoding Opus.
 # Scout/provost are pinned by officer_ladder_test; these complete it. (squad's build-delegation
-# officers were removed in Phase-2 §2; its surviving detect_domain_gap is a Haiku classifier, not
-# a ladder officer. adjutant.py itself was deleted in EU-325.)
+# officers, and later its read-only domain classifier, were removed in the Phase-2 collapse —
+# squad has no ladder officer left. adjutant.py itself was deleted in EU-325.)
 import re
 _pin = re.compile(r"[^_]model=cfg\.(reviewer_model|builder_model)")   # the bare hardcode pattern
 for _mod in ("pm", "scrum", "drillmaster", "quartermaster"):

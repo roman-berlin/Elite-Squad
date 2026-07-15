@@ -1222,9 +1222,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 2) VERIFICATION GATE on the feature branch (cheap filter, before review)
         # Gate only the monorepo apps/packages this ticket actually touched (EU-19) —
         # falls back to the repo-wide gate when no per-app config matches the diff.
-        # (EU-85: domain-gap classification lives solely in the squad delegation path —
-        # squad._plan → detect_domain_gap — where it actually routes provisioning; the gate
-        # no longer re-classifies here just to attach an advisory note.)
+        # (EU-85 / EU-326: domain-gap classification was removed entirely in the Phase-2
+        # collapse; the gate never re-classifies here.)
         gate = run_gate(app, git.changed_paths())
         if not gate.passed:
             # Flake honesty (2026-07-09): a red gate must REPRODUCE before it burns a builder pass.
