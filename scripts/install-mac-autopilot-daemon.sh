@@ -36,9 +36,12 @@ ACTION="${2:-install}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # EU-232: derive LABEL from the SAME source orchestrator/autopilot.py's _stop_launchd_daemon() reads
 # (LAUNCHD_LABEL), so the installer and the stopper can never drift apart again — the label mismatch
-# that made "Stop" silently no-op against a keepalive daemon it never actually targeted. Overridable
-# via GENERAL_LAUNCHD_LABEL for tests/CI where python3 -> orchestrator isn't importable.
-LABEL="${GENERAL_LAUNCHD_LABEL:-$(cd "$HERE" && python3 -c 'from orchestrator.autopilot import LAUNCHD_LABEL; print(LAUNCHD_LABEL)')}"
+# that made "Stop" silently no-op against a keepalive daemon it never actually targeted. The value is
+# ast-parsed straight out of orchestrator/autopilot.py (stdlib only) rather than imported: importing
+# orchestrator.autopilot drags in the whole loop/builder chain (claude_agent_sdk), which aborted this
+# installer with a raw traceback on any shell without the repo .venv activated. ANY python3 can run
+# this. Overridable via GENERAL_LAUNCHD_LABEL for tests/CI.
+LABEL="${GENERAL_LAUNCHD_LABEL:-$(cd "$HERE" && python3 -c 'import ast; print(next(n.value.value for n in ast.walk(ast.parse(open("orchestrator/autopilot.py", encoding="utf-8").read())) if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "LAUNCHD_LABEL" for t in n.targets)))')}"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/General"

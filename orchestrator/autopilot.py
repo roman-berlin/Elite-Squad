@@ -122,8 +122,10 @@ def daemon_is_external() -> bool:
 
 
 # EU-232: single shared launchd label. scripts/install-mac-autopilot-daemon.sh derives its LABEL=
-# from this exact constant (``python3 -c 'from orchestrator.autopilot import LAUNCHD_LABEL; ...'``),
-# so the installer and this stopper can never drift apart again — tests/eu232_launchd_label_test.py
+# from this exact assignment (a stdlib-only ``python3 -c`` that ast-parses THIS file for the
+# LAUNCHD_LABEL assignment — deliberately NOT an import, which would drag in claude_agent_sdk and
+# abort the installer on any shell without the repo .venv), so the installer and this stopper can
+# never drift apart again — tests/eu232_launchd_label_test.py
 # asserts the installer's LABEL= line matches this string byte-for-byte. Previously these were two
 # independent literals: the installer wrote "com.roman.general.autopilot-keepalive" but this file
 # targeted the stale "com.romanberlin.general.autopilot", so _stop_launchd_daemon booted out a label

@@ -3,12 +3,15 @@
 Three independent guards, all behavioural where practical:
 
   (1) LABEL EQUALITY: scripts/install-mac-autopilot-daemon.sh and orchestrator/autopilot.py must
-      resolve to the SAME launchd label. The installer derives its LABEL= from
-      ``orchestrator.autopilot.LAUNCHD_LABEL`` at install time (a shell-out to python3) — this guard
-      actually RUNS that derivation and diffs the result against the live Python constant, so it goes
-      RED the moment the two fall out of step again (the bug this ticket fixes: the installer wrote
-      "com.roman.general.autopilot-keepalive" but the stopper targeted the stale
-      "com.romanberlin.general.autopilot", so Stop always silently no-opped).
+      resolve to the SAME launchd label. The installer derives its LABEL= at install time by
+      ast-parsing orchestrator/autopilot.py for the ``LAUNCHD_LABEL`` assignment (a stdlib-only
+      shell-out to python3 — deliberately NOT ``from orchestrator.autopilot import ...``, which
+      drags in claude_agent_sdk and aborted the installer on any shell without the repo .venv) —
+      this guard actually RUNS that derivation under an ISOLATED python3 and diffs the result
+      against the live Python constant, so it goes RED the moment the two fall out of step again
+      (the bug this ticket fixes: the installer wrote "com.roman.general.autopilot-keepalive" but
+      the stopper targeted the stale "com.romanberlin.general.autopilot", so Stop always silently
+      no-opped) AND the moment the derivation stops being dependency-free.
 
   (2) STOP VERIFICATION: _stop_launchd_daemon() must not trust launchctl's optimistic exit code — it
       has to poll daemon_running() and return True ONLY once the daemon is confirmed gone, False if
@@ -98,24 +101,37 @@ _installer_text = INSTALLER.read_text(encoding="utf-8")
 _label_line_m = re.search(r"^LABEL=.*$", _installer_text, re.MULTILINE)
 chk("installer has a LABEL= assignment", _label_line_m is not None)
 _label_line = _label_line_m.group(0) if _label_line_m else ""
-chk("installer's LABEL= derives from orchestrator.autopilot.LAUNCHD_LABEL — not an independent literal "
-    "(this is what makes drift structurally impossible, not just today's string match)",
-    "LAUNCHD_LABEL" in _label_line and "orchestrator.autopilot" in _label_line,
+chk("installer's LABEL= derives from orchestrator/autopilot.py's LAUNCHD_LABEL assignment — not an "
+    "independent literal (this is what makes drift structurally impossible, not just today's string match)",
+    "LAUNCHD_LABEL" in _label_line and "orchestrator/autopilot.py" in _label_line,
+    _label_line)
+chk("installer's LABEL= neither hardcodes the label nor imports the orchestrator — the ast parse must "
+    "stay stdlib-only so a venv-less python3 can still run the installer (importing pulls in "
+    "claude_agent_sdk and set -euo pipefail aborted the whole install)",
+    autopilot.LAUNCHD_LABEL not in _label_line
+    and "from orchestrator" not in _label_line
+    and "import orchestrator" not in _label_line,
     _label_line)
 
 # Actually RUN the installer's LABEL derivation (env override unset) and diff it against the live
 # Python constant — the guard that goes RED on real drift, not merely on textual presence.
 _env = dict(os.environ)
 _env.pop("GENERAL_LAUNCHD_LABEL", None)
-# The LABEL line shells out to bare `python3`. Put the suite's own interpreter first on PATH so
-# that resolves to an interpreter that can import the orchestrator: run un-activated from .venv,
-# system python3 lacks claude_agent_sdk and this guard reddened on ModuleNotFoundError instead of
-# the drift it exists to catch (red on every local run_all, green on CI where deps are global).
-_env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + _env.get("PATH", "")
-_proc = subprocess.run(
-    ["bash", "-c", f'HERE={str(ROOT)!r}; {_label_line}; printf "%s" "$LABEL"'],
-    capture_output=True, text=True, timeout=15, cwd=str(ROOT), env=_env,
-)
+# The LABEL line shells out to bare `python3`. Resolve that through a shim that re-execs the
+# suite's own interpreter in ISOLATED mode (-I: cwd off sys.path, PYTHON* env ignored). This both
+# guarantees a python3 exists on PATH (so the guard is green with or without the .venv on PATH)
+# and proves the derivation is stdlib-only: the ast parse doesn't care, but a regression back to
+# `from orchestrator.autopilot import ...` — which drags in claude_agent_sdk and aborted the
+# installer on venv-less shells — reddens here even on machines whose venv could import it.
+with tempfile.TemporaryDirectory() as _shim_dir:
+    _shim = Path(_shim_dir) / "python3"
+    _shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "$@"\n')
+    _shim.chmod(0o755)
+    _env["PATH"] = _shim_dir + os.pathsep + _env.get("PATH", "")
+    _proc = subprocess.run(
+        ["bash", "-c", f'HERE={str(ROOT)!r}; {_label_line}; printf "%s" "$LABEL"'],
+        capture_output=True, text=True, timeout=15, cwd=str(ROOT), env=_env,
+    )
 _resolved = _proc.stdout.strip()
 chk("installer's LABEL= resolves to EXACTLY orchestrator.autopilot.LAUNCHD_LABEL",
     _resolved == autopilot.LAUNCHD_LABEL,
