@@ -353,6 +353,14 @@ def _doctor(cfg_path: str) -> int:
         print(f"  ✗ could not load config: {exc}")
         return 1
     print(f"  ✓ config loaded ({len(cfg.apps)} app(s): {', '.join(a.name for a in cfg.apps)})")
+    # 2026-07-15: doctor is the Commander's live diagnostic — force a FRESH auth-liveness probe so
+    # the "Claude auth" line can't show a ≤15-min-stale verdict right after a /login fix (or right
+    # after a token died). health.checks() below then reads this probe from the warm cache.
+    try:
+        from . import auth_probe
+        auth_probe.probe(force=True)
+    except Exception:  # noqa: BLE001 - the probe must never crash the doctor
+        pass
     s = health.summary(cfg)
     print(f"  ✓ models: builder {s['models']['builder']} · reviewer {s['models']['reviewer']} · backend {s['backend']}")
     for c in s["checks"]:

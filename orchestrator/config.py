@@ -398,6 +398,9 @@ class Config:
     # Auth comes from the environment / Claude Code login, never the YAML file.
     # The officers run on Claude Code, which accepts EITHER a Max/Pro subscription
     # (via `claude` /login or a `claude setup-token` OAuth token) OR an API key.
+    # PRESENCE-ONLY on purpose: this proves a credential SOURCE exists, never that it is
+    # still VALID (the 2026-07-15 expired-OAuth incident) — liveness is auth_probe.probe(),
+    # surfaced as the separate "Claude auth" check in health.checks().
     def detected_auth(self) -> str | None:
         if os.environ.get("ANTHROPIC_API_KEY"):
             return "ANTHROPIC_API_KEY (per-token API billing)"

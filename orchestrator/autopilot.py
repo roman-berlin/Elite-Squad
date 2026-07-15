@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import gate as gate_mod
-from . import infra_classify, intake, locking, notify, usage
+from . import auth_probe, infra_classify, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
@@ -571,6 +571,12 @@ def _tally_errored(reports, error_counts: dict[str, int]):
     never park — or even nudge the counter toward parking — a healthy ticket (the 2026-07-10
     16:29:47 evidence: one blip charged 4 tickets a strike each before this fix).
 
+    2026-07-15 ~22:05: an EXPIRED Claude login is the same class — every builder call fails with
+    "Not logged in · Please run /login" and that burned strikes on 5+ tickets in one drain. A
+    report whose notes carry a login-failure marker (``auth_probe.is_login_failure``) is treated
+    exactly like infra here (no strike, reported in ``infra``); the caller splits those ids out
+    again to arm the dedicated auth-hold (see ``_enter_auth_hold``) instead of the offline-hold.
+
     Returns ``(park_now_additions, errored_ids, retrying_ids, infra_ids, counts_changed)``. A
     ticket that made progress (no longer ERRORED) still has its tally reset, same as before.
     """
@@ -582,7 +588,7 @@ def _tally_errored(reports, error_counts: dict[str, int]):
     for r in reports:
         if r.outcome is Outcome.ERRORED:
             errored.add(r.ticket_id)
-            if infra_classify.classify(r.notes):
+            if auth_probe.is_login_failure(r.notes) or infra_classify.classify(r.notes):
                 infra.add(r.ticket_id)
                 continue   # no strike, no counter touch — see docstring
             n = error_counts.get(r.ticket_id, 0) + 1
@@ -626,6 +632,75 @@ def _offline_hold_recheck(cfg: Config, audit: "AuditLog", active: bool) -> bool:
         notify.send("✅ Connectivity restored — autopilot resuming normal operation.")
         audit.record("infra_offline_resume")
         print("  ✅ connectivity restored — resuming normal operation.", flush=True)
+        return False
+    return True
+
+
+# While an auth-hold is active, re-verify the login via auth_probe at most this often — cycles run
+# every `interval` (~60s), so most rechecks ride the cache and a real re-login is noticed in ≤5 min.
+_AUTH_HOLD_RECHECK_S = 300.0
+
+# Telegram damper for the auth-hold alerts. If the login-failure marker ever fires on a failure the
+# probe then verifies as valid (e.g. a non-default backend's own credential dying with the same CLI
+# message), the hold would churn enter→resume every couple of cycles — each transition must not page
+# the Commander again. The enter alert is rate-limited by `_AUTH_ALERT_COOLDOWN_S`; the resume alert
+# is PAIRED to it (fires only when its matching enter alert fired), so the Commander never gets an
+# orphan "verified again" ping. audit.jsonl still records every transition; only pings are damped.
+_AUTH_ALERT_COOLDOWN_S = 1800.0
+_last_auth_alert = 0.0
+_auth_resume_alert_due = False   # True while an alerted hold awaits its paired resume alert
+
+
+def _enter_auth_hold(cfg: Config, audit: "AuditLog", auth_ids, already_active: bool) -> bool:
+    """2026-07-15 ~22:05 incident: builder failures carrying a login-failure marker ("Not logged
+    in · Please run /login" — the Claude Code OAuth token expired) must hold the WHOLE drain with
+    ONE "re-login needed" alert, exactly like the EU-228 offline-hold — not burn error strikes
+    ticket by ticket (5+ tickets were charged toward parking that night). No counter was touched
+    (``_tally_errored`` classified these no-strike), so nothing needs a human ``/unblock``: the
+    tickets stay queued and the hold auto-clears once ``_auth_hold_recheck`` verifies the login.
+
+    Invalidates the auth-probe cache on every auth-classified cycle: the failure is hard evidence
+    that a cached "valid" (up to 15 min old) is stale — without this the recheck would read that
+    stale cache and instantly (wrongly) clear the hold."""
+    global _last_auth_alert, _auth_resume_alert_due
+    if not auth_ids:
+        return already_active
+    auth_probe.invalidate()
+    if not already_active:
+        ids = ", ".join(sorted(auth_ids))
+        audit.record("auth_expired_hold", tickets=sorted(auth_ids))
+        now = time.time()
+        if now - _last_auth_alert >= _AUTH_ALERT_COOLDOWN_S:
+            _last_auth_alert = now
+            _auth_resume_alert_due = True
+            notify.send(f"🔐 Autopilot auth-hold — builder failed with a login error on {ids}. "
+                        "The Claude Code login looks EXPIRED — run `claude` then /login "
+                        "(or refresh CLAUDE_CODE_OAUTH_TOKEN). No error strikes were charged; "
+                        "holding all new work and auto-resuming once the login is valid again.")
+        print(f"  🔐 auth-hold — login error(s) on {ids}; no strikes charged, "
+              "re-login needed (auto-resume once the probe verifies).", flush=True)
+    return True
+
+
+def _auth_hold_recheck(cfg: Config, audit: "AuditLog", active: bool) -> bool:
+    """While an auth-hold is active, re-probe login validity (``auth_probe.probe``, its own ≤5-min
+    cadence via ``_AUTH_HOLD_RECHECK_S``) and clear the hold — with one resume alert — the moment
+    the probe verifies ``valid``. Returns the (possibly updated) active state.
+
+    Only a VERIFIED ``valid`` clears the hold: ``expired`` obviously keeps it, and ``unreachable``
+    / ``unknown`` (network down, probe can't run) keep it too — on a box where the probe can't run
+    the builders can't run either (the SDK shells the same CLI), and clearing on no-evidence would
+    just re-burn a failing wave per cycle. The hold is in-memory: a drain restart re-tries builds
+    immediately, and if the login is still dead it re-holds with no strikes charged."""
+    global _auth_resume_alert_due
+    if not active:
+        return False
+    if auth_probe.probe(max_age_s=_AUTH_HOLD_RECHECK_S).get("state") == "valid":
+        audit.record("auth_expired_resume")
+        if _auth_resume_alert_due:   # paired to the enter alert — never an orphan/churn ping
+            _auth_resume_alert_due = False
+            notify.send("✅ Claude login verified again — autopilot resuming normal operation.")
+        print("  ✅ Claude login verified again — resuming normal operation.", flush=True)
         return False
     return True
 
@@ -832,6 +907,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # per-ticket error_counts — that's the point of this ticket.
         offline_hold = False
         toolchain_held: frozenset[str] = frozenset()
+        # 2026-07-15 ~22:05: expired-Claude-login hold. Like offline_hold it pauses ALL new work
+        # (every builder call fails the same way) and touches no per-ticket counter, but it is a
+        # SEPARATE hold: the offline-hold's connectivity probe checks Jira/git and would announce
+        # a misleading "connectivity restored" while the login is still dead — the same lesson as
+        # the base-gate-timeout exclusion above. See _enter_auth_hold / _auth_hold_recheck.
+        auth_hold = False
         # 2026-07-15: base-level hold, PER APP. A red or timed-out BASE gate applies to the whole
         # app — picking it again before the red-base cache would re-verify (gate._RED_BASE_RED_TTL_S)
         # just parks one more ticket per cycle (the needs_human massacre: ~60 tickets in the 04:20
@@ -857,6 +938,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # passes again; no per-ticket counter was touched, so nothing needs a human /unblock.
             offline_hold = _offline_hold_recheck(cfg, audit, offline_hold)
             if offline_hold:
+                if once:
+                    break
+                _sleep(max(10, interval), stop_event)
+                continue
+
+            # 2026-07-15: expired-login hold — a builder failed with "Not logged in" last cycle
+            # (see _enter_auth_hold below). Hold ALL new work until the auth probe verifies the
+            # login again; no per-ticket counter was touched, so nothing needs a human /unblock.
+            auth_hold = _auth_hold_recheck(cfg, audit, auth_hold)
+            if auth_hold:
                 if once:
                     break
                 _sleep(max(10, interval), stop_event)
@@ -1183,9 +1274,22 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                              if (r.notes or "").startswith(_BASE_LEVEL_PREFIXES)]
             _base_ids = {r.ticket_id for r in _base_reports}
 
+            # 2026-07-15: expired-login failures ("Not logged in · Please run /login") are split
+            # out too — _tally_errored already classified them no-strike (they ride in
+            # infra_errored), but like base timeouts they must NOT arm the offline-hold, whose
+            # connectivity probe checks Jira/git and would announce a misleading "connectivity
+            # restored" while the Claude login is still dead. They arm their own auth-hold below.
+            _auth_ids = {r.ticket_id for r in reports
+                         if r.outcome is Outcome.ERRORED and auth_probe.is_login_failure(r.notes)}
+
             # EU-228: one or more tickets errored on infra/outage this cycle — hold ALL new work
             # (not just these tickets) until connectivity_probe passes again; no counter touched.
-            offline_hold = _enter_offline_hold(cfg, audit, infra_errored - _base_ids, offline_hold)
+            offline_hold = _enter_offline_hold(
+                cfg, audit, infra_errored - _base_ids - _auth_ids, offline_hold)
+
+            # 2026-07-15: expired-login hold — ONE "re-login needed" alert, no strikes, and the
+            # drain pauses until _auth_hold_recheck (top of the loop) verifies the login again.
+            auth_hold = _enter_auth_hold(cfg, audit, _auth_ids, auth_hold)
 
             # 2026-07-15: base-level outcome — the app can't build ANYTHING right now. Hold ITS
             # picking until the red-base cache would re-verify, instead of re-parking one more
