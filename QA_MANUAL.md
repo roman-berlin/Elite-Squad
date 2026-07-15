@@ -190,7 +190,7 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 **14.1 Unit memory** — Views → **Unit memory** (or `./general memory`).
 - Expect: Mission, Standing Orders, per-app notes, Scribe-maintained Lessons (newest first). Your hand-edits between markers are preserved.
 
-**14.2 Drill** — Unit → **Run drill** (or `./general drill`).
+**14.2 Drill** — `./general drill` (drillmaster CLI; no longer available as a cockpit web-UI menu item).
 - Expect: Drillmaster proposes officer upgrades + onboarding/refresher notes (proposal only).
 
 **14.3 Scribe** — Unit → **Update memory** (or `./general scribe`).
@@ -224,5 +224,5 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 | Chat + group + standup | ☐ | |
 | Council/meeting/ship-review | ☐ | |
 | Patrol + autonomy | ☐ | |
-| Memory/drill/scribe | ☐ | |
+| Memory/scribe | ☐ | |
 | Telegram | ☐ | |
