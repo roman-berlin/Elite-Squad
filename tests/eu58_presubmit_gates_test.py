@@ -1,7 +1,10 @@
-"""EU-58 / EU-97 QA — the Builder officer prompt documents the three hard pre-submit gates (axe-core
-zero-violations + `bun test --coverage` + security countersignature) so they are enforced on every
-ticket, and frames gate failures as the Builder's own remediation work BEFORE the Reviewer sees the
-diff. EU-97 adds the security countersignature gate and the reference to officers/builder.md."""
+"""EU-58 / EU-97 / EU-339 QA — the Builder officer prompt documents the three hard pre-submit gates
+(axe-core zero-violations + `bun test --coverage` + security countersignature) so they are enforced
+on every ticket, and frames gate failures as the Builder's own remediation work BEFORE the Reviewer
+sees the diff. EU-97 adds the security countersignature gate and the reference to officers/builder.md.
+EU-339 adds output-volume/token-hygiene discipline: quiet reporters, summary-only coverage, and
+failing-file-only re-runs — mirrored into officers/builder.md."""
+import pathlib
 import sys, types
 
 REPO = "."
@@ -60,6 +63,22 @@ check("all gate outcomes reported in the summary",
 check("builder prompt keeps a security reminder", "security" in low)
 check("builder prompt no longer carries the retired §1/§2/§3 countersignature template",
       "§1-secrets" not in P and "§2-authz" not in P and "§3-injection" not in P)
+
+# ---- EU-339: output-volume / token-hygiene discipline (quiet reporters, summary-only coverage,
+# failing-file-only re-runs) is present in the Resource-safety block ----
+check("quiet-reporter rule mandates vitest dot reporter", "--reporter=dot" in P)
+check("quiet-reporter rule mandates summary-only coverage (totals line, not per-file table)",
+      "totals line" in low or "text-summary" in low)
+check("quiet-reporter rule mandates pytest quiet mode", "pytest -q --no-header" in P)
+check("quiet-reporter rule mandates a red run re-runs only the failing test file(s)",
+      "only the failing test file" in low)
+
+# ---- EU-339: the same wording is mirrored into officers/builder.md so charter and runtime prompt
+# don't drift ----
+_BUILDER_MD = pathlib.Path("officers/builder.md").read_text().lower()
+check("officers/builder.md mirrors the quiet-reporter dot rule", "--reporter=dot" in _BUILDER_MD)
+check("officers/builder.md mirrors the summary-only coverage rule",
+      "totals line" in _BUILDER_MD or "text-summary" in _BUILDER_MD)
 
 # ---- the section is in the prompt the Builder actually receives ----
 from orchestrator.contracts import BuildRequest, Ticket

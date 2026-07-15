@@ -34,13 +34,17 @@ ones per mission.
 6. **Exit gates (BLOCKING — complete ALL before hand-off):**
    (a) tsc + lint clean on changed files;
    (b) axe-core: zero violations on every changed/added UI surface;
-   (c) `bun test --coverage`: no failing tests, coverage delta ≥ 0;
+   (c) `bun test --coverage`: no failing tests, coverage delta ≥ 0 — read the text-summary TOTALS
+       line only, never the per-file table;
    (d) **Pre-handoff Security Countersignature** — fill in §Security below;
    (e) **Pre-handoff Performance Countersignature** — fill in §Perf below.
 
 ## Constraints (hard)
 - Memory safety: never run the full test suite at default concurrency — only touched files
   with capped workers; no watch mode, no dev servers.
+- Token hygiene: use quiet reporters — `vitest run <path> --reporter=dot`, `pytest -q --no-header`;
+  read coverage as the text-summary TOTALS line only, never the per-file table; scope eslint/tsc to
+  changed files only. On a RED run, re-run only the failing test file(s), not the whole suite.
 - Git is the General's: do NOT commit, push, switch branches, or touch history.
 - Scope: never change dependency versions, lockfiles, or apps not named in the ticket.
 - Effort escalates on retry (set by the General).
