@@ -33,6 +33,26 @@ def reap_stale_worktrees(cfg) -> None:
     import re
     from . import loop
 
+    # EU-334 self-exclusion: the base-gate can run `tests/run_all.py` from INSIDE a
+    # `.general-worktrees/<app>` worktree whose HEAD is exactly the base tip (a fresh
+    # merge) — that worktree trivially satisfies the "merged" + "dead flock" checks
+    # below, so without this guard the reaper would `git worktree remove` the very
+    # directory the current process is running in, then `git worktree prune` with a cwd
+    # that no longer exists → FileNotFoundError propagating out of autopilot() → a
+    # harness crash misread as a genuine red base. Resolve the process's own worktree
+    # root ONCE, up front, so the per-app loop below can skip it unconditionally.
+    try:
+        _toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), capture_output=True, text=True
+        )
+        current_wt_root = (
+            str(Path(_toplevel.stdout.strip()).resolve())
+            if _toplevel.returncode == 0 and _toplevel.stdout.strip()
+            else str(Path(os.getcwd()).resolve())
+        )
+    except OSError:
+        current_wt_root = str(Path(os.getcwd()).resolve())
+
     # Review fix (2026-07-05): the canonical persistent per-app worktrees are deliberately parked
     # DETACHED at origin/<base> when idle, so sha-classification would call every healthy idle
     # worktree "merged + dead" and destroy it on each startup (re-running worktree_setup_cmd and
@@ -64,6 +84,22 @@ def reap_stale_worktrees(cfg) -> None:
         base_ref = f"origin/{app.base_branch}"
         blocks = res.stdout.strip().split("\n\n")
 
+        # EU-334 stable cwd: the FIRST block `git worktree list --porcelain` prints is always
+        # the repo's primary/main worktree — a location this loop never targets for removal, so
+        # it's guaranteed to still exist for every git call below. Use it (falling back to `repo`
+        # if parsing somehow comes up empty) instead of `cwd=str(repo)`, which — when `repo` IS a
+        # linked worktree this same iteration just removed — no longer exists.
+        primary_wt_path = None
+        if blocks:
+            for line in blocks[0].split("\n"):
+                if line.startswith("worktree "):
+                    primary_wt_path = line[9:].strip()
+                    break
+        try:
+            stable_cwd = str(Path(primary_wt_path).resolve()) if primary_wt_path else str(repo)
+        except OSError:
+            stable_cwd = str(repo)
+
         for block in blocks:
             lines = block.split("\n")
             wt_path = None
@@ -88,6 +124,18 @@ def reap_stale_worktrees(cfg) -> None:
 
             # Target paths: .claude/worktrees/agent-* and .general-worktrees/*
             if not (".claude/worktrees/agent-" in wt_path or ".general-worktrees/" in wt_path):
+                continue
+
+            # EU-334 self-exclusion: never reap the worktree the current process is running in,
+            # nor the repo's primary/base worktree — both are load-bearing for the git calls this
+            # very loop iteration is mid-way through issuing (cwd=stable_cwd above).
+            try:
+                wt_resolved = str(Path(wt_path).resolve())
+            except OSError:
+                continue
+            if wt_resolved == current_wt_root or wt_resolved == stable_cwd:
+                print(f"  · reaper: skipping {wt_path} (current/primary worktree — never reap "
+                      f"the tree a process is running in)", flush=True)
                 continue
 
             # Review fix (2026-07-05): never touch a configured app's canonical persistent
@@ -157,11 +205,11 @@ def reap_stale_worktrees(cfg) -> None:
                     label = branch_ref or f"detached @ {(head_sha or '')[:9]}"
                     print(f"  · reaper: cleaning up stale merged worktree {wt_path} ({label})", flush=True)
                     if is_locked:
-                        subprocess.run(["git", "worktree", "unlock", wt_path], cwd=str(repo))
-                    subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=str(repo))
-                    subprocess.run(["git", "worktree", "prune"], cwd=str(repo))
+                        subprocess.run(["git", "worktree", "unlock", wt_path], cwd=stable_cwd)
+                    subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=stable_cwd)
+                    subprocess.run(["git", "worktree", "prune"], cwd=stable_cwd)
                     if branch_ref:   # QW7: a detached worktree has no branch to delete
-                        subprocess.run(["git", "branch", "-D", branch_ref], cwd=str(repo), capture_output=True)
+                        subprocess.run(["git", "branch", "-D", branch_ref], cwd=stable_cwd, capture_output=True)
                     # QW7: also remove the dead session's flock sidecar (<worktree>.lock) — git
                     # doesn't know about it; unlinked while we still hold the flock, so no other
                     # process can be holding the same inode.
@@ -169,6 +217,12 @@ def reap_stale_worktrees(cfg) -> None:
                         Path(wt_path + ".lock").unlink(missing_ok=True)
                     except OSError:
                         pass
+            except OSError as exc:
+                # EU-334: a vanished path or crashed `git worktree …` subprocess must never
+                # propagate out of the reaper and be misread as a genuine test-assertion red on
+                # the base-gate — log it and move on to the next worktree.
+                print(f"  · reaper: {wt_path} removal hit {exc.__class__.__name__} ({exc}) — "
+                      f"logged, continuing", flush=True)
             finally:
                 if held_lock is not None:
                     try:
