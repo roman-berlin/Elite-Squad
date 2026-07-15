@@ -33,7 +33,7 @@ from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 # NEVER hard-coded below — they're resolved from the single source of truth via display(), so renaming an
 # officer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
 _OFFICER_KEY = {
-    "general": "general", "adjutant": "adjutant", "pm": "pm",
+    "general": "general", "pm": "pm",
     "builder": "field_engineer", "reviewer": "inspector", "scout": "scout",
     "provost": "provost", "quartermaster": "quartermaster", "sentinel": "sentinel",
 }
@@ -41,7 +41,6 @@ _OFFICER_KEY = {
 # (cockpit key, role line). Order = chain of command. The display-name column is built from the SOT below.
 _OFFICER_ROLES = [
     ("general",       "Orchestrator"),
-    ("adjutant",      "S-1 · personnel"),
     ("pm",            "S-5 · product"),
     ("builder",       "Builder"),
     ("reviewer",      "Reviewer"),
@@ -396,7 +395,6 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
 
     seen: dict[str, Optional[datetime]] = {
         "general": council_ts,
-        "adjutant": rpt("adjutant-report.md"),
         "builder": last.get("build"),
         "reviewer": last.get("review"),
         "scout": rpt("scout-report.md"),

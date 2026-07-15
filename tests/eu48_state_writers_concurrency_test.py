@@ -176,25 +176,27 @@ chk("approvals/approve+deny+enqueue race: no actioned batch reverts, none lost",
 
 # approvals.json: concurrent writes to two DIFFERENT dict keys never clobber each other.
 # disapprove() is sync; drive the state write the same way approve() does, via its marker path.
-# EU-328 removed the "drill" KINDS entry (adjutant is now the only real approval kind), but the
-# underlying lock is keyed on arbitrary dict keys — a synthetic second key still proves the same
-# contract: locked_rmw must not lose one writer's key to the other's read-modify-write.
-(Path(cfg6.audit_path).with_name("adjutant-report.md")).write_text("adj body", encoding="utf-8")
+# EU-325 removed the "adjutant" KINDS entry (adjutant.py is gone; KINDS is empty until an officer
+# opts back in), but the underlying lock is keyed on arbitrary dict keys — a synthetic KINDS entry
+# + second key still proves the same contract: locked_rmw must not lose one writer's key to the
+# other's read-modify-write.
+approvals.KINDS = {"test_kind": ("Test Officer — test action", "test_kind-report.md", None)}
+(Path(cfg6.audit_path).with_name("test_kind-report.md")).write_text("test body", encoding="utf-8")
 
 
 def _approve_other_kind():
     # Simulates a second concurrent state-writer (not a real approval kind) hitting the SAME
-    # approvals.json file at the same time as disapprove(adjutant) below — pinned directly at
+    # approvals.json file at the same time as disapprove(test_kind) below — pinned directly at
     # the RMW, exactly as approve() calls it, so the state-write interleaving is what's under test.
     approvals._mutate_state(
         cfg6, lambda st: {**st, "_other": {"hash": "h1", "action": "approved", "ts": 1.0}})
 
 
-_run([_approve_other_kind, (lambda: approvals.disapprove(cfg6, "adjutant", "not now"))] * 3)
+_run([_approve_other_kind, (lambda: approvals.disapprove(cfg6, "test_kind", "not now"))] * 3)
 st6 = approvals._load(cfg6)
 chk("approvals/state: concurrent writes to two different keys keep BOTH",
     st6.get("_other", {}).get("action") == "approved"
-    and st6.get("adjutant", {}).get("action") == "disapproved", str(st6))
+    and st6.get("test_kind", {}).get("action") == "disapproved", str(st6))
 
 # Regression tripwire: the writers must stay on locking.locked_rmw (a quiet revert to bare
 # write_text reintroduces the lost-update race even if the assertions above get lucky).

@@ -199,7 +199,8 @@ PROMPT_RENAME = [
     ("orchestrator/council.py",     ["soldiers do not speak", "needs a new soldier", "command soldiers"], "engineers do not speak"),
     ("orchestrator/recon.py",       ["YOU ARE A SOLDIER", "SOLDIER FINDINGS", "Your soldiers"], "YOU ARE AN ENGINEER"),
     ("orchestrator/drillmaster.py", ["officer or soldier"],                         "officer or engineer"),
-    ("orchestrator/adjutant.py",    ["own SOLDIERS", "given soldiers", "HIRE a soldier"], "own ENGINEERS"),
+    # orchestrator/adjutant.py was deleted in EU-325 — its "own SOLDIERS"/"own ENGINEERS" rename
+    # pin went with it.
 ]
 for rel, absent, present in PROMPT_RENAME:
     src = (ROOT / rel).read_text(encoding="utf-8")
