@@ -105,7 +105,15 @@ def _opts(system: str, cwd: str, model: str, tools: list[str], turns: int, effor
 
 
 async def _solo(system, task, cwd, model, tools, turns, effort, empty, tag, cfg=None, audit=None):
-    run = await run_agent(task, _opts(system, cwd, model, tools, turns, effort), tag=tag)
+    # EU-139: a solo hiccup (e.g. the SDK's "Claude Code returned an error result: success" quirk
+    # when a result message is_error=True with no usable errors list) must fail CLOSED, not crash
+    # uncaught — matching the convention already used for soldiers/synthesis below.
+    try:
+        run = await run_agent(task, _opts(system, cwd, model, tools, turns, effort), tag=tag)
+    except Exception as e:  # noqa: BLE001 - a solo inspection failing must never crash the caller
+        if audit is not None:
+            audit.record("officer_recon", officer=tag, ok=False, error=str(e))
+        return f"{tag} recon FAILED (fail-closed — inspection did not complete): {e}"
     if audit is not None:
         audit.record("officer_recon", officer=tag, provider=run.provider, model=run.model_version,
                      ok=not run.is_error, cost_usd=run.cost_usd, turns=run.num_turns)
