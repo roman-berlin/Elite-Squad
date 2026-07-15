@@ -169,7 +169,8 @@ async def pm_decide(cfg, tkt, app, audit, halt_report):
     return {"verdict": "DECIDE", "body": "Default to Premium — matches current live behaviour."}
 
 
-async def _stub_review_needs_human(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
+async def _stub_review_needs_human(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
+                                   already_bounced=None):
     return need_human_review
 
 
@@ -280,7 +281,8 @@ fail_no_issues = ReviewResult(
 )
 
 
-async def _stub_review_findings(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
+async def _stub_review_findings(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
+                                already_bounced=None):
     return fail_with_decision_finding if iteration == 1 else fail_no_issues
 
 

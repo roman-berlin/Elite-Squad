@@ -297,7 +297,8 @@ class StubBuilderFail:
         )
 
 
-async def _stub_review_fail(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
+async def _stub_review_fail(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
+                            already_bounced=None):
     """Reviewer always returns FAIL so the loop exhausts its iterations."""
     return ReviewResult(
         verdict=Verdict.FAIL, spec_met=False,

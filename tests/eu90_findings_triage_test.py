@@ -152,7 +152,8 @@ _review_issue: list[QualityIssue] = []   # replaced per test
 _review_raw: list[str] = [""]            # review.raw (reviewer ===TICKETS=== block), replaced per test
 
 
-async def _stub_review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
+async def _stub_review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
+                       already_bounced=None):
     return ReviewResult(
         verdict=Verdict.FAIL,
         spec_met=False,

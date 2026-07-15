@@ -152,11 +152,16 @@ class WiringBuilder:
         return BuildResult(ok=True, summary="did the thing", cost_usd=0.0, num_turns=1, raw="", tools=[])
 class WiringReviewer:
     @staticmethod
-    async def review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None):
+    async def review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
+                     already_bounced=None):
         cap["review_artifact"] = build_artifact
         if store is not None:
             store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))
         return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=0.0)
+
+    @staticmethod
+    def collect_unverifiable_fingerprints(result):   # EU-352: loop.py always calls this
+        return set()
 
 loop.builder_mod = WiringBuilder
 loop.reviewer_mod = WiringReviewer
