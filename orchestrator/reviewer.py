@@ -374,6 +374,66 @@ def _finding_fingerprint(lens: str, detail: str) -> str:
     return hashlib.sha256(f"{norm_lens}|{norm_detail}".encode("utf-8")).hexdigest()
 
 
+def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> ReviewResult:
+    """EU-351: escalate-once bounce gate — mirrors `_enforce_admitted_red_tests`/
+    `_enforce_execution_gate` as a deterministic backstop, but this one RELAXES rather than forces
+    a blocker. Walks the reviewer's own blocking findings (`quality_issues` blocker/major subset)
+    and `spec_gaps`, classifying each via `_classify_unverifiable_finding` (EU-350). A finding that
+    classifies as unverifiable AND whose fingerprint (`_finding_fingerprint`) is already present in
+    `already_bounced` — i.e. it was raised and bounced on a PRIOR pass of this same ticket — is
+    removed from `quality_issues`/`spec_gaps` and its detail is appended to
+    `result.unverifiable_gaps` instead. A READ-ONLY reviewer that keeps re-raising the exact same
+    unrenderable claim can never be satisfied by more builder iterations, so the second time is an
+    escalate-once demotion, not a fresh blocker.
+
+    First-time unverifiable findings (fingerprint not yet in `already_bounced`) and ordinary
+    logic/data/test findings (returns None from the classifier) are left completely untouched —
+    behavior is unchanged for both, and a first-pass unverifiable finding can still FAIL.
+
+    After demotion, if nothing else keeps the ticket down (no blocking_issues, no spec_gaps left,
+    and spec_met is True), the verdict is RECOMPUTED to PASS — an escalate-once demotion has to
+    actually let a ticket reach ship-ready, not just relabel the same permanent FAIL.
+    """
+    if not already_bounced:
+        return result
+
+    kept_issues: list[QualityIssue] = []
+    for q in result.quality_issues:
+        if q.severity in ("blocker", "major"):
+            lens = _classify_unverifiable_finding(q.detail)
+            if lens is not None and _finding_fingerprint(lens, q.detail) in already_bounced:
+                result.unverifiable_gaps = list(result.unverifiable_gaps) + [q.detail]
+                continue
+        kept_issues.append(q)
+    result.quality_issues = kept_issues
+
+    kept_gaps: list[str] = []
+    removed_gaps: list[str] = []
+    for gap in result.spec_gaps:
+        lens = _classify_unverifiable_finding(gap)
+        if lens is not None and _finding_fingerprint(lens, gap) in already_bounced:
+            result.unverifiable_gaps = list(result.unverifiable_gaps) + [gap]
+            removed_gaps.append(gap)
+            continue
+        kept_gaps.append(gap)
+    result.spec_gaps = kept_gaps
+
+    # EU-351 iteration-2: recompute the SPEC channel so a ticket whose only spec blocker was a
+    # previously-bounced unverifiable finding can actually reach ship-ready, not just get relabelled.
+    # By construction every gap in `removed_gaps` was a bounced-unverifiable repeat (that is the sole
+    # removal condition), so "all removed gaps were demoted-unverifiable" always holds here — the only
+    # extra requirement is that NONE survive (`not result.spec_gaps`). A real surviving gap (an
+    # ordinary spec gap, or an execution-gate gap from `_enforce_execution_gate` — neither classifies
+    # as unverifiable, so neither is ever removed) keeps `spec_gaps` non-empty and leaves `spec_met`
+    # False, so a genuine execution-gate FAIL is never flipped.
+    if removed_gaps and not result.spec_gaps:
+        result.spec_met = True
+
+    if result.spec_met and not result.blocking_issues and not result.spec_gaps:
+        result.verdict = Verdict.PASS
+    return result
+
+
 def _classify_diff(diff: str) -> tuple[str, str]:
     """Classify a diff as 'trivial' or 'production' based on size and content.
 
@@ -427,7 +487,8 @@ def _effort_for_diff(category: str, cfg: Config) -> tuple[str, int]:
 
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1,
                  *, store: PerTicketArtifactStore | None = None,
-                 build_artifact: BuildArtifact | None = None) -> ReviewResult:
+                 build_artifact: BuildArtifact | None = None,
+                 already_bounced: set[str] | None = None) -> ReviewResult:
     from . import models, provider as _provider
     # EU-72: read the Builder's BuildArtifact (passed by the loop, or from the shared pool) as the
     # primary handoff; the full diff is still under review below. After parsing, publish a typed
@@ -491,6 +552,7 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
     result = _enforce_execution_gate(result, ticket, build_artifact, diff)   # EU-268 deterministic backstop
+    result = _enforce_bounce_once(result, already_bounced or set())   # EU-351 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking
