@@ -114,6 +114,10 @@ class FailReviewer:
         return ReviewResult(verdict=Verdict.FAIL, spec_met=False,
                             required_changes=[f"issue #{iteration}"], cost_usd=0.0)
 
+    @staticmethod
+    def collect_unverifiable_fingerprints(result):   # EU-352: loop.py always calls this
+        return set()
+
 
 loop.builder_mod = FatBuilder
 loop.reviewer_mod = FailReviewer

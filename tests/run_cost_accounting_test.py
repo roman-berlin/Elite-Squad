@@ -106,10 +106,15 @@ class _StubBuilder:
 
 class _StubReviewer:
     @staticmethod
-    async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None):
+    async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None,
+                     already_bounced=None):
         if store is not None:
             store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))
         return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=REVIEW_C)
+
+    @staticmethod
+    def collect_unverifiable_fingerprints(result):   # EU-352: loop.py always calls this
+        return set()
 
 
 _land_costs: list[float] = []

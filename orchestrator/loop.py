@@ -859,6 +859,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     # passes so the "Builder retrying" Jira comment is posted only when that set actually CHANGES —
     # not re-posted identically on every failing retry.
     last_in_scope_sig: str | None = None
+    # EU-352: fingerprints of unverifiable-surface findings (UI/visual, pixel/layout,
+    # browser-render — see reviewer._classify_unverifiable_finding) seen on ANY prior review pass
+    # of this ticket attempt. Threaded into every review() call as `already_bounced` so a READ-ONLY
+    # reviewer that keeps re-raising the same unrenderable claim gets it demoted (EU-351's
+    # escalate-once gate) on the pass AFTER it first appears, instead of blocking forever. Same
+    # single-attempt, in-memory lifetime as recent_reject_sigs/last_in_scope_sig above — no
+    # cross-process persistence needed.
+    bounced_unverifiable: set[str] = set()
 
     # EU-72: one shared per-ticket artifact pool, threaded through the officers so each reads a tight
     # structured handoff instead of re-deriving from the full diff. The SpecArtifact is derived straight
@@ -1342,7 +1350,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # EU-197: Wrap reviewer with transcript context to capture full tool inputs + reasoning
         with _officer_transcript_context(app, ticket, "reviewer", cfg):
             review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
-                                               store=store, build_artifact=store.build)
+                                               store=store, build_artifact=store.build,
+                                               already_bounced=bounced_unverifiable)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
@@ -1356,10 +1365,15 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # EU-197: Wrap reviewer retry with transcript context
             with _officer_transcript_context(app, ticket, "reviewer", cfg):
                 review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
-                                                   store=store, build_artifact=store.build)
+                                                   store=store, build_artifact=store.build,
+                                                   already_bounced=bounced_unverifiable)
             cost += review.cost_usd
             budget.add(review.cost_usd)
             _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry
+        # EU-352: fold this pass's unverifiable-surface findings (freshly raised OR already demoted
+        # by EU-351's _enforce_bounce_once) into the accumulator BEFORE the audit record below, so
+        # the NEXT pass's review() calls above see them in already_bounced.
+        bounced_unverifiable |= reviewer_mod.collect_unverifiable_fingerprints(review)
         audit.record("review", ticket_id=ticket.id, iteration=iteration,
                      verdict=review.verdict.value, spec_met=review.spec_met,
                      blocking=len(review.blocking_issues), cost_usd=review.cost_usd,

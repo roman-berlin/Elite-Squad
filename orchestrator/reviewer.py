@@ -434,6 +434,34 @@ def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> Rev
     return result
 
 
+def collect_unverifiable_fingerprints(result: ReviewResult) -> set[str]:
+    """EU-352: collect the fingerprints of every unverifiable-surface finding CURRENTLY present on
+    `result` — whether already demoted to `unverifiable_gaps` (a prior-pass bounce recognised by
+    `_enforce_bounce_once`) or still sitting in `quality_issues` (blocker/major) / `spec_gaps` (a
+    first-time raise this pass hasn't bounced yet, since `already_bounced` was empty or didn't
+    contain it). The loop folds the returned set into its per-attempt `bounced_unverifiable`
+    accumulator so the NEXT `review()` call's `already_bounced` recognises the SAME finding
+    reappearing and demotes it via `_enforce_bounce_once` instead of blocking again. Ordinary
+    logic/data/test findings (the classifier returns None) contribute nothing. Public and
+    side-effect-free — kept in reviewer.py (not loop.py) so the fingerprint/classify logic stays
+    self-contained per EU-351's design; loop.py never imports the private `_`-prefixed helpers."""
+    fps: set[str] = set()
+    for detail in result.unverifiable_gaps:
+        lens = _classify_unverifiable_finding(detail)
+        if lens is not None:
+            fps.add(_finding_fingerprint(lens, detail))
+    for q in result.quality_issues:
+        if q.severity in ("blocker", "major"):
+            lens = _classify_unverifiable_finding(q.detail)
+            if lens is not None:
+                fps.add(_finding_fingerprint(lens, q.detail))
+    for gap in result.spec_gaps:
+        lens = _classify_unverifiable_finding(gap)
+        if lens is not None:
+            fps.add(_finding_fingerprint(lens, gap))
+    return fps
+
+
 def _classify_diff(diff: str) -> tuple[str, str]:
     """Classify a diff as 'trivial' or 'production' based on size and content.
 
