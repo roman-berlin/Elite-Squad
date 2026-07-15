@@ -1259,37 +1259,6 @@ def create_app(cfg: Config):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/standup")
 
-    @app.post("/api/drill")
-    def drill_api():
-        if not _state.get("drilling"):
-            def _bg():
-                _state["drilling"] = True
-                try:
-                    from . import drillmaster
-                    rep = asyncio.run(drillmaster.drill(cfg))
-                    Path(cfg.audit_path).with_name("drill-report.md").write_text(rep, encoding="utf-8")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"drill failed: {exc}"
-                finally:
-                    _state["drilling"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/drill")
-
-    @app.get("/drill")
-    def drill_page():
-        rep = Path(cfg.audit_path).with_name("drill-report.md")
-        if _state.get("drilling"):
-            body = _working("Engineering Coach is reviewing the unit's record and proposing officer upgrades…")
-        else:
-            act = _actbar(_actbtn("/api/drill", "&#127894; Run drill"))
-            if rep.exists():
-                body = act + "<pre class=rep>" + html.escape(rep.read_text(encoding="utf-8")) + "</pre>"
-            else:
-                body = act + ("<p style='color:#8a909c'>No drill yet. Run one — the Engineering Coach reviews "
-                              "the unit's record and proposes officer upgrades, which you Approve in the "
-                              "<a href='/approvals'>Approvals</a> inbox.</p>")
-        return _wrap("Engineering Coach report", body)
-
     @app.post("/api/council")
     def council_api():
         if not _state.get("councilling"):
