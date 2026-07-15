@@ -98,6 +98,11 @@ class ReviewResult:
     spec_gaps: list[str] = field(default_factory=list)
     quality_issues: list[QualityIssue] = field(default_factory=list)
     required_changes: list[str] = field(default_factory=list)   # next prompt for builder
+    # EU-351: findings that classified as unverifiable-surface (see `_classify_unverifiable_finding`
+    # in reviewer.py) AND were already bounced on a prior pass — demoted here by `_enforce_bounce_once`
+    # instead of re-raised in `blocking_issues`/`spec_gaps`. Deliberately excluded from both
+    # `blocking_issues` and `is_ship_ready()`: an escalate-once demotion must be able to reach PASS.
+    unverifiable_gaps: list[str] = field(default_factory=list)
     summary: str = ""
     needs_human: bool = False     # a product/scope decision only the Commander can make
     question: str = ""            # the decision being asked, if needs_human
