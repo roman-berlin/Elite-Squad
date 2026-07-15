@@ -29,11 +29,21 @@ class TicketCommenter:
     # Rate limit: max 5 comments per ticket per gate cycle
     MAX_COMMENTS_PER_CYCLE = 5
 
+    # EU-353: fixed label for the escalated-unverifiable-gaps comment (verbatim list, not an
+    # LLM summary — see post_unverifiable_gaps below).
+    UNVERIFIABLE_GAPS_LABEL = (
+        "⚠️ Unverifiable ACs — accepted on builder evidence, could not be executed by review:"
+    )
+
     def __init__(self, cfg: Config, dry_run: bool = False, no_comment: bool = False):
         self.cfg = cfg
         self.dry_run = dry_run
         self.no_comment = no_comment
         self.comment_counts: dict[str, int] = {}  # ticket_id -> count in current cycle
+        # EU-353: ticket_ids whose unverifiable_gaps have already been surfaced this attempt —
+        # backstops the "exactly once per attempt" requirement independent of how many terminal
+        # call sites (land / max-passes escalate) end up invoking post_unverifiable_gaps.
+        self._unverifiable_gaps_posted: set[str] = set()
 
     def _get_api_key(self) -> str | None:
         """Get Anthropic API key from environment."""
@@ -212,6 +222,52 @@ class TicketCommenter:
             return True
         except Exception as exc:
             print(f"  · ticket commenter: failed to post to {ticket_id}: {exc}", flush=True)
+            return False
+
+    def format_unverifiable_gaps(self, gaps: list[str]) -> str:
+        """Render the fixed labeled block for an escalated unverifiable_gaps list."""
+        bullets = "\n".join(f"• {gap}" for gap in gaps)
+        return f"{self.UNVERIFIABLE_GAPS_LABEL}\n{bullets}"
+
+    def post_unverifiable_gaps(self, backlog, ticket_id: str, gaps: list[str]) -> bool:
+        """Post the escalated unverifiable_gaps list to Jira, exactly once per ticket attempt.
+
+        EU-353: `ReviewResult.unverifiable_gaps` (EU-351's escalate-once demotions) must reach
+        the Commander at the terminal outcome of a ticket attempt (land or max-passes escalate)
+        — but never more than once, even if both/either terminal site is reached across retries
+        within the same attempt. This is a verbatim escalation list, not a gate summary, so it
+        bypasses the Haiku summarize_gate_event path entirely and posts directly.
+
+        Returns True if a comment was posted (or would be, in dry-run); False if suppressed
+        (empty gaps, already posted, no_comment) or on a tracker error.
+        """
+        if not gaps:
+            return False
+        if ticket_id in self._unverifiable_gaps_posted:
+            return False
+        # Mark BEFORE the no_comment/dry_run checks so the idempotence guard holds regardless of
+        # posting mode — a second call for the same ticket_id must never re-post.
+        self._unverifiable_gaps_posted.add(ticket_id)
+
+        if self.no_comment:
+            return False
+
+        formatted = self.format_unverifiable_gaps(gaps)
+
+        if self.dry_run:
+            print(f"  · ticket commenter (dry-run): would post unverifiable gaps to {ticket_id}: "
+                  f"{formatted}", flush=True)
+            return True
+
+        try:
+            backlog.add_comment(
+                type("Ticket", (), {"key": ticket_id})(),
+                formatted
+            )
+            print(f"  · ticket commenter: posted unverifiable gaps to {ticket_id}", flush=True)
+            return True
+        except Exception as exc:
+            print(f"  · ticket commenter: failed to post unverifiable gaps to {ticket_id}: {exc}", flush=True)
             return False
 
     def reset_cycle(self, ticket_id: str) -> None:

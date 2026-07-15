@@ -849,6 +849,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             no_comment=getattr(cfg, "no_comments", False)
         )
     cost = 0.0
+    # EU-353: last review binding this attempt saw — may stay None if every pass broke before
+    # reaching the review step. Read (guarded) at the max-passes escalation site below to surface
+    # any escalated review.unverifiable_gaps.
+    review = None
     last_changes: list[str] = []
     # Retry guard (EU-56): remember the last few reject signatures, not just the immediately
     # previous one, so an A/B/A/B rejection oscillation — where the build alternates between two
@@ -1732,8 +1736,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")
     audit.record("needs_human", ticket_id=ticket.id, iterations=max_passes,
                  reason="max passes — PM escalated", question=esc[:1500])
+    # EU-353: surface any escalated unverifiable_gaps on the last review this attempt saw —
+    # exactly once (post_unverifiable_gaps self-guards per ticket_id) — and fold them into the
+    # report's notes for cockpit/status-board visibility. Best-effort: a tracker hiccup here must
+    # never turn an already-decided escalation into an unhandled exception.
+    gap_note = ""
+    gaps = getattr(review, "unverifiable_gaps", None) if review is not None else None
+    if gaps and backlog and not ticket.ephemeral:
+        try:
+            commenter.post_unverifiable_gaps(backlog, ticket.key, gaps)
+        except Exception as exc:  # noqa: BLE001 — best-effort, never blocks the escalation
+            print(f"  · unverifiable-gaps comment skipped ({exc})", flush=True)
+        gap_note = " · unverifiable ACs: " + " | ".join(gaps)
     return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, max_passes, cost, app.name, branch,
-                                 notes="max_iterations reached without a passing review"))
+                                 notes="max_iterations reached without a passing review" + gap_note))
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
@@ -1900,10 +1916,23 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         except Exception as exc:  # noqa: BLE001 — best-effort, like sentinel/smoke
             print(f"  🔎 CI · conclusion check skipped ({exc})", flush=True)
 
+        # EU-353: surface any escalated review.unverifiable_gaps exactly once at this terminal
+        # (MERGED) outcome — post_unverifiable_gaps self-guards per ticket_id — and fold them
+        # into TicketReport.notes for cockpit/status-board visibility. Best-effort: a tracker
+        # hiccup here must never un-land an already-successful merge.
+        gap_note = ""
+        gaps = getattr(review, "unverifiable_gaps", None) if review else None
+        if gaps and backlog and not ticket.ephemeral:
+            try:
+                commenter.post_unverifiable_gaps(backlog, ticket.key, gaps)
+            except Exception as exc:  # noqa: BLE001 — best-effort, never un-lands a merge
+                print(f"  land · unverifiable-gaps comment skipped ({exc})", flush=True)
+            gap_note = " · unverifiable ACs: " + " | ".join(gaps)
+
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
                             + (", Done" if cfg.mark_done_on_merge else ", awaiting QA")
-                            + smoke_note + ci_note)
+                            + smoke_note + ci_note + gap_note)
 
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)
