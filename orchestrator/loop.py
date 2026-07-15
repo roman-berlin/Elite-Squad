@@ -25,7 +25,8 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
-from .gate import base_gate_check, extract_failure_evidence, gate_fingerprint, run_deterministic_checks, run_gate
+from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
+                   gate_fingerprint, run_deterministic_checks, run_gate)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -122,6 +123,15 @@ def _is_deliberate_halt(text: str | None) -> bool:
 
 
 _TURN_LIMIT_MARKERS = ("maximum number of turns", "max turns", "max_turns")
+
+# Report notes for the two BASE-LEVEL verdicts. Both are emitted ONLY from the constants below
+# (never inline literals) because _run_inner and autopilot key their base-level halts on these
+# prefixes — an inline rewording would silently disarm both halts and reopen the 2026-07-15
+# needs_human massacre class. _BASE_INFRA_NOTES must additionally contain "timed out" so
+# infra_classify.classify tags it infra (EU-228: no error strike).
+_RED_BASE_NOTES = "red base — gate fails on the clean base tree"
+_BASE_INFRA_NOTES = "base gate timed out on the clean base tree — environment/load infra, not a code red"
+_BASE_LEVEL_PREFIXES = ("red base", "base gate timed out")
 
 
 def _is_turn_limit(text: str | None) -> bool:
@@ -481,6 +491,7 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     # never clobbered. flock auto-releases on process exit, so a crashed run never wedges the lock.
     locks = ExitStack()
     busy: set[str] = set()
+    base_halted: set[str] = set()   # apps whose BASE failed this run (red/timed-out) — see below
     if getattr(cfg, "use_worktree", False):
         for app in {a.name: a for a, _ in worklist}.values():
             try:
@@ -510,6 +521,8 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                 reports.append(TicketReport(ticket.id, Outcome.SKIPPED, 0, 0.0, app.name,
                                             notes="deferred — worktree busy (another run active)"))
                 continue
+            if app.name in base_halted:
+                continue   # base-level verdict already hit THIS app — leave its tickets queued
             backlog = None   # pre-bind: an exception before assignment must not NameError the handler
             # EU-253: bracket THIS ticket with a per-ticket log file before any work starts, and
             # close it once the ticket is done (success OR caught exception — so even a
@@ -571,6 +584,19 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                     except Exception:  # noqa: BLE001 — log teardown must never block a run
                         pass
             reports.append(report)
+            # 2026-07-15: a base-level verdict (genuine red base, or a base-gate timeout under
+            # load) applies to EVERY ticket of THAT app — processing its remaining tickets just
+            # repeats it N times (the needs_human massacre: ~60 parks in two waves that day).
+            # Halt per app, not per run: other apps' tickets in a unit-wide drain keep building
+            # (the EU-87/EU-252 never-starve contracts); the halted app's tickets stay queued.
+            if (report.notes or "").startswith(_BASE_LEVEL_PREFIXES):
+                base_halted.add(app.name)
+                _skipped = [t.id for a2, t in worklist[i:] if a2.name == app.name]
+                if _skipped:
+                    audit.record("base_halt_run", ticket_id=ticket.id, app=app.name,
+                                 reason=(report.notes or "")[:200], skipped=_skipped)
+                    print(f"  ⛔ {app.name}: base not buildable — leaving {len(_skipped)} queued "
+                          "ticket(s) untouched.", flush=True)
 
             # EU-201: After a split, inject the fragments into the worklist at the current position
             # The fragments are built serially in dependency order before the next queue ticket
@@ -891,6 +917,28 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _at_base = False
     if _at_base:
         base_ok, base_fp, base_report = base_gate_check(app, cfg, git, runner=run_gate)
+        if not base_ok and base_gate_timed_out(base_report):
+            # 2026-07-15 (twice: 04:20 and 17:41 waves): a box under load timed the base suite
+            # out, the red got cached, and the drain force-parked every To Do ticket to
+            # needs_human. A timeout is an environment verdict (EU-228 class), never a code-red:
+            # charge no ticket, ask the Commander nothing. The notes carry the timeout marker so
+            # autopilot's infra_classify path (EU-228) holds the drain with no error strike, and
+            # _run_inner stops this run so the rest of the worklist stays queued untouched.
+            audit.record("base_gate_infra", ticket_id=ticket.id,
+                         report=(base_report or "")[:1500])
+            print(f"  🌐 {ticket.id}: base gate timed out — environment/load, not a red base; "
+                  "no ticket charged, run holding.", flush=True)
+            try:
+                # The pick already moved this ticket to In Progress with a "started" ping; without
+                # a comment the board shows silent stalled work (the loop.py:240 invisibility
+                # problem). Best-effort — a tracker hiccup must never break the infra path.
+                backlog.add_comment(ticket, "⏳ Base gate timed out (environment/load, not a code "
+                                            "failure) — no work was done on this ticket; the drain "
+                                            "holds and retries automatically.")
+            except Exception:  # noqa: BLE001
+                pass
+            return _resolve(TicketReport(ticket.id, Outcome.ERRORED, 0, cost, app.name, branch,
+                                         notes=_BASE_INFRA_NOTES))
         if not base_ok:
             audit.record("red_base_block", ticket_id=ticket.id, fingerprint=base_fp,
                          report=(base_report or "")[:2500])
@@ -907,7 +955,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _notify(cfg, f"⛔ {ticket.id} blocked — base branch '{app.base_branch}' is RED before "
                          f"any build (gate fails on the clean base). {decisions.reply_hint(ticket.id)}")
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, 0, cost, app.name, branch,
-                                         notes="red base — gate fails on the clean base tree"))
+                                         notes=_RED_BASE_NOTES))
 
     # §3.1 second half: identical gate-failure fingerprint on consecutive failed gates → stop
     # rebuilding and BREAK to the normal exhaustion path (PM triage first, then park). Breaking

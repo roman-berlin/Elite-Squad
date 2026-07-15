@@ -22,10 +22,12 @@ import threading
 import time
 from pathlib import Path
 
+from . import gate as gate_mod
 from . import infra_classify, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
+from .loop import _BASE_LEVEL_PREFIXES
 from .loop import run as run_loop
 
 # PID file — single source of truth for "is the daemon actually running?"
@@ -830,6 +832,15 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # per-ticket error_counts — that's the point of this ticket.
         offline_hold = False
         toolchain_held: frozenset[str] = frozenset()
+        # 2026-07-15: base-level hold, PER APP. A red or timed-out BASE gate applies to the whole
+        # app — picking it again before the red-base cache would re-verify (gate._RED_BASE_RED_TTL_S)
+        # just parks one more ticket per cycle (the needs_human massacre: ~60 tickets in the 04:20
+        # and 17:41 waves that day). Keyed by app name so a unit-wide drain keeps building the
+        # healthy apps (EU-87/EU-252 never-starve contracts); the held app's queue stays on the
+        # board untouched. Timer-based: the TTL matches when the red cache re-verifies anyway
+        # (a base FIX landed mid-hold waits out the remainder; cockpit manual runs bypass it).
+        red_base_hold: dict[str, float] = {}
+        base_timeout_waves = 0   # consecutive cycles ending in a base-gate TIMEOUT (escalate at 3)
 
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
@@ -850,6 +861,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     break
                 _sleep(max(10, interval), stop_event)
                 continue
+
 
             # Cost governor: never let a runaway loop eat the day's token budget. Pause new tickets
             # once today's burn hits the ceiling (resumes after midnight / when the ceiling is raised).
@@ -1065,6 +1077,18 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # error strike, no park).
             worklist, toolchain_held = _apply_toolchain_holds(cfg, audit, worklist, toolchain_held)
 
+            # 2026-07-15: drop apps under an active base-level hold (red/timed-out base last
+            # cycle) — their tickets stay queued on the board; expired holds are pruned so the
+            # next pick re-verifies the base (the red cache TTL expires on the same clock).
+            _now = time.time()
+            red_base_hold = {a: ts for a, ts in red_base_hold.items() if ts > _now}
+            _dropped_held = [t.id for (a, t) in worklist if a.name in red_base_hold]
+            if _dropped_held:
+                worklist = [(a, t) for (a, t) in worklist if a.name not in red_base_hold]
+                print(f"  ⛔ base-hold active for {', '.join(sorted(red_base_hold))} — "
+                      f"{len(_dropped_held)} ticket(s) stay queued until the base re-check.",
+                      flush=True)
+
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed
             # to prevent re-picking the same ticket forever. Track previewed tickets so they're
             # skipped in subsequent cycles, but valid apps still drain.
@@ -1152,9 +1176,47 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                       + ", ".join(f"{t} [{error_counts[t]}/{_MAX_TICKET_ERRORS}]" for t in retrying),
                       flush=True)
 
+            # 2026-07-15: split out base-level reports FIRST — a base-gate timeout is CPU/load,
+            # not connectivity, so it must not enter the offline-hold (whose probe checks Jira/
+            # git and would immediately announce a misleading "connectivity restored").
+            _base_reports = [r for r in reports
+                             if (r.notes or "").startswith(_BASE_LEVEL_PREFIXES)]
+            _base_ids = {r.ticket_id for r in _base_reports}
+
             # EU-228: one or more tickets errored on infra/outage this cycle — hold ALL new work
             # (not just these tickets) until connectivity_probe passes again; no counter touched.
-            offline_hold = _enter_offline_hold(cfg, audit, infra_errored, offline_hold)
+            offline_hold = _enter_offline_hold(cfg, audit, infra_errored - _base_ids, offline_hold)
+
+            # 2026-07-15: base-level outcome — the app can't build ANYTHING right now. Hold ITS
+            # picking until the red-base cache would re-verify, instead of re-parking one more
+            # ticket every cycle (the needs_human massacre). A genuine red already pinged the
+            # Commander via its one parked ticket; a timeout gets its own accurate ping here
+            # (it was excluded from the offline-hold alert above), and three consecutive
+            # timeout waves escalate — a persistently overloaded box needs a human look.
+            if _base_reports:
+                for r in _base_reports:
+                    red_base_hold[r.app or app_name or ""] = (
+                        time.time() + gate_mod._RED_BASE_RED_TTL_S)
+                _hold_m = int(gate_mod._RED_BASE_RED_TTL_S / 60)
+                audit.record("red_base_drain_hold", tickets=sorted(_base_ids),
+                             apps=sorted({r.app or "" for r in _base_reports}),
+                             hold_minutes=_hold_m)
+                print(f"  ⛔ base-level failure — holding {_hold_m}m before re-checking the base.",
+                      flush=True)
+                _timeout_wave = any((r.notes or "").startswith("base gate timed out")
+                                    for r in _base_reports)
+                if _timeout_wave:
+                    base_timeout_waves += 1
+                    notify.send(f"⏳ Base gate timed out under load (wave {base_timeout_waves}) — "
+                                f"drain holding {_hold_m}m; no tickets were charged or parked.")
+                    if base_timeout_waves == 3:
+                        notify.send("⚠️ 3rd consecutive base-gate timeout wave — the box looks "
+                                    "persistently overloaded. Check system load, or raise "
+                                    "gate_timeout_sec for this app.")
+                else:
+                    base_timeout_waves = 0
+            else:
+                base_timeout_waves = 0
 
             # Re-read straight from disk right before the write-back instead of trusting the snapshot
             # taken at the top of the loop (~:219). The Telegram poller may have run /unblock mid-cycle;

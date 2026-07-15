@@ -679,6 +679,17 @@ def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str
 
 _RED_BASE_CACHE_MAX = 40   # (repo@sha) entries kept
 _RED_BASE_RED_TTL_S = 30 * 60   # a cached RED is re-verified after this long (see below)
+_BASE_GATE_TIMEOUT_MARKER = "(timed out after"   # written by run_commands on a command timeout
+
+
+def base_gate_timed_out(report: str | None) -> bool:
+    """True when a base-gate red is a runtime TIMEOUT — an environment/load verdict (the EU-228
+    class), not a code-red. 2026-07-15 incident, twice in one day (04:20 and 17:41 waves): a box
+    under load timed the 1800s base suite out, the red survived its confirmation re-run (sustained
+    load reproduces), got cached, and the drain force-parked the whole To Do queue to needs_human
+    one ticket per pick. A timeout must neither poison the red cache (see base_gate_check) nor
+    park tickets (loop.py routes it to the EU-228 infra path instead)."""
+    return _BASE_GATE_TIMEOUT_MARKER in (report or "")
 
 
 def _base_gate_once(app: AppConfig, run) -> GateResult:
@@ -728,16 +739,26 @@ def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, s
             pass
 
     res = _base_gate_once(app, run)
-    if not res.passed:
+    if not res.passed and not base_gate_timed_out(res.report):
         # Confirmation re-run: only a red that REPRODUCES blocks (a single timing flake on this
         # box must never park the whole queue). A green confirm wins — old behaviour proceeds.
+        # A TIMEOUT red is exempt: it isn't cached, and doubling a gate_timeout_sec suite on an
+        # already-loaded box is the harm, not the cure (2026-07-15: 2×1800s per re-check).
         confirm = _base_gate_once(app, run)
         if confirm.passed:
             res = confirm
+    # Compute the infra verdict on the FULL report BEFORE truncation — run_commands appends one
+    # entry per failing command, so a long genuine failure ahead of the timed-out command could
+    # push the marker past the cut and make loop.py read the same red differently than we did.
+    infra_red = (not res.passed) and base_gate_timed_out(res.report)
     fp = "" if res.passed else gate_fingerprint(res.report or "")
     report = "" if res.passed else (res.report or "")[:4000]
+    if infra_red and not base_gate_timed_out(report):
+        report = "(timed out after gate timeout — marker restored; truncation dropped it)\n" + report[:3900]
 
-    if sha:
+    # A timeout-shaped red is an environment verdict, not a code verdict — caching it would make
+    # every pick for the next _RED_BASE_RED_TTL_S insta-block on a box that was merely busy.
+    if sha and not infra_red:
         try:
             from . import locking
 
