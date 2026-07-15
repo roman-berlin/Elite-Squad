@@ -433,6 +433,12 @@ def create_app(cfg: Config):
         the combined stdout/stderr. Commands run in the orchestrator's working directory
         with a 10-second timeout.
 
+        EU-146: Runs via Popen with ``start_new_session=True`` (its own process group,
+        same pattern as gate.py's ``run_commands``) so a backgrounded/forked child (e.g.
+        a bare `vitest` typed into the terminal) can't outlive a timeout. On
+        TimeoutExpired — and in a finally block covering every exit path — the WHOLE
+        process group is SIGKILL-ed via ``os.killpg``, not just the top shell PID.
+
         Security:
         * Commands are executed in a subprocess with a timeout.
         * No interactive shells — each command is a one-shot execution.
@@ -442,7 +448,6 @@ def create_app(cfg: Config):
         """
         from flask import jsonify
         import subprocess
-        import shlex
 
         cmd = (request.form.get("cmd") or "").strip()
         if not cmd:
@@ -452,26 +457,56 @@ def create_app(cfg: Config):
         if any(c in cmd for c in ["\x00", "\n", "\r"]):
             return jsonify({"output": "", "error": "Invalid characters in command"}), 400
 
+        proc = None
         try:
-            # Execute command with timeout, capture both stdout and stderr
-            result = subprocess.run(
+            # EU-146: Popen (not run) + start_new_session=True so the shell and any child
+            # it forks/backgrounds share one process group we can kill as a unit.
+            proc = subprocess.Popen(
                 cmd,
                 shell=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=10,
                 cwd=str(Path(cfg.config_path).parent) if hasattr(cfg, "config_path") else None,
-                env=dict(os.environ)
+                env=dict(os.environ),
+                start_new_session=True,
             )
-            output = result.stdout + result.stderr
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # EU-146: Kill the entire process group, not just the shell PID.
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+                except (ProcessLookupError, OSError):
+                    proc.kill()
+                # Reap the zombie so it doesn't linger.
+                try:
+                    proc.communicate(timeout=1)
+                except Exception:
+                    pass
+                return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
+            output = (stdout or "") + (stderr or "")
             # Cap output at 64KB
             if len(output) > 65536:
                 output = output[:65536] + "\n... (output truncated)"
             return jsonify({"output": output, "error": None})
-        except subprocess.TimeoutExpired:
-            return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
         except Exception as e:
             return jsonify({"output": "", "error": str(e)}), 500
+        finally:
+            # EU-146: Final sweep — if anything in the group is still alive (e.g. a
+            # backgrounded grandchild the communicate() reap above didn't catch), kill it.
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)
+                except (ProcessLookupError, OSError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.communicate(timeout=1)
+                except Exception:
+                    pass
 
     @app.get("/api/autopilot")
     def autopilot_status_api():
