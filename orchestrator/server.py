@@ -801,6 +801,60 @@ def create_app(cfg: Config):
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get("/api/terminal/stream")
+    def terminal_stream_api():
+        """Server-Sent Events: live-tail the orchestrator's terminal/log output for the cockpit's
+        interactive terminal panel.
+
+        EU-154: reuses the existing stdout ring buffer (``cockpit_state._LOG``, a
+        ``deque(maxlen=600)`` that already feeds the War Room live-feed panel) instead of a new
+        log source. Live-tails from CONNECT time only — whatever backlog is already in the buffer
+        when the client connects is never replayed, only lines appended afterwards. Polls every
+        0.5s and emits one raw ``data: <line>\n\n`` frame per new line (a bare SSE data frame,
+        not the ``event: <type>`` form ``_sse()`` produces — the terminal panel just wants plain
+        lines). Sends a ``: heartbeat\n\n`` comment roughly every 15s while idle, and resyncs
+        against the ring buffer's current contents if it has wrapped past what this stream last
+        saw (the bookmark fell off the back of the deque).
+        """
+        from flask import Response
+
+        def gen():
+            snapshot = list(_LOG)
+            bookmark = snapshot[-1] if snapshot else None   # last backlog entry — never replayed
+            last_heartbeat = time.time()
+            try:
+                while True:
+                    snapshot = list(_LOG)
+                    if bookmark is None:
+                        new_items = snapshot
+                    else:
+                        idx = None
+                        for i in range(len(snapshot) - 1, -1, -1):
+                            if snapshot[i] is bookmark:
+                                idx = i
+                                break
+                        # idx is None => the bookmark wrapped off the ring buffer since our last
+                        # poll (maxlen exceeded) — resync to whatever it currently holds instead
+                        # of guessing how much was missed.
+                        new_items = snapshot if idx is None else snapshot[idx + 1:]
+                    if new_items:
+                        for line, _key in new_items:
+                            yield f"data: {line}\n\n"
+                        bookmark = new_items[-1]
+                        last_heartbeat = time.time()
+                    else:
+                        now = time.time()
+                        if now - last_heartbeat >= 15:
+                            yield ": heartbeat\n\n"
+                            last_heartbeat = now
+                    time.sleep(0.5)
+            except GeneratorExit:
+                # Client disconnected — unwind quietly, nothing left to clean up.
+                return
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.get("/tasks")
     def tasks_page():
         # EU-129: Resolve the active project first so needs.count() can scope to it.
