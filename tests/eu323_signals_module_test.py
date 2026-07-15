@@ -1,13 +1,13 @@
 """EU-323 regression: collect_signals/format_signals live in orchestrator/signals.py — the
 mandatory prerequisite before drillmaster.py can be deleted (both functions are pure/no-LLM and
-load-bearing; council/roster/adjutant all depend on them, and the launchd cockpit daemon can't
-self-restart if that import chain bricks).
+load-bearing; council/roster depend on them, and the launchd cockpit daemon can't
+self-restart if that import chain bricks). (adjutant.py was a third importer until EU-325 deleted it.)
 
 This harness pins:
   1. `orchestrator.signals` exists and exports both names, callable, with the same behavior
      (same dict keys from collect_signals; format_signals renders the same digest text).
-  2. NOTHING in orchestrator/ imports these two names from `.drillmaster` anymore — council.py,
-     roster.py, and adjutant.py must all resolve them via `.signals`.
+  2. NOTHING in orchestrator/ imports these two names from `.drillmaster` anymore — council.py
+     and roster.py must resolve them via `.signals` (whole-tree scan catches any other file too).
   3. drillmaster.py no longer DEFINES the two functions (only re-imports them), so its own
      drill()/_prompt() code keeps resolving without drillmaster.py being deleted yet.
 """
@@ -84,8 +84,10 @@ if _import_ok:
     check("format_signals(fixture) renders the expected digest verbatim", out == expected, f"got: {out!r}")
 
 # === 2. no importer resolves these names via .drillmaster anymore =============================
+# (adjutant.py was deleted in EU-325; council.py + roster.py are the surviving named importers.
+# The belt-and-suspenders whole-tree scan below still catches any file, named or not.)
 BAD_IMPORT = re.compile(r"from\s+\.drillmaster\s+import\s+.*(collect_signals|format_signals)")
-for rel in ("orchestrator/council.py", "orchestrator/roster.py", "orchestrator/adjutant.py"):
+for rel in ("orchestrator/council.py", "orchestrator/roster.py"):
     src = (ROOT / rel).read_text(encoding="utf-8")
     check(f"{rel}: no longer imports collect_signals/format_signals from .drillmaster",
           not BAD_IMPORT.search(src), "still imports from .drillmaster")

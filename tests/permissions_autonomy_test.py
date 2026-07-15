@@ -45,9 +45,10 @@ chk("council.py has 9 bypass officers (8 + the EU-287 group-chat triage classifi
     src.count('permission_mode="bypassPermissions"') == 9,
     str(src.count('permission_mode="bypassPermissions"')))
 
-# the other read-only officers (adjutant/drillmaster/reviewer/squad) are flipped as well
+# the other read-only officers (drillmaster/reviewer/squad) are flipped as well (adjutant.py was
+# deleted in EU-325)
 root = Path("./orchestrator")
-for f in ("adjutant", "drillmaster", "reviewer", "squad"):
+for f in ("drillmaster", "reviewer", "squad"):
     t = (root / f"{f}.py").read_text()
     chk(f"{f}.py has no 'default' gate", 'permission_mode="default"' not in t)
 

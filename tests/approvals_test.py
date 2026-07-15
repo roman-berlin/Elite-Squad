@@ -14,12 +14,10 @@ results = []
 def check(n, c, d=""):
     results.append((n, bool(c), d))
 
-from orchestrator import approvals, adjutant, notify, council
+from orchestrator import approvals, notify, council
 from orchestrator.config import Config, AppConfig
 notify.send = lambda *a, **k: None
 approvals._commit_push = lambda msg: "committed + pushed to origin"   # don't touch real git
-async def _fake_adjutant_apply(cfg): return "Applied. edited officers/engineer.md"
-adjutant.apply = _fake_adjutant_apply
 notes = []
 council.add_commander_note = lambda cfg, txt: notes.append(txt)
 
@@ -31,25 +29,31 @@ cfg = Config(apps=[app], audit_path=str(d / "audit.jsonl"), use_worktree=False)
 
 check("no reports -> nothing pending", approvals.pending(cfg) == [])
 
-(d / "adjutant-report.md").write_text("## Propose: recruit a DB soldier", encoding="utf-8")
-pend = approvals.pending(cfg)
-check("an adjutant report -> 1 pending (adjutant)", len(pend) == 1 and pend[0]["kind"] == "adjutant", str(pend))
+# EU-325: adjutant.py (and its "adjutant" KINDS entry) is gone — KINDS is empty until an officer
+# opts back into this single-report approval flow. Register a synthetic kind so pending/approve/
+# disapprove still exercise the real KINDS-driven dispatch, generically, with no officer module
+# hardcoded.
+async def _fake_apply(cfg): return "Applied. edited officers/engineer.md"
+approvals.KINDS = {"test_kind": ("Test Officer — test action", "test_kind-report.md", _fake_apply)}
 
-res = asyncio.run(approvals.approve(cfg, "adjutant"))
+(d / "test_kind-report.md").write_text("## Propose: recruit a DB soldier", encoding="utf-8")
+pend = approvals.pending(cfg)
+check("a test_kind report -> 1 pending (test_kind)", len(pend) == 1 and pend[0]["kind"] == "test_kind", str(pend))
+
+res = asyncio.run(approvals.approve(cfg, "test_kind"))
 check("approve applies + pushes", "edited officers" in res and "pushed" in res, res[:80])
 check("approved report is no longer pending", approvals.pending(cfg) == [])
 
-(d / "adjutant-report.md").write_text("## DIFFERENT proposal: retire a stale specialist", encoding="utf-8")
+(d / "test_kind-report.md").write_text("## DIFFERENT proposal: retire a stale specialist", encoding="utf-8")
 check("a new/changed report becomes pending again", len(approvals.pending(cfg)) == 1)
 
-# EU-328: drill wiring was removed — a stale "drill" request is simply rejected, never imports
-# drillmaster (that module is gone; approve() must not even try).
+# A kind not registered in KINDS is simply rejected, no import of any officer module.
 res_drill = asyncio.run(approvals.approve(cfg, "drill"))
-check("approve('drill') is rejected as an unknown kind (no drillmaster import)",
+check("approve('drill') is rejected as an unknown kind (no officer module imported)",
       res_drill == "unknown approval kind: drill", res_drill)
 
-approvals.disapprove(cfg, "adjutant", "roster is fine for now")
-check("disapprove clears adjutant from pending", all(p["kind"] != "adjutant" for p in approvals.pending(cfg)))
+approvals.disapprove(cfg, "test_kind", "roster is fine for now")
+check("disapprove clears test_kind from pending", all(p["kind"] != "test_kind" for p in approvals.pending(cfg)))
 check("disapprove logs the reason to Unit Memory", any("roster is fine" in n for n in notes), str(notes))
 
 print("\n================ APPROVALS QA ================")
