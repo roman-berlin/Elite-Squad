@@ -1311,6 +1311,7 @@ _TALK_HTML = (
 
 _TERMINAL_HTML = (
     '<div class=term>'
+    '<div class=termbar><span id=termstat class=termstat>Connecting…</span></div>'
     '<div class=termout id=termout><div class=term-out>Welcome to the terminal. Commands execute in the orchestrator\'s working directory.</div><div class=term-out>Type a command below and press Enter to execute.</div></div>'
     '<div class=tbox>'
     '<span class=tbox-prompt>$</span>'
@@ -2079,6 +2080,8 @@ background:#0d1119;text-decoration:none;color:inherit;transition:border-color va
 .tki{font-size:20px}.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
 /* terminal panel */
 .term{display:flex;flex-direction:column;height:100%;min-height:280px;background:#070a0e;border-radius:0 0 var(--r-xl) var(--r-xl)}
+.termbar{display:flex;justify-content:flex-end;padding:6px 16px 0}
+.termstat{font-family:var(--mono);font-size:11px;color:var(--dim)}
 .termout{flex:1;font-family:var(--mono);font-size:12px;line-height:1.5;color:#b9c2cf;padding:12px 16px;
 overflow:auto;white-space:pre-wrap;word-break:break-word;min-height:200px}
 .termout .term-prompt{color:#4d7cff;font-weight:600}
@@ -2314,6 +2317,46 @@ startStream();
   // Auto-focus input when clicking anywhere in the terminal
   document.querySelector(".term").addEventListener("click",function(){
     input.focus();
+  });
+})();
+// EU-157: wire the terminal panel to the live SSE log stream (/api/terminal/stream) so it shows
+// real orchestrator output as it happens, not just command echoes. Mirrors the board SSE
+// (startStream, ~2161) and EU-200 run-log SSE (startRunlogStream, ~2212) reconnect patterns.
+(function(){
+  var termout=document.getElementById("termout");
+  var termstat=document.getElementById("termstat");
+  if(!termout)return;
+
+  function setTermStat(s){if(termstat)termstat.textContent=s;}
+  // Same escaping approach as the command-echo path above (term-cmd/term-out), plus '&' and '>'
+  // since streamed log lines are arbitrary text, not operator-typed commands.
+  function escTermLine(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+  var termEs=null;
+  function startTermStream(){
+    if(typeof(EventSource)==="undefined"){setTermStat("Disconnected");return;}
+    setTermStat("Connecting…");
+    try{
+      termEs=new EventSource("/api/terminal/stream");
+      termEs.onopen=function(){setTermStat("Connected");};
+      termEs.onmessage=function(e){
+        var line=document.createElement("div");
+        line.innerHTML='<span class=term-out>'+escTermLine(e.data)+'</span>';
+        termout.appendChild(line);
+        termout.scrollTop=termout.scrollHeight;
+      };
+      termEs.onerror=function(){
+        setTermStat("Disconnected");
+        if(termEs){termEs.close();termEs=null;}
+        setTimeout(startTermStream,4000);
+      };
+    }catch(e){setTermStat("Disconnected");}
+  }
+  startTermStream();
+
+  // Clean up on unload so no EventSource is left open (no leak).
+  window.addEventListener("beforeunload",function(){
+    if(termEs){termEs.close();termEs=null;}
   });
 })();
 </script>
