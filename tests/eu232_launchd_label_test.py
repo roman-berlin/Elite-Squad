@@ -107,6 +107,11 @@ chk("installer's LABEL= derives from orchestrator.autopilot.LAUNCHD_LABEL — no
 # Python constant — the guard that goes RED on real drift, not merely on textual presence.
 _env = dict(os.environ)
 _env.pop("GENERAL_LAUNCHD_LABEL", None)
+# The LABEL line shells out to bare `python3`. Put the suite's own interpreter first on PATH so
+# that resolves to an interpreter that can import the orchestrator: run un-activated from .venv,
+# system python3 lacks claude_agent_sdk and this guard reddened on ModuleNotFoundError instead of
+# the drift it exists to catch (red on every local run_all, green on CI where deps are global).
+_env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + _env.get("PATH", "")
 _proc = subprocess.run(
     ["bash", "-c", f'HERE={str(ROOT)!r}; {_label_line}; printf "%s" "$LABEL"'],
     capture_output=True, text=True, timeout=15, cwd=str(ROOT), env=_env,
