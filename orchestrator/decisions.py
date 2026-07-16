@@ -508,7 +508,9 @@ def handle_command(cfg, audit, text: str) -> bool:
         def _dly():
             try:
                 from . import council
-                asyncio.run(council.daily_brief(cfg, audit=audit))
+                # EU-303: an interactive /daily is a deliberate human request → always broadcast,
+                # even if this host isn't the elected scheduled sender.
+                asyncio.run(council.daily_brief(cfg, audit=audit, broadcast=True))
             except Exception as exc:  # noqa: BLE001
                 notify.send(f"⚠️ daily failed: {exc}")
         threading.Thread(target=_dly, daemon=True).start()
@@ -522,7 +524,8 @@ def handle_command(cfg, audit, text: str) -> bool:
         def _c():
             try:
                 from . import council
-                asyncio.run(council.hold_council(cfg, topic=arg or None, audit=audit))
+                # EU-303: an interactive /council is a deliberate human request → always broadcast.
+                asyncio.run(council.hold_council(cfg, topic=arg or None, audit=audit, broadcast=True))
             except Exception as exc:  # noqa: BLE001
                 notify.send(f"⚠️ council failed: {exc}")
         threading.Thread(target=_c, daemon=True).start()

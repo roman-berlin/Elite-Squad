@@ -42,7 +42,9 @@ OPUS = cfg.builder_model
 
 # --- daily muster = council + stand-up merged, one briefing, all on Sonnet ---
 captured.clear(); sent.clear()
-asyncio.run(council.hold_council(cfg))     # no topic = the daily muster
+asyncio.run(council.hold_council(cfg, broadcast=True))  # no topic = the daily muster; EU-303: the
+# send is now host-elected — force broadcast=True here since this harness tests the muster CONTENT
+# (the election gating is pinned in eu303_daily_single_sender_test).
 tags = [t for _, t in captured]
 check("daily gathers the stand-up (officers report)", any(t.startswith("standup-") for t in tags), str(tags))
 check("daily has the General brief", "the-general" in tags)

@@ -340,7 +340,8 @@ async def discuss(cfg: Config, officers, digest: str, notes: str,
     return transcript
 
 
-async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str:
+async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
+                       broadcast: bool | None = None) -> str:
     """Run the muster as a multi-round debate; the CTO chairs. Returns the briefing,
     saves the full transcript, and sends the briefing to Telegram."""
     sig = collect_signals(cfg)
@@ -395,15 +396,23 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
 
+    # EU-303: single-sender election (same as daily_brief) — only the elected host broadcasts the
+    # weekly council, so a second scheduler/host can't double-send. Interactive callers force it.
+    if broadcast is None:
+        from . import decisions as _dec
+        broadcast = _dec.should_poll_telegram(cfg)[0]
+
     # Report up to the Commander.
     header = "🎖️ *Daily Council*" if not topic else f"🎖️ *Muster — {topic}*"
-    notify.send(f"{header}\n\n{await notify.report_brief(cfg, briefing)}")
-    if questions:
-        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
-                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
+    if broadcast:
+        notify.send(f"{header}\n\n{await notify.report_brief(cfg, briefing)}")
+        if questions:
+            notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                        + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     if audit is not None:
         audit.record("council", topic=topic or "daily", provider=chair_provider, model=chair_model,
-                     officers=[r for r, _, _ in COUNCIL], questions=len(questions), transcript=saved.name)
+                     officers=[r for r, _, _ in COUNCIL], questions=len(questions),
+                     broadcast=bool(broadcast), transcript=saved.name)
     # The Technical Writer folds this council's lessons into Unit Memory (best-effort — never break the muster).
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
@@ -1171,7 +1180,7 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
             f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
 
 
-async def daily_brief(cfg: Config, audit=None) -> str:
+async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None) -> str:
     """The LIGHT daily stand-up (best-practice: fast daily, deep weekly).
 
     A deterministic digest — what shipped, what needs the Commander, what awaits a decision
@@ -1203,17 +1212,26 @@ async def daily_brief(cfg: Config, audit=None) -> str:
     governor.note_call(cfg, 1)
     questions = _commander_questions(synth)
 
+    # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine
+    # holds the cron prevented duplicates, so a second cron/timer/host (or install-server-cron run
+    # twice) each broadcast its own copy. Elect ONE sender (the same host that owns the Telegram
+    # poller, EU-185), unless an interactive caller (cockpit/Telegram /daily) forces broadcast=True.
+    if broadcast is None:
+        from . import decisions as _dec
+        broadcast = _dec.should_poll_telegram(cfg)[0]
+
     # One skimmable phone ping: the deterministic facts + the CTO's focus/decision.
-    notify.send(f"{facts}\n\n{synth}")
-    if questions:
-        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
-                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
+    if broadcast:
+        notify.send(f"{facts}\n\n{synth}")
+        if questions:
+            notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                        + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     try:
         _save_transcript(cfg, "daily", facts, [("CTO", synth)], synth)
     except OSError:
         pass
     if audit is not None:
-        audit.record("daily_brief", questions=len(questions),
+        audit.record("daily_brief", questions=len(questions), broadcast=bool(broadcast),
                      provider=run.provider, model=run.model_version)
     return synth
 

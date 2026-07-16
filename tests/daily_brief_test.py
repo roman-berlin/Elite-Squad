@@ -55,7 +55,9 @@ if hasattr(council, "daily_brief"):
     cfg = Config(apps=[])
     cfg.audit_path = str(Path(d) / "audit.jsonl")
     try:
-        out = asyncio.run(council.daily_brief(cfg, audit=None))
+        # EU-303: the daily send is now host-elected; this harness tests the CONTENT of the send,
+        # so force broadcast=True (the election gating is pinned in eu303_daily_single_sender_test).
+        out = asyncio.run(council.daily_brief(cfg, audit=None, broadcast=True))
     finally:
         council.run_agent = _orig_run_agent
         council.notify.send = _orig_send

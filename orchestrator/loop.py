@@ -1983,7 +1983,12 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                     ticket,
                     f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
             except Exception as exc:  # noqa: BLE001 — tracker trouble never un-lands a merge
+                # EU-310: a lost post-merge transition strands the ticket In Progress, so the drain
+                # re-picks and rebuilds already-merged code (EU-307, 2026-07-14). Record it as an
+                # audit event, not just a print, so the miss is diagnosable — the in-memory
+                # recently-merged guard in autopilot is what actually prevents the re-pick.
                 print(f"  land · ticket status update skipped ({exc})", flush=True)
+                audit.record("merge_transition_failed", ticket_id=ticket.id, error=str(exc)[:200])
         done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,
