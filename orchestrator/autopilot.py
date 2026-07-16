@@ -558,6 +558,32 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
     return out
 
 
+def _assemble_worklist(raw: list, blocked: set, resumed: dict, cap: int) -> list:
+    """Three-tier pick order (EU-87 / EU-252 / EU-344), pure so the picker layer is testable.
+
+    Input ``raw`` is ``[(app, ticket)]`` in the adapter's board order (priority DESC, Rank ASC —
+    the drain-HIGHEST-first lever). Output preserves that order WITHIN each tier:
+
+      Tier-1  In Progress — resume already-started work first; NEVER capped (an in-flight ticket
+              must never be starved by fresh To Do, EU-252).
+      Tier-2  answered/resumed — parked tickets the Commander replied to on Jira; additive/uncapped,
+              de-duped against anything already surfacing In Progress via the drain.
+      Tier-3  To Do — the fresh backlog in board-Rank (priority) order; ``cap`` bounds ONLY this
+              slice, applied AFTER the priority sort so a low-cap cycle still takes the HIGHEST
+              To Do tickets, never an ascending-key prefix (the EU-344 symptom).
+
+    The blocked filter runs over the FULL drawn window first so a jql-override that ranks an In
+    Progress fragment low can't be clipped before Tier-1 rescues it (EU-252)."""
+    raw = [(a, t) for (a, t) in raw if t.id not in blocked]
+    in_progress = [(a, t) for (a, t) in raw
+                   if (s := getattr(t, "status", None)) and "progress" in s.lower()]
+    to_do = [(a, t) for (a, t) in raw
+             if not ((s := getattr(t, "status", None)) and "progress" in s.lower())][:cap]
+    in_drain = {t.id for _, t in raw}
+    answered_items = [v for k, v in (resumed or {}).items() if k not in in_drain]
+    return in_progress + answered_items + to_do
+
+
 def _park_errored_on_tracker(cfg: Config, by_id: dict, newly: list, errored: set) -> None:
     """EU-219: 2026-07-09 forensics found a ticket_exception left the ticket In Progress with no board
     state change — the single-run path posts an ❌ error comment (12ecb49) but deliberately does not
@@ -1193,32 +1219,10 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # the pre-EU-87 contract eu61_autopilot_resume_queue_test.py pins (capping the *combined*
             # list instead silently truncated the To Do tail when cap was small).
             raw = intake.from_drain(cfg, app_name, cap + len(blocked) + len(resumed) + 5)
-            raw = [(a, t) for (a, t) in raw if t.id not in blocked]
-
-            # Tier-1: tickets the board already shows as In Progress — always run these first so
-            # a ticket we started in a previous cycle is never delayed by new To Do items. Never
-            # bounded by `cap` (EU-252) — an In Progress resume must never be starved by fresh work.
-            # Use getattr for robustness in tests / adapters that return plain namespaces.
-            in_progress = [(a, t) for (a, t) in raw
-                           if (s := getattr(t, "status", None)) and "progress" in s.lower()]
-            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order. `cap` bounds
-            # only this fresh-backlog slice (EU-252) — In Progress and answered resumes are additive.
-            to_do = [(a, t) for (a, t) in raw
-                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())][:cap]
-
-            # Tier-2: parked tickets the Commander answered directly on Jira. They sit between
-            # In Progress and To Do so a replied-to ticket is never left behind a fresh To Do.
-            # Unanswered blocked tickets stay in `blocked` and are excluded by the raw filter
-            # above — only tickets lifted by _resumable_answered() enter this tier.
-            # De-dup against the drain: an answered ticket that is still In Progress on the board
-            # comes through tier-1 via the drain and must not appear in tier-2 as well.
-            in_drain = {t.id for _, t in raw}
-            answered_items = [v for k, v in resumed.items() if k not in in_drain]
-
-            # Final ordering: In Progress → answered → To Do. The cap was already applied to the
-            # To Do slice above (EU-252); In Progress and answered resumes are intentionally
-            # additive/uncapped (see notes above).
-            worklist = in_progress + answered_items + to_do
+            # EU-344: the tier split is a pure helper so the picker layer is unit-testable — the
+            # ticket's core finding was "priority doesn't steer" with the bug living HERE, yet no
+            # regression pinned that To Do is picked in adapter (priority DESC, Rank ASC) order.
+            worklist = _assemble_worklist(raw, blocked, resumed, cap)
 
             # EU-228: hold any app whose gate/worktree-setup toolchain is missing a binary on this
             # machine — one alert for the WHOLE app, its tickets simply don't run this cycle (no
@@ -1236,6 +1240,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 print(f"  ⛔ base-hold active for {', '.join(sorted(red_base_hold))} — "
                       f"{len(_dropped_held)} ticket(s) stay queued until the base re-check.",
                       flush=True)
+                # EU-344: no silent pick-time skips — every exclusion emits an audit event naming
+                # the tickets + reason, so "priority isn't steering" is diagnosable from the log
+                # instead of inferred. (The base-hold is the picker layer's one uncaptured drop.)
+                audit.record("pick_skip", reason="base-hold",
+                             apps=sorted(red_base_hold), tickets=_dropped_held)
 
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed
             # to prevent re-picking the same ticket forever. Track previewed tickets so they're
