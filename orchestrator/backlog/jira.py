@@ -273,13 +273,18 @@ class JiraAdapter(BacklogAdapter):
 
     # -- filing (officers raise their own tickets) ------------------------ #
     def create_task(self, summary: str, description: str, labels=None,
-                    issue_type: str = "Task", priority: str | None = None) -> str | None:
+                    issue_type: str = "Task", priority: str | None = None,
+                    parent: str | None = None) -> str | None:
         fields: dict[str, Any] = {
             "project": {"key": self.project},
             "summary": summary[:240],
             "issuetype": {"name": issue_type},
             "description": _adf(description or summary),
         }
+        # EU-301: link a child Task to its Epic via the team-managed `parent` field (these boards are
+        # simplified/next-gen — children group under an Epic by `parent`, not the classic epic-link).
+        if parent:
+            fields["parent"] = {"key": parent}
         # Always pin an assignee: the configured one, else Roman by default. Leaving it unset makes
         # Jira fall back to the token owner (implicit currentUser()), so tickets the unit files would
         # never reach Roman's queue.

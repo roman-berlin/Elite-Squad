@@ -204,18 +204,23 @@ async def _fake_officer(**kw):
 
 
 class _FakeBacklog:
-    def __init__(self, fail_on_call=None):
-        self.fail_on_call = fail_on_call
+    # EU-301: split now creates an Epic + Task children (linked via parent) + a verify child.
+    # fail_on_child fails the Nth CHILD create so the partial-filing path (EU-358) still triggers.
+    def __init__(self, fail_on_child=None):
+        self.fail_on_child = fail_on_child
         self.created: list[str] = []
         self.comments: list[str] = []
         self.statuses: list[tuple[str, str]] = []
-        self._n = 0
+        self._children = 0
 
-    def create_task(self, title, body, labels=None):
-        self._n += 1
-        if self.fail_on_call and self._n == self.fail_on_call:
+    def create_task(self, title, body, labels=None, issue_type="Task", priority=None, parent=None):
+        if issue_type == "Epic":
+            self.created.append("EU-EPIC")
+            return "EU-EPIC"
+        self._children += 1
+        if self.fail_on_child and self._children == self.fail_on_child:
             raise RuntimeError("jira 500")
-        key = f"EU-90{self._n}"
+        key = f"EU-90{self._children}"
         self.created.append(key)
         return key
 
@@ -237,11 +242,12 @@ try:
     recon_mod.run_officer = _fake_officer
     models_mod.for_officer = lambda cfg, effort=None, ceiling_model=None: ("m", "why")
 
-    bl_partial = _FakeBacklog(fail_on_call=2)
+    # EU-301: 3 officer pieces + 1 mandatory verify child = 4 children. Fail the 2nd child so 1 lands.
+    bl_partial = _FakeBacklog(fail_on_child=2)
     backlog_base.make_backlog = lambda app: bl_partial
     sp = asyncio.run(scrum.split(cfg_s, "eu", parent))
     chk("partial split reports ok=False", sp["ok"] is False, str(sp))
-    chk("partial split records the error", "filed 1/3" in (sp.get("error") or ""), str(sp.get("error")))
+    chk("partial split records the error", "filed 1/4" in (sp.get("error") or ""), str(sp.get("error")))
     chk("partial split does NOT close the parent",
         ("EU-999", "Done") not in bl_partial.statuses, str(bl_partial.statuses))
     chk("partial split leaves an INCOMPLETE comment naming what landed",
@@ -251,7 +257,8 @@ try:
     bl_full = _FakeBacklog()
     backlog_base.make_backlog = lambda app: bl_full
     sp = asyncio.run(scrum.split(cfg_s, "eu", parent))
-    chk("full split still reports ok=True with all keys", sp["ok"] and len(sp["keys"]) == 3, str(sp))
+    chk("full split still reports ok=True with all children (3 pieces + verify)",
+        sp["ok"] and len(sp["keys"]) == 4, str(sp))
     chk("full split still closes the parent", ("EU-999", "Done") in bl_full.statuses, str(bl_full.statuses))
 finally:
     recon_mod.run_officer = _orig_officer
