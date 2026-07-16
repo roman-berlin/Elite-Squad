@@ -78,6 +78,13 @@ state/
 *.jsonl.tmp
 *.txt.lock
 *.txt.tmp
+# EU-335: the Technical Writer's changelog append + the ELITE cycle state dir left *.md.lock and
+# .elite/ untracked in the PRIMARY checkout after a land, dirtying the tree so autopull's ff was
+# blocked and the cockpit silently ran stale code (the "0 shipped" incident). These were only in a
+# machine-local .git/info/exclude; commit them so a fresh checkout and the VPS main tree stay clean.
+*.md.lock
+*.md.tmp
+.elite/
 # Remaining runtime state files that were never ignored (and were mistakenly committed).
 pending_specialist_approvals.json
 sonnet_fallback_state.json
