@@ -604,8 +604,11 @@ def pre_flight_check(cfg: Config | None = None, ticket_estimate_pct: float = 0.0
             pct_rem = max(0.0, 1.0 - glm_pct)
             reason = f"GLM quota at {glm_pct:.1%} used (~{pct_rem:.1%} remaining)"
 
-    # Also check watermark / safety margins
-    go = remaining >= margin and not provider_stat.get("over", False)
+    # Also check watermark / safety margins — but ONLY when this provider's token budget is
+    # actually configured (EU-358): with the budget off, remaining is 0 by construction, so the
+    # margin test alone would hold every ticket forever ("below safety margin" with no budget set).
+    budget_on = provider_stat.get("on", False)
+    go = (not budget_on) or (remaining >= margin and not provider_stat.get("over", False))
     if not go and not should_skip:
         should_skip = True
         skip_provider = active
@@ -918,7 +921,9 @@ def claude_budget_status_detailed(cfg: Config | None = None) -> dict:
         "remaining": remaining,
         "pct": pct,
         "low": low,
-        "over": used >= cap,
+        # EU-358: cap == 0 is the documented "budget off" (budget_status agrees) — `used >= 0`
+        # used to brand it exhausted, and pre_flight_check then skipped every ticket.
+        "over": cap > 0 and used >= cap,
         "alert": pct >= alert_pct,
     }
 
