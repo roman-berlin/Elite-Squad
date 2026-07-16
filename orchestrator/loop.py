@@ -808,15 +808,26 @@ def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     return False
 
 
+# EU-358: how long a no_changes outcome keeps a ticket out of the drain. The guard exists to stop
+# an immediate rebuild loop while the ticket sits in 'Needs Human' — it must NOT be a life sentence.
+_NO_CHANGES_WINDOW_H = 48.0
+
+
 def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
-    """Return the set of ticket IDs that recently had a no_changes outcome (EU-116).
+    """Return the set of ticket IDs that RECENTLY had a no_changes outcome (EU-116).
 
     The drain uses this to skip tickets that already produced no changes — they're
     in 'Needs Human' awaiting verification/close, and re-running them would waste
-    another full build cycle producing the same result."""
+    another full build cycle producing the same result.
+
+    EU-358: 'recently' is a 48h window on the event timestamp. The audit log never rotates, so
+    the unbounded version excluded a ticket FOREVER after one historical no_changes — a ticket
+    the Commander edited and re-queued was silently skipped on every later drain."""
     try:
         import json
+        from datetime import datetime, timedelta, timezone
         from . import dashboard as _D
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_NO_CHANGES_WINDOW_H)
         no_changes_ids = set()
         for line in _D.audit_lines(cfg.audit_path):
             try:
@@ -825,7 +836,15 @@ def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
                 continue
             if e.get("event") == "no_changes":
                 ticket_id = e.get("ticket_id")
-                if ticket_id:
+                if not ticket_id:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(e.get("ts", "")))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue     # no parseable timestamp → too old to trust as "recent"
+                if ts >= cutoff:
                     no_changes_ids.add(ticket_id)
         return no_changes_ids
     except Exception:  # noqa: BLE001
