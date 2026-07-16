@@ -343,23 +343,34 @@ def _repin_worktree_deps(cfg: Config, app: AppConfig, git: Git) -> None:
     if not (workdir / "bun.lock").exists() and not (workdir / "package.json").exists():
         return
     base_ref = getattr(git, "base_ref", f"origin/{app.base_branch}")
+    # EU-366: bound both subprocesses — a wedged package registry on `bun install` (or a git that
+    # decides to prompt) must not freeze the drain mid-ticket. A timeout is treated exactly like a
+    # non-zero exit here: a logged dep-isolation warning, then the build proceeds (may fail later on
+    # its own gate) — never a crash. Override with GENERAL_SETUP_TIMEOUT (seconds).
+    _setup_timeout = int(os.environ.get("GENERAL_SETUP_TIMEOUT", "600") or 600)
     # 1) restore DEV's lockfile into the worktree (undoes any prior-ticket drift).
-    restored = _loop_module.subprocess.run(
-        ["git", "checkout", base_ref, "--", "bun.lock"],
-        cwd=str(workdir), capture_output=True, text=True,
-    )
-    if restored.returncode != 0:
-        why = (restored.stderr.strip().splitlines() or ["no bun.lock at base"])[0]
-        print(f"  · dep isolation: bun.lock not restored from {base_ref} ({why})", flush=True)
+    try:
+        restored = _loop_module.subprocess.run(
+            ["git", "checkout", base_ref, "--", "bun.lock"],
+            cwd=str(workdir), capture_output=True, text=True, timeout=_setup_timeout,
+        )
+        if restored.returncode != 0:
+            why = (restored.stderr.strip().splitlines() or ["no bun.lock at base"])[0]
+            print(f"  · dep isolation: bun.lock not restored from {base_ref} ({why})", flush=True)
+    except _loop_module.subprocess.SubprocessError as exc:
+        print(f"  · dep isolation: bun.lock restore did not complete ({exc}) — continuing", flush=True)
     # 2) reinstall frozen so the install can't drift off the pinned lock.
     print("  · dep isolation — bun install --frozen-lockfile", flush=True)
-    proc = _loop_module.subprocess.run(
-        ["bun", "install", "--frozen-lockfile"],
-        cwd=str(workdir), capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        tail = (proc.stderr.strip().splitlines() or ["unknown"])[-1]
-        print(f"  · dep isolation: frozen install reported a problem ({tail})", flush=True)
+    try:
+        proc = _loop_module.subprocess.run(
+            ["bun", "install", "--frozen-lockfile"],
+            cwd=str(workdir), capture_output=True, text=True, timeout=_setup_timeout,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr.strip().splitlines() or ["unknown"])[-1]
+            print(f"  · dep isolation: frozen install reported a problem ({tail})", flush=True)
+    except _loop_module.subprocess.SubprocessError as exc:
+        print(f"  · dep isolation: frozen install timed out/failed ({exc}) — continuing", flush=True)
 
 
 class Budget:

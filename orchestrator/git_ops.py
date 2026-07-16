@@ -3,6 +3,7 @@ keeps `dev` green and is hard-blocked from touching the protected branch (main).
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +14,23 @@ logger = logging.getLogger(__name__)
 
 class GitError(RuntimeError):
     pass
+
+
+# EU-366: git/gh subprocesses must never block the drain forever. Two guards, applied to every call:
+#  · a wall-clock timeout (a network fetch/push/clone can stall indefinitely on a half-open socket);
+#  · a NON-INTERACTIVE credential env — a git that decides to prompt for a password on a stalled auth
+#    would hang with no TTY to answer it. GIT_TERMINAL_PROMPT=0 + GCM_INTERACTIVE=never make it fail
+#    fast instead, so the ticket requeues rather than wedging the loop.
+_GIT_TIMEOUT_S = int(os.environ.get("GENERAL_GIT_TIMEOUT", "300") or 300)
+
+
+def _git_env() -> dict[str, str]:
+    """The environment for every git/gh subprocess — inherited env with interactive credential
+    prompting disabled (EU-366). Built per-call so a daemon that has its env updated is respected."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
 
 
 # Class-level set to track repos that have failed validation and should be parked
@@ -43,14 +61,15 @@ def reap_stale_worktrees(cfg) -> None:
     # root ONCE, up front, so the per-app loop below can skip it unconditionally.
     try:
         _toplevel = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), capture_output=True, text=True
+            ["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), capture_output=True, text=True,
+            env=_git_env(), timeout=_GIT_TIMEOUT_S,   # EU-366: never hang the reaper on a wedged git
         )
         current_wt_root = (
             str(Path(_toplevel.stdout.strip()).resolve())
             if _toplevel.returncode == 0 and _toplevel.stdout.strip()
             else str(Path(os.getcwd()).resolve())
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         current_wt_root = str(Path(os.getcwd()).resolve())
 
     # Review fix (2026-07-05): the canonical persistent per-app worktrees are deliberately parked
@@ -75,10 +94,12 @@ def reap_stale_worktrees(cfg) -> None:
             continue
 
         try:
-            res = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=str(repo), capture_output=True, text=True)
+            res = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=str(repo),
+                                  capture_output=True, text=True,
+                                  env=_git_env(), timeout=_GIT_TIMEOUT_S)   # EU-366
             if res.returncode != 0:
                 continue
-        except OSError:
+        except (OSError, subprocess.SubprocessError):
             continue
 
         base_ref = f"origin/{app.base_branch}"
@@ -163,11 +184,12 @@ def reap_stale_worktrees(cfg) -> None:
             try:
                 merge_res = subprocess.run(
                     ["git", "merge-base", "--is-ancestor", merge_probe, base_ref],
-                    cwd=str(repo), capture_output=True
+                    cwd=str(repo), capture_output=True,
+                    env=_git_env(), timeout=_GIT_TIMEOUT_S,   # EU-366
                 )
                 if merge_res.returncode != 0:
                     continue
-            except OSError:
+            except (OSError, subprocess.SubprocessError):
                 continue
 
             # Check if owning session is dead — and, for .general-worktrees paths, HOLD the flock
@@ -205,11 +227,15 @@ def reap_stale_worktrees(cfg) -> None:
                     label = branch_ref or f"detached @ {(head_sha or '')[:9]}"
                     print(f"  · reaper: cleaning up stale merged worktree {wt_path} ({label})", flush=True)
                     if is_locked:
-                        subprocess.run(["git", "worktree", "unlock", wt_path], cwd=stable_cwd)
-                    subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=stable_cwd)
-                    subprocess.run(["git", "worktree", "prune"], cwd=stable_cwd)
+                        subprocess.run(["git", "worktree", "unlock", wt_path], cwd=stable_cwd,
+                                       env=_git_env(), timeout=_GIT_TIMEOUT_S)   # EU-366
+                    subprocess.run(["git", "worktree", "remove", "--force", wt_path], cwd=stable_cwd,
+                                   env=_git_env(), timeout=_GIT_TIMEOUT_S)
+                    subprocess.run(["git", "worktree", "prune"], cwd=stable_cwd,
+                                   env=_git_env(), timeout=_GIT_TIMEOUT_S)
                     if branch_ref:   # QW7: a detached worktree has no branch to delete
-                        subprocess.run(["git", "branch", "-D", branch_ref], cwd=stable_cwd, capture_output=True)
+                        subprocess.run(["git", "branch", "-D", branch_ref], cwd=stable_cwd,
+                                       capture_output=True, env=_git_env(), timeout=_GIT_TIMEOUT_S)
                     # QW7: also remove the dead session's flock sidecar (<worktree>.lock) — git
                     # doesn't know about it; unlinked while we still hold the flock, so no other
                     # process can be holding the same inode.
@@ -217,10 +243,11 @@ def reap_stale_worktrees(cfg) -> None:
                         Path(wt_path + ".lock").unlink(missing_ok=True)
                     except OSError:
                         pass
-            except OSError as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 # EU-334: a vanished path or crashed `git worktree …` subprocess must never
                 # propagate out of the reaper and be misread as a genuine test-assertion red on
-                # the base-gate — log it and move on to the next worktree.
+                # the base-gate — log it and move on to the next worktree. EU-366: a timed-out
+                # worktree op (SubprocessError) is handled the same way, not left to crash the drain.
                 print(f"  · reaper: {wt_path} removal hit {exc.__class__.__name__} ({exc}) — "
                       f"logged, continuing", flush=True)
             finally:
@@ -302,7 +329,12 @@ class Git:
 
     # -- low level -------------------------------------------------------- #
     def _git(self, cwd: Path, *args: str, check: bool = True) -> str:
-        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                                  env=_git_env(), timeout=_GIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired as exc:  # EU-366: a stalled network op is a git failure
+            raise GitError(f"git {' '.join(args)} timed out after {_GIT_TIMEOUT_S}s "
+                           "(network stall or credential prompt — ran non-interactive)") from exc
         if check and proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed:\n{proc.stderr}")
         return proc.stdout.strip()
@@ -311,12 +343,19 @@ class Git:
         return self._git(self.repo, *args, check=check)
 
     def _run_code(self, *args: str) -> tuple[int, str, str]:
-        proc = subprocess.run(["git", *args], cwd=self.repo,
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["git", *args], cwd=self.repo, capture_output=True, text=True,
+                                  env=_git_env(), timeout=_GIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:   # EU-366: surface as a non-zero code (124), never hang
+            return 124, "", f"git {' '.join(args)} timed out after {_GIT_TIMEOUT_S}s"
         return proc.returncode, proc.stdout, proc.stderr
 
     def _code_at(self, cwd: Path, *args: str) -> tuple[int, str, str]:
-        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                                  env=_git_env(), timeout=_GIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return 124, "", f"git {' '.join(args)} timed out after {_GIT_TIMEOUT_S}s"
         return proc.returncode, proc.stdout, proc.stderr
 
     def _guard(self, branch: str) -> None:
@@ -341,8 +380,13 @@ class Git:
         if not self.isolated:
             return False
         self._git(self.main, "fetch", "origin", self.base, check=False)
-        check = subprocess.run(["git", "rev-parse", "--verify", "--quiet", self.base_ref],
-                               cwd=self.main, capture_output=True, text=True)
+        try:
+            check = subprocess.run(["git", "rev-parse", "--verify", "--quiet", self.base_ref],
+                                   cwd=self.main, capture_output=True, text=True,
+                                   env=_git_env(), timeout=_GIT_TIMEOUT_S)   # EU-366
+        except subprocess.TimeoutExpired as exc:
+            self._park_repo(f"git rev-parse timed out resolving '{self.base_ref}'")
+            raise GitError(f"cannot isolate: git rev-parse timed out after {_GIT_TIMEOUT_S}s") from exc
         if check.returncode != 0:
             self._park_repo(f"base branch '{self.base_ref}' does not resolve")
             raise GitError(f"cannot isolate: '{self.base_ref}' does not resolve "
@@ -715,11 +759,15 @@ class Git:
         self._guard(branch)
         if not shutil.which("gh"):
             return None
-        proc = subprocess.run(
-            ["gh", "pr", "create", "--base", self.base, "--head", branch,
-             "--title", title, "--body", body],
-            cwd=self.repo, capture_output=True, text=True,
-        )
+        try:
+            proc = subprocess.run(
+                ["gh", "pr", "create", "--base", self.base, "--head", branch,
+                 "--title", title, "--body", body],
+                cwd=self.repo, capture_output=True, text=True,
+                env=_git_env(), timeout=_GIT_TIMEOUT_S,   # EU-366: gh is a network call — never hang
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"gh pr create timed out after {_GIT_TIMEOUT_S}s") from exc
         if proc.returncode != 0:
             raise GitError(f"gh pr create failed:\n{proc.stderr}")
         return proc.stdout.strip()
