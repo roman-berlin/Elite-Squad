@@ -34,7 +34,18 @@ from .loop import run as run_loop
 # PID file — single source of truth for "is the daemon actually running?"
 # Written at startup and removed on clean exit or SIGTERM. The Mac launchd keepalive daemon
 # (scripts/install-mac-autopilot-daemon.sh) relies on this file for external status checks.
-_PID_FILE = Path("/tmp/general-autopilot.pid")
+# EU-355: GENERAL_PID_FILE overrides the machine-global default. tests/run_all.py sets it to a
+# per-run temp path in every harness's env, so no harness can read a LIVE drain's PID (false
+# "autopilot ON" → drain-halting red base — the 2026-07-16 eu203 incident) or clobber it. One
+# central seam closes the whole class, not a per-harness house rule each new test must remember.
+_PID_FILE = Path(os.environ.get("GENERAL_PID_FILE") or "/tmp/general-autopilot.pid")
+
+# EU-357: usage-exhaustion circuit breaker tunables. After this many consecutive "barren" cycles
+# (non-empty worklist, only unexplained ERRORED reports) the drain pauses for the cooldown rather
+# than churning the backlog on an exhausted 5-hour usage window. The cooldown is long enough to
+# outlast a transient storm and let a rolling window recover; it auto-resumes with no /unblock.
+_MAX_BARREN_CYCLES = 3
+_USAGE_HOLD_COOLDOWN_S = 1800.0
 
 # Refcount of live in-process autopilot() runs holding the (process-wide) PID file. The cockpit
 # runs each per-app drain as a thread of the ONE serve process, so every drain writes the SAME
@@ -558,6 +569,19 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
     return out
 
 
+def _is_barren_cycle(reports: list, explained_ids: set) -> bool:
+    """EU-357: True when this cycle produced ONLY unexplained instant failures — every report
+    ERRORED and none was classified infra/auth/base (those have their own dedicated holds). That
+    is the fingerprint of the 5-hour-window refusal storm (calls fail as 'transient', nothing
+    lands, nothing is infra). N of these in a row arm the usage-exhaustion breaker. Pure so the
+    predicate is unit-testable without driving the whole autopilot loop."""
+    if not reports:
+        return False
+    if not all(r.outcome is Outcome.ERRORED for r in reports):
+        return False
+    return not any(r.ticket_id in explained_ids for r in reports)
+
+
 def _assemble_worklist(raw: list, blocked: set, resumed: dict, cap: int) -> list:
     """Three-tier pick order (EU-87 / EU-252 / EU-344), pure so the picker layer is testable.
 
@@ -991,6 +1015,15 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # a misleading "connectivity restored" while the login is still dead — the same lesson as
         # the base-gate-timeout exclusion above. See _enter_auth_hold / _auth_hold_recheck.
         auth_hold = False
+        # EU-357: usage-exhaustion circuit breaker. The 5-hour Max window running out surfaces as a
+        # per-call REFUSAL classified "transient" (agent.py) — NOT a plan-limit hit (the probe goes
+        # blind, plan_limit_hit fails open) and NOT infra (so no offline-hold). So the drain churned
+        # 41 instant-failing picks in 38 min (2026-07-16 12:20 flood). This breaker is provider- and
+        # cause-agnostic: N consecutive cycles where a non-empty worklist produced ONLY unexplained
+        # ERRORED reports (none infra/auth/base-classified — those have their own holds) → pause for
+        # a cooldown, one alert, one audit event; auto-resume when the cooldown expires.
+        usage_hold_until = 0.0
+        consecutive_barren = 0
         # 2026-07-15: base-level hold, PER APP. A red or timed-out BASE gate applies to the whole
         # app — picking it again before the red-base cache would re-verify (gate._RED_BASE_RED_TTL_S)
         # just parks one more ticket per cycle (the needs_human massacre: ~60 tickets in the 04:20
@@ -1030,6 +1063,22 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     break
                 _sleep(max(10, interval), stop_event)
                 continue
+
+            # EU-357: usage-exhaustion hold — while the cooldown is active, hold ALL new work. The
+            # breaker below arms it after N barren cycles; it auto-clears when the cooldown expires
+            # (the 5h window will have rolled by then, or the transient storm passed).
+            if time.time() < usage_hold_until:
+                if once:
+                    stop_reason = "usage-exhaustion"
+                    break
+                _sleep(max(30, interval), stop_event)
+                continue
+            if usage_hold_until and time.time() >= usage_hold_until:
+                usage_hold_until = 0.0
+                consecutive_barren = 0
+                audit.record("usage_exhaustion_resume")
+                notify.send("✅ Usage-exhaustion hold cleared — autopilot resuming.")
+                print("  ✅ usage-exhaustion cooldown elapsed — resuming.", flush=True)
 
 
             # Cost governor: never let a runaway loop eat the day's token budget. Pause new tickets
@@ -1369,6 +1418,28 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # 2026-07-15: expired-login hold — ONE "re-login needed" alert, no strikes, and the
             # drain pauses until _auth_hold_recheck (top of the loop) verifies the login again.
             auth_hold = _enter_auth_hold(cfg, audit, _auth_ids, auth_hold)
+
+            # EU-357: usage-exhaustion breaker. A "barren" cycle is one where a non-empty worklist
+            # produced ONLY ERRORED reports AND none were classified infra/auth/base (those have
+            # their own holds above). That's the fingerprint of the 5h-window refusal storm — calls
+            # instant-fail as "transient", nothing lands, nothing is infra. N barren cycles in a row
+            # → pause for a cooldown so the drain stops churning the whole backlog to no effect.
+            _explained = infra_errored | _auth_ids | _base_ids
+            _unexplained = _is_barren_cycle(reports, _explained)
+            if worklist and _unexplained:
+                consecutive_barren += 1
+            elif any(r.outcome not in (Outcome.ERRORED,) for r in reports):
+                consecutive_barren = 0
+            if consecutive_barren >= _MAX_BARREN_CYCLES and not usage_hold_until:
+                usage_hold_until = time.time() + _USAGE_HOLD_COOLDOWN_S
+                mins = int(_USAGE_HOLD_COOLDOWN_S // 60)
+                audit.record("usage_exhaustion_hold", barren_cycles=consecutive_barren,
+                             cooldown_s=_USAGE_HOLD_COOLDOWN_S)
+                notify.send(f"⛔ Autopilot paused — {consecutive_barren} cycles in a row produced only "
+                            f"instant failures with no landed work (usage window likely exhausted). "
+                            f"Holding {mins} min to stop churn; auto-resumes after the cooldown.")
+                print(f"  ⛔ usage-exhaustion breaker — {consecutive_barren} barren cycles; holding "
+                      f"{mins} min to stop churn.", flush=True)
 
             # 2026-07-15: base-level outcome — the app can't build ANYTHING right now. Hold ITS
             # picking until the red-base cache would re-verify, instead of re-parking one more

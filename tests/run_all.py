@@ -24,6 +24,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent          # the General repo root
@@ -53,6 +54,15 @@ _CHILD_ENV = {k: v for k, v in os.environ.items() if not _is_sensitive_key(k)}
 # every harness, same contract as the Telegram strip above. A harness that tests the probe stubs
 # auth_probe._run_probe / clears this var in-process (auth_liveness_test.py).
 _CHILD_ENV["GENERAL_AUTH_PROBE"] = "0"
+
+# EU-355: point every harness's autopilot PID file at a per-run temp path, NOT the machine-global
+# /tmp/general-autopilot.pid. A harness that reads get_autopilot_status()/daemon_is_external() (e.g.
+# eu203) would otherwise see a LIVE drain's PID and conclude "autopilot is ON" — reddening the base
+# gate mid-drain (2026-07-16 incident) — and a harness that runs the real autopilot() would OVERWRITE
+# then DELETE the live daemon's PID file. Isolating the path in the child env closes both directions
+# of the leak for the WHOLE suite, so no future harness has to remember the per-test _PID_FILE pin.
+_PID_FILE_DIR = tempfile.mkdtemp(prefix="general-test-pid-")
+_CHILD_ENV["GENERAL_PID_FILE"] = str(Path(_PID_FILE_DIR) / "autopilot.pid")
 
 # EU-360: a per-harness wall-clock ceiling so one hung harness can no longer stall the whole suite
 # (subprocess.run had NO timeout — a wedged harness froze run_all, and with it any gate that shells
