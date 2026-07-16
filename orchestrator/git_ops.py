@@ -16,6 +16,14 @@ class GitError(RuntimeError):
     pass
 
 
+class LandRaceError(GitError):
+    """EU-259: the base advanced under a land (a concurrent ticket landed first), so the ff-push was
+    rejected. This is NOT a failure — the ticket simply needs to re-trial against the new base and
+    re-run the gate. Distinct from GitError so the loop can requeue it cleanly (no error strike)
+    instead of treating it as a build/infra exception."""
+    pass
+
+
 # EU-366: git/gh subprocesses must never block the drain forever. Two guards, applied to every call:
 #  · a wall-clock timeout (a network fetch/push/clone can stall indefinitely on a half-open socket);
 #  · a NON-INTERACTIVE credential env — a git that decides to prompt for a password on a stalled auth
@@ -657,38 +665,40 @@ class Git:
         trial straight to origin/<base> — the user's local base and working tree are
         never touched (they pull it for QA). In-tree: ff base locally, then push.
 
-        Non-fast-forward recovery (isolated mode only): if the push is rejected because
-        another ticket landed concurrently and advanced origin/<base>, we fetch the new
-        tip, rebase ``temp`` onto it, and retry once.  On a second failure the temp
-        branch is deleted (so the next ticket starts clean) and a descriptive error is
-        raised — the caller should treat this as a failed land and leave the ticket for
-        the next run rather than leaving a dirty tree."""
+        Non-fast-forward handling (isolated mode only): if the push is rejected because
+        another ticket landed concurrently and advanced origin/<base>, we do NOT rebase-
+        and-push. Pre-EU-259 that recovery pushed a COMBINED tree (this ticket's changes
+        replayed on top of the concurrent land) that the gate had NEVER validated — a
+        gate bypass that could land red-reported-green on <base>, and it also left the
+        caller's captured merge_sha pointing at a commit that was never on <base> (so the
+        SRE rollback / CI check referenced a phantom commit). Instead we clean up to a
+        clean base and raise LandRaceError: the caller requeues, and the NEXT drain
+        re-trials this ticket against the new base AND re-runs the gate. Because only an
+        honest fast-forward ever lands, the caller's `current_sha()` captured just before
+        this call is always exactly what is on <base>.
+
+        A push failure that is NOT a fast-forward race (auth, network, refspec) still
+        raises a plain GitError so it surfaces as a real error, not a silent requeue."""
         if self.base == self.protected:
             raise GitError("refusing to land on the protected branch")
         if self.isolated:
             code, _, err = self._run_code("push", "origin", f"{temp}:{self.base}")
             if code != 0:
-                # Likely a non-fast-forward rejection: fetch the latest base and
-                # rebase the trial merge commit onto it, then retry the push once.
-                self._git(self.main, "fetch", "origin", self.base, check=False)
-                rb_code, _, rb_err = self._run_code("rebase", self.base_ref)
-                if rb_code != 0:
-                    self._run_code("rebase", "--abort")
-                    self._run_code("branch", "-D", temp)
-                    self._run("checkout", "--detach", self.base_ref)
-                    raise GitError(
-                        f"land_trial: push rejected and rebase of '{temp}' onto "
-                        f"'{self.base_ref}' failed — left on clean {self.base_ref}.\n"
-                        f"push stderr: {err}\nrebase stderr: {rb_err}"
-                    )
-                code2, _, err2 = self._run_code("push", "origin", f"{temp}:{self.base}")
-                if code2 != 0:
-                    self._run_code("branch", "-D", temp)
-                    self._run("checkout", "--detach", self.base_ref)
-                    raise GitError(
-                        f"land_trial: push to origin/{self.base} failed after rebase "
-                        f"— left on clean {self.base_ref}; retry the ticket.\n{err2}"
-                    )
+                # Return to a clean detached base and drop the trial branch no matter what,
+                # so the next attempt starts clean (detach first — can't delete a checked-out branch).
+                self._run("checkout", "--detach", self.base_ref)
+                self._run_code("branch", "-D", temp)
+                low = (err or "").lower()
+                is_non_ff = any(m in low for m in (
+                    "non-fast-forward", "fetch first", "updates were rejected",
+                    "[rejected]", "failed to push some refs"))
+                if is_non_ff:
+                    raise LandRaceError(
+                        f"land_trial: push to origin/{self.base} rejected — the base advanced "
+                        f"under us (a concurrent land). Re-trial next drain.\n{err}")
+                raise GitError(
+                    f"land_trial: push to origin/{self.base} failed (not a fast-forward race — "
+                    f"auth/network/refspec). Left on clean {self.base_ref}.\n{err}")
             self._run("checkout", "--detach", self.base_ref)     # off temp; origin/<base> now advanced
             self._run_code("branch", "-D", temp)
             return

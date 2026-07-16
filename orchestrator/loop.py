@@ -30,7 +30,7 @@ from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidenc
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
-from .git_ops import Git, GitError
+from .git_ops import Git, GitError, LandRaceError
 from .officers import display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 
@@ -314,7 +314,28 @@ def _make_git(cfg: Config, app: AppConfig) -> Git:
             return git
         except GitError as exc:
             first = str(exc).splitlines()[0] if str(exc) else "unknown"
-            print(f"  · worktree isolation off ({first}); working in-tree", flush=True)
+            # EU-367: never SILENTLY downgrade to editing the main checkout. Two cases:
+            #  · the orchestrator's OWN repo — building the live unit in-tree is the EU-174
+            #    isolation-leak (a self-dev ticket editing the running code). REFUSE: raise so the
+            #    ticket parks for a human rather than clobbering the main checkout.
+            #  · a product repo — keep the in-tree fallback (some setups legitimately have no origin),
+            #    but make it LOUD (it used to be a single silent log line) so an unexpected downgrade
+            #    is visible on Telegram, not a surprise discovered later.
+            try:
+                is_self_repo = Path(app.repo_path).resolve() == Path(__file__).resolve().parent.parent
+            except Exception:  # noqa: BLE001 — a bad path just means "treat as product repo"
+                is_self_repo = False
+            if is_self_repo:
+                _notify(cfg, f"⛔ {app.name}: worktree isolation unavailable ({first}) — refusing to "
+                             "build the unit's OWN code in the main checkout (EU-174 self-edit guard). "
+                             "Ticket parked; ensure origin/<base> resolves, then re-run.")
+                raise GitError(
+                    f"worktree isolation required for the orchestrator's own repo but unavailable "
+                    f"({first}); refusing to build in-tree — EU-174 self-edit guard") from exc
+            print(f"  · ⚠️ worktree isolation OFF for {app.name} ({first}) — working IN-TREE "
+                  "(the build edits the main checkout).", flush=True)
+            _notify(cfg, f"⚠️ {app.name}: worktree isolation unavailable ({first}) — building in-tree "
+                         "(edits the main checkout). Check that origin/<base> resolves.")
     git = Git(app.repo_path, app.base_branch, app.protected_branch)
     app.workdir = git.workdir
     return git
@@ -1844,7 +1865,21 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     # LIVE + validated -> fast-forward DEV to the trial and push: the ONLY moment DEV changes.
     if not reason:
         merge_sha = git.current_sha()   # the validated merge commit — SRE reverts THIS if DEV breaks
-        git.land_trial(temp)
+        try:
+            git.land_trial(temp)
+        except LandRaceError as exc:
+            # EU-259: the base advanced under us (a concurrent land) — nothing was merged. This is a
+            # benign race, NOT a build/infra error: requeue so the next drain re-trials this ticket
+            # against the new base AND re-runs the gate. No Jira status changed yet (that happens
+            # only after a successful land below), so the ticket stays put for the resume. REQUEUED
+            # does not tick the EU-219 error counter; a distinct audit event keeps forensics honest.
+            # land_trial already detached to a clean base and deleted the trial branch before raising.
+            audit.record("land_race_requeue", ticket_id=ticket.id, base=app.base_branch,
+                         detail=str(exc).splitlines()[0][:200])
+            print(f"  land · {ticket.id}: {app.base_branch} advanced mid-land — re-trialing next "
+                  "drain (nothing merged, gate will re-run).", flush=True)
+            return TicketReport(ticket.id, Outcome.REQUEUED, iteration, cost, app.name, branch,
+                                notes="dev advanced during land — re-trial next drain (gate re-runs)")
         # EU-81: the commit is now on remote <base> — the ticket's definition of done is met.
         # Everything below is best-effort post-land housekeeping (retire the merged feature
         # branch, then fast-forward the Mac checkout so the running cockpit never serves stale
@@ -1918,11 +1953,28 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         if sentinel.should_run(cfg, app):
             ok, snote = sentinel.guard(cfg, app, ticket, git, merge_sha, audit)
             if not ok:
+                # EU-367: the SRE has ALREADY reverted the merge (irreversible git effect — DEV is
+                # restored). The tracker writes below are the ONLY thing telling the board this
+                # ticket needs a human; a tracker outage here used to raise straight out of _land,
+                # mislabelling the ticket a ticket_exception AND losing the Needs-Human signal — DEV
+                # reverted but the board still shows In Progress. Guard them: on failure, record a
+                # loud, reconcilable audit event + Telegram with the exact manual step, and still
+                # return ESCALATED (the intended outcome).
                 if not ticket.ephemeral:
-                    backlog.set_status(ticket, "Needs Human")
-                    backlog.add_comment(ticket,
-                        f"⚠️ SRE rolled back from {app.base_branch}.\n"
-                        f"• {snote[:900]}")
+                    try:
+                        backlog.set_status(ticket, "Needs Human")
+                        backlog.add_comment(ticket,
+                            f"⚠️ SRE rolled back from {app.base_branch}.\n"
+                            f"• {snote[:900]}")
+                    except Exception as exc:  # noqa: BLE001 — DEV is already reverted; don't crash
+                        audit.record("tracker_reconcile_needed", ticket_id=ticket.id,
+                                     phase="sentinel_revert", base=app.base_branch,
+                                     error=str(exc).splitlines()[0][:200])
+                        _notify(cfg, f"⚠️ {ticket.id}: SRE reverted the merge on {app.base_branch} "
+                                     "(DEV is restored) but the tracker update FAILED — the ticket "
+                                     "still shows In Progress. Set it to Needs Human manually.")
+                        print(f"  🛡️ {ticket.id}: SRE reverted, but tracker update failed ({exc}) — "
+                              "reconcile the ticket status by hand.", flush=True)
                 print(f"  🛡️ {ticket.id}: SRE reverted the merge — needs you.", flush=True)
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                     notes=f"sentinel reverted: {snote[:160]}")
@@ -1987,13 +2039,23 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     print(f"  land · not auto-merged ({reason}) → "
           + (f"PR {pr_url}" if pr_url else "open a PR manually"), flush=True)
     _bar(fail_idx, fail=fail_idx)
+    # EU-367: the branch is pushed and (if configured) the PR is already created — remote side
+    # effects that are done. A tracker outage on the comment/attach below must NOT raise out of
+    # _land (which would mislabel the ticket a ticket_exception and, worse, LOSE the PR link so the
+    # already-open PR is orphaned from the board). Guard it: on failure the PR url is preserved in
+    # the audit event + Telegram, and the ticket still reports PR_OPENED.
     if not ticket.ephemeral:
-        backlog.add_comment(ticket,
-            f"⚠️ Passed review — not auto-merged.\n"
-            f"• Reason: {reason}\n"
-            + (f"• PR: {pr_url}" if pr_url else "• Open a PR manually."))
-        if pr_url:
-            backlog.attach_pr(ticket, pr_url)
+        try:
+            backlog.add_comment(ticket,
+                f"⚠️ Passed review — not auto-merged.\n"
+                f"• Reason: {reason}\n"
+                + (f"• PR: {pr_url}" if pr_url else "• Open a PR manually."))
+            if pr_url:
+                backlog.attach_pr(ticket, pr_url)
+        except Exception as exc:  # noqa: BLE001 — the PR already exists; never lose its link
+            audit.record("tracker_reconcile_needed", ticket_id=ticket.id, phase="pr_opened",
+                         pr_url=pr_url, error=str(exc).splitlines()[0][:200])
+            print(f"  land · PR opened but the tracker update failed ({exc}) — PR: {pr_url}", flush=True)
     _notify(cfg, f"⚠️ {ticket.id} needs you — not auto-merged ({reason})\n"
             + (pr_url or "open a PR manually"))
     audit.record(Outcome.PR_OPENED.audit_event, ticket_id=ticket.id, reason=reason, pr_url=pr_url)
