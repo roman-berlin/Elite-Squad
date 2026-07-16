@@ -233,6 +233,13 @@ class Config:
     #     once proven live, which then unlocks retiring the separate Test Engineer coverage pass. ---
     planner_enabled: bool = False
 
+    # EU-225: when the Planner independently verdicts CLOSE/ANSWER AND the ticket id is provably
+    # already shipped (in the Technical Writer changelog AND a commit on origin/<base>), close it to
+    # QA with evidence instead of rebuilding it (EU-191 was fully rebuilt 2 days after it landed).
+    # Double-keyed + routes to QA (reversible, not Done) so the old senior_pm auto-close mistake
+    # can't recur. Set False to fall back to the conservative "build anyway".
+    autoclose_already_landed: bool = True
+
     # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
     #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
     #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as

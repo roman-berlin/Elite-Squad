@@ -109,6 +109,37 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
         return False
 
 
+def _already_landed(app: AppConfig, ticket_id: str) -> str | None:
+    """EU-225: deterministic, read-only evidence that ``ticket_id`` already SHIPPED — its id in the
+    Technical Writer's changelog (written only on a successful live land) AND a commit on
+    ``origin/<base>`` whose message references it. BOTH must hit (double-keyed) so a stale changelog
+    line or an unrelated "relates to X" commit mention alone can't trigger a close. Returns a short
+    evidence string (commit sha) or None. Best-effort: any error → None (fall back to building)."""
+    tid = (ticket_id or "").strip()
+    if not tid:
+        return None
+    # Changelog hit — match the `· <TID> ·` field, not a loose substring (so EU-19 ≠ EU-191).
+    try:
+        cl = _changelog_path().read_text()
+    except Exception:  # noqa: BLE001
+        cl = ""
+    changelog_hit = any(f"· {tid} ·" in ln for ln in cl.splitlines() if ln.startswith("- "))
+    if not changelog_hit:
+        return None
+    # Git-log corroboration on origin/<base> in the app repo.
+    try:
+        base = f"origin/{app.base_branch}"
+        r = subprocess.run(
+            ["git", "log", base, "--grep", tid, "--fixed-strings", "--pretty=%h", "-n", "1"],
+            cwd=os.path.expanduser(app.repo_path), capture_output=True, text=True, timeout=30)
+        sha = (r.stdout or "").strip().splitlines()[0] if (r.returncode == 0 and r.stdout.strip()) else None
+    except Exception:  # noqa: BLE001
+        sha = None
+    if sha:
+        return f"already landed — commit {sha} on origin/{app.base_branch} + Technical Writer changelog entry"
+    return None
+
+
 _HALT_MARKERS = ("halt", "stop", "do not proceed", "precondition", "made no writes",
                  "no files were written", "no files written", "will not edit", "will not proceed",
                  "cannot proceed", "refuse", "abort", "needs your", "for the commander", "holding for")
@@ -1152,6 +1183,30 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             if _pres.verdict not in ("BUILD", "SPLIT"):
                 audit.record("planner_nonbuild_verdict", ticket_id=ticket.id,
                              verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
+                # EU-225: if the Planner independently says CLOSE/ANSWER AND the ticket is provably
+                # already shipped (changelog + origin/<base> commit), close it to QA with evidence
+                # rather than rebuilding landed work (EU-191 was rebuilt 2 days after it merged).
+                # Double-keyed (verdict + code evidence) and routed to QA — reversible, never Done.
+                _ev = None
+                if getattr(cfg, "autoclose_already_landed", True) and _pres.verdict in ("CLOSE", "ANSWER") \
+                        and not ticket.ephemeral and not cfg.dry_run:
+                    _ev = _already_landed(app, ticket.id)
+                if _ev:
+                    try:
+                        backlog.set_status(ticket, "QA")
+                        backlog.add_comment(
+                            ticket, f"✅ Auto-closed to QA — {_ev}. The Planner verdicted "
+                                    f"{_pres.verdict} and the work is already on origin/{app.base_branch}; "
+                                    "not rebuilding (EU-225). Reopen to To Do to force a rebuild.")
+                    except Exception as _exc:  # noqa: BLE001 — a board hiccup must not rebuild landed work
+                        print(f"  · already-landed close: board update failed ({_exc}); reported anyway.",
+                              flush=True)
+                    audit.record("already_landed_autoclose", ticket_id=ticket.id,
+                                 verdict=_pres.verdict, evidence=_ev)
+                    print(f"  ✅ {ticket.id}: {_ev} + Planner {_pres.verdict} → closed to QA, not rebuilt.",
+                          flush=True)
+                    return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name,
+                                                 branch, notes=f"already landed — closed to QA: {_ev}"))
                 print(f"  planner · verdict {_pres.verdict} — building anyway (conservative; verdict "
                       "routing is a guarded follow-up)", flush=True)
             else:
