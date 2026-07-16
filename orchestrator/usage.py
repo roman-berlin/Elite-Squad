@@ -439,6 +439,7 @@ def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force
             }
 
     over_limits = []
+    blind = False
     try:
         usage_data = plan_usage(cfg, now=t, force=force)
         if usage_data.get("available"):
@@ -446,8 +447,15 @@ def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force
                 util = float(limit.get("utilization", 0.0))
                 if util >= 1.0:
                     over_limits.append(limit)
+        else:
+            # EU-357: the probe returned no usage data (refused / rate-limited / offline). The old
+            # code silently fell through to hit=False — "fails OPEN", so an exhausted window looked
+            # like plenty of headroom and the drain churned. Surface the blindness so the caller can
+            # distinguish "verified under limit" from "couldn't tell" (the drain's barren-cycle
+            # breaker is the actual backstop; this makes the blind window diagnosable).
+            blind = True
     except Exception:  # noqa: BLE001 — plan-limit detection must never break the loop
-        pass
+        blind = True
 
     hit = len(over_limits) > 0
     _plan_limit_hit_cache = {
@@ -460,6 +468,7 @@ def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force
     return {
         "hit": hit,
         "over_limits": over_limits,
+        "blind": blind,
         "checked_at": t
     }
 
