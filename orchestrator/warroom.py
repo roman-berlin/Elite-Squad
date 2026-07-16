@@ -2294,7 +2294,7 @@ startStream();
         if(data.error){
           outLine.innerHTML='<span class=term-err>Error: '+data.error.replace(/</g,"&lt;")+'</span>';
         }else if(data.output){
-          outLine.innerHTML='<span class=term-out>'+data.output.replace(/</g,"&lt;").replace(/\n/g,"<br>")+'</span>';
+          outLine.innerHTML='<span class=term-out>'+data.output.replace(/</g,"&lt;").replace(/\\n/g,"<br>")+'</span>';
         }else{
           outLine.innerHTML='<span class=term-out>(no output)</span>';
         }
