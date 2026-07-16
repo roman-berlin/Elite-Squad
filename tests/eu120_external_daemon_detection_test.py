@@ -144,7 +144,21 @@ _test_internal_autopilot_external_false()
 # =============================================================================
 
 def _test_external_daemon_stopping_behavior() -> None:
-    """External daemon detection should respect stop_event behavior."""
+    """An EXTERNAL daemon is never 'stopping' because of a LOCAL stop_event (EU-336).
+
+    This scenario — no local loop (``autopilot_on=False``), an already-set Event left in the state, and
+    the real drain in a DIFFERENT process (``daemon_is_external`` True) — used to assert ``stopping=True``.
+    That expectation encoded the 2026-07-15 control-plane lie: a ``stop_event`` is an in-process
+    ``threading.Event`` and CANNOT signal another process's loop, so reporting "stopping…" for an external
+    daemon promised a stand-down nobody had ordered and no reachable loop would ever honour. Worse, the
+    Event here is a leftover from THIS cockpit's own earlier drain — precisely the stale-event path that
+    made the live unit unstoppable-looking while it drained on.
+
+    EU-336 gates ``stopping`` on ``internal_on`` (a live in-process loop), not the wider ``on`` (which
+    ORs in the cross-process PID probe). So the honest snapshot for an external daemon is on=True,
+    external=True, stopping=False — the badge no longer claims a stop it can't deliver. Stopping an
+    external launchd/terminal daemon goes through ``_stop_launchd_daemon`` / SIGTERM, not this Event.
+    """
     cockpit_state.reset_run_state()
     st = cockpit_state.get_state("automatixy")
     st["autopilot_on"] = False
@@ -155,7 +169,8 @@ def _test_external_daemon_stopping_behavior() -> None:
     with patch("orchestrator.autopilot.daemon_running", return_value=True), \
          patch("orchestrator.autopilot.daemon_is_external", return_value=True):
         s = cockpit_state.get_autopilot_status("automatixy")
-        chk("external daemon with stop_event: stopping=True", s["stopping"] is True, str(s))
+        chk("external daemon: stopping=False — a local Event can't stand down another process (EU-336)",
+            s["stopping"] is False, str(s))
         chk("external daemon with stop_event: on=True", s["on"] is True, str(s))
         chk("external daemon with stop_event: external=True", s["external"] is True, str(s))
 

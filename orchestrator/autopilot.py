@@ -15,6 +15,7 @@ would be re-picked every cycle. Use --once for dry-run checks.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import signal
@@ -914,6 +915,22 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # release, so we never clear or clobber someone else's run-state.
         owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
         run_state = cockpit_state.get_state(run_key)
+        # EU-336: bind THIS loop's stop_event as the app's authoritative stop signal — whether or not
+        # the claim above succeeded. claim_run binds only on success, so on a failed claim (which this
+        # function deliberately survives, running on with owns_run_state=False) the state kept pointing
+        # at the PREVIOUS owner's Event — the cockpit's Stop would set that dead Event, read it back as
+        # "stopping", and this loop, polling the Event nobody could reach, would drain on. (Forensics
+        # note: the live 2026-07-15 22:39→01:53 incident was NOT this path — its binding was correct
+        # and its root cause was run_loop's disarmed stop checks, fixed at the run_loop call below.
+        # This dead-event hole is the ADJACENT stop-path defect the same investigation proved
+        # reachable, closed here.) The loop is the authority on its own stop signal, so it rebinds
+        # unconditionally on entry.
+        #
+        # Ordering is load-bearing on BOTH sides: bind BEFORE raising autopilot_on (below), and in the
+        # finally drop autopilot_on BEFORE unbinding. autopilot_on is what makes the cockpit offer a
+        # Stop button and what gates ``stopping`` — so there must be no instant where it is true while
+        # the reachable event isn't this loop's.
+        cockpit_state.bind_stop_event(run_key, stop_event)
         # EU-103: flag THIS app's run as an autopilot run (distinct from a manual cockpit/answer-box
         # run, which sets ``active`` but not ``autopilot_on``). This is the dedicated signal the cockpit
         # control reads via get_autopilot_status(app), so a manual run never renders as "Autopilot ON".
@@ -1271,7 +1288,20 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # best-effort transition a freshly-parked ERRORED ticket to Blocked without re-fetching it.
             by_id = {t.id: (a, t) for (a, t) in worklist}
 
-            reports = await run_loop(cfg, worklist, audit)
+            # EU-336 (the ACTUAL 2026-07-15 incident fix): arm run_loop's ticket-boundary stop check
+            # with this drain's own event. Until now the event armed only THIS loop's per-cycle check
+            # — but one run_loop call IS a whole cycle, and EU-201 fragment injection extends its
+            # worklist IN PLACE mid-run, so a "cycle" can run for hours (22:40→01:53 live: EU-321
+            # split into EU-350..353 and the drain ordered at ~22:50 wasn't honoured until 01:53).
+            # Deliberately the boundary-only channel, NOT stop_event= — the drain's promise is "let
+            # the in-flight ticket land on DEV, then stand down", and the full channel would also arm
+            # the pre-build/pre-merge aborts that kill or abandon the in-flight build. The signature
+            # guard follows the loop.py `_land` idiom: many harnesses stub run_loop with a bare
+            # (cfg, worklist, audit) fake, and this seam must not force them all to grow the kwarg.
+            if "stop_between_tickets" in inspect.signature(run_loop).parameters:
+                reports = await run_loop(cfg, worklist, audit, stop_between_tickets=stop_event)
+            else:
+                reports = await run_loop(cfg, worklist, audit)
 
             # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
             # parking so a transient blip doesn't sideline a ticket for hours.
@@ -1395,6 +1425,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # Start path's own finally also clears it.)
         if run_state is not None:
             run_state["autopilot_on"] = False
+        # EU-336: retract this loop's stop signal now that it has stood down, so the Event can never
+        # outlive the loop that polled it. A bound-but-dead Event is exactly what made the cockpit lie:
+        # Stop set it, ``stopping`` read it back as true, and no loop was left to honour it. Identity-
+        # checked inside, so if a NEWER drain for this app already rebound its own event while this one
+        # was winding down, we leave the live binding alone instead of blanking it. Unconditional (not
+        # gated on owns_run_state) — the mirror of the unconditional bind above.
+        if run_state is not None:
+            cockpit_state.unbind_stop_event(run_key, stop_event)
         # Release THIS project's run-state if we own it (clears active / run_started / stop_event) and
         # drop the dry/live tag, so the per-project board shows no stale run once autopilot stands down.
         # (run_state may still be None if claim_run() never ran — an early raise during setup.)

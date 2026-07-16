@@ -147,3 +147,40 @@ Before any item is "done":
 - For loop/autopilot changes, a `--once` dry-run live check.
 - Self-review checklist (no secrets in code, error paths covered, docs updated).
 - Update `CHANGELOG.md` / `SYSTEM_OVERVIEW.md` where behaviour or config changes.
+
+---
+
+## EU-336 stop-path investigation — deferred findings (2026-07-16)
+
+Adversarially-reviewed residuals from the EU-336 land (cockpit Stop must reach the running drain).
+None is reachable through today's call graph in the serve process — each is an enforced-invariant gap,
+not a live bug. IDs continue the F-series.
+
+### F17 — `release_run` / `autopilot_on` writes are not identity-guarded · **P2 · S**
+- `unbind_stop_event` is identity-checked so a superseded loop can't blank a newer loop's binding, but
+  the same wind-down path still writes unconditionally: `run_state["autopilot_on"] = False`
+  ([autopilot.py](../orchestrator/autopilot.py) finally) and `release_run`'s blanket
+  `st["stop_event"] = None` ([cockpit_state.py](../orchestrator/cockpit_state.py)). If two loops ever
+  coexist on one key (an owner exiting + a claim-failed survivor), the owner's exit turns the survivor's
+  badge OFF and blanks its binding — cockpit-unstoppable again, now with no badge. **AC:** an exiting
+  superseded loop leaves a live loop's `autopilot_on` + binding intact (identity-pair the writes).
+  **Trade-off:** release_run has many callers; changing its semantics needs a sweep.
+### F18 — CLI/daemon autopilot surviving a failed claim can hijack a manual run's stop event · **P2 · S**
+- In a NON-serve process, `autopilot()`'s unconditional `bind_stop_event` would overwrite a manual
+  run's bound event if one held the slot (the serve process is safe: its route refuses to start
+  autopilot over a held slot). `/api/stop-run` would then signal the autopilot instead of the manual
+  run, and the identity-checked unbind leaves the binding `None` on exit — the manual run's event is
+  never restored. **AC:** a claim-failed autopilot() refuses to clobber a MANUAL run's binding (bind
+  only when the displaced event is absent/its own), or restores the displaced event on exit.
+### F19 — `get_autopilot_status` reads `stop_event`/`autopilot_on` lock-free — torn snapshot · **P3 · XS**
+- A status poll racing a loop handover can pair the OLD loop's set event with the NEW loop's
+  `autopilot_on=True` and render one spurious "Stopping…" SSE tick (self-corrects next poll).
+  **AC:** take `run_lock_for(app)` around the two reads. **Trade-off:** none — cosmetic today.
+### F20 — plan-limit probe spawns a REAL `claude -p` CLI under the test suite · **P1 · S**
+- `usage._probe_plan_limits()` (fired from `/api/run`'s `_bg` finally via `plan_limit_hit(cfg,
+  force=True)`, EU-191) launches a real `claude -p . --model haiku` subprocess. Harnesses that drive
+  `/api/run` (eu60/eu63/eu64/eu336 among others) each orphan one — accumulating CPU load that flips
+  timing-sensitive checks suite-wide (the 2026-07-16 eu64/eu203 flakes; same class as the 2026-07-15
+  process-hygiene lesson). **AC:** no real `claude` subprocess is ever spawned by a `tests/run_all.py`
+  run — gate the probe on the stubbed-SDK sentinel or an env flag the suite sets, and pin it with a
+  harness. **Trade-off:** none in production; the probe still runs live.

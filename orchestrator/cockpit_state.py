@@ -161,6 +161,50 @@ def claim_run(app: str | None = None, *, dry_run: bool | None = None,
             return True
 
 
+def bind_stop_event(app: str | None, stop_event: object) -> None:
+    """Make ``stop_event`` THE authoritative stop signal for ``app`` — the one the cockpit reaches.
+
+    The invariant this exists to hold (EU-336): *while ``autopilot_on`` is true for an app, the event
+    reachable at ``st["stop_event"]`` IS the event that app's live loop polls.*
+
+    ``claim_run`` binds the event only on a SUCCESSFUL claim, which silently drops it on a failed one.
+    That is not a theoretical gap: ``autopilot()`` treats a failed claim as "someone else owns the run
+    slot" and runs the drain ANYWAY (``owns_run_state=False``), polling a local Event that the state
+    never learned about. The slot's previous owner's Event stays bound — so the cockpit's Stop/drain
+    sets a DEAD event, ``get_autopilot_status`` reads that same dead event back as ``stopping: true``,
+    and the live loop — never signalled — keeps picking new tickets: unstoppable except by killing the
+    process. (The live 2026-07-15 22:39→01:53 drain that motivated EU-336 turned out, on audit-log
+    forensics, NOT to be this path — its binding was correct and its stop was late because run_loop's
+    ticket-boundary stop check was never armed; see loop.run's ``stop_between_tickets``. This binding
+    hole is the adjacent defect the same investigation demonstrated with a live repro harness.)
+
+    So binding must NOT be conditional on owning the slot: the live loop is the authority on its own
+    stop signal, and it rebinds on entry. Pair every bind with ``unbind_stop_event`` on the way out so
+    the event can never outlive the loop that polls it and go stale.
+    """
+    with run_lock_for(app):
+        get_state(app)["stop_event"] = stop_event
+
+
+def unbind_stop_event(app: str | None, stop_event: object) -> bool:
+    """Clear ``app``'s bound stop event — but ONLY when it is still ``stop_event`` (identity-checked).
+
+    The mirror of ``bind_stop_event``, and the reason a stale event can't linger: an exiting loop
+    retracts its own signal, so nothing can later ``.set()`` a dead Event and be told ``stopping: true``.
+
+    Identity-checked so a loop that has already been SUPERSEDED (a newer drain for the same app rebound
+    its own event while this one was winding down) can't clear the live loop's binding on its way out —
+    the same last-writer-wins hazard, just in the other direction. Returns True when this call actually
+    cleared the binding.
+    """
+    with run_lock_for(app):
+        st = get_state(app)
+        if st.get("stop_event") is stop_event:
+            st["stop_event"] = None
+            return True
+        return False
+
+
 def release_run(app: str | None = None) -> None:
     """Release ``app``'s run slot on any terminal outcome (merged / errored / no_changes /
     postmortem / stopped).
@@ -264,9 +308,16 @@ def get_autopilot_status(app: str | None = None) -> dict:
     # per-app ``autopilot_on`` flag is False (the daemon lives in a different process).
     on = internal_on or external_daemon
 
+    # EU-336: ``stopping`` is gated on ``internal_on``, NOT ``on``. A stop_event is an in-process
+    # threading.Event — it can only ever signal a loop running in THIS process, so an EXTERNAL daemon
+    # (a different process; ``on`` is true via the PID-file probe) can never be "stopping" because of
+    # a local Event. Reading it through the wider ``on`` let a leftover Event from this cockpit's own
+    # earlier drain render a foreign daemon as "stopping…" forever — a badge that promised a stand-down
+    # nobody had ordered and no loop would honour. Only the live local loop's own event speaks here;
+    # ``bind_stop_event`` guarantees that is the one bound while ``autopilot_on``.
     return {
         "on": on,
-        "stopping": bool(on and stop_ev is not None and stop_ev.is_set()),
+        "stopping": bool(internal_on and stop_ev is not None and stop_ev.is_set()),
         "mode": st.get("autopilot_mode"),
         "external": external_daemon,
     }

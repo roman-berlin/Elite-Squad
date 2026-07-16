@@ -435,7 +435,16 @@ def _worktree_lock(worktree_path: str):
 
 
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
-              audit: AuditLog, stop_event=None) -> list[TicketReport]:
+              audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
+    # EU-336: ``stop_between_tickets`` is the TICKET-BOUNDARY-ONLY stop channel, distinct from
+    # ``stop_event`` (which also arms the pre-build and pre-merge aborts inside _attempt). The
+    # autopilot drain passes its stop Event here and NOT as stop_event, because the drain's contract
+    # is "let the in-flight ticket land on DEV, then stand down" — arming the mid-ticket checkpoints
+    # would kill a build in flight or abandon a finished build before its merge. This channel is what
+    # was MISSING on 2026-07-15: the drain's event armed only autopilot's own per-CYCLE check, and a
+    # single cycle ran 3h13m because EU-201 fragment injection kept extending the live worklist
+    # in place (EU-321 → EU-350..353 → EU-334 → EU-339), so a 22:50 stop wasn't honoured until 01:53.
+    # With this armed, that stop lands at the next ticket boundary (23:12) instead.
     # EU-189: pin THIS run's model backend (Opus vs GLM) for every officer SDK call. set_backend
     # writes a run-scoped contextvar that agent._run_agent_unrouted reads at the single SDK seam,
     # so all officers inherit the choice with no per-call plumbing. Each run executes in its own
@@ -451,7 +460,7 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE),
                                      registry=ModelRegistry(cfg))
     try:
-        return await _run_inner(cfg, worklist, audit, stop_event)
+        return await _run_inner(cfg, worklist, audit, stop_event, stop_between_tickets)
     finally:
         backends.reset_backend(_bk_token)
 
@@ -479,7 +488,7 @@ def _fetch_fragments_to_worklist(cfg: Config, app: AppConfig,
 
 
 async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
-                     audit: AuditLog, stop_event=None) -> list[TicketReport]:
+                     audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     gits: dict[str, Git] = {}
@@ -509,7 +518,11 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
         while i < len(worklist):
             app, ticket = worklist[i]
             i += 1
-            if stop_event is not None and stop_event.is_set():
+            # EU-336: the ticket boundary honours BOTH stop channels — the full stop_event (manual
+            # runs, also armed mid-ticket) and the boundary-only drain channel (autopilot; the
+            # in-flight ticket just landed, so standing down here is exactly the drain's promise).
+            if (stop_event is not None and stop_event.is_set()) or \
+                    (stop_between_tickets is not None and stop_between_tickets.is_set()):
                 audit.record("run_stopped", reason="commander stop (before ticket)")
                 print("  ■ stopped by Commander — remaining tickets skipped.", flush=True)
                 break
