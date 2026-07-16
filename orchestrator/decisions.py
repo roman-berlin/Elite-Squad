@@ -85,22 +85,29 @@ def _validate_question_format(question: str) -> tuple[bool, str]:
 
     # Detect leaked internal monologue / chain-of-thought - these are exact patterns
     # that should NEVER appear in a question sent to the Commander.
-    # Check both at start and anywhere in the text (PM's "WHY PM CANNOT RESOLVE" prefix can
-    # precede the leaked monologue, so we need to check the full text).
-    leaked_patterns = [
+    # Distinctive markers are rejected ANYWHERE (PM's "WHY PM CANNOT RESOLVE" prefix can precede
+    # the leaked monologue). Common English openers are only rejected when a LINE STARTS with
+    # them (EU-358): as bare substrings they ate legitimate decisions — e.g. any option text
+    # containing "…I need to know if sessions matter" silently voided the whole question.
+    leaked_anywhere = [
         "## ANALYSIS",
-        "Looking at the",
         "Reality check on",
+    ]
+    leaked_line_start = [
+        "Looking at the",
         "I need to",
         "Let me",
         "Based on the",
     ]
     q_lower = q.lower()
-    for pattern in leaked_patterns:
-        pattern_lower = pattern.lower()
-        # Check if it starts with the pattern OR if the pattern appears anywhere in the text
-        if q_lower.startswith(pattern_lower) or pattern_lower in q_lower:
+    for pattern in leaked_anywhere:
+        if pattern.lower() in q_lower:
             return False, f"leaked internal monologue (contains '{pattern[:20]}')"
+    for line in q_lower.split("\n"):
+        stripped = line.strip()
+        for pattern in leaked_line_start:
+            if stripped.startswith(pattern.lower()):
+                return False, f"leaked internal monologue (contains '{pattern[:20]}')"
 
     # Raw markdown headers (##, ###) - these should NEVER appear in a Commander-facing question
     # They indicate leaked developer markdown. More lenient check: only if they appear
@@ -524,8 +531,11 @@ def handle_command(cfg, audit, text: str) -> bool:
         notify.send("▶️ " + ap_mod.unblock(cfg, arg or None) + " — autopilot will retry it.")
     elif cmd in ("run", "drain"):
         import copy
-        live = "--live" in arg
-        arg = arg.replace("--live", "").strip()
+        # EU-358: token-anchored — a bare substring test made any argument CONTAINING "--live"
+        # (e.g. a /run description mentioning "--liveness") silently flip the run to LIVE.
+        toks = arg.split()
+        live = "--live" in toks
+        arg = " ".join(t for t in toks if t != "--live").strip()
         rcfg = copy.copy(cfg)        # per-invocation config — never mutate the shared cfg
         rcfg.dry_run = not live
         try:
