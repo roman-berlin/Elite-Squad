@@ -57,15 +57,26 @@ def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) ->
             )
             try:
                 stdout, stderr = proc.communicate(timeout=app.gate_timeout_sec)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as texc:
                 # EU-146: Kill entire process group to prevent orphaned children
                 try:
                     os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
                 except (ProcessLookupError, OSError):
                     proc.kill()
-                # Reap the zombie and get partial output
-                stdout, stderr = proc.communicate()
-                failures.append(f"$ {cmd}\n(timed out after {app.gate_timeout_sec}s)")
+                # Reap the zombie and get partial output. The reap itself must be BOUNDED (EU-358):
+                # a grandchild that re-daemonized into its own session survives the killpg and keeps
+                # the pipe FDs open, so an unbounded communicate() here froze the whole drain.
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except Exception:  # noqa: BLE001 - TimeoutExpired again, or a closed-pipe race
+                    stdout = texc.stdout or b""
+                    stderr = texc.stderr or b""
+                # Keep the partial output tail — a timeout report with no evidence made every
+                # timeout look identical (EU-346 triage needs to see WHERE the suite stalled).
+                tail = (stdout.decode("utf-8", errors="replace") + "\n"
+                        + stderr.decode("utf-8", errors="replace")).strip()[-2000:]
+                failures.append(f"$ {cmd}\n(timed out after {app.gate_timeout_sec}s)"
+                                + (f"\n[partial output before the kill]\n{tail}" if tail else ""))
                 continue
         except Exception as exc:
             failures.append(f"$ {cmd}\n({exc!r})")
