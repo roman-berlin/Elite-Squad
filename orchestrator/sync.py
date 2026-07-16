@@ -315,6 +315,31 @@ def promote(cfg: Config) -> dict[str, Any]:
     if not can_promote():
         out["error"] = "promote not allowed on this cockpit"
         return out
+    # EU-367 / EU-335: the cockpit can be running a STALE local dev — autopull's fast-forward is
+    # blocked whenever the unit's own runtime files leave the tree dirty — and `push dev:main` would
+    # then ship OLD code to production while reporting success (the "0 shipped" daily-brief incident).
+    # Fetch origin/dev and refuse unless the local dev ref is EXACTLY origin/dev, so a deploy can only
+    # ever ship what is actually on the shared dev branch, and staleness surfaces instead of shipping.
+    try:
+        _git(repo, "fetch", "origin", "dev")
+        local_dev = (_git(repo, "rev-parse", "dev").stdout or "").strip()
+        origin_dev = (_git(repo, "rev-parse", "origin/dev").stdout or "").strip()
+    except subprocess.TimeoutExpired:
+        out["error"] = "could not verify dev is current (fetch timed out) — check network/credentials"
+        return out
+    except (subprocess.SubprocessError, OSError) as e:
+        out["error"] = "could not verify dev is current before deploy: " + str(e)[:150]
+        return out
+    if local_dev and origin_dev and local_dev != origin_dev:
+        behind = _git(repo, "rev-list", "--count", "dev..origin/dev")
+        n_behind = int((behind.stdout or "0").strip() or "0") if behind.returncode == 0 else 0
+        if n_behind > 0:
+            out["error"] = (f"local dev is STALE — {n_behind} commit(s) behind origin/dev (this cockpit "
+                            "is running behind). Pull dev, then deploy — refusing to ship old code.")
+        else:
+            out["error"] = ("local dev has commits not yet on origin/dev — push dev first, then deploy "
+                            "(refusing to ship commits that aren't on the shared branch).")
+        return out
     # Inlined promote_status logic: compute how far dev is ahead of main
     try:
         r = _git(repo, "rev-list", "--count", "main..dev")
