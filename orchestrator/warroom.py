@@ -2195,7 +2195,7 @@ startStream();
     var linesHtml=runlogBuffer.map(function(line){
       var low=line.toLowerCase();
       var cls="";
-      if("merged" in low || "✓" in line || " pass" in low || "ready" in low){
+      if(low.includes('merged') || line.includes('✓') || low.includes(' pass') || low.includes('ready')){
         cls="lg-ok";
       }else if(/error|fail|park|block|✗|reject/.test(low)){
         cls="lg-b";
