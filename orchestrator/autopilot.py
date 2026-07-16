@@ -47,6 +47,11 @@ _PID_FILE = Path(os.environ.get("GENERAL_PID_FILE") or "/tmp/general-autopilot.p
 _MAX_BARREN_CYCLES = 3
 _USAGE_HOLD_COOLDOWN_S = 1800.0
 
+# EU-310: exclude a just-merged ticket from re-selection for this long, so a lost or lagging
+# post-merge Jira transition can't make the drain rebuild already-merged code. Long enough for board
+# propagation + a self-update restart; short enough that a genuinely re-opened ticket isn't stuck.
+_MERGED_COOLDOWN_S = 600.0
+
 # Refcount of live in-process autopilot() runs holding the (process-wide) PID file. The cockpit
 # runs each per-app drain as a thread of the ONE serve process, so every drain writes the SAME
 # pid — a bare contents==getpid() ownership check let the FIRST drain to exit delete the file
@@ -1024,6 +1029,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # a cooldown, one alert, one audit event; auto-resume when the cooldown expires.
         usage_hold_until = 0.0
         consecutive_barren = 0
+        # EU-310: a ticket that modifies the unit's OWN code merges but its post-merge Jira transition
+        # can be lost or lag propagation, so the board still shows In Progress and the drain re-picks
+        # and rebuilds already-merged code (EU-307, 2026-07-14 — re-picked 19s after merge). Track the
+        # ids merged this process and exclude them from the worklist for a short cooldown, regardless
+        # of what the board says — the durable prevention that doesn't depend on the transition landing.
+        recently_merged: dict[str, float] = {}
         # 2026-07-15: base-level hold, PER APP. A red or timed-out BASE gate applies to the whole
         # app — picking it again before the red-base cache would re-verify (gate._RED_BASE_RED_TTL_S)
         # just parks one more ticket per cycle (the needs_human massacre: ~60 tickets in the 04:20
@@ -1268,10 +1279,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # the pre-EU-87 contract eu61_autopilot_resume_queue_test.py pins (capping the *combined*
             # list instead silently truncated the To Do tail when cap was small).
             raw = intake.from_drain(cfg, app_name, cap + len(blocked) + len(resumed) + 5)
+            # EU-310: drop keys merged in the last _MERGED_COOLDOWN_S — the board may still show them
+            # In Progress (lost/lagging transition), and re-picking rebuilds already-merged code.
+            _now_m = time.time()
+            recently_merged = {k: ts for k, ts in recently_merged.items()
+                               if _now_m - ts < _MERGED_COOLDOWN_S}
+            _pick_exclude = blocked | set(recently_merged)
             # EU-344: the tier split is a pure helper so the picker layer is unit-testable — the
             # ticket's core finding was "priority doesn't steer" with the bug living HERE, yet no
             # regression pinned that To Do is picked in adapter (priority DESC, Rank ASC) order.
-            worklist = _assemble_worklist(raw, blocked, resumed, cap)
+            worklist = _assemble_worklist(raw, _pick_exclude, resumed, cap)
 
             # EU-228: hold any app whose gate/worktree-setup toolchain is missing a binary on this
             # machine — one alert for the WHOLE app, its tickets simply don't run this cycle (no
@@ -1381,6 +1398,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # auto-resume does NOT fire. The cycle is Blocked→(Commander answers again)→resume,
             # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
             # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
+            # EU-310: remember what merged this cycle so the next pick can't re-select it while the
+            # board catches up to the Done/QA transition (or if that transition was lost).
+            for r in reports:
+                if r.outcome is Outcome.MERGED:
+                    recently_merged[r.ticket_id] = time.time()
+
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
             # EU-228: infra-classified ERRORED reports (network/DNS/timeout/5xx — a turn-limit is
             # NEVER infra, see infra_classify.classify) contribute no strike at all.
