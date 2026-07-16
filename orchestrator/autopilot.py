@@ -920,7 +920,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # release, so we never clear or clobber someone else's run-state.
         owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
         run_state = cockpit_state.get_state(run_key)
-        # EU-336: bind THIS loop's stop_event as the app's authoritative stop signal — whether or not
+        # EU-356: bind THIS loop's stop_event as the app's authoritative stop signal — whether or not
         # the claim above succeeded. claim_run binds only on success, so on a failed claim (which this
         # function deliberately survives, running on with owns_run_state=False) the state kept pointing
         # at the PREVIOUS owner's Event — the cockpit's Stop would set that dead Event, read it back as
@@ -1298,7 +1298,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # best-effort transition a freshly-parked ERRORED ticket to Blocked without re-fetching it.
             by_id = {t.id: (a, t) for (a, t) in worklist}
 
-            # EU-336 (the ACTUAL 2026-07-15 incident fix): arm run_loop's ticket-boundary stop check
+            # EU-356 (the ACTUAL 2026-07-15 incident fix): arm run_loop's ticket-boundary stop check
             # with this drain's own event. Until now the event armed only THIS loop's per-cycle check
             # — but one run_loop call IS a whole cycle, and EU-201 fragment injection extends its
             # worklist IN PLACE mid-run, so a "cycle" can run for hours (22:40→01:53 live: EU-321
@@ -1435,7 +1435,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # Start path's own finally also clears it.)
         if run_state is not None:
             run_state["autopilot_on"] = False
-        # EU-336: retract this loop's stop signal now that it has stood down, so the Event can never
+        # EU-356: retract this loop's stop signal now that it has stood down, so the Event can never
         # outlive the loop that polled it. A bound-but-dead Event is exactly what made the cockpit lie:
         # Stop set it, ``stopping`` read it back as true, and no loop was left to honour it. Identity-
         # checked inside, so if a NEWER drain for this app already rebound its own event while this one

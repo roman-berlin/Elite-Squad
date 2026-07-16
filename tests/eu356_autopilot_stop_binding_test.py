@@ -1,4 +1,4 @@
-"""EU-336 — the cockpit's Stop must reach, and actually stop, the loop that is running.
+"""EU-356 — the cockpit's Stop must reach, and actually stop, the loop that is running.
 
 THE INCIDENT (2026-07-15, live). A drain was ordered to stop from the cockpit at ~22:50. It reported
 back ``{"on": true, "stopping": true}`` — and then picked four MORE tickets (EU-350 23:12, EU-351
@@ -241,7 +241,7 @@ try:
         live_before.get("on") is True and loop_state["ev"] is not None, f"{live_before}")
     chk("POST /api/autopilot action=drain STOPS the running per-app loop end-to-end",
         loop_state["stopped"] is True, "the drain POST never reached the live loop")
-    # EU-336: the stop REQUEST itself must land in the audit trail (the live forensics couldn't place
+    # EU-356: the stop REQUEST itself must land in the audit trail (the live forensics couldn't place
     # the operator's click closer than a 3-hour window because ev.set() left no trace).
     _audit2 = Path(str(tmp / "audit2.jsonl"))
     _stop_reqs = ([json.loads(l) for l in _audit2.read_text().splitlines() if l.strip()]
@@ -379,7 +379,7 @@ chk("…and the boundary stop is recorded (run_stopped — zero of these existed
 # controls inline; section 3's route wiring predates the fix.)
 cockpit_state.reset_run_state()
 _real_bind = cockpit_state.bind_stop_event
-cockpit_state.bind_stop_event = lambda app, ev: None        # ← pre-EU-336 behaviour
+cockpit_state.bind_stop_event = lambda app, ev: None        # ← pre-EU-356 behaviour
 try:
     prefix_foreign = threading.Event()
     cockpit_state.claim_run(APP, stop_event=prefix_foreign)  # slot pre-held → claim fails → event dropped
@@ -411,7 +411,7 @@ finally:
     cockpit_state.bind_stop_event = _real_bind
     cockpit_state.reset_run_state()
 
-print("\n===== AUTOPILOT STOP-PATH QA (EU-336: binding + ticket-boundary drain) =====")
+print("\n===== AUTOPILOT STOP-PATH QA (EU-356: binding + ticket-boundary drain) =====")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
     print(f"  [{'PASS' if ok else 'FAIL'}] {n}" + (f"  ({det})" if det and not ok else ""))

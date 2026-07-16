@@ -150,9 +150,9 @@ Before any item is "done":
 
 ---
 
-## EU-336 stop-path investigation — deferred findings (2026-07-16)
+## EU-356 stop-path investigation — deferred findings (2026-07-16)
 
-Adversarially-reviewed residuals from the EU-336 land (cockpit Stop must reach the running drain).
+Adversarially-reviewed residuals from the EU-356 land (cockpit Stop must reach the running drain).
 None is reachable through today's call graph in the serve process — each is an enforced-invariant gap,
 not a live bug. IDs continue the F-series.
 

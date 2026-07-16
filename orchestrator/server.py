@@ -652,7 +652,7 @@ def create_app(cfg: Config):
             # "stopping" until the worker's finally clears autopilot_on. Acts on the SELECTED app's
             # state — never a single global autopilot — so draining one project leaves others running.
             ev = st.get("stop_event")
-            # EU-336: record the REQUEST itself. ev.set() leaves no trace, so the 2026-07-15 forensics
+            # EU-356: record the REQUEST itself. ev.set() leaves no trace, so the 2026-07-15 forensics
             # could not place the operator's drain click closer than "somewhere in a 3-hour window" —
             # every stop order now lands in the audit trail whether or not a live event was reachable.
             audit.record("autopilot_stop_requested", action="drain", app=app_name or "",
@@ -677,7 +677,7 @@ def create_app(cfg: Config):
             # Immediate stop for THIS project: flip its autopilot OFF now (the in-flight build still
             # finishes in the background) and signal only this app's stop_event.
             ev = st.get("stop_event")
-            # EU-336: same request-trail as the drain branch — the click itself must be auditable.
+            # EU-356: same request-trail as the drain branch — the click itself must be auditable.
             audit.record("autopilot_stop_requested", action="stop", app=app_name or "",
                          event_reachable=ev is not None)
             if ev is not None:

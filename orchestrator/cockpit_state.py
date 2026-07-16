@@ -164,7 +164,7 @@ def claim_run(app: str | None = None, *, dry_run: bool | None = None,
 def bind_stop_event(app: str | None, stop_event: object) -> None:
     """Make ``stop_event`` THE authoritative stop signal for ``app`` — the one the cockpit reaches.
 
-    The invariant this exists to hold (EU-336): *while ``autopilot_on`` is true for an app, the event
+    The invariant this exists to hold (EU-356): *while ``autopilot_on`` is true for an app, the event
     reachable at ``st["stop_event"]`` IS the event that app's live loop polls.*
 
     ``claim_run`` binds the event only on a SUCCESSFUL claim, which silently drops it on a failed one.
@@ -173,7 +173,7 @@ def bind_stop_event(app: str | None, stop_event: object) -> None:
     never learned about. The slot's previous owner's Event stays bound — so the cockpit's Stop/drain
     sets a DEAD event, ``get_autopilot_status`` reads that same dead event back as ``stopping: true``,
     and the live loop — never signalled — keeps picking new tickets: unstoppable except by killing the
-    process. (The live 2026-07-15 22:39→01:53 drain that motivated EU-336 turned out, on audit-log
+    process. (The live 2026-07-15 22:39→01:53 drain that motivated EU-356 turned out, on audit-log
     forensics, NOT to be this path — its binding was correct and its stop was late because run_loop's
     ticket-boundary stop check was never armed; see loop.run's ``stop_between_tickets``. This binding
     hole is the adjacent defect the same investigation demonstrated with a live repro harness.)
@@ -308,7 +308,7 @@ def get_autopilot_status(app: str | None = None) -> dict:
     # per-app ``autopilot_on`` flag is False (the daemon lives in a different process).
     on = internal_on or external_daemon
 
-    # EU-336: ``stopping`` is gated on ``internal_on``, NOT ``on``. A stop_event is an in-process
+    # EU-356: ``stopping`` is gated on ``internal_on``, NOT ``on``. A stop_event is an in-process
     # threading.Event — it can only ever signal a loop running in THIS process, so an EXTERNAL daemon
     # (a different process; ``on`` is true via the PID-file probe) can never be "stopping" because of
     # a local Event. Reading it through the wider ``on`` let a leftover Event from this cockpit's own

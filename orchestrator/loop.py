@@ -436,7 +436,7 @@ def _worktree_lock(worktree_path: str):
 
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
               audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
-    # EU-336: ``stop_between_tickets`` is the TICKET-BOUNDARY-ONLY stop channel, distinct from
+    # EU-356: ``stop_between_tickets`` is the TICKET-BOUNDARY-ONLY stop channel, distinct from
     # ``stop_event`` (which also arms the pre-build and pre-merge aborts inside _attempt). The
     # autopilot drain passes its stop Event here and NOT as stop_event, because the drain's contract
     # is "let the in-flight ticket land on DEV, then stand down" — arming the mid-ticket checkpoints
@@ -518,7 +518,7 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
         while i < len(worklist):
             app, ticket = worklist[i]
             i += 1
-            # EU-336: the ticket boundary honours BOTH stop channels — the full stop_event (manual
+            # EU-356: the ticket boundary honours BOTH stop channels — the full stop_event (manual
             # runs, also armed mid-ticket) and the boundary-only drain channel (autopilot; the
             # in-flight ticket just landed, so standing down here is exactly the drain's promise).
             if (stop_event is not None and stop_event.is_set()) or \
