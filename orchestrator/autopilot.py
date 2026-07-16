@@ -550,6 +550,11 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
                 continue
             if answer and answer != pending[tid].get("answer_baseline"):
                 out[tid] = (app, ticket)
+                # Consume-on-detect: advance the baseline to THIS answer immediately, so the same
+                # comment resumes the ticket once — not every ~2-min cycle forever (the EU-335
+                # '▶️ Resuming' Telegram spam loop, 2026-07-16). A later different comment still
+                # differs from the new baseline and resumes again.
+                decisions.consume_answer(cfg, tid, answer)
     return out
 
 
@@ -1166,7 +1171,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # of the skip-set and put it at the FRONT of the queue (resume before taking new work).
             resumed = _resumable_answered(cfg, app_name, blocked)
             if resumed:
-                blocked -= set(resumed)
+                # Re-read right before the write-back (same rule as the park path below): the
+                # resume scan above does one Jira fetch per pending decision and can run for
+                # MINUTES — writing the stale top-of-cycle snapshot back resurrects any ticket
+                # the Commander /unblock'ed mid-scan (EU-218 came back from the dead this way
+                # twice on 2026-07-16, 10:54 and 10:56).
+                blocked = load_blocked(cfg) - set(resumed)
                 save_blocked(cfg, blocked)
                 notify.send("▶️ Resuming (answered on Jira): " + ", ".join(sorted(resumed)))
                 audit.record("decision_resumed", tickets=sorted(resumed), via="jira-comment")

@@ -221,6 +221,27 @@ def _park_on_tracker(cfg, ticket: Ticket, app_name: str, reason: str = "") -> st
         return None
 
 
+def consume_answer(cfg, ticket_id: str, answer: str) -> None:
+    """Snapshot a just-detected Jira answer as the entry's new ``answer_baseline`` — atomically,
+    under the shared store lock — so one comment resumes a ticket exactly ONCE.
+
+    EU-229 widened the Jira-answer resume scan from blocked∩pending to ALL pending decisions but
+    left the consume step behind (EU-61's blocked-only version was self-limiting via the blocked
+    set): nothing ever advanced the baseline, so `_resumable_answered` re-detected the SAME comment
+    every drain cycle and spammed '▶️ Resuming (answered on Jira)' to Telegram every ~2 minutes
+    (live incident EU-335, 2026-07-16 10:45–10:56+). A later, genuinely different comment still
+    resumes again. Best-effort: a store hiccup must never break the resume path."""
+    def _mut(items):
+        for e in (items or []):
+            if e.get("id") == ticket_id:
+                e["answer_baseline"] = answer
+        return items or []
+    try:
+        locking.locked_rmw(_store(cfg), _mut, default=[])
+    except (OSError, ValueError):
+        pass
+
+
 def _comment_answer(cfg, resolved: dict, answer: str) -> None:
     """Post the Commander's decision back onto the ticket as a comment (the write half of the EU-61
     round-trip), so the question and its resolution both live in Jira. Best-effort: skipped for dry-run /
