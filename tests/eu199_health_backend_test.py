@@ -4,12 +4,17 @@ Fail-first tests for each acceptance criterion.
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import types
 from pathlib import Path
 
 import pytest
+
+# This harness calls health.summary() for REAL — keep the auth-liveness probe (a real `claude -p`
+# round-trip) off even when run standalone, outside run_all.py's stripped child env.
+os.environ["GENERAL_AUTH_PROBE"] = "0"
 
 # Mock the SDK module so health.checks doesn't fail
 sdk = types.ModuleType("claude_agent_sdk")

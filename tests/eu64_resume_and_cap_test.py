@@ -183,6 +183,12 @@ for _ in range(60):
         break
     time.sleep(0.05)
 # with alpha's slot freed, beta can now claim under the cap.
+# EU-356 flake fix: re-ARM the gate before beta starts. cap_release is still set from freeing alpha,
+# so beta's run_loop would return instantly and its _bg finally release the slot within milliseconds —
+# a transient the 50ms poll below loses under load (the suite's leaked `claude -p` plan-limit probes
+# supply exactly that load). Cleared, beta's loop BLOCKS on the gate, so is_active("beta") is a stable
+# state until observed; the final set() below releases it.
+cap_release.clear()
 app.test_client().post("/api/run", data={"kind": "task", "text": "b2", "app": "beta"})
 for _ in range(60):
     if cockpit_state.is_active("beta"):

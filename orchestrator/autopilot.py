@@ -15,6 +15,7 @@ would be re-picked every cycle. Use --once for dry-run checks.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import signal
@@ -22,10 +23,12 @@ import threading
 import time
 from pathlib import Path
 
-from . import intake, locking, notify, usage
+from . import gate as gate_mod
+from . import auth_probe, infra_classify, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
 from .contracts import PARKED, Outcome
+from .loop import _BASE_LEVEL_PREFIXES
 from .loop import run as run_loop
 
 # PID file — single source of truth for "is the daemon actually running?"
@@ -33,29 +36,55 @@ from .loop import run as run_loop
 # (scripts/install-mac-autopilot-daemon.sh) relies on this file for external status checks.
 _PID_FILE = Path("/tmp/general-autopilot.pid")
 
+# Refcount of live in-process autopilot() runs holding the (process-wide) PID file. The cockpit
+# runs each per-app drain as a thread of the ONE serve process, so every drain writes the SAME
+# pid — a bare contents==getpid() ownership check let the FIRST drain to exit delete the file
+# while a sibling drain was still live, flipping daemon_running() (the cockpit badge's single
+# source of truth, EU-73) to False mid-run and opening the daemon_is_external() start guards to
+# a second conflicting daemon. _remove_pid() now unlinks only when the LAST in-process holder
+# exits; the cross-process ownership check below still protects a foreign daemon's file.
+_pid_holders = 0
+_pid_lock = threading.Lock()
+
 
 def _write_pid() -> None:
-    """Write the current process PID to _PID_FILE (best-effort; failure is non-fatal)."""
-    try:
-        _PID_FILE.write_text(str(os.getpid()))
-    except OSError:
-        pass
+    """Register this autopilot run as a PID-file holder and (re)write the file (best-effort).
+
+    Callers MUST pair every _write_pid() with exactly one _remove_pid() — autopilot() does this
+    via its wrote_pid flag — or the refcount drifts and the file outlives / predeceases the runs.
+    """
+    global _pid_holders
+    with _pid_lock:
+        _pid_holders += 1
+        try:
+            _PID_FILE.write_text(str(os.getpid()))
+        except OSError:
+            pass
 
 
 def _remove_pid() -> None:
-    """Remove the PID file on clean exit — but ONLY when it still points at THIS process.
+    """Drop one PID-file hold; unlink only when the LAST in-process holder exits — and even then
+    ONLY when the file still points at THIS process.
 
-    Best-effort (failure is non-fatal). The ownership check hardens the single-instance design: if a
-    second autopilot ever overwrote the file with its own PID, this exiting instance must NOT delete it
-    — otherwise daemon_running() (the single source of truth for the cockpit badge, EU-73) would read
-    'not running' while that other instance is still alive. We own the file only when its contents equal
-    os.getpid(); a missing or garbled file simply means there is nothing of ours to remove.
+    Best-effort (failure is non-fatal). Two guards, each covering what the other can't:
+      * the holder refcount keeps overlapping per-app drains in ONE process (cockpit threads,
+        EU-103) from deleting the shared file while a sibling drain is still live;
+      * the contents==os.getpid() ownership check keeps THIS process from deleting a file a
+        DIFFERENT process (detached daemon / launchd keepalive) has since overwritten —
+        otherwise daemon_running() would read 'not running' while that instance is alive.
+    A missing or garbled file simply means there is nothing of ours to remove.
     """
-    try:
-        if _PID_FILE.read_text().strip() == str(os.getpid()):
-            _PID_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    global _pid_holders
+    with _pid_lock:
+        if _pid_holders > 0:
+            _pid_holders -= 1
+        if _pid_holders > 0:
+            return   # a sibling in-process drain still runs — the file must outlive THIS exit
+        try:
+            if _PID_FILE.read_text().strip() == str(os.getpid()):
+                _PID_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def daemon_running() -> bool:
@@ -121,15 +150,35 @@ def daemon_is_external() -> bool:
     return daemon_running() and not _pid_file_holds_our_pid()
 
 
-def _stop_launchd_daemon() -> bool:
-    """Stop the launchd KeepAlive daemon using launchctl.
+# EU-232: single shared launchd label. scripts/install-mac-autopilot-daemon.sh derives its LABEL=
+# from this exact assignment (a stdlib-only ``python3 -c`` that ast-parses THIS file for the
+# LAUNCHD_LABEL assignment — deliberately NOT an import, which would drag in claude_agent_sdk and
+# abort the installer on any shell without the repo .venv), so the installer and this stopper can
+# never drift apart again — tests/eu232_launchd_label_test.py
+# asserts the installer's LABEL= line matches this string byte-for-byte. Previously these were two
+# independent literals: the installer wrote "com.roman.general.autopilot-keepalive" but this file
+# targeted the stale "com.romanberlin.general.autopilot", so _stop_launchd_daemon booted out a label
+# that was never installed and silently claimed success while KeepAlive respawned the real daemon.
+LAUNCHD_LABEL = "com.roman.general.autopilot-keepalive"
+
+
+def _stop_launchd_daemon(poll_timeout: float = 10.0, poll_interval: float = 0.5) -> bool:
+    """Stop the launchd KeepAlive daemon using launchctl, and VERIFY it actually exited.
 
     Tries launchctl bootout (modern macOS) first, then falls back to launchctl unload (older macOS).
     This is the ONLY way to durably stop a KeepAlive daemon — a plain 'launchctl stop' is respawned.
-    Returns True on success, False on failure (best-effort: the daemon may already be gone).
 
-    EU-120: cockpit's "Finish & stop" (drain) calls this for external daemons so the stop sticks.
-    The plist path matches scripts/install-mac-autopilot-daemon.sh.
+    EU-232: launchctl's exit code is optimistic — bootout/unload can return success while the daemon
+    is still mid-ticket (or launchd itself is lagging) — so this used to claim success unconditionally
+    the moment the subprocess call didn't raise. Now, once launchctl has actually run, poll
+    ``daemon_running()`` (the same source of truth as the cockpit badge) for up to ``poll_timeout``
+    seconds, checking every ``poll_interval``, and return True ONLY once the daemon is confirmed gone
+    — False if it's still alive when the deadline passes. Returns False immediately, with no poll,
+    when launchctl itself couldn't be invoked at all (platform mismatch / missing plist / subprocess
+    failure) — there's nothing to verify in that case.
+
+    EU-120: cockpit's "Finish & stop" (drain) and "Stop" call this for external daemons so the stop
+    sticks. The plist path/label matches scripts/install-mac-autopilot-daemon.sh (LAUNCHD_LABEL).
     """
     import platform
     import subprocess
@@ -137,35 +186,48 @@ def _stop_launchd_daemon() -> bool:
     if platform.system() != "Darwin":
         return False
 
-    # Path from install-mac-autopilot-daemon.sh
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.romanberlin.general.autopilot.plist"
+    # Path from install-mac-autopilot-daemon.sh (same LAUNCHD_LABEL, so this can't drift again)
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
     if not plist_path.exists():
         # No plist installed — nothing to unload
         return False
 
+    launchctl_ran = False
     try:
         # Modern macOS (10.10+): use bootout, which removes the service *and* stops it
-        result = subprocess.run(
-            ["launchctl", "bootout", f"gui/{os.getuid()}/com.romanberlin.general.autopilot"],
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        # bootout returns 0 even if the service wasn't running (idempotent)
-        return True
+        launchctl_ran = True
     except (OSError, subprocess.TimeoutExpired):
         # bootout failed or not available — fall back to unload (older macOS)
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ["launchctl", "unload", str(plist_path)],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            return result.returncode == 0
+            launchctl_ran = True
         except (OSError, subprocess.TimeoutExpired):
+            launchctl_ran = False
+
+    if not launchctl_ran:
+        return False
+
+    # EU-232: don't trust launchctl's exit code — poll daemon_running() until it agrees the daemon
+    # is actually gone (or the deadline passes), so callers get a verified outcome, not a guess.
+    deadline = time.monotonic() + poll_timeout
+    while True:
+        if not daemon_running():
+            return True
+        if time.monotonic() >= deadline:
             return False
+        time.sleep(poll_interval)
 
 
 # `PARKED` (the outcomes that park a ticket IMMEDIATELY — a human decision / a PR is waiting, no point
@@ -488,6 +550,11 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
                 continue
             if answer and answer != pending[tid].get("answer_baseline"):
                 out[tid] = (app, ticket)
+                # Consume-on-detect: advance the baseline to THIS answer immediately, so the same
+                # comment resumes the ticket once — not every ~2-min cycle forever (the EU-335
+                # '▶️ Resuming' Telegram spam loop, 2026-07-16). A later different comment still
+                # differs from the new baseline and resumes again.
+                decisions.consume_answer(cfg, tid, answer)
     return out
 
 
@@ -526,6 +593,182 @@ def _park_errored_on_tracker(cfg: Config, by_id: dict, newly: list, errored: set
             pass
 
 
+def _tally_errored(reports, error_counts: dict[str, int]):
+    """EU-228: update `error_counts` IN PLACE for this cycle's reports, splitting ERRORED reports
+    into park-worthy (hit `_MAX_TICKET_ERRORS`), retrying, and infra/outage.
+
+    An ERRORED report whose notes classify as infra (network/DNS/timeout/5xx — see
+    ``infra_classify.classify``; a turn-limit is NEVER infra, that's EU-248's job) contributes NO
+    strike at all: `error_counts` is left exactly as it was for that ticket, so a DNS blip can
+    never park — or even nudge the counter toward parking — a healthy ticket (the 2026-07-10
+    16:29:47 evidence: one blip charged 4 tickets a strike each before this fix).
+
+    2026-07-15 ~22:05: an EXPIRED Claude login is the same class — every builder call fails with
+    "Not logged in · Please run /login" and that burned strikes on 5+ tickets in one drain. A
+    report whose notes carry a login-failure marker (``auth_probe.is_login_failure``) is treated
+    exactly like infra here (no strike, reported in ``infra``); the caller splits those ids out
+    again to arm the dedicated auth-hold (see ``_enter_auth_hold``) instead of the offline-hold.
+
+    Returns ``(park_now_additions, errored_ids, retrying_ids, infra_ids, counts_changed)``. A
+    ticket that made progress (no longer ERRORED) still has its tally reset, same as before.
+    """
+    park_now: list[str] = []
+    errored: set[str] = set()
+    retrying: list[str] = []
+    infra: set[str] = set()
+    counts_changed = False
+    for r in reports:
+        if r.outcome is Outcome.ERRORED:
+            errored.add(r.ticket_id)
+            if auth_probe.is_login_failure(r.notes) or infra_classify.classify(r.notes):
+                infra.add(r.ticket_id)
+                continue   # no strike, no counter touch — see docstring
+            n = error_counts.get(r.ticket_id, 0) + 1
+            if n >= _MAX_TICKET_ERRORS:
+                park_now.append(r.ticket_id)
+                error_counts.pop(r.ticket_id, None)   # parked -> reset for a future /unblock
+            else:
+                error_counts[r.ticket_id] = n
+                retrying.append(r.ticket_id)
+            counts_changed = True
+        elif error_counts.pop(r.ticket_id, None) is not None:
+            counts_changed = True   # made progress (didn't error) -> reset its tally
+    return park_now, errored, retrying, infra, counts_changed
+
+
+def _enter_offline_hold(cfg: Config, audit: "AuditLog", infra_ids, already_active: bool) -> bool:
+    """EU-228: raise ONE offline-hold alert for this cycle's infra-classified errors and return
+    True (now/still active). A no-op when there's nothing infra-classed this cycle, and a no-op
+    alert-wise when a hold is already active — a single DNS blip that errors several tickets in
+    the same cycle must produce ONE Telegram message, not one per ticket."""
+    if not infra_ids:
+        return already_active
+    if not already_active:
+        ids = ", ".join(sorted(infra_ids))
+        notify.send(f"🌐 Autopilot offline-hold — infra/outage error(s) on {ids} "
+                    "(network/DNS/timeout, not a ticket defect). No error strikes were charged; "
+                    "holding new tickets and auto-resuming once connectivity returns.")
+        audit.record("infra_offline_hold", tickets=sorted(infra_ids))
+        print(f"  🌐 offline-hold — infra error(s) on {ids}; no strikes charged, "
+              "auto-resume on connectivity.", flush=True)
+    return True
+
+
+def _offline_hold_recheck(cfg: Config, audit: "AuditLog", active: bool) -> bool:
+    """EU-228: while an offline-hold is active, probe connectivity (Jira base URL + `git
+    ls-remote`) and clear the hold — with one resume alert — the moment it passes. No human
+    `/unblock` needed. Returns the (possibly updated) active state."""
+    if not active:
+        return False
+    if infra_classify.connectivity_probe(cfg):
+        notify.send("✅ Connectivity restored — autopilot resuming normal operation.")
+        audit.record("infra_offline_resume")
+        print("  ✅ connectivity restored — resuming normal operation.", flush=True)
+        return False
+    return True
+
+
+# While an auth-hold is active, re-verify the login via auth_probe at most this often — cycles run
+# every `interval` (~60s), so most rechecks ride the cache and a real re-login is noticed in ≤5 min.
+_AUTH_HOLD_RECHECK_S = 300.0
+
+# Telegram damper for the auth-hold alerts. If the login-failure marker ever fires on a failure the
+# probe then verifies as valid (e.g. a non-default backend's own credential dying with the same CLI
+# message), the hold would churn enter→resume every couple of cycles — each transition must not page
+# the Commander again. The enter alert is rate-limited by `_AUTH_ALERT_COOLDOWN_S`; the resume alert
+# is PAIRED to it (fires only when its matching enter alert fired), so the Commander never gets an
+# orphan "verified again" ping. audit.jsonl still records every transition; only pings are damped.
+_AUTH_ALERT_COOLDOWN_S = 1800.0
+_last_auth_alert = 0.0
+_auth_resume_alert_due = False   # True while an alerted hold awaits its paired resume alert
+
+
+def _enter_auth_hold(cfg: Config, audit: "AuditLog", auth_ids, already_active: bool) -> bool:
+    """2026-07-15 ~22:05 incident: builder failures carrying a login-failure marker ("Not logged
+    in · Please run /login" — the Claude Code OAuth token expired) must hold the WHOLE drain with
+    ONE "re-login needed" alert, exactly like the EU-228 offline-hold — not burn error strikes
+    ticket by ticket (5+ tickets were charged toward parking that night). No counter was touched
+    (``_tally_errored`` classified these no-strike), so nothing needs a human ``/unblock``: the
+    tickets stay queued and the hold auto-clears once ``_auth_hold_recheck`` verifies the login.
+
+    Invalidates the auth-probe cache on every auth-classified cycle: the failure is hard evidence
+    that a cached "valid" (up to 15 min old) is stale — without this the recheck would read that
+    stale cache and instantly (wrongly) clear the hold."""
+    global _last_auth_alert, _auth_resume_alert_due
+    if not auth_ids:
+        return already_active
+    auth_probe.invalidate()
+    if not already_active:
+        ids = ", ".join(sorted(auth_ids))
+        audit.record("auth_expired_hold", tickets=sorted(auth_ids))
+        now = time.time()
+        if now - _last_auth_alert >= _AUTH_ALERT_COOLDOWN_S:
+            _last_auth_alert = now
+            _auth_resume_alert_due = True
+            notify.send(f"🔐 Autopilot auth-hold — builder failed with a login error on {ids}. "
+                        "The Claude Code login looks EXPIRED — run `claude` then /login "
+                        "(or refresh CLAUDE_CODE_OAUTH_TOKEN). No error strikes were charged; "
+                        "holding all new work and auto-resuming once the login is valid again.")
+        print(f"  🔐 auth-hold — login error(s) on {ids}; no strikes charged, "
+              "re-login needed (auto-resume once the probe verifies).", flush=True)
+    return True
+
+
+def _auth_hold_recheck(cfg: Config, audit: "AuditLog", active: bool) -> bool:
+    """While an auth-hold is active, re-probe login validity (``auth_probe.probe``, its own ≤5-min
+    cadence via ``_AUTH_HOLD_RECHECK_S``) and clear the hold — with one resume alert — the moment
+    the probe verifies ``valid``. Returns the (possibly updated) active state.
+
+    Only a VERIFIED ``valid`` clears the hold: ``expired`` obviously keeps it, and ``unreachable``
+    / ``unknown`` (network down, probe can't run) keep it too — on a box where the probe can't run
+    the builders can't run either (the SDK shells the same CLI), and clearing on no-evidence would
+    just re-burn a failing wave per cycle. The hold is in-memory: a drain restart re-tries builds
+    immediately, and if the login is still dead it re-holds with no strikes charged."""
+    global _auth_resume_alert_due
+    if not active:
+        return False
+    if auth_probe.probe(max_age_s=_AUTH_HOLD_RECHECK_S).get("state") == "valid":
+        audit.record("auth_expired_resume")
+        if _auth_resume_alert_due:   # paired to the enter alert — never an orphan/churn ping
+            _auth_resume_alert_due = False
+            notify.send("✅ Claude login verified again — autopilot resuming normal operation.")
+        print("  ✅ Claude login verified again — resuming normal operation.", flush=True)
+        return False
+    return True
+
+
+def _apply_toolchain_holds(cfg: Config, audit: "AuditLog", worklist, held: frozenset):
+    """EU-228: filter `worklist` to drop tickets for any app whose gate/worktree-setup toolchain
+    is missing a binary under the daemon's real environment (``infra_classify.missing_toolchain``)
+    — a missing binary would otherwise burn every one of that app's tickets an error strike on an
+    environment problem, not a real failure. HOLDS the whole app instead, with exactly ONE alert
+    per app per hold (and one resume alert once the toolchain is fixed again); touches NO per-
+    ticket counters. Only checks apps that actually have tickets in `worklist` this cycle — cheap,
+    since a hit toolchain is the common case. Returns ``(filtered_worklist, updated_held)``."""
+    apps_in_play = {a.name: a for a, _ in worklist}
+    currently: set[str] = set()
+    for name, app in apps_in_play.items():
+        missing = infra_classify.missing_toolchain(app)
+        if not missing:
+            continue
+        currently.add(name)
+        if name not in held:
+            notify.send(f"🛠️ Autopilot holding {name} — missing toolchain binaries on this "
+                        f"machine: {', '.join(missing)}. No tickets were charged; it resumes "
+                        "automatically once the toolchain is fixed.")
+            audit.record("infra_toolchain_hold", app=name, missing=missing)
+            print(f"  🛠️ holding {name} — missing toolchain binaries: {', '.join(missing)} "
+                  "(no tickets charged).", flush=True)
+    recovered = held - currently
+    if recovered:
+        names = ", ".join(sorted(recovered))
+        notify.send(f"✅ Toolchain restored — resuming: {names}")
+        audit.record("infra_toolchain_resume", apps=sorted(recovered))
+        print(f"  ✅ toolchain restored — resuming: {names}", flush=True)
+    filtered = [(a, t) for (a, t) in worklist if a.name not in currently]
+    return filtered, frozenset(currently)
+
+
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
     """After a productive cycle, fold any new recurring rejection-lessons into Unit Memory and prune it
     — FREE + deterministic (no model call), so memory compounds every cycle instead of only at the
@@ -560,10 +803,20 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     if stop_event is None:
         stop_event = threading.Event()
 
+    # EU-232: WHY this run stood down, recorded on the terminal autopilot_stop audit event (see the
+    # finally below). Set as early as possible on every exit path — the top-of-loop stop_event check,
+    # the SIGTERM handler (before it sets stop_event, so the loop's own check doesn't overwrite it),
+    # the budget/plan-limit "once" breaks, and the except clauses. Defaults to "once-complete" at
+    # record time for every other break (a normal --once cycle finishing, or a hold's once-break) —
+    # see the ``stop_reason or "once-complete"`` in the finally.
+    stop_reason: str | None = None
+
     def _handle_sigterm(signum, frame):  # noqa: ANN001 — signal-handler signature
         """SIGTERM (e.g. a launchd unload of the keepalive daemon) → graceful stand-down: set the stop Event and let
         the loop notice it, finish any in-flight ticket, and run its finally (PID-file cleanup,
         run-state release). Mirrors the cockpit Stop toggle and Ctrl-C."""
+        nonlocal stop_reason
+        stop_reason = "sigterm"   # EU-232: set BEFORE stop_event, so the loop's own check never overwrites it
         stop_event.set()
 
     audit = AuditLog(cfg.audit_path)
@@ -593,6 +846,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     run_state = None
     started = False           # EU-175: gates autopilot_stop so a setup failure BEFORE autopilot_start
                               # never records an UNPAIRED stop (the mirror image of the ghost-session bug).
+    wrote_pid = False         # gates the finally's _remove_pid(): every _write_pid() must be paired with
+                              # exactly ONE _remove_pid() (the holder refcount), so a raise BEFORE the
+                              # write must not decrement a sibling drain's hold on the shared file.
     try:
         # Write the PID file FIRST, inside the try, so the finally's _remove_pid() always runs — even
         # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
@@ -600,6 +856,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # daemon_running() True forever (EU-73 — this is the single source of truth for the cockpit badge).
         _alert_unclean_restart(audit)   # QW5: a restart after a crash is never silent
         _write_pid()
+        wrote_pid = True
         if _on_main_thread:
             _orig_sigterm = signal.getsignal(signal.SIGTERM)
             signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -663,6 +920,22 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # release, so we never clear or clobber someone else's run-state.
         owns_run_state = cockpit_state.claim_run(run_key, dry_run=cfg.dry_run, stop_event=stop_event)
         run_state = cockpit_state.get_state(run_key)
+        # EU-356: bind THIS loop's stop_event as the app's authoritative stop signal — whether or not
+        # the claim above succeeded. claim_run binds only on success, so on a failed claim (which this
+        # function deliberately survives, running on with owns_run_state=False) the state kept pointing
+        # at the PREVIOUS owner's Event — the cockpit's Stop would set that dead Event, read it back as
+        # "stopping", and this loop, polling the Event nobody could reach, would drain on. (Forensics
+        # note: the live 2026-07-15 22:39→01:53 incident was NOT this path — its binding was correct
+        # and its root cause was run_loop's disarmed stop checks, fixed at the run_loop call below.
+        # This dead-event hole is the ADJACENT stop-path defect the same investigation proved
+        # reachable, closed here.) The loop is the authority on its own stop signal, so it rebinds
+        # unconditionally on entry.
+        #
+        # Ordering is load-bearing on BOTH sides: bind BEFORE raising autopilot_on (below), and in the
+        # finally drop autopilot_on BEFORE unbinding. autopilot_on is what makes the cockpit offer a
+        # Stop button and what gates ``stopping`` — so there must be no instant where it is true while
+        # the reachable event isn't this loop's.
+        cockpit_state.bind_stop_event(run_key, stop_event)
         # EU-103: flag THIS app's run as an autopilot run (distinct from a manual cockpit/answer-box
         # run, which sets ``active`` but not ``autopilot_on``). This is the dedicated signal the cockpit
         # control reads via get_autopilot_status(app), so a manual run never renders as "Autopilot ON".
@@ -680,12 +953,58 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # emits exactly one alert per run, not one per cycle. Start empty so the first cycle
         # announces repos detected as missing during preflight.
         repos_announced: frozenset[str] = frozenset()
+        # EU-228: infra/outage state. `offline_hold` pauses ALL new work (a Jira/git outage — see
+        # _enter_offline_hold/_offline_hold_recheck); `toolchain_held` HOLDS only the specific
+        # app(s) missing a gate/worktree-setup binary (see _apply_toolchain_holds). Neither touches
+        # per-ticket error_counts — that's the point of this ticket.
+        offline_hold = False
+        toolchain_held: frozenset[str] = frozenset()
+        # 2026-07-15 ~22:05: expired-Claude-login hold. Like offline_hold it pauses ALL new work
+        # (every builder call fails the same way) and touches no per-ticket counter, but it is a
+        # SEPARATE hold: the offline-hold's connectivity probe checks Jira/git and would announce
+        # a misleading "connectivity restored" while the login is still dead — the same lesson as
+        # the base-gate-timeout exclusion above. See _enter_auth_hold / _auth_hold_recheck.
+        auth_hold = False
+        # 2026-07-15: base-level hold, PER APP. A red or timed-out BASE gate applies to the whole
+        # app — picking it again before the red-base cache would re-verify (gate._RED_BASE_RED_TTL_S)
+        # just parks one more ticket per cycle (the needs_human massacre: ~60 tickets in the 04:20
+        # and 17:41 waves that day). Keyed by app name so a unit-wide drain keeps building the
+        # healthy apps (EU-87/EU-252 never-starve contracts); the held app's queue stays on the
+        # board untouched. Timer-based: the TTL matches when the red cache re-verifies anyway
+        # (a base FIX landed mid-hold waits out the remainder; cockpit manual runs bypass it).
+        red_base_hold: dict[str, float] = {}
+        base_timeout_waves = 0   # consecutive cycles ending in a base-gate TIMEOUT (escalate at 3)
 
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
             if stop_event is not None and stop_event.is_set():
+                # EU-232: sigterm already claimed this reason via nonlocal above; anything else that
+                # set the same stop_event (the cockpit Stop/Drain toggle) is a cockpit-stop.
+                if stop_reason is None:
+                    stop_reason = "cockpit-stop"
                 print("🛸 Autopilot stood down (stopped from the cockpit).", flush=True)
                 break
+
+            # EU-228: infra/outage hold — a Jira/git-remote outage errored one or more tickets last
+            # cycle (see _enter_offline_hold below). Hold ALL new work until connectivity_probe
+            # passes again; no per-ticket counter was touched, so nothing needs a human /unblock.
+            offline_hold = _offline_hold_recheck(cfg, audit, offline_hold)
+            if offline_hold:
+                if once:
+                    break
+                _sleep(max(10, interval), stop_event)
+                continue
+
+            # 2026-07-15: expired-login hold — a builder failed with "Not logged in" last cycle
+            # (see _enter_auth_hold below). Hold ALL new work until the auth probe verifies the
+            # login again; no per-ticket counter was touched, so nothing needs a human /unblock.
+            auth_hold = _auth_hold_recheck(cfg, audit, auth_hold)
+            if auth_hold:
+                if once:
+                    break
+                _sleep(max(10, interval), stop_event)
+                continue
+
 
             # Cost governor: never let a runaway loop eat the day's token budget. Pause new tickets
             # once today's burn hits the ceiling (resumes after midnight / when the ceiling is raised).
@@ -700,6 +1019,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                           "tickets (resumes after midnight, or raise daily_token_budget).", flush=True)
                     budget_paused = True
                 if once:
+                    stop_reason = "budget"   # EU-232
                     break
                 _sleep(max(30, interval), stop_event)
                 continue
@@ -750,6 +1070,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                           f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
                     plan_limit_paused = True
                 if once:
+                    stop_reason = "plan-limit"   # EU-232
                     break
                 _sleep(max(30, interval), stop_event)
                 continue
@@ -850,7 +1171,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # of the skip-set and put it at the FRONT of the queue (resume before taking new work).
             resumed = _resumable_answered(cfg, app_name, blocked)
             if resumed:
-                blocked -= set(resumed)
+                # Re-read right before the write-back (same rule as the park path below): the
+                # resume scan above does one Jira fetch per pending decision and can run for
+                # MINUTES — writing the stale top-of-cycle snapshot back resurrects any ticket
+                # the Commander /unblock'ed mid-scan (EU-218 came back from the dead this way
+                # twice on 2026-07-16, 10:54 and 10:56).
+                blocked = load_blocked(cfg) - set(resumed)
                 save_blocked(cfg, blocked)
                 notify.send("▶️ Resuming (answered on Jira): " + ", ".join(sorted(resumed)))
                 audit.record("decision_resumed", tickets=sorted(resumed), via="jira-comment")
@@ -893,6 +1219,23 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # To Do slice above (EU-252); In Progress and answered resumes are intentionally
             # additive/uncapped (see notes above).
             worklist = in_progress + answered_items + to_do
+
+            # EU-228: hold any app whose gate/worktree-setup toolchain is missing a binary on this
+            # machine — one alert for the WHOLE app, its tickets simply don't run this cycle (no
+            # error strike, no park).
+            worklist, toolchain_held = _apply_toolchain_holds(cfg, audit, worklist, toolchain_held)
+
+            # 2026-07-15: drop apps under an active base-level hold (red/timed-out base last
+            # cycle) — their tickets stay queued on the board; expired holds are pruned so the
+            # next pick re-verifies the base (the red cache TTL expires on the same clock).
+            _now = time.time()
+            red_base_hold = {a: ts for a, ts in red_base_hold.items() if ts > _now}
+            _dropped_held = [t.id for (a, t) in worklist if a.name in red_base_hold]
+            if _dropped_held:
+                worklist = [(a, t) for (a, t) in worklist if a.name not in red_base_hold]
+                print(f"  ⛔ base-hold active for {', '.join(sorted(red_base_hold))} — "
+                      f"{len(_dropped_held)} ticket(s) stay queued until the base re-check.",
+                      flush=True)
 
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed
             # to prevent re-picking the same ticket forever. Track previewed tickets so they're
@@ -955,7 +1298,20 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # best-effort transition a freshly-parked ERRORED ticket to Blocked without re-fetching it.
             by_id = {t.id: (a, t) for (a, t) in worklist}
 
-            reports = await run_loop(cfg, worklist, audit)
+            # EU-356 (the ACTUAL 2026-07-15 incident fix): arm run_loop's ticket-boundary stop check
+            # with this drain's own event. Until now the event armed only THIS loop's per-cycle check
+            # — but one run_loop call IS a whole cycle, and EU-201 fragment injection extends its
+            # worklist IN PLACE mid-run, so a "cycle" can run for hours (22:40→01:53 live: EU-321
+            # split into EU-350..353 and the drain ordered at ~22:50 wasn't honoured until 01:53).
+            # Deliberately the boundary-only channel, NOT stop_event= — the drain's promise is "let
+            # the in-flight ticket land on DEV, then stand down", and the full channel would also arm
+            # the pre-build/pre-merge aborts that kill or abandon the in-flight build. The signature
+            # guard follows the loop.py `_land` idiom: many harnesses stub run_loop with a bare
+            # (cfg, worklist, audit) fake, and this seam must not force them all to grow the kwarg.
+            if "stop_between_tickets" in inspect.signature(run_loop).parameters:
+                reports = await run_loop(cfg, worklist, audit, stop_between_tickets=stop_event)
+            else:
+                reports = await run_loop(cfg, worklist, audit)
 
             # Park ESCALATED / PR_OPENED immediately. For ERRORED, retry a few times before
             # parking so a transient blip doesn't sideline a ticket for hours.
@@ -968,21 +1324,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
             # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
-            errored = {r.ticket_id for r in reports if r.outcome is Outcome.ERRORED}
-            retrying: list[str] = []
-            counts_changed = False
-            for r in reports:
-                if r.outcome is Outcome.ERRORED:
-                    n = error_counts.get(r.ticket_id, 0) + 1
-                    if n >= _MAX_TICKET_ERRORS:
-                        park_now.append(r.ticket_id)
-                        error_counts.pop(r.ticket_id, None)   # parked -> reset for a future /unblock
-                    else:
-                        error_counts[r.ticket_id] = n
-                        retrying.append(r.ticket_id)
-                    counts_changed = True
-                elif error_counts.pop(r.ticket_id, None) is not None:
-                    counts_changed = True   # made progress (didn't error) -> reset its tally
+            # EU-228: infra-classified ERRORED reports (network/DNS/timeout/5xx — a turn-limit is
+            # NEVER infra, see infra_classify.classify) contribute no strike at all.
+            extra_park, errored, retrying, infra_errored, counts_changed = \
+                _tally_errored(reports, error_counts)
+            park_now += extra_park
             if counts_changed:
                 save_error_counts(cfg, error_counts)
 
@@ -990,6 +1336,61 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 print(f"  · ERRORED, retrying next cycle (not parked): "
                       + ", ".join(f"{t} [{error_counts[t]}/{_MAX_TICKET_ERRORS}]" for t in retrying),
                       flush=True)
+
+            # 2026-07-15: split out base-level reports FIRST — a base-gate timeout is CPU/load,
+            # not connectivity, so it must not enter the offline-hold (whose probe checks Jira/
+            # git and would immediately announce a misleading "connectivity restored").
+            _base_reports = [r for r in reports
+                             if (r.notes or "").startswith(_BASE_LEVEL_PREFIXES)]
+            _base_ids = {r.ticket_id for r in _base_reports}
+
+            # 2026-07-15: expired-login failures ("Not logged in · Please run /login") are split
+            # out too — _tally_errored already classified them no-strike (they ride in
+            # infra_errored), but like base timeouts they must NOT arm the offline-hold, whose
+            # connectivity probe checks Jira/git and would announce a misleading "connectivity
+            # restored" while the Claude login is still dead. They arm their own auth-hold below.
+            _auth_ids = {r.ticket_id for r in reports
+                         if r.outcome is Outcome.ERRORED and auth_probe.is_login_failure(r.notes)}
+
+            # EU-228: one or more tickets errored on infra/outage this cycle — hold ALL new work
+            # (not just these tickets) until connectivity_probe passes again; no counter touched.
+            offline_hold = _enter_offline_hold(
+                cfg, audit, infra_errored - _base_ids - _auth_ids, offline_hold)
+
+            # 2026-07-15: expired-login hold — ONE "re-login needed" alert, no strikes, and the
+            # drain pauses until _auth_hold_recheck (top of the loop) verifies the login again.
+            auth_hold = _enter_auth_hold(cfg, audit, _auth_ids, auth_hold)
+
+            # 2026-07-15: base-level outcome — the app can't build ANYTHING right now. Hold ITS
+            # picking until the red-base cache would re-verify, instead of re-parking one more
+            # ticket every cycle (the needs_human massacre). A genuine red already pinged the
+            # Commander via its one parked ticket; a timeout gets its own accurate ping here
+            # (it was excluded from the offline-hold alert above), and three consecutive
+            # timeout waves escalate — a persistently overloaded box needs a human look.
+            if _base_reports:
+                for r in _base_reports:
+                    red_base_hold[r.app or app_name or ""] = (
+                        time.time() + gate_mod._RED_BASE_RED_TTL_S)
+                _hold_m = int(gate_mod._RED_BASE_RED_TTL_S / 60)
+                audit.record("red_base_drain_hold", tickets=sorted(_base_ids),
+                             apps=sorted({r.app or "" for r in _base_reports}),
+                             hold_minutes=_hold_m)
+                print(f"  ⛔ base-level failure — holding {_hold_m}m before re-checking the base.",
+                      flush=True)
+                _timeout_wave = any((r.notes or "").startswith("base gate timed out")
+                                    for r in _base_reports)
+                if _timeout_wave:
+                    base_timeout_waves += 1
+                    notify.send(f"⏳ Base gate timed out under load (wave {base_timeout_waves}) — "
+                                f"drain holding {_hold_m}m; no tickets were charged or parked.")
+                    if base_timeout_waves == 3:
+                        notify.send("⚠️ 3rd consecutive base-gate timeout wave — the box looks "
+                                    "persistently overloaded. Check system load, or raise "
+                                    "gate_timeout_sec for this app.")
+                else:
+                    base_timeout_waves = 0
+            else:
+                base_timeout_waves = 0
 
             # Re-read straight from disk right before the write-back instead of trusting the snapshot
             # taken at the top of the loop (~:219). The Telegram poller may have run /unblock mid-cycle;
@@ -1018,17 +1419,30 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 previewed_tickets.update(processed_ids)
 
             if once:
+                stop_reason = "once-complete"   # EU-232
                 break
             # A transient error gets a short backoff before the next look; otherwise a brief breath.
             _sleep(_ERROR_BACKOFF_SEC if retrying else 3, stop_event)
     except KeyboardInterrupt:
+        stop_reason = "keyboard-interrupt"   # EU-232
         print("\n🛸 Autopilot stood down. Nothing left mid-flight.", flush=True)
+    except Exception as exc:   # noqa: BLE001 — record WHAT broke, then let it propagate unchanged
+        stop_reason = f"exception:{type(exc).__name__}"   # EU-232
+        raise
     finally:
         # EU-103: the autopilot loop has stood down — clear THIS app's autopilot signal so the cockpit
         # control reflects OFF, independent of who owns the run-state release. (Idempotent: the cockpit
         # Start path's own finally also clears it.)
         if run_state is not None:
             run_state["autopilot_on"] = False
+        # EU-356: retract this loop's stop signal now that it has stood down, so the Event can never
+        # outlive the loop that polled it. A bound-but-dead Event is exactly what made the cockpit lie:
+        # Stop set it, ``stopping`` read it back as true, and no loop was left to honour it. Identity-
+        # checked inside, so if a NEWER drain for this app already rebound its own event while this one
+        # was winding down, we leave the live binding alone instead of blanking it. Unconditional (not
+        # gated on owns_run_state) — the mirror of the unconditional bind above.
+        if run_state is not None:
+            cockpit_state.unbind_stop_event(run_key, stop_event)
         # Release THIS project's run-state if we own it (clears active / run_started / stop_event) and
         # drop the dry/live tag, so the per-project board shows no stale run once autopilot stands down.
         # (run_state may still be None if claim_run() never ran — an early raise during setup.)
@@ -1036,9 +1450,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             cockpit_state.release_run(run_key)
             if run_state is not None:
                 run_state["dry_run"] = None
-        # Remove the PID file on any clean exit path (KeyboardInterrupt, stop_event, budget halt, once=True).
-        # The launchd daemon treats a missing PID file as "not running" — this is the handshake.
-        _remove_pid()
+        # Drop this run's PID-file hold on any exit path (KeyboardInterrupt, stop_event, budget halt,
+        # once=True). The file itself is unlinked only by the LAST in-process holder — overlapping
+        # per-app drains (cockpit threads, EU-103) share one process-wide file, and the first drain
+        # to exit must not flip daemon_running() False while a sibling is still live. The launchd
+        # daemon treats a missing PID file as "not running" — this is the handshake.
+        if wrote_pid:
+            _remove_pid()
         # Restore the original SIGTERM handler — main thread only, mirroring the registration guard
         # above (signal.signal() raises ValueError off the main thread, e.g. the cockpit _bg path).
         if _on_main_thread and _orig_sigterm is not None:
@@ -1049,5 +1467,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # skipped it, leaving an unpaired autopilot_start and a phantom "Working" card (the Jul-1 signature).
         # Gated on `started`: a setup failure BEFORE autopilot_start must NOT record an unpaired stop
         # (the mirror-image invariant break the 2026-07-06 review caught).
+        # EU-232: every autopilot_stop now carries a reason= — cockpit-stop / sigterm / once-complete /
+        # plan-limit / budget / keyboard-interrupt / exception:<type> — set at the exit path above.
+        # Falls back to "once-complete" for the handful of other `if once: break` holds (git/pre-flight/
+        # graceful-stop/idle-queue) that don't set their own reason — still a genuine --once completion.
         if started:
-            audit.record("autopilot_stop")
+            audit.record("autopilot_stop", reason=stop_reason or "once-complete")

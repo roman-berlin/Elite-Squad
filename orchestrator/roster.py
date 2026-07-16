@@ -155,7 +155,7 @@ async def _status_line(cfg: Config) -> str:
     """One cheap (Haiku) sentence on the unit's state today, from the record. Best-effort; '' on any
     hiccup. Info only — never a decision."""
     try:
-        from .drillmaster import collect_signals, format_signals
+        from .signals import collect_signals, format_signals
         from .agent import run_agent
         from claude_agent_sdk import ClaudeAgentOptions
         from . import memory

@@ -56,8 +56,9 @@ gate, before tagging Reviewer. Do NOT hand a diff to Reviewer with a known gate 
   changed. Fix every reported violation before finishing. (Pure backend/config tickets with no UI
   surface have nothing to scan — say so in your summary instead of running it.)
 - TESTS + COVERAGE: run `bun test --coverage` for the package you changed and require it to pass with
-  NO failing tests. Read the coverage output and make sure the code you added/changed is exercised;
-  add the missing test(s) if it is not. Every test you add must have been RED before your change
+  NO failing tests. Read the coverage TOTALS/summary line only (never the per-file table) and make
+  sure the code you added/changed is exercised; add the missing test(s) if it is not. Every test you
+  add must have been RED before your change
   (fail-first — step 5): a test that stays green on the unchanged code is not covering your change.
   (Bun's test runner is light — unlike Vitest below it does not need worker bounding — but still
   scope it to the package you touched, not the whole monorepo.)
@@ -80,6 +81,12 @@ Resource safety (the dev machine has limited RAM — respect it):
       npx vitest run <path> --pool=forks --poolOptions.forks.maxForks=2
 - Prefer fast checks (tsc --noEmit, eslint on changed files) over full runs.
 - Never start watch mode or dev servers (no `vitest` watch, no `vite`/`npm run dev`).
+- TOKEN HYGIENE — use quiet reporters; every verbose test/coverage dump compounds into every later
+  turn's input across the pass. Run `vitest run <path> --reporter=dot` (not the default verbose
+  reporter); run Python tests with `pytest -q --no-header`; read coverage as the text-summary TOTALS
+  line only — never the per-file table; scope eslint/tsc to the changed files only, not the whole
+  package. On a RED run, re-run only the failing test file(s) — not the whole suite — to isolate and
+  confirm the fix.
 
 Git: the orchestrator owns git and has ALREADY placed you on the correct branch in an isolated
 worktree (your cwd is the repo root). Do NOT run git at all — no fetch, status, rev-parse,

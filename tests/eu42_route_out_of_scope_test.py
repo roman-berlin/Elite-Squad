@@ -74,7 +74,7 @@ class StubBacklog:
         self.created = []          # (summary, labels, issue_type)
     def find_open_by_summary(self, summary):
         return self._open.get(str(summary).strip().lower())
-    def create_task(self, summary, description, labels=None, issue_type="Task"):
+    def create_task(self, summary, description, labels=None, issue_type="Task", priority=None):
         key = f"EU-{900 + len(self.created)}"
         self.created.append((summary, list(labels or []), issue_type))
         return key

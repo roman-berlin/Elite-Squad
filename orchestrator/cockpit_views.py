@@ -37,7 +37,14 @@ _TOKENS_FALLBACK = (
     "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
     "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
     "--shadow-3:0 16px 40px rgba(0,0,0,.55);"
-    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease}")
+    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease;"
+    # 8pt spacing scale (EU-296) — mirrors _PAGE's :root block, kept byte-identical.
+    "--s-1:4px;--s-2:8px;--s-3:16px;--s-4:24px;--s-5:32px;--s-6:48px;"
+    # modular type scale (EU-296) — px-equivalents/usage documented on the _PAGE mirror.
+    "--t-xs:11px;--t-sm:12.5px;--t-md:14px;--t-lg:18px;--t-xl:24px;--t-2xl:32px;"
+    # semantic color-role aliases (EU-296) — map onto the existing palette above.
+    "--surface:var(--panel);--border:var(--line);--text:var(--ink);"
+    "--positive:var(--ok);--critical:var(--bad)}")
 
 
 def _token_css() -> str:
@@ -121,6 +128,56 @@ def _charged() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+# ── REUSABLE PARTIALS (EU-297 / EU-285b) ───────────────────────────────────────
+# The first slice that actually *consumes* the EU-296 foundation tokens (--s-*/--t-*/
+# --surface/--r-xl) instead of just defining them. Each partial inlines its tokens
+# directly on the element it returns, so the partial's OWN output always carries them —
+# independent of whichever stylesheet happens to be loaded around a given call site.
+# Full rollout to every card/panel/button on every screen is a later slice; these three
+# are wired into one real call site each as proof-of-integration (see _kpi_html /
+# _actbtn here, and the "Talk to the unit" panel in warroom.py).
+
+def _btn(label: str, *, cls: str = "", tag: str = "button", attrs: str = "") -> str:
+    """Reusable toolbar-button partial: a shared ``.btn`` base carrying ``--s-*`` padding,
+    ``--r-xl`` radius and ``--t-md`` type, so toolbar screens stop hand-rolling their own inline
+    button CSS. ``cls`` layers extra tone/colour classes (e.g. ``actbtn``) on top of the base."""
+    classes = ("btn " + cls).strip()
+    return (f'<{tag} class="{classes}" style="border-radius:var(--r-xl);'
+            f'padding:var(--s-2) var(--s-3);font-size:var(--t-md)"{attrs}>{label}</{tag}>')
+
+
+def _kpi_metric(value, label, tone: str = "", href: str | None = None, extra: str = "") -> str:
+    """Reusable KPI-numeral partial: renders a headline number + its label at the EU-296
+    ``--t-2xl`` type-scale token instead of a raw 30px/40px inline font-size literal — reducing
+    numeral weight per the parent ticket's direction. ``extra`` appends trusted HTML (e.g. a
+    gauge/sparkline) inside the wrapping tag before it closes. The distinctive ``kpim`` marker
+    class proves a call site renders through this partial rather than duplicating the numeral
+    markup inline."""
+    tag, attr, link = ("a", f' href="{html.escape(href)}"', " link") if href else ("div", "", "")
+    return (
+        f'<{tag} class="kpim kpi {tone}{link}"{attr}>'
+        f'<div class=kv style="font-size:var(--t-2xl);font-weight:500">{html.escape(str(value))}</div>'
+        f'<div class=kl>{html.escape(str(label))}</div>{extra}</{tag}>'
+    )
+
+
+def _card(title: str, body: str, freshness: str | None = None) -> str:
+    """Reusable card/panel partial: consistent padding (the EU-296 ``--s-*`` spacing scale),
+    border, ``--r-xl`` radius and ``--surface`` background, so KPI cards and panels stop being
+    hand-rolled per screen. ``body`` is trusted HTML (caller-controlled, same contract as the
+    other partials in this module); ``freshness`` renders an optional small caption (e.g.
+    'updated 2m ago') under the body."""
+    fresh_html = (f'<div class=card-fresh style="font-size:var(--t-xs);color:var(--dim);'
+                  f'margin-top:var(--s-2)">{html.escape(freshness)}</div>' if freshness else "")
+    return (
+        '<div class=card style="background:var(--surface);border:1px solid var(--border);'
+        'border-radius:var(--r-xl);padding:var(--s-4)">'
+        f'<div class=card-title style="font-size:var(--t-lg);font-weight:600;'
+        f'margin-bottom:var(--s-2)">{html.escape(title)}</div>'
+        f'<div class=card-body>{body}</div>{fresh_html}</div>'
+    )
+
+
 def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
     """A single on-page officer-action button (POST form). These actions used to live in the
     'Unit' toolbar menu; they now sit on the page that shows their result, so each activity
@@ -128,15 +185,16 @@ def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
     hidden = f'<input type=hidden name=app value="{html.escape(app)}">' if app else ""
     onsub = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
     return (f"<form method=post action={action} style='margin:0'{onsub}>{hidden}"
-            f"<button class=actbtn>{label}</button></form>")
+            f"{_btn(label, cls='actbtn')}</form>")
 
 
 def _actbar(*items: str) -> str:
-    """A row of on-page officer-action controls."""
+    """A row of on-page officer-action controls. Buttons render via ``_btn`` (EU-297); this
+    style block adds only the ``actbtn`` tone/colour on top of the shared ``.btn`` base."""
     return ("<style>.actbar{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}"
-            ".actbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);"
-            "border-radius:var(--r-md);padding:9px 14px;font:inherit;font-size:14px;font-weight:600;"
-            "cursor:pointer;text-decoration:none;display:inline-block;transition:background var(--t-fast)}"
+            ".btn{font:inherit;font-weight:600;cursor:pointer;text-decoration:none;"
+            "display:inline-block;transition:background var(--t-fast)}"
+            ".actbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink)}"
             ".actbtn:hover{background:var(--line)}"
             ".actbtn:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
             "<div class=actbar>" + "".join(items) + "</div>")
@@ -358,6 +416,108 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
+# ── EU-314: per-project pipeline board ──────────────────────────────────────────
+# One consolidated board for the ACTIVE project tab only — every in-flight/recent ticket with its
+# current stage (dashboard.derive_pipeline_stage) and age — so the Commander stops cross-reading
+# KPI cards / /tasks / /needs to see "what's happening right now". Scoped exactly like
+# needs.summary(cfg, app_name) already scopes per app (EU-129 pattern): NOT a single global list.
+_MERGED_RECENCY_SECS = 30 * 60   # a just-merged ticket lingers ~30m on the board, then drops off
+
+# EU-315: per-tone row colour, keyed off dashboard.pipeline_stage_tone(task) — reuses the same
+# palette vars _token_css() already defines, so Blocked / Needs-you / Errored are each visually
+# distinct at a glance instead of identical --dim grey text.
+_STAGE_TONE_COLOR = {
+    "bad": "var(--bad)", "warn": "var(--warn)", "blocked": "var(--info)", "ok": "var(--ok)",
+}
+
+
+def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None,
+                    blocked_set: set[str] | None = None) -> str:
+    """Render the active tab's pipeline board: one row per ticket — id, current stage, age.
+
+    ``tasks`` is the caller's already-loaded ``dashboard.load_tasks(cfg.audit_path)`` result (one
+    entry per RUN, newest run first) — never reloaded here, mirroring ``needs.py``'s "load once,
+    filter many" contract. Filtered to ``app_name`` with the SAME rule ``needs.py``'s
+    ``_row_matches_app`` uses (the row's own ``app`` field, else a ticket-key prefix match) — pass
+    a falsy ``app_name`` to show every project (unscoped).
+
+    ``blocked_set`` (EU-315): the REAL parked set — the ticket ids in blocked_tickets.json
+    (``warroom._load_blocked``). A row whose ticket is a member renders with the distinct Blocked
+    tone/label and, once past ``warroom.STALE_BLOCK_CUTOFF_S``, greyed as ``(stale)``. Blocked-ness
+    is membership in this set, NOT a run ``outcome`` (there is no ``blocked`` outcome). When
+    ``None``, the board loads the set itself from ``cfg`` so a direct caller still gets the real
+    state; pass an explicit set (even empty) to override that self-load.
+
+    Age-filter rule: every non-terminal / needs-you row always shows; a ``merged→dev`` row shows
+    only while recent (< ``_MERGED_RECENCY_SECS`` since it ended), so a just-landed ticket lingers
+    briefly instead of vanishing the instant it merges. ``cfg`` is accepted (used to self-load the
+    parked set) and otherwise matches the ``needs.summary(cfg, app_name)`` convention this mirrors.
+    """
+    from datetime import datetime
+
+    from . import needs as _needs
+
+    if blocked_set is None:
+        blocked_set = set()
+        if cfg is not None:
+            try:
+                from . import warroom as _wr
+                blocked_set = {str(b) for b in _wr._load_blocked(cfg)}
+            except Exception:  # noqa: BLE001 - the board must never break on a bad parked-set read
+                blocked_set = set()
+    else:
+        blocked_set = {str(b) for b in blocked_set}
+
+    app_prefix = str(app_name).strip().upper() if app_name else ""
+    now_naive = datetime.now()
+
+    def _age_secs(ref) -> float | None:
+        if ref is None:
+            return None
+        now = datetime.now(ref.tzinfo) if getattr(ref, "tzinfo", None) else now_naive
+        return max((now - ref).total_seconds(), 0.0)
+
+    rows = []
+    for t in tasks:
+        if app_name and not _needs._row_matches_app(t, app_name, app_prefix):
+            continue
+        age_secs = _age_secs(t.get("ended") or t.get("started"))
+        if age_secs is None:
+            continue  # no timestamp at all — nothing to show an age for
+        if (t.get("outcome") or "") == "merged→dev" and age_secs >= _MERGED_RECENCY_SECS:
+            continue  # merged AND old — the one row kind the board drops (the recency rule)
+        raw_tid = str(t.get("ticket_id") or "")
+        is_blocked = raw_tid in blocked_set
+        tid = html.escape(raw_tid)
+        stage_text = D.derive_pipeline_stage(t, is_blocked=is_blocked)
+        age = html.escape(D._human_dur(age_secs))
+        # EU-315: freshness hardening — a parked (blocked) row past the staleness cutoff is NEVER
+        # shown as a plain active Blocked row; it stays visible (greyed), not silently dropped, so
+        # the Commander can still see it aged out rather than losing the signal entirely. Blocked-
+        # ness + its staleness are both derived from the real parked set (blocked_set membership),
+        # never from a run outcome.
+        stale = D.is_blocked_stale(t, is_blocked=is_blocked)
+        if stale:
+            tone_cls, color = "pbstale", "var(--faint)"
+            stage_text += " (stale)"
+        else:
+            tone = D.pipeline_stage_tone(t, is_blocked=is_blocked)
+            tone_cls = f"pbstage-{tone}" if tone else "pbstage-default"
+            color = _STAGE_TONE_COLOR.get(tone, "var(--dim)")
+        stage = html.escape(stage_text)
+        rows.append(
+            '<div class=pbrow style="display:flex;align-items:center;gap:var(--s-3);'
+            'padding:var(--s-2) 0;border-top:1px solid var(--border)">'
+            f'<span class="mono pbid" style="font-weight:600">{tid}</span>'
+            f'<span class="pbstage {tone_cls}" style="color:{color};flex:1">{stage}</span>'
+            f'<span class=pbage style="color:var(--faint);font-size:var(--t-xs)">{age}</span>'
+            '</div>'
+        )
+    body = ("".join(rows) if rows else
+            '<div class=pbempty style="color:var(--dim)">No in-flight tickets right now.</div>')
+    return _card("Pipeline", body)
+
+
 def backend_control(cfg, app_name: str | None = None) -> str:
     """EU-190/EU-223: the STICKY model-backend selectors for the cockpit control bar.
 
@@ -369,17 +529,38 @@ def backend_control(cfg, app_name: str | None = None) -> str:
     EU-223 adds an optional PER-PROJECT selector for ``app_name`` — defaults to "Inherit global"
     (selected when the app has no override) and posts ``app=<app_name>`` alongside ``backend=`` so
     only THAT project's pref changes — the two parallel drains (EU-103) can each pin a backend.
-    Never renders the token value."""
-    from . import backends as _bk, backend_pref
+    Never renders the token value.
+
+    EU-236: ALSO lists every user-defined model-registry backend as an additional ``<option>`` in
+    the global selector, alongside Claude/GLM — sourced live from ``ModelRegistry(cfg)`` (cfg-
+    anchored, same hermetic tmp-store convention as ``model_registry.py``) so a backend added via
+    the cockpit shows up immediately, with no code change or restart. Never renders a credential."""
+    from . import backend_pref
+    from . import backends as _bk
+    from .model_registry import ModelRegistry
     active = backend_pref.active(cfg)
     glm_ok = _bk.available("glm")
     show_glm = glm_ok or active == _bk.GLM     # keep a stale GLM choice visible even if key vanished
-    opts = f"<option value='opus' {'selected' if active == _bk.NATIVE else ''}>Opus (Claude)</option>"
-    if show_glm:
-        glm_label = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
-        opts += (f"<option value='glm' {'selected' if active == _bk.GLM else ''} "
-                 f'title="Sends prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
-                 f"{glm_label}</option>")
+    # EU-236: enumerate the selectable backends through backends.list_backends (the single source of
+    # truth — hardcoded opus/glm + every registry record), then render each; opus/glm keep their
+    # availability + third-party notes, registry records render as a plain custom option.
+    opts = ""
+    for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
+        _bid = _entry["id"]
+        if _bid == _bk.NATIVE:
+            opts += (f"<option value='opus' {'selected' if active == _bk.NATIVE else ''}>"
+                     "Opus (Claude)</option>")
+        elif _bid == _bk.GLM:
+            if not show_glm:
+                continue
+            glm_label = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
+            opts += (f"<option value='glm' {'selected' if active == _bk.GLM else ''} "
+                     f'title="Sends prompts (code, tickets, diffs) to Z.ai — a third-party provider">'
+                     f"{glm_label}</option>")
+        else:
+            _label = html.escape(_entry.get("label") or _bid)
+            opts += (f"<option value='{html.escape(_bid)}' {'selected' if active == _bid else ''} "
+                     f'title="Custom model backend — {_label}">{_label}</option>')
     if active == _bk.GLM and not glm_ok:
         note = ("<span class=\"tbnote bad\" title=\"Set GLM_AUTH_TOKEN and restart\">"
                 "&#9888; GLM key missing — runs blocked</span>")
@@ -469,7 +650,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     fr_tasks = _fresh(_tkdt)
     fr_council = _fresh(_wr._last_council(cfg))
     fr_standup = _fresh(_wr._mtime(_base.with_name("last-standup.md")))
-    fr_drill = _fresh(_wr._mtime(_base.with_name("drill-report.md")))
     try:
         from . import memory as _mem
         fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
@@ -587,10 +767,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     open_logs_html = ""
     if is_mac:
         log_folder = str(getattr(cfg, "log_folder", None) or "logs/")
-        open_logs_html = (
-            f'<a class="btn" href="/api/open-logs?path={html.escape(quote(log_folder))}" '
-            f'title="Open the run-logs folder in Finder">&#128194; Open logs</a>'
-        )
+        open_logs_html = _btn(
+            "&#128194; Open logs", tag="a",
+            attrs=(f' href="/api/open-logs?path={html.escape(quote(log_folder))}" '
+                   f'title="Open the run-logs folder in Finder"'))
 
     # Render plan-limit banner BEFORE the control bar (if active)
     plan_banner = _plan_limit_banner(_state, cfg)
@@ -656,6 +836,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .btn:disabled{{opacity:.5;cursor:not-allowed}}
 .tbar .panel a{{display:flex;align-items:center}}
 .tbar .panel .mfresh{{margin-left:auto;padding-left:14px;color:var(--faint);font-size:11px;font-weight:400}}
+/* EU-299 (EU-285d) — toolbar clusters: group the flat button row into labeled sections
+   (build · QA · nav) instead of one flat emoji row. Spacing uses the EU-296 --s-* scale;
+   labels use the --t-xs type token — no new ad-hoc px literals. */
+.tbar .tclu{{display:inline-flex;align-items:center;gap:var(--s-2)}}
+.tbar .tclabel{{font-size:var(--t-xs);font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-right:var(--s-1)}}
+.tbar .tcrow{{display:inline-flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}}
 /* EU-103 — per-project Autopilot section */
 .tbar .tbap{{display:inline-flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--panel2)}}
 .tbar .tbap.on{{border-color:var(--okline);background:var(--okbg)}}
@@ -687,49 +873,63 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 }}
 </style>
 <div class=tbar>
-  <details class=menu>
-    <summary class=btn>&#43; New task</summary>
-    <div class="panel form">
-      <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
-        <input type=hidden name=kind value=task>
-        <div class=row style="gap:16px;margin-bottom:3px">
-          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
-          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
+  <div class=tclu>
+    <span class=tclabel>build</span>
+    <div class=tcrow>
+      <details class=menu>
+        {_btn("&#43; New task", tag="summary")}
+        <div class="panel form">
+          <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
+            <input type=hidden name=kind value=task>
+            <div class=row style="gap:16px;margin-bottom:3px">
+              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
+              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
+            </div>
+            <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
+            <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
+            <div class=row>
+              <select name=app title=project style="flex:1">{apps}</select>
+              <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
+            </div>
+            <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
+            <button {run_dis}>&#9654; Run</button>
+          </form>
         </div>
-        <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
-        <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
-        <div class=row>
-          <select name=app title=project style="flex:1">{apps}</select>
-          <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
+      </details>
+      {backend_control(cfg, app0)}
+      {ap_html}
+      {ship_html}
+    </div>
+  </div>
+
+  <div class=tclu>
+    <span class=tclabel>QA</span>
+    <div class=tcrow>
+      <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128225; Patrol", attrs=f' {busy("patrolling")}' if busy("patrolling") else "")}</form>
+      <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128640; Ship review", attrs=f' {busy("shipreview")}' if busy("shipreview") else "")}</form>
+    </div>
+  </div>
+
+  <div class=tclu>
+    <span class=tclabel>nav</span>
+    <div class=tcrow>
+      {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
+      <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
+      {open_logs_html}
+      <details class=menu>
+        {_btn("&#128202; Reports", tag="summary")}
+        <div class="panel right">
+          <a href="/tasks">&#128203; Task log{fr_tasks}</a>
+          <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
+          <a href="/memory">&#128221; Unit memory{fr_mem}</a>
+          <a href="/usage">&#128202; Token usage{fr_usage}</a>
+          <a href="/budget">&#128176; Budget monitor</a>
+          <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
+          <a href="/roster-doc">&#128101; Unit roster</a>
         </div>
-        <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
-        <button {run_dis}>&#9654; Run</button>
-      </form>
+      </details>
     </div>
-  </details>
-  {backend_control(cfg, app0)}
-
-  <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('patrolling')}>&#128225; Patrol</button></form>
-  <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}"><button class=btn {busy('shipreview')}>&#128640; Ship review</button></form>
-  <a class="btn" href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses">&#128268; Jira</a>
-  <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
-  {ship_html}
-  {ap_html}
-  {open_logs_html}
-
-  <details class=menu>
-    <summary class=btn>&#128202; Reports</summary>
-    <div class="panel right">
-      <a href="/tasks">&#128203; Task log{fr_tasks}</a>
-      <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
-      <a href="/memory">&#128221; Unit memory{fr_mem}</a>
-      <a href="/usage">&#128202; Token usage{fr_usage}</a>
-      <a href="/budget">&#128176; Budget monitor</a>
-      <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
-      <a href="/roster-doc">&#128101; Unit roster</a>
-      <a href="/drill">&#127894; Last drill{fr_drill}</a>
-    </div>
-  </details>
+  </div>
 
   <span class=grow></span>
   {status}
@@ -755,8 +955,43 @@ def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
     return out
 
 
-def _chat_inner(cfg: Config) -> str:
+def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
+    """Render the CTO chat thread, windowed to the last ``limit`` regular messages (EU-304).
+
+    ``offset`` counts how many of the most-recent regular messages to skip before taking the next
+    ``limit``-sized window going backwards — 0 (the default) is "the last ``limit`` messages" (used
+    for the normal page render and the 5s auto-refresh poll); ``offset=limit`` is the next-older
+    batch the 'load earlier' control fetches, ``offset=2*limit`` the one after that, and so on.
+
+    When ``offset`` is non-zero this returns a BARE fragment (just ``.msg`` bubbles, no pinned
+    cards, no ``.thread``/composer wrapper) meant to be prepended into the existing thread by the
+    client — an empty string means there are no older messages left. The default (``offset=0``)
+    render is unchanged in shape: pinned cards on top, then the ``.thread`` wrapper, plus a
+    'load earlier' control when older messages exist.
+    """
     from . import council, decisions
+    all_bubbles = _chat_bubbles(_safe_chat_transcript(cfg))
+    total = len(all_bubbles)
+    window_limit = limit if limit and limit > 0 else total
+    end = max(total - max(offset, 0), 0)
+    start = max(end - window_limit, 0)
+    window = all_bubbles[start:end]
+    bubbles = ""
+    for i, (who, text) in enumerate(window):
+        # EU-305: stamp each bubble with its absolute index in the full transcript so the
+        # auto-refresh poll can append-only (diff on data-seq) instead of replacing #cinner
+        # wholesale. Stable across the default window and any 'load earlier' offset batch,
+        # since it's always start + i into the same all_bubbles list.
+        seq = start + i
+        label = "You" if who == "you" else "CTO"
+        bubbles += (f'<div class="msg {who}" data-seq="{seq}"><div class=who>{label}</div>'
+                    f'<div class=bub>{html.escape(text)}</div></div>')
+
+    if offset:
+        # 'load earlier' batch fetch — just the older bubbles, nothing else, so the client can
+        # prepend them into the live .thread without disturbing pinned cards or the composer.
+        return bubbles
+
     try:
         pend = decisions.load(cfg)
     except Exception:  # noqa: BLE001
@@ -772,19 +1007,24 @@ def _chat_inner(cfg: Config) -> str:
                   f'<input type=text name=text placeholder="your decision for {tid}…" autocomplete=off>'
                   '<button>Send</button></form></div>')
     pending_html = f'<div class=pending>{cards}</div>' if cards else ""
-    try:
-        notes = council.chat_transcript(cfg, lines=400)
-    except Exception:  # noqa: BLE001
-        notes = ""
-    bubbles = ""
-    for who, text in _chat_bubbles(notes):
-        label = "You" if who == "you" else "CTO"
-        bubbles += (f'<div class="msg {who}"><div class=who>{label}</div>'
-                    f'<div class=bub>{html.escape(text)}</div></div>')
+
     if not bubbles and not cards:
         bubbles = ('<div class=cempty>No messages yet. When an officer needs a decision it shows '
                    'up here — or send the CTO a message below.</div>')
-    return pending_html + f'<div class=thread>{bubbles}</div>'
+    load_earlier = ""
+    if start > 0:
+        load_earlier = (f'<button type=button class=load-earlier data-offset="{window_limit}" '
+                         f'data-limit="{window_limit}" onclick="loadEarlierChat(this)">'
+                         '&#8593; Load earlier messages</button>')
+    return pending_html + load_earlier + f'<div class=thread>{bubbles}</div>'
+
+
+def _safe_chat_transcript(cfg: Config) -> str:
+    from . import council
+    try:
+        return council.chat_transcript(cfg, lines=400)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 _CHAT_STYLE = ("<style>"
@@ -799,6 +1039,11 @@ _CHAT_STYLE = ("<style>"
                ".pcard .ph2{color:var(--warn);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
                ".pcard .pq{color:var(--ink);font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:var(--mono);line-height:1.5}"
                ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
+               ".load-earlier{display:block;margin:14px auto 0;background:var(--panel2);"
+               "border:1px solid var(--line2);color:var(--dim);border-radius:var(--r-pill);"
+               "padding:7px 15px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}"
+               ".load-earlier:hover{background:var(--line);color:var(--ink)}"
+               ".load-earlier:disabled{opacity:.6;cursor:default}"
                ".thread{display:flex;flex-direction:column;gap:9px;margin:16px 0 96px}"
                ".msg{display:flex;flex-direction:column;max-width:80%}"
                ".msg.you{align-self:flex-end;align-items:flex-end}.msg.unit{align-self:flex-start}"
@@ -807,8 +1052,12 @@ _CHAT_STYLE = ("<style>"
                ".msg.unit .bub{background:var(--panel2);border:1px solid var(--line2);border-bottom-left-radius:4px}"
                ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
                ".cempty{color:var(--dim);padding:30px 8px;text-align:center;font-size:13px}"
+               ".typing{max-width:780px;margin:0 auto 8px;color:var(--faint);font-size:12px;font-style:italic}"
                ".composer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--line);padding:12px 30px}"
                ".composer form{max-width:780px;margin:0 auto;display:flex;gap:8px}.composer input{flex:1}"
+               ".composer input.cerr{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}"
+               ".chaterr{display:none;max-width:780px;margin:0 auto 7px;color:var(--bad);font-size:12px;font-weight:600}"
+               ".chaterr.on{display:block}"
                "</style>")
 
 
@@ -822,10 +1071,10 @@ def _chat_tabs(active: str, npend: int = 0) -> str:
 
 def _group_inner(cfg: Config) -> str:
     from . import council
-    msgs = council.group_messages(cfg, limit=200)
+    msgs = council.group_messages(cfg, limit=30)   # EU-287: window to the recent messages, not the whole log
     if not msgs:
-        return ('<div class=cempty>No messages yet. Ask the unit anything — the relevant officers '
-                'weigh in, others can add a comment. (The CTO is your 1:1 chat.)</div>')
+        return ('<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant officers '
+                'weigh in. (The CTO is your 1:1 chat.)</div>')
     out = ""
     for who, text in msgs:
         side = "you" if who == "you" else "unit"

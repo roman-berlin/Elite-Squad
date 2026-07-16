@@ -85,22 +85,29 @@ def _validate_question_format(question: str) -> tuple[bool, str]:
 
     # Detect leaked internal monologue / chain-of-thought - these are exact patterns
     # that should NEVER appear in a question sent to the Commander.
-    # Check both at start and anywhere in the text (PM's "WHY PM CANNOT RESOLVE" prefix can
-    # precede the leaked monologue, so we need to check the full text).
-    leaked_patterns = [
+    # Distinctive markers are rejected ANYWHERE (PM's "WHY PM CANNOT RESOLVE" prefix can precede
+    # the leaked monologue). Common English openers are only rejected when a LINE STARTS with
+    # them (EU-358): as bare substrings they ate legitimate decisions — e.g. any option text
+    # containing "…I need to know if sessions matter" silently voided the whole question.
+    leaked_anywhere = [
         "## ANALYSIS",
-        "Looking at the",
         "Reality check on",
+    ]
+    leaked_line_start = [
+        "Looking at the",
         "I need to",
         "Let me",
         "Based on the",
     ]
     q_lower = q.lower()
-    for pattern in leaked_patterns:
-        pattern_lower = pattern.lower()
-        # Check if it starts with the pattern OR if the pattern appears anywhere in the text
-        if q_lower.startswith(pattern_lower) or pattern_lower in q_lower:
+    for pattern in leaked_anywhere:
+        if pattern.lower() in q_lower:
             return False, f"leaked internal monologue (contains '{pattern[:20]}')"
+    for line in q_lower.split("\n"):
+        stripped = line.strip()
+        for pattern in leaked_line_start:
+            if stripped.startswith(pattern.lower()):
+                return False, f"leaked internal monologue (contains '{pattern[:20]}')"
 
     # Raw markdown headers (##, ###) - these should NEVER appear in a Commander-facing question
     # They indicate leaked developer markdown. More lenient check: only if they appear
@@ -219,6 +226,27 @@ def _park_on_tracker(cfg, ticket: Ticket, app_name: str, reason: str = "") -> st
             return ""
     except Exception:  # noqa: BLE001 - parking on the tracker must never break escalation
         return None
+
+
+def consume_answer(cfg, ticket_id: str, answer: str) -> None:
+    """Snapshot a just-detected Jira answer as the entry's new ``answer_baseline`` — atomically,
+    under the shared store lock — so one comment resumes a ticket exactly ONCE.
+
+    EU-229 widened the Jira-answer resume scan from blocked∩pending to ALL pending decisions but
+    left the consume step behind (EU-61's blocked-only version was self-limiting via the blocked
+    set): nothing ever advanced the baseline, so `_resumable_answered` re-detected the SAME comment
+    every drain cycle and spammed '▶️ Resuming (answered on Jira)' to Telegram every ~2 minutes
+    (live incident EU-335, 2026-07-16 10:45–10:56+). A later, genuinely different comment still
+    resumes again. Best-effort: a store hiccup must never break the resume path."""
+    def _mut(items):
+        for e in (items or []):
+            if e.get("id") == ticket_id:
+                e["answer_baseline"] = answer
+        return items or []
+    try:
+        locking.locked_rmw(_store(cfg), _mut, default=[])
+    except (OSError, ValueError):
+        pass
 
 
 def _comment_answer(cfg, resolved: dict, answer: str) -> None:
@@ -468,7 +496,7 @@ def handle_command(cfg, audit, text: str) -> bool:
     if cmd in ("help", "start"):
         notify.send("Commands:\n/daily — quick daily stand-up (cheap)\n/standup — deterministic report\n"
                     "/status — recent tasks\n"
-                    "/drill — train the unit\n/council [topic] — deep WEEKLY council\n"
+                    "/council [topic] — deep WEEKLY council\n"
                     "/run <app> <what to build> [--live]\n"
                     "/drain <app> [--live] — work your To-Do queue\n"
                     "/unblock <id> — retry a parked (escalated) ticket\n"
@@ -488,18 +516,6 @@ def handle_command(cfg, audit, text: str) -> bool:
         notify.send(D.standup(cfg))
     elif cmd == "status":
         notify.send(D.render_status(D.load_tasks(cfg.audit_path), limit=10, show_cost=False))
-    elif cmd == "drill":
-        notify.send("🎖️ Engineering Coach working…")
-
-        def _d():
-            try:
-                from . import drillmaster
-                rep = asyncio.run(drillmaster.drill(cfg))
-                Path(cfg.audit_path).with_name("drill-report.md").write_text(rep, encoding="utf-8")
-                notify.send("🎖️ Drill report:\n\n" + rep[:3500])
-            except Exception as exc:  # noqa: BLE001
-                notify.send(f"⚠️ drill failed: {exc}")
-        threading.Thread(target=_d, daemon=True).start()
     elif cmd == "council":
         notify.send("🎖️ Convening the daily council…")
 
@@ -515,8 +531,11 @@ def handle_command(cfg, audit, text: str) -> bool:
         notify.send("▶️ " + ap_mod.unblock(cfg, arg or None) + " — autopilot will retry it.")
     elif cmd in ("run", "drain"):
         import copy
-        live = "--live" in arg
-        arg = arg.replace("--live", "").strip()
+        # EU-358: token-anchored — a bare substring test made any argument CONTAINING "--live"
+        # (e.g. a /run description mentioning "--liveness") silently flip the run to LIVE.
+        toks = arg.split()
+        live = "--live" in toks
+        arg = " ".join(t for t in toks if t != "--live").strip()
         rcfg = copy.copy(cfg)        # per-invocation config — never mutate the shared cfg
         rcfg.dry_run = not live
         try:

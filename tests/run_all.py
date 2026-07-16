@@ -36,6 +36,11 @@ TESTS = sorted(p for p in (ROOT / "tests").glob("*_test.py"))
 # which process spawns the suite. A harness that tests notify sets its own fake env in-process.
 _CHILD_ENV = {k: v for k, v in os.environ.items()
               if k not in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
+# 2026-07-15 (auth liveness): health.checks() now probes credential VALIDITY with a real
+# `claude -p` round-trip (network + a real model) unless GENERAL_AUTH_PROBE=0 — force it off for
+# every harness, same contract as the Telegram strip above. A harness that tests the probe stubs
+# auth_probe._run_probe / clears this var in-process (auth_liveness_test.py).
+_CHILD_ENV["GENERAL_AUTH_PROBE"] = "0"
 
 
 def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:

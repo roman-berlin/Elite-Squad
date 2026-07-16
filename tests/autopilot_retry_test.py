@@ -18,7 +18,7 @@ req.Session = lambda: types.SimpleNamespace(auth=None, headers=types.SimpleNames
 sys.modules["requests"] = req
 sys.path.insert(0, ".")
 
-from orchestrator import autopilot
+from orchestrator import autopilot, git_ops
 from orchestrator.contracts import Outcome, TicketReport
 from orchestrator.config import Config, AppConfig
 
@@ -47,6 +47,13 @@ def _run_cycle():
     """Drive a single autopilot cycle (once=True) with stubbed intake / loop / events."""
     autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used": 0, "cap": 1, "pct": 0.0}
     autopilot.intake.from_drain = lambda c, app, n: [(APP, TICKET)]
+    # EU-334: this harness's cfg deliberately points repo_path="." at the repo root the suite
+    # itself runs from — exactly the shape that (pre-fix) let the reaper mistake its OWN base
+    # worktree for a stale one and `git worktree remove` it out from under the running process.
+    # autopilot() calls the REAL reap_stale_worktrees(cfg) every cycle (a local `from .git_ops
+    # import ...`, so patching the git_ops module attribute here is what takes effect); stub it
+    # so this harness never side-effects real worktrees, same as the intake/run_loop stubs below.
+    git_ops.reap_stale_worktrees = lambda c: None
     async def _run_loop(c, worklist, audit):
         return [TicketReport(ticket_id=TICKET.id, outcome=_outcome["value"], iterations=1, cost_usd=0.0)]
     autopilot.run_loop = _run_loop

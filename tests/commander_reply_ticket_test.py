@@ -49,7 +49,7 @@ if hasattr(council, "_file_commander_ticket") and hasattr(council, "_app_for_rep
     created, open_titles = [], set()
     class _FakeBacklog:
         def find_open_by_summary(self, title): return "EU-existing" if title in open_titles else ""
-        def create_task(self, title, body, labels=None, issue_type="Task"):
+        def create_task(self, title, body, labels=None, issue_type="Task", priority=None):
             created.append((title, tuple(labels or []), issue_type)); return "EU-701"
     _orig_make = filing.make_backlog
     filing.make_backlog = lambda app: _FakeBacklog()

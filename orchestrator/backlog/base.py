@@ -33,8 +33,10 @@ class BacklogAdapter(ABC):
         return None
 
     def create_task(self, summary: str, description: str, labels=None,
-                    issue_type: str = "Task") -> Optional[str]:
-        """Optional: file a new ticket (officers raising findings). Default: not supported."""
+                    issue_type: str = "Task", priority: Optional[str] = None) -> Optional[str]:
+        """Optional: file a new ticket (officers raising findings). `priority` is an optional
+        backend-native priority name (e.g. Jira's "Highest"/"High"/"Medium"/"Low"); a None/absent
+        value leaves the backend's own default untouched. Default: not supported."""
         return None
 
     def find_open_by_summary(self, summary: str) -> Optional[str]:

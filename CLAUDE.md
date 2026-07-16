@@ -67,6 +67,10 @@ Everything under `Documentation/` (these are the only files there — keep this 
 - `Documentation/DELTA_AUDIT_2026-07-12.md` — the 2026-07-12 delta-audit index of findings (EU-262):
   root-cause of the max-turns-exhaustion crash class (EU-248), delta metrics, economics, the 14 new
   EU tickets it filed (EU-248..EU-261), and the 7-ticket AUTO product-quality sample.
+- `Documentation/TOTAL_AUDIT_2026-07-16.md` — the 2026-07-16 full-system re-sweep (EU-358): a
+  12-auditor + 3-lens-verifier pass over all of `orchestrator/`, the launcher, and `tests/`; the 11
+  defects fixed directly (EU-358, pinned by `tests/eu358_audit_fixes_test.py`), the deferred findings
+  filed as EU-359..EU-372, the 8 recurring improvement clusters, and the durable EU-259 evidence.
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them

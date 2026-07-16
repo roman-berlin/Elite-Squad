@@ -12,6 +12,7 @@ nothing existing breaks.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -37,10 +38,18 @@ def _load(cfg=None) -> dict:
 
 
 def _save(cfg, data: dict) -> None:
+    """EU-358: this file holds RAW Jira API tokens, so the write must be atomic (a crash
+    mid-truncate used to wipe every saved connection) and owner-only (default umask left it
+    world-readable). A failed save is at least announced instead of silently losing the token."""
+    f = _file(cfg)
+    tmp = f.with_name(f.name + ".tmp")    # *.json.tmp is gitignored alongside the store itself
     try:
-        _file(cfg).write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, f)
+    except OSError as exc:
+        print(f"  ⚠️ jira_connections.json save failed — connection change NOT persisted: {exc}",
+              flush=True)
 
 
 def _mask(token: str) -> str:

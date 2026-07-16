@@ -177,6 +177,7 @@ def create_app(cfg: Config):
     # QW4: every agent call also lands an `agent_call` audit event (model, tokens, duration).
     from . import agent as _agent
     _agent.configure_audit(audit)
+    _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
 
     # ----------------------------------------------------------------------------------------------
     # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`
@@ -432,6 +433,12 @@ def create_app(cfg: Config):
         the combined stdout/stderr. Commands run in the orchestrator's working directory
         with a 10-second timeout.
 
+        EU-146: Runs via Popen with ``start_new_session=True`` (its own process group,
+        same pattern as gate.py's ``run_commands``) so a backgrounded/forked child (e.g.
+        a bare `vitest` typed into the terminal) can't outlive a timeout. On
+        TimeoutExpired — and in a finally block covering every exit path — the WHOLE
+        process group is SIGKILL-ed via ``os.killpg``, not just the top shell PID.
+
         Security:
         * Commands are executed in a subprocess with a timeout.
         * No interactive shells — each command is a one-shot execution.
@@ -441,7 +448,6 @@ def create_app(cfg: Config):
         """
         from flask import jsonify
         import subprocess
-        import shlex
 
         cmd = (request.form.get("cmd") or "").strip()
         if not cmd:
@@ -451,26 +457,56 @@ def create_app(cfg: Config):
         if any(c in cmd for c in ["\x00", "\n", "\r"]):
             return jsonify({"output": "", "error": "Invalid characters in command"}), 400
 
+        proc = None
         try:
-            # Execute command with timeout, capture both stdout and stderr
-            result = subprocess.run(
+            # EU-146: Popen (not run) + start_new_session=True so the shell and any child
+            # it forks/backgrounds share one process group we can kill as a unit.
+            proc = subprocess.Popen(
                 cmd,
                 shell=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=10,
                 cwd=str(Path(cfg.config_path).parent) if hasattr(cfg, "config_path") else None,
-                env=dict(os.environ)
+                env=dict(os.environ),
+                start_new_session=True,
             )
-            output = result.stdout + result.stderr
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # EU-146: Kill the entire process group, not just the shell PID.
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+                except (ProcessLookupError, OSError):
+                    proc.kill()
+                # Reap the zombie so it doesn't linger.
+                try:
+                    proc.communicate(timeout=1)
+                except Exception:
+                    pass
+                return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
+            output = (stdout or "") + (stderr or "")
             # Cap output at 64KB
             if len(output) > 65536:
                 output = output[:65536] + "\n... (output truncated)"
             return jsonify({"output": output, "error": None})
-        except subprocess.TimeoutExpired:
-            return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
         except Exception as e:
             return jsonify({"output": "", "error": str(e)}), 500
+        finally:
+            # EU-146: Final sweep — if anything in the group is still alive (e.g. a
+            # backgrounded grandchild the communicate() reap above didn't catch), kill it.
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)
+                except (ProcessLookupError, OSError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.communicate(timeout=1)
+                except Exception:
+                    pass
 
     @app.get("/api/autopilot")
     def autopilot_status_api():
@@ -616,6 +652,11 @@ def create_app(cfg: Config):
             # "stopping" until the worker's finally clears autopilot_on. Acts on the SELECTED app's
             # state — never a single global autopilot — so draining one project leaves others running.
             ev = st.get("stop_event")
+            # EU-356: record the REQUEST itself. ev.set() leaves no trace, so the 2026-07-15 forensics
+            # could not place the operator's drain click closer than "somewhere in a 3-hour window" —
+            # every stop order now lands in the audit trail whether or not a live event was reachable.
+            audit.record("autopilot_stop_requested", action="drain", app=app_name or "",
+                         event_reachable=ev is not None)
             if ev is not None:
                 ev.set()
             # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
@@ -623,19 +664,22 @@ def create_app(cfg: Config):
             # This must happen AFTER ev.set() so graceful shutdown happens first.
             if ap.daemon_is_external():
                 stopped = ap._stop_launchd_daemon()
+                # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout, so this is a
+                # verified outcome (not launchctl's optimistic exit code) — surface it to the operator.
                 if stopped:
-                    # Success — the daemon will finish its in-flight work and exit
-                    pass
+                    st["last_msg"] = "✓ external launchd daemon confirmed stopped — it will not respawn."
                 else:
-                    # launchctl failed — the stop_event is still set, so graceful shutdown proceeds,
-                    # but KeepAlive may respawn it. Log this but don't block the redirect.
-                    pass
+                    st["last_msg"] = ("⚠ couldn't confirm the external launchd daemon stopped — "
+                                      "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         if action == "stop" and ap_on:
             # Immediate stop for THIS project: flip its autopilot OFF now (the in-flight build still
             # finishes in the background) and signal only this app's stop_event.
             ev = st.get("stop_event")
+            # EU-356: same request-trail as the drain branch — the click itself must be auditable.
+            audit.record("autopilot_stop_requested", action="stop", app=app_name or "",
+                         event_reachable=ev is not None)
             if ev is not None:
                 ev.set()
             st["autopilot_on"] = False
@@ -644,13 +688,12 @@ def create_app(cfg: Config):
             # doesn't actually stop it—the KeepAlive respawn makes the button a no-op for external runs.
             if ap.daemon_is_external():
                 stopped = ap._stop_launchd_daemon()
+                # EU-232: verified outcome (see the drain branch above) — surface it to the operator.
                 if stopped:
-                    # Success — the daemon will finish its in-flight work and exit
-                    pass
+                    st["last_msg"] = "✓ external launchd daemon confirmed stopped — it will not respawn."
                 else:
-                    # launchctl failed — the stop_event is still set, so graceful shutdown proceeds,
-                    # but KeepAlive may respawn it. Log this but don't block the redirect.
-                    pass
+                    st["last_msg"] = ("⚠ couldn't confirm the external launchd daemon stopped — "
+                                      "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         # toggle / unknown action → no-op (the mode persist above already took effect).
@@ -766,6 +809,60 @@ def create_app(cfg: Config):
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get("/api/terminal/stream")
+    def terminal_stream_api():
+        """Server-Sent Events: live-tail the orchestrator's terminal/log output for the cockpit's
+        interactive terminal panel.
+
+        EU-154: reuses the existing stdout ring buffer (``cockpit_state._LOG``, a
+        ``deque(maxlen=600)`` that already feeds the War Room live-feed panel) instead of a new
+        log source. Live-tails from CONNECT time only — whatever backlog is already in the buffer
+        when the client connects is never replayed, only lines appended afterwards. Polls every
+        0.5s and emits one raw ``data: <line>\n\n`` frame per new line (a bare SSE data frame,
+        not the ``event: <type>`` form ``_sse()`` produces — the terminal panel just wants plain
+        lines). Sends a ``: heartbeat\n\n`` comment roughly every 15s while idle, and resyncs
+        against the ring buffer's current contents if it has wrapped past what this stream last
+        saw (the bookmark fell off the back of the deque).
+        """
+        from flask import Response
+
+        def gen():
+            snapshot = list(_LOG)
+            bookmark = snapshot[-1] if snapshot else None   # last backlog entry — never replayed
+            last_heartbeat = time.time()
+            try:
+                while True:
+                    snapshot = list(_LOG)
+                    if bookmark is None:
+                        new_items = snapshot
+                    else:
+                        idx = None
+                        for i in range(len(snapshot) - 1, -1, -1):
+                            if snapshot[i] is bookmark:
+                                idx = i
+                                break
+                        # idx is None => the bookmark wrapped off the ring buffer since our last
+                        # poll (maxlen exceeded) — resync to whatever it currently holds instead
+                        # of guessing how much was missed.
+                        new_items = snapshot if idx is None else snapshot[idx + 1:]
+                    if new_items:
+                        for line, _key in new_items:
+                            yield f"data: {line}\n\n"
+                        bookmark = new_items[-1]
+                        last_heartbeat = time.time()
+                    else:
+                        now = time.time()
+                        if now - last_heartbeat >= 15:
+                            yield ": heartbeat\n\n"
+                            last_heartbeat = now
+                    time.sleep(0.5)
+            except GeneratorExit:
+                # Client disconnected — unwind quietly, nothing left to clean up.
+                return
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.get("/tasks")
     def tasks_page():
         # EU-129: Resolve the active project first so needs.count() can scope to it.
@@ -778,9 +875,13 @@ def create_app(cfg: Config):
             _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
+        # EU-314: pass cfg + the resolved active project so render_html renders the per-project
+        # pipeline board for THIS tab; switching the ?app= tab (via _tab_bar) changes _appq and
+        # therefore the board's ticket set.
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
-                             active_filter=flt, blocked=blocked, needs_count=_needs_cnt)
+                             active_filter=flt, blocked=blocked, needs_count=_needs_cnt,
+                             cfg=cfg, app_name=_appq)
         # This board view is reached from the cockpit's Reports menu, so it needs a way back like
         # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
         # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
@@ -932,15 +1033,18 @@ def create_app(cfg: Config):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
-        raw = (request.form.get("backend") or "").strip().lower()
+        raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
-        if app_param and raw in ("inherit", ""):
+        if app_param and raw.lower() in ("inherit", ""):
             # "Inherit global" — clear this app's override; it now resolves the global pick.
             backend_pref.set_active(None, cfg, app_name=app_param)
             _state.pop("model_alert", None)
             get_state(None)["last_msg"] = f"{app_param}: Model now inherits the global pick."
             return redirect("/")
-        bk = backends.normalize(raw)
+        # EU-236: resolve against the registry so a KNOWN custom-backend id is persisted VERBATIM,
+        # not flattened to opus by normalize(); opus/glm aliases still canonicalize, unknown -> opus.
+        from .model_registry import ModelRegistry
+        bk = backends.resolve_selection(raw, ModelRegistry(cfg))
         if bk == backends.GLM:
             ok, detail = backends.glm_test_connection()
             if not ok:
@@ -953,7 +1057,13 @@ def create_app(cfg: Config):
         else:
             backend_pref.set_active(bk, cfg)
         _state.pop("model_alert", None)
-        _label = "GLM (Z.ai) — connection OK." if bk == backends.GLM else "Opus (Claude)."
+        if bk == backends.GLM:
+            _label = "GLM (Z.ai) — connection OK."
+        elif bk == backends.NATIVE:
+            _label = "Opus (Claude)."
+        else:
+            _rec = ModelRegistry(cfg).get(bk)
+            _label = f"{(_rec or {}).get('display_name') or bk} (custom backend)."
         get_state(None)["last_msg"] = (
             f"{app_param}: Model set to {_label} (this project only)." if app_param
             else "Model backend set to " + _label)
@@ -1245,37 +1355,6 @@ def create_app(cfg: Config):
                     _state["standuping"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/standup")
-
-    @app.post("/api/drill")
-    def drill_api():
-        if not _state.get("drilling"):
-            def _bg():
-                _state["drilling"] = True
-                try:
-                    from . import drillmaster
-                    rep = asyncio.run(drillmaster.drill(cfg))
-                    Path(cfg.audit_path).with_name("drill-report.md").write_text(rep, encoding="utf-8")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"drill failed: {exc}"
-                finally:
-                    _state["drilling"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/drill")
-
-    @app.get("/drill")
-    def drill_page():
-        rep = Path(cfg.audit_path).with_name("drill-report.md")
-        if _state.get("drilling"):
-            body = _working("Engineering Coach is reviewing the unit's record and proposing officer upgrades…")
-        else:
-            act = _actbar(_actbtn("/api/drill", "&#127894; Run drill"))
-            if rep.exists():
-                body = act + "<pre class=rep>" + html.escape(rep.read_text(encoding="utf-8")) + "</pre>"
-            else:
-                body = act + ("<p style='color:#8a909c'>No drill yet. Run one — the Engineering Coach reviews "
-                              "the unit's record and proposes officer upgrades, which you Approve in the "
-                              "<a href='/approvals'>Approvals</a> inbox.</p>")
-        return _wrap("Engineering Coach report", body)
 
     @app.post("/api/council")
     def council_api():
@@ -2672,22 +2751,111 @@ def create_app(cfg: Config):
         prefill = html.escape((request.args.get("prefill") or "")[:800], quote=True)
         body = (_CHAT_STYLE + _chat_tabs("general", npend)
                 + '<div class=chat><div id=cinner>' + _chat_inner(cfg) + '</div></div>'
-                '<div class=composer><form method=post action=/api/chat>'
-                f'<input type=text name=text autocomplete=off autofocus value="{prefill}" '
+                '<div class=composer><div id=chaterr class=chaterr role=alert aria-live=assertive></div>'
+                '<form id=chatform method=post action=/api/chat>'
+                f'<input type=text id=chatinput name=text autocomplete=off autofocus value="{prefill}" '
                 'placeholder="Message the CTO…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
-                'setInterval(async function(){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
-                'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
-                'document.getElementById("cinner").innerHTML=await r.text();'
-                'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},5000);'
+                # EU-305 — append/patch only what's new instead of wholesale-replacing #cinner
+                # innerHTML every 5s (which jank-reset scroll position on every tick). The
+                # .pending 'needs-your-call' cards are cheap and sit above the thread, so they're
+                # just swapped in whole; the .thread is diffed on each bubble's data-seq (its
+                # stable absolute index into the transcript, EU-305/cockpit_views._chat_inner) and
+                # only bubbles newer than what's already on screen are appended — existing nodes
+                # are never rewritten, so scroll position is never disturbed by the poll itself.
+                # EU-307 — pulled the poll body into refreshChat(force) so the Enter-to-send handler
+                # below can await the same patch-in-place refresh (force=true skips the "near
+                # bottom" check, since the Commander's own just-sent message should always pull the
+                # view down) instead of duplicating the #cinner reconciliation logic.
+                'async function refreshChat(force){try{var r=await fetch("/api/chat-thread",{cache:"no-store"});'
+                'if(!r.ok)return;'
+                'var near=force||((window.innerHeight+window.scrollY)>=document.body.scrollHeight-140);'
+                'var frag=document.createElement("div");frag.innerHTML=await r.text();'
+                'var cinner=document.getElementById("cinner");'
+                'var newPending=frag.querySelector(".pending"),oldPending=cinner.querySelector(".pending");'
+                # EU-305 iter2 — only swap the .pending block when it actually changed, so text the
+                # Commander is mid-typing into a pending card's reply input isn't wiped every tick.
+                'if(newPending){if(oldPending){if(oldPending.outerHTML!==newPending.outerHTML)'
+                'oldPending.outerHTML=newPending.outerHTML;}'
+                'else cinner.insertBefore(newPending,cinner.firstChild);}'
+                'else if(oldPending)oldPending.remove();'
+                'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
+                'if(newThread&&oldThread){'
+                'var maxSeq=-1;'
+                'oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s>maxSeq)maxSeq=s;});'
+                'if(maxSeq===-1)oldThread.innerHTML="";'
+                'newThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'if(parseInt(m.dataset.seq,10)>maxSeq)oldThread.appendChild(m);});}'
+                # EU-305 iter2 — reconcile the EU-304 'load earlier' control against the LIVE window.
+                # The poller appends new bubbles, so the on-screen window grows and the button's
+                # original offset goes stale; a click at a stale offset would prepend duplicates.
+                # Anchor it to the true boundary: offset = (server total) - (oldest on-screen seq),
+                # where total = max fetched data-seq + 1. Insert the control when it newly appears,
+                # remove it when the fetched fragment no longer has one, update its offset otherwise.
+                'var newLE=frag.querySelector(".load-earlier"),oldLE=cinner.querySelector(".load-earlier");'
+                'if(newLE){var minSeq=Infinity,total=0;'
+                'if(oldThread)oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s<minSeq)minSeq=s;});'
+                'frag.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s+1>total)total=s+1;});'
+                'var off=(minSeq===Infinity)?parseInt(newLE.dataset.offset||"0",10):(total-minSeq);'
+                'if(oldLE){oldLE.dataset.offset=off;oldLE.dataset.limit=newLE.dataset.limit;}'
+                'else{newLE.dataset.offset=off;cinner.insertBefore(newLE,oldThread||null);}}'
+                'else if(oldLE)oldLE.remove();'
+                'if(near)window.scrollTo(0,document.body.scrollHeight);'
+                '}catch(e){}}'
+                'setInterval(function(){refreshChat(false);},5000);'
+                # EU-307 — Telegram-style Enter-to-send: intercept the composer's submit so Enter
+                # (or the Send button) posts via fetch instead of a native form submit (which would
+                # full-page-reload /chat and drop scroll position / any in-flight poll). After the
+                # POST resolves, clear the input, patch-in-place refresh #cinner via the same
+                # refreshChat() the poller uses (so it degrades gracefully to the full-log render
+                # if EU-286a windowing isn't present), then re-focus the input and stick the view to
+                # the newest message (own message included).
+                'var chatform=document.getElementById("chatform"),chatinput=document.getElementById("chatinput"),'
+                'chaterr=document.getElementById("chaterr");'
+                'if(chatform)chatform.addEventListener("submit",async function(ev){'
+                'ev.preventDefault();'
+                'var text=chatinput.value;if(!text.trim())return;'
+                # POST the send; treat a network throw OR a non-ok HTTP status as failure. On
+                # failure DO NOT clear the input — keep the Commander's typed text so it can be
+                # retried — surface a visible inline error, and leave focus in the box so a
+                # re-press of Enter re-sends. Only on success do we clear + refresh + stick down.
+                'var ok=false;'
+                'try{var r=await fetch("/api/chat",{method:"POST",body:new FormData(chatform)});ok=!!(r&&r.ok);}'
+                'catch(e){ok=false;}'
+                'if(!ok){chatinput.classList.add("cerr");'
+                'if(chaterr){chaterr.textContent="Message not sent — check your connection and press Enter to retry.";'
+                'chaterr.classList.add("on");}chatinput.focus();return;}'
+                'chatinput.classList.remove("cerr");if(chaterr)chaterr.classList.remove("on");'
+                'chatinput.value="";'
+                'await refreshChat(true);'
+                'chatinput.focus();'
+                'window.scrollTo(0,document.body.scrollHeight);'
+                '});'
+                # EU-304 — 'load earlier': fetch the next-older batch (offset grows by its own
+                # data-limit each click) and prepend it into the live .thread, no reload. An empty
+                # response means there's nothing older left, so the button removes itself.
+                'async function loadEarlierChat(btn){'
+                'var off=parseInt(btn.dataset.offset||"0",10),lim=parseInt(btn.dataset.limit||"20",10);'
+                'btn.disabled=true;var prev=btn.textContent;btn.textContent="Loading…";'
+                'try{var r=await fetch("/api/chat-thread?offset="+off,{cache:"no-store"});'
+                'var t=r.ok?await r.text():"";'
+                'if(t.trim()){var th=document.querySelector("#cinner .thread"),f=document.createElement("div");'
+                'f.innerHTML=t;while(f.lastChild){th.insertBefore(f.lastChild,th.firstChild);}'
+                'btn.dataset.offset=off+lim;btn.disabled=false;btn.textContent=prev;}'
+                'else{btn.remove();}}catch(e){btn.disabled=false;btn.textContent=prev;}}'
                 '</script>')
         return _wrap("Chat with the CTO", body)
 
     @app.get("/group")
     def group_page():
         officer = (request.args.get("officer") or "").strip()
-        busy = ('<div class=cempty>&#128225; the unit is weighing in… replies appear below.</div>'
-                if _state.get("grouping") else "")
+        # EU-287: a lightweight typing indicator (not a banner) — the officer(s) triage picked are
+        # composing. `_state['grouping']` already tracks the in-flight window (set in group_api below).
+        busy = (f'<div class=typing>&middot; {html.escape(officer) if officer else "an officer"} '
+                'is weighing in&hellip;</div>' if _state.get("grouping") else "")
         aim = (f'<div class=aim>Consulting <b>{html.escape(officer)}</b> directly — only they answer. '
                '<a href="/group">ask the whole unit instead</a></div>') if officer else ""
         oin = f'<input type=hidden name=officer value="{html.escape(officer)}">' if officer else ""
@@ -2695,14 +2863,44 @@ def create_app(cfg: Config):
               else "Ask the unit / brainstorm with the officers…")
         body = (_CHAT_STYLE + _chat_tabs("group")
                 + '<div class=chat>' + aim + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
-                '<div class=composer><form method=post action=/api/group>' + oin
-                + f'<input type=text name=text autocomplete=off autofocus '
+                '<div class=composer><div id=grouperr class=chaterr role=alert aria-live=assertive></div>'
+                '<form id=groupform method=post action=/api/group>' + oin
+                + f'<input type=text id=groupinput name=text autocomplete=off autofocus '
                 f'placeholder="{ph}"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
-                'setInterval(async function(){try{var r=await fetch("/api/group-thread",{cache:"no-store"});'
-                'if(r.ok){var near=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-140;'
+                # EU-307 — same patch-in-place-friendly pattern as /chat's refreshChat(): pull the
+                # poll body into a function so Enter-to-send can await the identical refresh,
+                # instead of duplicating the #ginner reconciliation logic. Group has no windowing
+                # (EU-304/305 only landed for /chat), so this stays a plain innerHTML swap — that's
+                # the graceful-degradation path the ticket asks for regardless of EU-286a.
+                'async function refreshGroup(force){try{var r=await fetch("/api/group-thread",{cache:"no-store"});'
+                'if(!r.ok)return;'
+                'var near=force||((window.innerHeight+window.scrollY)>=document.body.scrollHeight-140);'
                 'document.getElementById("ginner").innerHTML=await r.text();'
-                'if(near)window.scrollTo(0,document.body.scrollHeight);}}catch(e){}},4000);'
+                'if(near)window.scrollTo(0,document.body.scrollHeight);'
+                '}catch(e){}}'
+                'setInterval(function(){refreshGroup(false);},4000);'
+                # EU-307 — Telegram-style Enter-to-send for the group composer, mirroring /chat's
+                # chatform handler: intercept submit, POST via fetch, and only on success clear the
+                # input, patch-refresh #ginner, refocus, and stick to the newest message. On failure
+                # keep the typed text and surface an inline error so Enter retries the same send.
+                'var groupform=document.getElementById("groupform"),groupinput=document.getElementById("groupinput"),'
+                'grouperr=document.getElementById("grouperr");'
+                'if(groupform)groupform.addEventListener("submit",async function(ev){'
+                'ev.preventDefault();'
+                'var text=groupinput.value;if(!text.trim())return;'
+                'var ok=false;'
+                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});ok=!!(r&&r.ok);}'
+                'catch(e){ok=false;}'
+                'if(!ok){groupinput.classList.add("cerr");'
+                'if(grouperr){grouperr.textContent="Message not sent — check your connection and press Enter to retry.";'
+                'grouperr.classList.add("on");}groupinput.focus();return;}'
+                'groupinput.classList.remove("cerr");if(grouperr)grouperr.classList.remove("on");'
+                'groupinput.value="";'
+                'await refreshGroup(true);'
+                'groupinput.focus();'
+                'window.scrollTo(0,document.body.scrollHeight);'
+                '});'
                 '</script>')
         return _wrap("Group room — the unit", body)
 
@@ -2734,7 +2932,11 @@ def create_app(cfg: Config):
     @app.get("/api/chat-thread")
     def chat_thread_api():
         from flask import Response
-        return Response(_chat_inner(cfg), mimetype="text/html")
+        try:
+            offset = max(int(request.args.get("offset") or 0), 0)
+        except ValueError:
+            offset = 0
+        return Response(_chat_inner(cfg, offset=offset), mimetype="text/html")
 
     @app.post("/api/chat")
     def chat_api():
@@ -2742,6 +2944,19 @@ def create_app(cfg: Config):
         tid = (request.form.get("ticket") or "").strip()
         if text:
             msg = f"{tid}: {text}" if tid else text
+
+            # EU-307 — echo the Commander's freeform message into the chat transcript
+            # SYNCHRONOUSLY, before the (double-threaded) CTO reply path runs, so the
+            # client's post-send refreshChat() immediately sees the own message and can
+            # stick the view to it — closing the 'own message included' race deterministically
+            # rather than hoping the bg reply lands first. respond_to_commander() dedups its
+            # own leading append against this echo (council._last_chat_line). Only freeform
+            # composer messages are chat bubbles: a pending-decision reply (tid set) resolves
+            # via handle_reply and a '/command' is dispatched — neither renders as a Q bubble,
+            # so don't echo those.
+            if not tid and not text.startswith("/"):
+                from . import council
+                council.append_chat(cfg, "Q", msg)
 
             def _bg():
                 try:

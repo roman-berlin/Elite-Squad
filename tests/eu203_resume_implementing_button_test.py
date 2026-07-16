@@ -45,6 +45,14 @@ from orchestrator.config import AppConfig, Config
 
 # ── shared config ────────────────────────────────────────────────────────────────
 _TMP = Path(tempfile.mkdtemp())
+
+# House rule (see autopilot_pid_refcount_test.py header): point _PID_FILE off /tmp FIRST.
+# get_autopilot_status() ORs in daemon_is_external(), which reads the machine-global
+# /tmp/general-autopilot.pid — so a LIVE drain on the same box made every "Resume
+# implementing button present" check here fail (autopilot looked ON) whenever the unit's
+# own base-gate/dev-gate ran this harness mid-drain → false "red base" drain halt.
+autopilot._PID_FILE = _TMP / "general-autopilot.pid"
+
 _CFG = Config(
     apps=[
         AppConfig(name="automatixy", repo_path=str(_TMP), base_branch="DEV",

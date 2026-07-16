@@ -102,6 +102,20 @@ for path, data in STATE_CHANGING:
 # ==================================================================================================
 # 4 — a same-origin cockpit POST (Origin/Referer + Host all matching) is accepted, not 403.
 # ==================================================================================================
+# The stubs must be installed BEFORE the first accepted /api/run: the handler builds its worklist
+# synchronously (intake.from_text) but its daemon thread resolves `srv.run_loop` only when it gets
+# scheduled. Stubbing after the acceptance loops (the old order) left those threads racing the
+# rebind — on slow CI runners they landed in `started` alongside the dedicated request and the
+# exactly-once check counted 2 (the 2026-07-12..15 CI-only red). Tagging each worklist with the
+# request text keeps the dedicated POST distinguishable no matter when a stray thread drains.
+started = []
+async def fake_run_loop(rcfg, worklist, audit, stop_event=None):
+    started.append(worklist)
+    import time as _t
+    _t.sleep(0.2)
+srv.run_loop = fake_run_loop
+srv.intake.from_text = lambda rcfg, app, text, *a, **k: [f"wl:{app}:{text}"]
+
 for path, data in STATE_CHANGING:
     cockpit_state.reset_run_state()
     resp = client.post(path, data=data, headers={"Origin": GOOD_ORIGIN, "Host": GOOD_HOST})
@@ -112,23 +126,18 @@ for path, data in STATE_CHANGING:
     resp = client.post(path, data=data, headers={"Referer": GOOD_REFERER, "Host": GOOD_HOST})
     chk(f"same-origin Referer POST on {path} is accepted", resp.status_code != 403, resp.status_code)
 
-# a same-origin /api/run actually reaches the handler and claims the run slot.
+# a same-origin /api/run actually reaches the handler and claims the run slot — exactly once for
+# THIS request (text "x"; the acceptance loops above posted "hello", so their threads can't shadow it).
 cockpit_state.reset_run_state()
-started = []
-async def fake_run_loop(rcfg, worklist, audit, stop_event=None):
-    started.append(worklist)
-    import time as _t
-    _t.sleep(0.2)
-srv.run_loop = fake_run_loop
-srv.intake.from_text = lambda rcfg, app, *a, **k: [f"wl:{app}"]
 client.post("/api/run", data={"kind": "task", "text": "x", "app": "alpha"},
             headers={"Origin": GOOD_ORIGIN, "Host": GOOD_HOST})
 import time
 for _ in range(60):
-    if started:
+    if ["wl:alpha:x"] in started:
         break
     time.sleep(0.05)
-chk("same-origin /api/run actually starts a run", len(started) == 1, started)
+time.sleep(0.25)   # settle: let any stray acceptance-loop thread finish appending before counting
+chk("same-origin /api/run actually starts a run", started.count(["wl:alpha:x"]) == 1, started)
 for _ in range(60):
     if not cockpit_state.is_active("alpha"):
         break

@@ -4,10 +4,20 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Activate venv if present
+# Activate venv if present. A linked git WORKTREE is created without its own
+# (gitignored) .venv, and macOS has no bare `python` — so fall back to the MAIN
+# checkout's venv, parsed from the worktree's `.git` file ("gitdir: <main>/.git/
+# worktrees/<name>"). Without this, every harness that shells out to ./general
+# fails in a fresh base-gate worktree → false "red base" drain halt (EU-218).
 if [[ -f "$HERE/.venv/bin/activate" ]]; then
   # shellcheck disable=SC1091
   source "$HERE/.venv/bin/activate"
+elif [[ -f "$HERE/.git" ]]; then
+  MAIN_REPO="$(sed -n 's|^gitdir: \(.*\)/\.git/worktrees/.*|\1|p' "$HERE/.git" 2>/dev/null || true)"
+  if [[ -n "$MAIN_REPO" && -f "$MAIN_REPO/.venv/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$MAIN_REPO/.venv/bin/activate"
+  fi
 fi
 
 # Load secrets (ANTHROPIC_API_KEY, JIRA_*) if a .env exists

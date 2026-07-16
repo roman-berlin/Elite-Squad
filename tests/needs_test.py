@@ -32,7 +32,14 @@ check("empty side panel says 'All clear'", "All clear" in warroom._needs_side_ht
 # --- seed all three streams ---
 (d / "pending_decisions.json").write_text(json.dumps(
     [{"id": "AUTO-9", "app": "automatixy", "question": "DD/MM or MM/DD?", "summary": "date format"}]))
-(d / "drill-report.md").write_text("## Proposal: tighten the Engineer exit gate", encoding="utf-8")
+# EU-325: the single-report approval path is generic — approvals.KINDS is empty until an officer
+# opts in (the adjutant officer that used to seed it was deleted). Register a synthetic officer
+# report so the approvals-stream aggregation + side-panel render are still exercised.
+from orchestrator import approvals as _approvals
+async def _coach_apply(_cfg):  # pragma: no cover - summary() never invokes the apply coroutine
+    return "applied"
+_approvals.KINDS["coach"] = ("Engineering Coach — doctrine upgrade", "coach-report.md", _coach_apply)
+(d / "coach-report.md").write_text("## Proposal: tighten the Engineer exit gate", encoding="utf-8")
 dashboard.load_tasks = lambda p: [{"ticket_id": "AUTO-7", "outcome": "errored", "app": "automatixy",
                                    "note": "build blew up", "started": datetime.now()}]
 dashboard.load_dismissed = lambda p: {}

@@ -6,6 +6,7 @@ but physically cannot edit it. It judges BOTH spec conformance and quality.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -312,6 +313,155 @@ def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact
     return result
 
 
+# EU-350 (auto-split from EU-321): a classifier over the REVIEWER'S OWN FINDING text — a
+# `QualityIssue.detail` / spec-gap string the reviewer is about to raise as blocking — not the
+# ticket's AC text (that's `_ac_requires_execution` above). A READ-ONLY reviewer (no Bash, no
+# browser/renderer) can never actually confirm a "looks like" / pixel-drift / cross-browser-render
+# claim by reading a diff; this flags findings on that surface with a stable lens key so a future
+# ticket can route them differently. Additive only in EU-350 — nothing in `review()` consumes this
+# yet, so no verdict/blocking_issues behaviour changes.
+_UNVERIFIABLE_SURFACE_RE = re.compile(
+    r"(?i)("
+    r"(?P<ui_visual>"
+    r"\blooks?\s+(?:off|wrong|misaligned|broken|different|odd|weird)\b"
+    r"|\bscreenshot\b"
+    r"|\bvisually\b"
+    r"|\bwrong\s+colou?r\b|\bcolou?r\s+(?:is|looks)\s+wrong\b"
+    r"|\bmisaligned\b"
+    r")"
+    r"|(?P<layout_pixel>"
+    r"\b\d+\s*px\b"
+    r"|\bpixel[\s-]*(?:perfect|drift|diff)\b"
+    r"|\blayout\s+(?:shifts?|breaks?|is\s+broken)\b"
+    r"|\bviewport\b"
+    r"|\bresponsive\b"
+    r")"
+    r"|(?P<browser_behavior>"
+    r"\brenders?\s+(?:incorrectly|differently|wrong)\b"
+    r"|\bin\s+(?:desktop\s+chrome|mobile\s+safari|mobile\s+chrome|desktop\s+firefox|desktop\s+safari)\b"
+    r"|\bcross[\s-]*browser\b"
+    r"|\bbrowser\s+render(?:ing)?\b"
+    r")"
+    r")"
+)
+
+
+def _classify_unverifiable_finding(text: str | None) -> str | None:
+    """Classify a reviewer FINDING (a `QualityIssue.detail` / spec-gap string) as being on a surface
+    a READ-ONLY reviewer structurally cannot execute or render — UI/visual ('looks off',
+    'screenshot'), pixel/layout ('4px', 'viewport', 'responsive'), or browser-render
+    ('Mobile Safari', 'renders incorrectly') — and return the matching stable lens key
+    ('ui_visual' | 'layout_pixel' | 'browser_behavior'). Returns `None` for ordinary logic/data/test
+    findings, or falsy input. Mirrors `_ac_requires_execution`, but over the reviewer's OWN finding
+    text rather than the ticket's AC text."""
+    if not text:
+        return None
+    m = _UNVERIFIABLE_SURFACE_RE.search(text)
+    if not m:
+        return None
+    return next(name for name, val in m.groupdict().items() if val is not None)
+
+
+def _finding_fingerprint(lens: str, detail: str) -> str:
+    """A stable, order-independent, whitespace/case-tolerant fingerprint of a classified finding
+    (lens, detail), so the SAME underlying finding re-raised with trivial wording drift can be
+    recognised as identical. Reuses the normalization STYLE of `_changes_sig` in loop.py (lowercase,
+    collapse whitespace, cap the detail to a prefix) without importing from loop.py — reviewer.py
+    stays self-contained. Pure/deterministic: same (lens, detail) modulo whitespace/case always
+    yields the same fingerprint; a genuinely different lens or detail yields a different one."""
+    norm_lens = " ".join((lens or "").lower().split())
+    norm_detail = " ".join((detail or "").lower().split())[:160]
+    return hashlib.sha256(f"{norm_lens}|{norm_detail}".encode("utf-8")).hexdigest()
+
+
+def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> ReviewResult:
+    """EU-351: escalate-once bounce gate — mirrors `_enforce_admitted_red_tests`/
+    `_enforce_execution_gate` as a deterministic backstop, but this one RELAXES rather than forces
+    a blocker. Walks the reviewer's own blocking findings (`quality_issues` blocker/major subset)
+    and `spec_gaps`, classifying each via `_classify_unverifiable_finding` (EU-350). A finding that
+    classifies as unverifiable AND whose fingerprint (`_finding_fingerprint`) is already present in
+    `already_bounced` — i.e. it was raised and bounced on a PRIOR pass of this same ticket — is
+    removed from `quality_issues`/`spec_gaps` and its detail is appended to
+    `result.unverifiable_gaps` instead. A READ-ONLY reviewer that keeps re-raising the exact same
+    unrenderable claim can never be satisfied by more builder iterations, so the second time is an
+    escalate-once demotion, not a fresh blocker.
+
+    First-time unverifiable findings (fingerprint not yet in `already_bounced`) and ordinary
+    logic/data/test findings (returns None from the classifier) are left completely untouched —
+    behavior is unchanged for both, and a first-pass unverifiable finding can still FAIL.
+
+    After demotion, if nothing else keeps the ticket down (no blocking_issues, no spec_gaps left,
+    and spec_met is True), the verdict is RECOMPUTED to PASS — an escalate-once demotion has to
+    actually let a ticket reach ship-ready, not just relabel the same permanent FAIL.
+    """
+    if not already_bounced:
+        return result
+
+    kept_issues: list[QualityIssue] = []
+    for q in result.quality_issues:
+        if q.severity in ("blocker", "major"):
+            lens = _classify_unverifiable_finding(q.detail)
+            if lens is not None and _finding_fingerprint(lens, q.detail) in already_bounced:
+                result.unverifiable_gaps = list(result.unverifiable_gaps) + [q.detail]
+                continue
+        kept_issues.append(q)
+    result.quality_issues = kept_issues
+
+    kept_gaps: list[str] = []
+    removed_gaps: list[str] = []
+    for gap in result.spec_gaps:
+        lens = _classify_unverifiable_finding(gap)
+        if lens is not None and _finding_fingerprint(lens, gap) in already_bounced:
+            result.unverifiable_gaps = list(result.unverifiable_gaps) + [gap]
+            removed_gaps.append(gap)
+            continue
+        kept_gaps.append(gap)
+    result.spec_gaps = kept_gaps
+
+    # EU-351 iteration-2: recompute the SPEC channel so a ticket whose only spec blocker was a
+    # previously-bounced unverifiable finding can actually reach ship-ready, not just get relabelled.
+    # By construction every gap in `removed_gaps` was a bounced-unverifiable repeat (that is the sole
+    # removal condition), so "all removed gaps were demoted-unverifiable" always holds here — the only
+    # extra requirement is that NONE survive (`not result.spec_gaps`). A real surviving gap (an
+    # ordinary spec gap, or an execution-gate gap from `_enforce_execution_gate` — neither classifies
+    # as unverifiable, so neither is ever removed) keeps `spec_gaps` non-empty and leaves `spec_met`
+    # False, so a genuine execution-gate FAIL is never flipped.
+    if removed_gaps and not result.spec_gaps:
+        result.spec_met = True
+
+    if result.spec_met and not result.blocking_issues and not result.spec_gaps:
+        result.verdict = Verdict.PASS
+    return result
+
+
+def collect_unverifiable_fingerprints(result: ReviewResult) -> set[str]:
+    """EU-352: collect the fingerprints of every unverifiable-surface finding CURRENTLY present on
+    `result` — whether already demoted to `unverifiable_gaps` (a prior-pass bounce recognised by
+    `_enforce_bounce_once`) or still sitting in `quality_issues` (blocker/major) / `spec_gaps` (a
+    first-time raise this pass hasn't bounced yet, since `already_bounced` was empty or didn't
+    contain it). The loop folds the returned set into its per-attempt `bounced_unverifiable`
+    accumulator so the NEXT `review()` call's `already_bounced` recognises the SAME finding
+    reappearing and demotes it via `_enforce_bounce_once` instead of blocking again. Ordinary
+    logic/data/test findings (the classifier returns None) contribute nothing. Public and
+    side-effect-free — kept in reviewer.py (not loop.py) so the fingerprint/classify logic stays
+    self-contained per EU-351's design; loop.py never imports the private `_`-prefixed helpers."""
+    fps: set[str] = set()
+    for detail in result.unverifiable_gaps:
+        lens = _classify_unverifiable_finding(detail)
+        if lens is not None:
+            fps.add(_finding_fingerprint(lens, detail))
+    for q in result.quality_issues:
+        if q.severity in ("blocker", "major"):
+            lens = _classify_unverifiable_finding(q.detail)
+            if lens is not None:
+                fps.add(_finding_fingerprint(lens, q.detail))
+    for gap in result.spec_gaps:
+        lens = _classify_unverifiable_finding(gap)
+        if lens is not None:
+            fps.add(_finding_fingerprint(lens, gap))
+    return fps
+
+
 def _classify_diff(diff: str) -> tuple[str, str]:
     """Classify a diff as 'trivial' or 'production' based on size and content.
 
@@ -365,7 +515,8 @@ def _effort_for_diff(category: str, cfg: Config) -> tuple[str, int]:
 
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1,
                  *, store: PerTicketArtifactStore | None = None,
-                 build_artifact: BuildArtifact | None = None) -> ReviewResult:
+                 build_artifact: BuildArtifact | None = None,
+                 already_bounced: set[str] | None = None) -> ReviewResult:
     from . import models, provider as _provider
     # EU-72: read the Builder's BuildArtifact (passed by the loop, or from the shared pool) as the
     # primary handoff; the full diff is still under review below. After parsing, publish a typed
@@ -429,6 +580,7 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
     result = _enforce_execution_gate(result, ticket, build_artifact, diff)   # EU-268 deterministic backstop
+    result = _enforce_bounce_once(result, already_bounced or set())   # EU-351 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking

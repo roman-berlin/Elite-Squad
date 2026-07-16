@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -105,6 +106,26 @@ async def report_brief(cfg, raw: str) -> str:
                          tag="report-brief", fallback=lambda: bulletize(raw))
 
 
+# Telegram's hard per-message ceiling; anything longer is rejected with HTTP 400 (message lost).
+_TG_MAX_CHARS = 4096
+
+
+def _tg_chunks(text: str, limit: int = _TG_MAX_CHARS) -> list[str]:
+    """Split an over-long message into <=limit pieces, preferring newline boundaries so an
+    escalation report arrives as readable consecutive messages instead of vanishing (EU-358)."""
+    chunks: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n", 1, limit)
+        if cut < limit // 2:          # no usable newline — hard cut rather than tiny fragments
+            cut = limit
+        chunks.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    if rest:
+        chunks.append(rest)
+    return chunks or [""]
+
+
 def send(text: str, chat_id: str | int | None = None) -> bool:
     """Send a Telegram message. Returns True if sent, False if not configured or
     failed. Never raises — notifications must not break the pipeline.
@@ -113,20 +134,38 @@ def send(text: str, chat_id: str | int | None = None) -> bool:
     existing caller — ops reports, escalations, council summaries — stays pinned to the ops
     chat. ``chat_id`` may target a specific chat explicitly (needs only the bot token, not
     TELEGRAM_CHAT_ID); since the EU-65 liaison channel's deletion (Phase-2 §2) no production
-    path supplies one."""
+    path supplies one.
+
+    EU-358: messages over Telegram's 4096-char ceiling are chunked (they were rejected with a 400
+    and silently lost — exactly the long escalation reports that most need to arrive), and a 429
+    gets ONE bounded retry honouring retry_after (capped so a rate-limit can't stall the pipeline)."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     target = str(chat_id) if chat_id is not None else os.environ.get("TELEGRAM_CHAT_ID")
     if not (token and target):
         return False
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": target, "text": text, "disable_web_page_preview": True},
-            timeout=10,
-        )
-        return r.status_code == 200
-    except requests.RequestException:
-        return False
+    ok = True
+    for chunk in _tg_chunks(text):
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": target, "text": chunk, "disable_web_page_preview": True},
+                timeout=10,
+            )
+            if r.status_code == 429:
+                try:
+                    wait = float((r.json().get("parameters") or {}).get("retry_after", 1))
+                except Exception:  # noqa: BLE001
+                    wait = 1.0
+                time.sleep(min(max(wait, 0.0), 10.0))
+                r = requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": target, "text": chunk, "disable_web_page_preview": True},
+                    timeout=10,
+                )
+            ok = ok and r.status_code == 200
+        except requests.RequestException:
+            ok = False
+    return ok
 
 
 def get_updates(offset: int | None = None, timeout: int = 0) -> list:

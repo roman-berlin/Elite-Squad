@@ -118,16 +118,19 @@ def _test_bootout_called_on_modern_macos() -> None:
         fake_home = Path(tmpdir)
         plist_dir = fake_home / "Library" / "LaunchAgents"
         plist_dir.mkdir(parents=True, exist_ok=True)
-        plist_path = plist_dir / "com.romanberlin.general.autopilot.plist"
+        plist_path = plist_dir / f"{autopilot.LAUNCHD_LABEL}.plist"
         plist_path.write_text("test plist content")
 
         with patch.object(platform_module, "system", return_value="Darwin"), \
              patch("pathlib.Path.home", return_value=fake_home), \
              patch("os.getuid", return_value=501), \
-             patch("subprocess.run") as mock_run:
+             patch("subprocess.run") as mock_run, \
+             patch("orchestrator.autopilot.daemon_running", return_value=False):
             # Mock successful bootout call
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
+            # EU-232: _stop_launchd_daemon now polls daemon_running() post-bootout — mocked False
+            # above (already gone), so this resolves to True immediately, no real delay.
             result = autopilot._stop_launchd_daemon()
 
             # Verify bootout was called
@@ -156,13 +159,14 @@ def _test_fallback_to_unload_on_bootout_failure() -> None:
         fake_home = Path(tmpdir)
         plist_dir = fake_home / "Library" / "LaunchAgents"
         plist_dir.mkdir(parents=True, exist_ok=True)
-        plist_path = plist_dir / "com.romanberlin.general.autopilot.plist"
+        plist_path = plist_dir / f"{autopilot.LAUNCHD_LABEL}.plist"
         plist_path.write_text("test plist content")
 
         with patch.object(platform_module, "system", return_value="Darwin"), \
              patch("pathlib.Path.home", return_value=fake_home), \
              patch("os.getuid", return_value=501), \
-             patch("subprocess.run") as mock_run:
+             patch("subprocess.run") as mock_run, \
+             patch("orchestrator.autopilot.daemon_running", return_value=False):
             # First call (bootout) fails with OSError, second call (unload) succeeds
             mock_run.side_effect = [
                 OSError("bootout not available"),  # bootout fails
@@ -194,7 +198,7 @@ def _test_best_effort_on_complete_failure() -> None:
         fake_home = Path(tmpdir)
         plist_dir = fake_home / "Library" / "LaunchAgents"
         plist_dir.mkdir(parents=True, exist_ok=True)
-        plist_path = plist_dir / "com.romanberlin.general.autopilot.plist"
+        plist_path = plist_dir / f"{autopilot.LAUNCHD_LABEL}.plist"
         plist_path.write_text("test plist content")
 
         with patch.object(platform_module, "system", return_value="Darwin"), \
@@ -228,13 +232,14 @@ def _test_correct_plist_path_and_command() -> None:
         fake_home = Path(tmpdir)
         plist_dir = fake_home / "Library" / "LaunchAgents"
         plist_dir.mkdir(parents=True, exist_ok=True)
-        plist_path = plist_dir / "com.romanberlin.general.autopilot.plist"
+        plist_path = plist_dir / f"{autopilot.LAUNCHD_LABEL}.plist"
         plist_path.write_text("test plist content")
 
         with patch.object(platform_module, "system", return_value="Darwin"), \
              patch("pathlib.Path.home", return_value=fake_home), \
              patch("os.getuid", return_value=501), \
-             patch("subprocess.run") as mock_run:
+             patch("subprocess.run") as mock_run, \
+             patch("orchestrator.autopilot.daemon_running", return_value=False):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
             autopilot._stop_launchd_daemon()
@@ -244,7 +249,7 @@ def _test_correct_plist_path_and_command() -> None:
             cmd = bootout_call[0][0]  # First positional arg is the command list
             chk("bootout command: starts with launchctl", cmd[0] == "launchctl", f"got {cmd}")
             chk("bootout command: contains 'bootout'", "bootout" in cmd, f"got {cmd}")
-            chk("bootout command: contains service label", "com.romanberlin.general.autopilot" in cmd[2],
+            chk("bootout command: contains service label", autopilot.LAUNCHD_LABEL in cmd[2],
                 f"got {cmd}")
 
 

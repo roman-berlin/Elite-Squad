@@ -201,7 +201,7 @@ flowchart TD
    build → land → QA, loop. Parks escalated/errored/PR tickets in `blocked_tickets.json`
    (`autopilot.py:29, 145-150`).
 3. **Telegram** (`decisions.handle_command`, `decisions.py:129`): `/run <app> <what>`, `/drain`,
-   `/unblock <id>`, `/council`, `/drill`, `/standup`, `/status`, `/help`; a `TICKET: decision` reply
+   `/unblock <id>`, `/council`, `/standup`, `/status`, `/help`; a `TICKET: decision` reply
    resumes a parked ticket (`decisions.handle_reply`, `decisions.py:100`); any other free-text goes to
    the CTO as 1:1 chat (`decisions.route_message`, `decisions.py:199`).
 4. **Scheduled — VPS cron** (`scripts/install-server-cron.sh`, `CRON_TZ=Asia/Jerusalem`):
@@ -247,7 +247,7 @@ ring buffer (`server.py:46-64`) and pushed to the browser via Server-Sent Events
 
 **Reports pages:** Token usage (`/usage`, `server.py:1166`), Failure forensics (`/forensics`,
 `server.py:1492`), Unit roster (`/roster-doc`, `server.py:1552`), Unit memory (`/memory`,
-`server.py:839`), Daily muster & meetings (`/council`), Task log (`/tasks`), Last drill (`/drill`),
+`server.py:839`), Daily muster & meetings (`/council`), Task log (`/tasks`),
 Approvals (`/approvals`, `server.py:1015`).
 
 A **health gate** blocks runs until green: `health.summary` (`health.py:81`) checks Claude login, the

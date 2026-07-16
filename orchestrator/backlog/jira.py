@@ -34,6 +34,26 @@ from .base import BacklogAdapter
 # implicit currentUser()), so it never lands in Roman's queue.
 ROMAN_ACCOUNT_ID = "70121:051c9744-3c4d-4dfb-b2e5-d7a0e87c2443"
 
+# EU-358: requests has NO default timeout, so a single half-open connection to Atlassian used to
+# block the drain thread forever (every adapter call runs inline in the autopilot cycle).
+_HTTP_TIMEOUT = float(os.environ.get("JIRA_HTTP_TIMEOUT", "30") or 30)
+
+
+def _with_default_timeout(session):
+    """Make every request on ``session`` carry a default timeout (EU-358). Call sites may still
+    pass their own ``timeout=``; the point is that FORGETTING one can no longer hang the autopilot.
+    Wraps (not subclasses) so the many test harnesses that stub ``requests`` with a bare fake —
+    whose Session isn't a real class, or whose fake session has no ``request`` — keep working."""
+    try:
+        orig = session.request
+    except AttributeError:        # a test stub whose .get/.post don't route through .request
+        return session
+    def request(method, url, **kwargs):
+        kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+        return orig(method, url, **kwargs)
+    session.request = request
+    return session
+
 
 class JiraAdapter(BacklogAdapter):
     def __init__(self, app):
@@ -58,7 +78,7 @@ class JiraAdapter(BacklogAdapter):
         # Queue order: resume In Progress first, then pull the ready column (To Do),
         # each ordered by board Rank (top first). Override with `queue_statuses:` in config.
         self.queue_statuses = b.get("queue_statuses") or ["In Progress", self.ready_status]
-        self.session = requests.Session()
+        self.session = _with_default_timeout(requests.Session())
         # Credentials, in priority order:
         #  1) a cockpit "connection" assigned to this project (the quick-connect store) — base_url +
         #     project + email/token come straight from it.
@@ -253,7 +273,7 @@ class JiraAdapter(BacklogAdapter):
 
     # -- filing (officers raise their own tickets) ------------------------ #
     def create_task(self, summary: str, description: str, labels=None,
-                    issue_type: str = "Task") -> str | None:
+                    issue_type: str = "Task", priority: str | None = None) -> str | None:
         fields: dict[str, Any] = {
             "project": {"key": self.project},
             "summary": summary[:240],
@@ -266,6 +286,10 @@ class JiraAdapter(BacklogAdapter):
         fields["assignee"] = {"accountId": self.assignee or ROMAN_ACCOUNT_ID}
         if labels:
             fields["labels"] = [str(l).replace(" ", "-") for l in labels]
+        # EU-284: an explicit priority (mapped from the finding's severity) overrides the project
+        # default; leaving it unset (None/empty) keeps Jira's own default (Medium) untouched.
+        if priority:
+            fields["priority"] = {"name": priority}
         r = self.session.post(self._url("issue"), json={"fields": fields})
         r.raise_for_status()
         return r.json().get("key")

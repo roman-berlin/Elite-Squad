@@ -24,6 +24,9 @@ def chk(n, c, d=""):
 
 tmp = Path(tempfile.mkdtemp())
 cfg = Config(apps=[], audit_path=str(tmp / "audit.jsonl"))
+# NEVER touch the machine-global /tmp/general-autopilot.pid — this harness runs the REAL autopilot(),
+# which would overwrite (then delete) a live daemon's PID file and flip its cockpit badge OFF mid-run.
+autopilot._PID_FILE = tmp / "general-autopilot.pid"
 
 autopilot.usage.budget_status = lambda c: {"over": False, "alert": False, "used": 0, "cap": 1, "pct": 0.0}
 autopilot.intake.from_drain = lambda c, app, n: []          # always empty → permanently idle

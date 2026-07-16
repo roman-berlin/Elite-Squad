@@ -22,26 +22,25 @@ from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Optional
 
+from . import cockpit_views as CV
 from . import dashboard as D
 from .officers import display as _display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
-# from the officer key (builder=field_engineer, reviewer=inspector, drill=drillmaster). Display names are
+# from the officer key (builder=field_engineer, reviewer=inspector). Display names are
 # NEVER hard-coded below — they're resolved from the single source of truth via display(), so renaming an
 # officer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
 _OFFICER_KEY = {
-    "general": "general", "adjutant": "adjutant", "pm": "pm",
+    "general": "general", "pm": "pm",
     "builder": "field_engineer", "reviewer": "inspector", "scout": "scout",
     "provost": "provost", "quartermaster": "quartermaster", "sentinel": "sentinel",
-    "drill": "drillmaster",
 }
 
 # (cockpit key, role line). Order = chain of command. The display-name column is built from the SOT below.
 _OFFICER_ROLES = [
     ("general",       "Orchestrator"),
-    ("adjutant",      "S-1 · personnel"),
     ("pm",            "S-5 · product"),
     ("builder",       "Builder"),
     ("reviewer",      "Reviewer"),
@@ -49,7 +48,6 @@ _OFFICER_ROLES = [
     ("provost",       "Security gate"),
     ("quartermaster", "S-4 · deploy"),
     ("sentinel",      "S-3 · integration & rollback"),
-    ("drill",         "Doctrine / training"),
 ]
 
 # The roster: (key, display name, role line). Display name resolved from officers.OFFICER_NAMES (SOT).
@@ -227,6 +225,16 @@ def _last_council(cfg) -> Optional[datetime]:
 # --------------------------------------------------------------------------- #
 # Data (JSON-safe primitives)
 
+# EU-313: freshness window for the "Security blocks" KPI card — a security_block event
+# older than this (with no newer event for its ticket) no longer counts as an active block.
+STALE_BLOCK_CUTOFF_S = 24 * 3600
+
+# Event types that resolve/supersede an earlier security_block for the same ticket_id: another
+# security_block (a fresh gate hit), any dashboard-terminal outcome (merged/PR/escalated/etc — the
+# ticket moved on), or a plain "build" (the Builder re-attempted the ticket).
+_RESOLVING_EVENTS = D._TERMINAL | {"build", "security_block"}
+
+
 def _load_security_blocks(cfg) -> list[dict]:
     """Load all security_block events from the audit log, newest first.
 
@@ -253,6 +261,50 @@ def _load_security_blocks(cfg) -> list[dict]:
     return blocks
 
 
+def _active_security_blocks(cfg, blocks: list[dict]) -> list[dict]:
+    """Subset of `blocks` (from _load_security_blocks) still counted as "active" (EU-313).
+
+    A block is active when both hold:
+      - it is within STALE_BLOCK_CUTOFF_S of now (freshness window), AND
+      - no later event for the SAME ticket_id has superseded it (see _RESOLVING_EVENTS).
+
+    Fixes the KPI card counting a block from days ago as if it were still live: previously
+    `sec_block_count` was simply `len(_load_security_blocks(cfg))` — every security_block ever
+    recorded, all-time. Preserves the input order (newest-first, inherited from the caller).
+    """
+    if not blocks:
+        return []
+    # Latest resolving-event ts per ticket_id, in one pass over the audit log. ts strings are all
+    # written by audit.py with the same "%Y-%m-%dT%H:%M:%S%z" format, so lexical comparison orders
+    # them correctly — same convention _load_security_blocks already relies on for its sort.
+    latest_resolving: dict[str, str] = {}
+    for line in D.audit_lines(cfg.audit_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") not in _RESOLVING_EVENTS:
+            continue
+        tid = ev.get("ticket_id")
+        ts = ev.get("ts", "")
+        if not tid or not ts:
+            continue
+        if ts > latest_resolving.get(tid, ""):
+            latest_resolving[tid] = ts
+
+    active = []
+    for b in blocks:
+        if _age_secs(_parse(b.get("ts", ""))) >= STALE_BLOCK_CUTOFF_S:
+            continue  # outside the freshness window
+        if latest_resolving.get(b.get("ticket_id", ""), "") > b.get("ts", ""):
+            continue  # superseded by a later event for this ticket
+        active.append(b)
+    return active
+
+
 def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     ts = _scope(tasks, app)
     today = datetime.now().strftime("%Y-%m-%d")
@@ -263,8 +315,16 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    sec_blocks = _load_security_blocks(cfg)
-    sec_block_count = len(sec_blocks)
+    sec_blocks = _load_security_blocks(cfg)  # all-time — still feeds the interactive findings list
+    active_sec_blocks = _active_security_blocks(cfg, sec_blocks)  # EU-313: only still-live blocks count
+    sec_block_count = len(active_sec_blocks)
+    # EU-313: age of the most recent still-active block, for the card to surface inline (e.g.
+    # "1 · 3h ago") — kept as its own field rather than "hint" since EU-152 retired hint-line
+    # rendering for every KPI card (incl. Security blocks) and that decision stays in force here.
+    sec_block_age = None
+    if active_sec_blocks:
+        # newest-first order is inherited from _load_security_blocks, so [0] is the most recent.
+        sec_block_age = _rel(_parse(active_sec_blocks[0].get("ts", "")))
 
     # EU-76: pre-compute sparkline series for the Merged→DEV and cost/burn KPI cards.
     # Both helpers are best-effort: an empty audit or absent ledger yields all-zeros, which
@@ -280,9 +340,10 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
          "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
-        {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate (all time)",
+        {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
-         "security_block_findings": sec_blocks},  # EU-145: pass actual findings for interactive card
+         "security_block_findings": sec_blocks,  # EU-145: pass actual findings for interactive card
+         "active_age": sec_block_age},  # EU-313: age of the most recent active block (None if none)
     ]
 
     # EU-145 — merged token KPI card (today + week in one, UX best practice).
@@ -334,13 +395,11 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
 
     seen: dict[str, Optional[datetime]] = {
         "general": council_ts,
-        "adjutant": rpt("adjutant-report.md"),
         "builder": last.get("build"),
         "reviewer": last.get("review"),
         "scout": rpt("scout-report.md"),
         "provost": last.get("security_block") or rpt("provost-report.md"),
         "quartermaster": rpt("quartermaster-report.md"),
-        "drill": rpt("drill-report.md") or council_ts,
     }
     # An active run means the Builder/Reviewer are on duty right now.
     on_duty = {"builder", "reviewer"} if active else set()
@@ -834,15 +893,20 @@ def _kpi_html(cards: list[dict]) -> str:
         if is_security_card:
             # Always render interactive card, even when empty
             issues_html = _security_issues_html(findings) if findings else '<div class=secempty>No security blocks recorded yet.</div>'
+            # EU-313: surface the age of the most recent still-active block (e.g. "1 · 3h ago") right
+            # in the headline number, so freshness is visible at a glance. Deliberately NOT a separate
+            # class=kh hint line — EU-152 retired third-line hints from every KPI card and that
+            # decision stays in force; this appends inline into the existing kv div instead.
+            age = c.get("active_age")
+            kv_text = f'{_esc(c["value"])} · {_esc(age)}' if age else _esc(c["value"])
             out.append(
                 f'<details class="kpi {tone}" open>'
-                f'<summary class=kpisum><div class=kv>{_esc(c["value"])}</div>'
+                f'<summary class=kpisum><div class=kv>{kv_text}</div>'
                 f'<div class=kl>{_esc(c["label"])}</div></summary>'
                 f'{issues_html}'
                 f'</details>')
             continue
 
-        tag, attr, link = ("a", f' href="{href}"', " link") if href else ("div", "", "")
         # Optional inline gauge bar (EU-75 tokens-today/cap card). Rendered via inline
         # style so the existing CSS block is untouched; bar colour tracks the card tone.
         gauge_html = ""
@@ -869,10 +933,11 @@ def _kpi_html(cards: list[dict]) -> str:
                 "var(--info)"
             )
             spark_html = _kpi_sparkline_svg(sp, stroke=sp_stroke)
-        out.append(
-            f'<{tag} class="kpi {tone}{link}"{attr}><div class=kv>{_esc(c["value"])}</div>'
-            f'<div class=kl>{_esc(c["label"])}</div>'
-            f'{gauge_html}{spark_html}</{tag}>')
+        # EU-297: numeral + label render via the shared cockpit_views._kpi_metric partial
+        # (--t-2xl token scale) instead of duplicating the <div class=kv>/<div class=kl> markup
+        # inline per card.
+        out.append(CV._kpi_metric(c["value"], c.get("label", ""), tone=tone, href=href,
+                                   extra=f"{gauge_html}{spark_html}"))
     return "".join(out)
 
 
@@ -1581,7 +1646,10 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<div class=term>{_terminal_html()}</div></section>'
         '</div>'
         f'<div class=col-side>'
-        f'<section class=panel><div class=ph>Talk to the unit</div>{_TALK_HTML}</section>'
+        # EU-297: proof-of-integration call site for the cockpit_views._card partial —
+        # consistent --s-* padding / --r-xl radius / --surface background instead of a
+        # hand-rolled <section class=panel><div class=ph>…</div>…</section> pair.
+        f'{CV._card("Talk to the unit", _TALK_HTML)}'
         '</div>'
         '</div>')
 
@@ -1728,7 +1796,29 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --shadow-3:0 16px 40px rgba(0,0,0,.55);
 /* keyboard-focus ring + motion — shared so focus & transitions are uniform (a11y) */
 --ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);
---t-fast:.15s ease}
+--t-fast:.15s ease;
+/* 8pt spacing scale (EU-296) — additive foundation; nothing is rewired to consume these yet */
+--s-1:4px; /* micro gap: icon-to-label spacing, tight inline gaps */
+--s-2:8px; /* small gap: control padding, chip/tag spacing */
+--s-3:16px; /* base gap: card padding, row gaps, standard margins */
+--s-4:24px; /* medium gap: section padding, panel gutters */
+--s-5:32px; /* large gap: section margin, major block spacing */
+--s-6:48px; /* xl gap: page-level section margin, hero spacing */
+/* modular type scale (EU-296) — will replace raw inline font-size numerals (e.g. the
+   30/40px KPI numerals) in a later slice; additive only for now */
+--t-xs:11px; /* micro labels, meta text, tags, timestamps */
+--t-sm:12.5px; /* secondary body text, chips, list meta */
+--t-md:14px; /* base body copy (matches body font-size) */
+--t-lg:18px; /* section/run titles */
+--t-xl:24px; /* group headers */
+--t-2xl:32px; /* hero KPI numerals (e.g. the 30-40px inline KPI stat figures) */
+/* semantic color-role aliases (EU-296) — map onto the existing palette so consumers
+   read intent, not raw color; --warn already exists above and is reused as-is */
+--surface:var(--panel); /* default elevated surface background */
+--border:var(--line); /* default hairline border */
+--text:var(--ink); /* default body text color */
+--positive:var(--ok); /* success / good-state accent */
+--critical:var(--bad)} /* error / bad-state accent */
 *{box-sizing:border-box}
 /* Keyboard focus is visible on every interactive board surface (a11y): mouse clicks
    stay clean (:focus-visible), but Tab navigation lands on a clear accent ring. */
@@ -2105,7 +2195,7 @@ startStream();
     var linesHtml=runlogBuffer.map(function(line){
       var low=line.toLowerCase();
       var cls="";
-      if("merged" in low || "✓" in line || " pass" in low || "ready" in low){
+      if(low.includes('merged') || line.includes('✓') || low.includes(' pass') || low.includes('ready')){
         cls="lg-ok";
       }else if(/error|fail|park|block|✗|reject/.test(low)){
         cls="lg-b";
@@ -2204,7 +2294,7 @@ startStream();
         if(data.error){
           outLine.innerHTML='<span class=term-err>Error: '+data.error.replace(/</g,"&lt;")+'</span>';
         }else if(data.output){
-          outLine.innerHTML='<span class=term-out>'+data.output.replace(/</g,"&lt;").replace(/\n/g,"<br>")+'</span>';
+          outLine.innerHTML='<span class=term-out>'+data.output.replace(/</g,"&lt;").replace(/\\n/g,"<br>")+'</span>';
         }else{
           outLine.innerHTML='<span class=term-out>(no output)</span>';
         }

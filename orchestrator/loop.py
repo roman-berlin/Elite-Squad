@@ -25,7 +25,8 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
-from .gate import base_gate_check, extract_failure_evidence, gate_fingerprint, run_deterministic_checks, run_gate
+from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
+                   gate_fingerprint, run_deterministic_checks, run_gate)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -122,6 +123,15 @@ def _is_deliberate_halt(text: str | None) -> bool:
 
 
 _TURN_LIMIT_MARKERS = ("maximum number of turns", "max turns", "max_turns")
+
+# Report notes for the two BASE-LEVEL verdicts. Both are emitted ONLY from the constants below
+# (never inline literals) because _run_inner and autopilot key their base-level halts on these
+# prefixes — an inline rewording would silently disarm both halts and reopen the 2026-07-15
+# needs_human massacre class. _BASE_INFRA_NOTES must additionally contain "timed out" so
+# infra_classify.classify tags it infra (EU-228: no error strike).
+_RED_BASE_NOTES = "red base — gate fails on the clean base tree"
+_BASE_INFRA_NOTES = "base gate timed out on the clean base tree — environment/load infra, not a code red"
+_BASE_LEVEL_PREFIXES = ("red base", "base gate timed out")
 
 
 def _is_turn_limit(text: str | None) -> bool:
@@ -425,7 +435,16 @@ def _worktree_lock(worktree_path: str):
 
 
 async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
-              audit: AuditLog, stop_event=None) -> list[TicketReport]:
+              audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
+    # EU-356: ``stop_between_tickets`` is the TICKET-BOUNDARY-ONLY stop channel, distinct from
+    # ``stop_event`` (which also arms the pre-build and pre-merge aborts inside _attempt). The
+    # autopilot drain passes its stop Event here and NOT as stop_event, because the drain's contract
+    # is "let the in-flight ticket land on DEV, then stand down" — arming the mid-ticket checkpoints
+    # would kill a build in flight or abandon a finished build before its merge. This channel is what
+    # was MISSING on 2026-07-15: the drain's event armed only autopilot's own per-CYCLE check, and a
+    # single cycle ran 3h13m because EU-201 fragment injection kept extending the live worklist
+    # in place (EU-321 → EU-350..353 → EU-334 → EU-339), so a 22:50 stop wasn't honoured until 01:53.
+    # With this armed, that stop lands at the next ticket boundary (23:12) instead.
     # EU-189: pin THIS run's model backend (Opus vs GLM) for every officer SDK call. set_backend
     # writes a run-scoped contextvar that agent._run_agent_unrouted reads at the single SDK seam,
     # so all officers inherit the choice with no per-call plumbing. Each run executes in its own
@@ -434,9 +453,14 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     # var before awaiting the body — the body is one pure await-chain with no task/thread boundary,
     # so the value reaches every officer call (a future create_task/run_in_executor added *before*
     # this set would not inherit it — keep the set first).
-    _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE))
+    # EU-236: pass the cfg-anchored ModelRegistry so a registry-id pin (a custom backend) is both
+    # preserved by current() and resolved hermetically by apply() at the SDK seam — never against the
+    # live state/ store from within a test's tmp config.
+    from .model_registry import ModelRegistry
+    _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE),
+                                     registry=ModelRegistry(cfg))
     try:
-        return await _run_inner(cfg, worklist, audit, stop_event)
+        return await _run_inner(cfg, worklist, audit, stop_event, stop_between_tickets)
     finally:
         backends.reset_backend(_bk_token)
 
@@ -464,7 +488,7 @@ def _fetch_fragments_to_worklist(cfg: Config, app: AppConfig,
 
 
 async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
-                     audit: AuditLog, stop_event=None) -> list[TicketReport]:
+                     audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     gits: dict[str, Git] = {}
@@ -476,6 +500,7 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     # never clobbered. flock auto-releases on process exit, so a crashed run never wedges the lock.
     locks = ExitStack()
     busy: set[str] = set()
+    base_halted: set[str] = set()   # apps whose BASE failed this run (red/timed-out) — see below
     if getattr(cfg, "use_worktree", False):
         for app in {a.name: a for a, _ in worklist}.values():
             try:
@@ -493,7 +518,11 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
         while i < len(worklist):
             app, ticket = worklist[i]
             i += 1
-            if stop_event is not None and stop_event.is_set():
+            # EU-356: the ticket boundary honours BOTH stop channels — the full stop_event (manual
+            # runs, also armed mid-ticket) and the boundary-only drain channel (autopilot; the
+            # in-flight ticket just landed, so standing down here is exactly the drain's promise).
+            if (stop_event is not None and stop_event.is_set()) or \
+                    (stop_between_tickets is not None and stop_between_tickets.is_set()):
                 audit.record("run_stopped", reason="commander stop (before ticket)")
                 print("  ■ stopped by Commander — remaining tickets skipped.", flush=True)
                 break
@@ -505,6 +534,8 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                 reports.append(TicketReport(ticket.id, Outcome.SKIPPED, 0, 0.0, app.name,
                                             notes="deferred — worktree busy (another run active)"))
                 continue
+            if app.name in base_halted:
+                continue   # base-level verdict already hit THIS app — leave its tickets queued
             backlog = None   # pre-bind: an exception before assignment must not NameError the handler
             # EU-253: bracket THIS ticket with a per-ticket log file before any work starts, and
             # close it once the ticket is done (success OR caught exception — so even a
@@ -566,6 +597,19 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                     except Exception:  # noqa: BLE001 — log teardown must never block a run
                         pass
             reports.append(report)
+            # 2026-07-15: a base-level verdict (genuine red base, or a base-gate timeout under
+            # load) applies to EVERY ticket of THAT app — processing its remaining tickets just
+            # repeats it N times (the needs_human massacre: ~60 parks in two waves that day).
+            # Halt per app, not per run: other apps' tickets in a unit-wide drain keep building
+            # (the EU-87/EU-252 never-starve contracts); the halted app's tickets stay queued.
+            if (report.notes or "").startswith(_BASE_LEVEL_PREFIXES):
+                base_halted.add(app.name)
+                _skipped = [t.id for a2, t in worklist[i:] if a2.name == app.name]
+                if _skipped:
+                    audit.record("base_halt_run", ticket_id=ticket.id, app=app.name,
+                                 reason=(report.notes or "")[:200], skipped=_skipped)
+                    print(f"  ⛔ {app.name}: base not buildable — leaving {len(_skipped)} queued "
+                          "ticket(s) untouched.", flush=True)
 
             # EU-201: After a split, inject the fragments into the worklist at the current position
             # The fragments are built serially in dependency order before the next queue ticket
@@ -705,6 +749,47 @@ async def _consult_pm(cfg, ticket, app, audit, halt_report: str):
         return None
 
 
+async def _pm_decide_before_park(cfg, ticket, app, audit, backlog, question: str, iteration: int):
+    """EU-230: consult the automode PM before parking a needs_human-shaped decision (reviewer
+    review.needs_human, or the EU-90 pm-findings 'decisions' bucket) — decide-first, mirroring the
+    builder-halt path's inject+comment+continue machinery (loop.py ~1097-1122). Callers guard this
+    with the shared per-ticket ``pm_used`` flag so the PM is consulted at most once per ticket.
+
+    On DECIDE: returns (new_ticket, None) — the caller replaces its local ``ticket`` with new_ticket
+    and ``continue``s the build loop; the decision is already injected into the ticket description,
+    the durable '🤖 Automode' Jira comment (automode) already posted, and a `pm_decided` audit event
+    already recorded. Roman is NOT paged.
+
+    On explicit ESCALATE, or when the PM is unavailable/errors (_consult_pm returns None): returns
+    (None, pm_outcome) so the caller falls through to its existing park-on-Commander code. When
+    pm_outcome carries a 'why' (the EU-92 WHY-CANNOT-RESOLVE line), the caller should prepend it to
+    the parked proposal."""
+    pm_outcome = await _consult_pm(cfg, ticket, app, audit, question)
+    if pm_outcome is not None and pm_outcome["verdict"] == "DECIDE":
+        from dataclasses import replace
+        auto = bool(getattr(cfg, "auto_mode", False))
+        new_ticket = replace(ticket, description=(ticket.description or "")
+            + "\n\n---\nPRODUCT MANAGER DECISION (resolves the open product question — "
+              "act on it, do not re-raise it):\n" + pm_outcome["body"])
+        audit.record("pm_decided", ticket_id=ticket.id, iteration=iteration, automode=auto)
+        # Automode: the PM decided WITHOUT waiting for you. Leave a durable trail on the
+        # ticket so you can review it (and reverse — it's on DEV, never production).
+        if auto and not cfg.dry_run and not ticket.ephemeral:
+            try:
+                backlog.add_comment(ticket,
+                    "🤖 Automode — PM decided autonomously (DEV only — review & reverse if needed).\n\n"
+                    + pm_outcome["body"][:1200])
+            except Exception:  # noqa: BLE001 - a comment failure must not break the run
+                pass
+        head = ("🤖 Automode — the PM decided autonomously" if auto
+                else "🧭 the PM made the product call")
+        _notify(cfg, f"{head}; {ticket.id} continuing:\n\n{pm_outcome['body'][:800]}")
+        print(f"  {'🤖' if auto else '🧭'} {ticket.id}: PM decided — re-building with "
+              "the decision.", flush=True)
+        return new_ticket, None
+    return None, pm_outcome
+
+
 def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     """True if this ticket already got its ONE PM triage — so a genuinely-stuck ticket escalates for
     real next time instead of looping triage -> re-queue forever."""
@@ -723,15 +808,26 @@ def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     return False
 
 
+# EU-358: how long a no_changes outcome keeps a ticket out of the drain. The guard exists to stop
+# an immediate rebuild loop while the ticket sits in 'Needs Human' — it must NOT be a life sentence.
+_NO_CHANGES_WINDOW_H = 48.0
+
+
 def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
-    """Return the set of ticket IDs that recently had a no_changes outcome (EU-116).
+    """Return the set of ticket IDs that RECENTLY had a no_changes outcome (EU-116).
 
     The drain uses this to skip tickets that already produced no changes — they're
     in 'Needs Human' awaiting verification/close, and re-running them would waste
-    another full build cycle producing the same result."""
+    another full build cycle producing the same result.
+
+    EU-358: 'recently' is a 48h window on the event timestamp. The audit log never rotates, so
+    the unbounded version excluded a ticket FOREVER after one historical no_changes — a ticket
+    the Commander edited and re-queued was silently skipped on every later drain."""
     try:
         import json
+        from datetime import datetime, timedelta, timezone
         from . import dashboard as _D
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_NO_CHANGES_WINDOW_H)
         no_changes_ids = set()
         for line in _D.audit_lines(cfg.audit_path):
             try:
@@ -740,7 +836,15 @@ def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
                 continue
             if e.get("event") == "no_changes":
                 ticket_id = e.get("ticket_id")
-                if ticket_id:
+                if not ticket_id:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(e.get("ts", "")))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue     # no parseable timestamp → too old to trust as "recent"
+                if ts >= cutoff:
                     no_changes_ids.add(ticket_id)
         return no_changes_ids
     except Exception:  # noqa: BLE001
@@ -777,6 +881,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             no_comment=getattr(cfg, "no_comments", False)
         )
     cost = 0.0
+    # EU-353: last review binding this attempt saw — may stay None if every pass broke before
+    # reaching the review step. Read (guarded) at the max-passes escalation site below to surface
+    # any escalated review.unverifiable_gaps.
+    review = None
     last_changes: list[str] = []
     # Retry guard (EU-56): remember the last few reject signatures, not just the immediately
     # previous one, so an A/B/A/B rejection oscillation — where the build alternates between two
@@ -787,6 +895,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     # passes so the "Builder retrying" Jira comment is posted only when that set actually CHANGES —
     # not re-posted identically on every failing retry.
     last_in_scope_sig: str | None = None
+    # EU-352: fingerprints of unverifiable-surface findings (UI/visual, pixel/layout,
+    # browser-render — see reviewer._classify_unverifiable_finding) seen on ANY prior review pass
+    # of this ticket attempt. Threaded into every review() call as `already_bounced` so a READ-ONLY
+    # reviewer that keeps re-raising the same unrenderable claim gets it demoted (EU-351's
+    # escalate-once gate) on the pass AFTER it first appears, instead of blocking forever. Same
+    # single-attempt, in-memory lifetime as recent_reject_sigs/last_in_scope_sig above — no
+    # cross-process persistence needed.
+    bounced_unverifiable: set[str] = set()
 
     # EU-72: one shared per-ticket artifact pool, threaded through the officers so each reads a tight
     # structured handoff instead of re-deriving from the full diff. The SpecArtifact is derived straight
@@ -845,6 +961,28 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _at_base = False
     if _at_base:
         base_ok, base_fp, base_report = base_gate_check(app, cfg, git, runner=run_gate)
+        if not base_ok and base_gate_timed_out(base_report):
+            # 2026-07-15 (twice: 04:20 and 17:41 waves): a box under load timed the base suite
+            # out, the red got cached, and the drain force-parked every To Do ticket to
+            # needs_human. A timeout is an environment verdict (EU-228 class), never a code-red:
+            # charge no ticket, ask the Commander nothing. The notes carry the timeout marker so
+            # autopilot's infra_classify path (EU-228) holds the drain with no error strike, and
+            # _run_inner stops this run so the rest of the worklist stays queued untouched.
+            audit.record("base_gate_infra", ticket_id=ticket.id,
+                         report=(base_report or "")[:1500])
+            print(f"  🌐 {ticket.id}: base gate timed out — environment/load, not a red base; "
+                  "no ticket charged, run holding.", flush=True)
+            try:
+                # The pick already moved this ticket to In Progress with a "started" ping; without
+                # a comment the board shows silent stalled work (the loop.py:240 invisibility
+                # problem). Best-effort — a tracker hiccup must never break the infra path.
+                backlog.add_comment(ticket, "⏳ Base gate timed out (environment/load, not a code "
+                                            "failure) — no work was done on this ticket; the drain "
+                                            "holds and retries automatically.")
+            except Exception:  # noqa: BLE001
+                pass
+            return _resolve(TicketReport(ticket.id, Outcome.ERRORED, 0, cost, app.name, branch,
+                                         notes=_BASE_INFRA_NOTES))
         if not base_ok:
             audit.record("red_base_block", ticket_id=ticket.id, fingerprint=base_fp,
                          report=(base_report or "")[:2500])
@@ -861,7 +999,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _notify(cfg, f"⛔ {ticket.id} blocked — base branch '{app.base_branch}' is RED before "
                          f"any build (gate fails on the clean base). {decisions.reply_hint(ticket.id)}")
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, 0, cost, app.name, branch,
-                                         notes="red base — gate fails on the clean base tree"))
+                                         notes=_RED_BASE_NOTES))
 
     # §3.1 second half: identical gate-failure fingerprint on consecutive failed gates → stop
     # rebuilding and BREAK to the normal exhaustion path (PM triage first, then park). Breaking
@@ -1176,9 +1314,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 2) VERIFICATION GATE on the feature branch (cheap filter, before review)
         # Gate only the monorepo apps/packages this ticket actually touched (EU-19) —
         # falls back to the repo-wide gate when no per-app config matches the diff.
-        # (EU-85: domain-gap classification lives solely in the squad delegation path —
-        # squad._plan → detect_domain_gap — where it actually routes provisioning; the gate
-        # no longer re-classifies here just to attach an advisory note.)
+        # (EU-85 / EU-326: domain-gap classification was removed entirely in the Phase-2
+        # collapse; the gate never re-classifies here.)
         gate = run_gate(app, git.changed_paths())
         if not gate.passed:
             # Flake honesty (2026-07-09): a red gate must REPRODUCE before it burns a builder pass.
@@ -1249,7 +1386,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # EU-197: Wrap reviewer with transcript context to capture full tool inputs + reasoning
         with _officer_transcript_context(app, ticket, "reviewer", cfg):
             review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
-                                               store=store, build_artifact=store.build)
+                                               store=store, build_artifact=store.build,
+                                               already_bounced=bounced_unverifiable)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
@@ -1263,10 +1401,15 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # EU-197: Wrap reviewer retry with transcript context
             with _officer_transcript_context(app, ticket, "reviewer", cfg):
                 review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
-                                                   store=store, build_artifact=store.build)
+                                                   store=store, build_artifact=store.build,
+                                                   already_bounced=bounced_unverifiable)
             cost += review.cost_usd
             budget.add(review.cost_usd)
             _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry
+        # EU-352: fold this pass's unverifiable-surface findings (freshly raised OR already demoted
+        # by EU-351's _enforce_bounce_once) into the accumulator BEFORE the audit record below, so
+        # the NEXT pass's review() calls above see them in already_bounced.
+        bounced_unverifiable |= reviewer_mod.collect_unverifiable_fingerprints(review)
         audit.record("review", ticket_id=ticket.id, iteration=iteration,
                      verdict=review.verdict.value, spec_met=review.spec_met,
                      blocking=len(review.blocking_issues), cost_usd=review.cost_usd,
@@ -1290,17 +1433,35 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # go to the backlog — auto-filed or proposed for you — instead of being lost.
         _route_out_of_scope(cfg, ticket, app, audit, review.raw, source="reviewer")
 
-        # A product/scope decision only the Commander can make -> stop and ask, don't loop.
+        # A product/scope decision only the Commander can make -> EU-230: consult the automode PM
+        # FIRST (decide-first, mirroring the builder-halt path) instead of parking straight on
+        # Roman. Guarded by the shared per-ticket pm_used flag so a needs_human retry doesn't
+        # re-invoke the PM. Park to the Commander ONLY on an explicit PM ESCALATE (or the PM being
+        # unavailable/errored).
         if review.needs_human:
-            decisions.add(cfg, ticket, app.name, review.question or review.summary)
-            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{await _decision_brief(cfg, ticket.id, review.question or review.summary)}"
+            question = review.question or review.summary
+            pm_outcome = None
+            if not pm_used:
+                pm_used = True
+                new_ticket, pm_outcome = await _pm_decide_before_park(
+                    cfg, ticket, app, audit, backlog, question, iteration)
+                if new_ticket is not None:
+                    ticket = new_ticket
+                    continue
+            proposal = question
+            # EU-92: prepend the WHY PM CANNOT RESOLVE line so the Commander immediately sees the
+            # specific authority/context that's missing, mirroring the builder-halt path.
+            if pm_outcome is not None and pm_outcome.get("why"):
+                proposal = f"WHY PM CANNOT RESOLVE: {pm_outcome['why']}\n\n{proposal}"
+            decisions.add(cfg, ticket, app.name, proposal)
+            _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n{await _decision_brief(cfg, ticket.id, proposal)}"
                          f"\n\n{decisions.reply_hint(ticket.id)}")
             if not cfg.dry_run and not ticket.ephemeral:
                 # decisions.add already parked it to 'Blocked' (EU-61) — just record the open question.
-                backlog.add_comment(ticket, f"Needs a product decision: {review.question}")
-            audit.record("needs_human", ticket_id=ticket.id, question=review.question)
+                backlog.add_comment(ticket, f"Needs a product decision: {proposal}")
+            audit.record("needs_human", ticket_id=ticket.id, question=proposal)
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
-                                         notes=f"needs decision: {review.question[:140]}"))
+                                         notes=f"needs decision: {proposal[:140]}"))
 
         # EU-90: PM findings triage — when the Reviewer returns FAIL with quality_issues,
         # classify each finding into: in-scope fixes (Builder retries these unchanged),
@@ -1383,6 +1544,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     )
                     question = ("Reviewer raised scope/product ambiguities that need your call:\n"
                                 + bullets)
+                    # EU-230: consult the automode PM before paging the Commander — decide-first,
+                    # mirroring the builder-halt + reviewer needs_human paths. Guarded by the shared
+                    # per-ticket pm_used flag. On DECIDE the loop injects the decision and re-builds;
+                    # decisions.add/notify below are skipped entirely — Roman is not paged.
+                    pm_outcome = None
+                    if not pm_used:
+                        pm_used = True
+                        new_ticket, pm_outcome = await _pm_decide_before_park(
+                            cfg, ticket, app, audit, backlog, question, iteration)
+                        if new_ticket is not None:
+                            ticket = new_ticket
+                            continue
+                    if pm_outcome is not None and pm_outcome.get("why"):
+                        question = f"WHY PM CANNOT RESOLVE: {pm_outcome['why']}\n\n{question}"
                     # Page the Commander ONLY when this parks a genuinely NEW decision. On a repeated
                     # retry the same question hits the EU-89 dedup gate, so decisions.add returns the id
                     # of the EXISTING entry (no new row is written) rather than a fresh one — re-paging
@@ -1593,8 +1768,20 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")
     audit.record("needs_human", ticket_id=ticket.id, iterations=max_passes,
                  reason="max passes — PM escalated", question=esc[:1500])
+    # EU-353: surface any escalated unverifiable_gaps on the last review this attempt saw —
+    # exactly once (post_unverifiable_gaps self-guards per ticket_id) — and fold them into the
+    # report's notes for cockpit/status-board visibility. Best-effort: a tracker hiccup here must
+    # never turn an already-decided escalation into an unhandled exception.
+    gap_note = ""
+    gaps = getattr(review, "unverifiable_gaps", None) if review is not None else None
+    if gaps and backlog and not ticket.ephemeral:
+        try:
+            commenter.post_unverifiable_gaps(backlog, ticket.key, gaps)
+        except Exception as exc:  # noqa: BLE001 — best-effort, never blocks the escalation
+            print(f"  · unverifiable-gaps comment skipped ({exc})", flush=True)
+        gap_note = " · unverifiable ACs: " + " | ".join(gaps)
     return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, max_passes, cost, app.name, branch,
-                                 notes="max_iterations reached without a passing review"))
+                                 notes="max_iterations reached without a passing review" + gap_note))
 
 
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
@@ -1761,10 +1948,23 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         except Exception as exc:  # noqa: BLE001 — best-effort, like sentinel/smoke
             print(f"  🔎 CI · conclusion check skipped ({exc})", flush=True)
 
+        # EU-353: surface any escalated review.unverifiable_gaps exactly once at this terminal
+        # (MERGED) outcome — post_unverifiable_gaps self-guards per ticket_id — and fold them
+        # into TicketReport.notes for cockpit/status-board visibility. Best-effort: a tracker
+        # hiccup here must never un-land an already-successful merge.
+        gap_note = ""
+        gaps = getattr(review, "unverifiable_gaps", None) if review else None
+        if gaps and backlog and not ticket.ephemeral:
+            try:
+                commenter.post_unverifiable_gaps(backlog, ticket.key, gaps)
+            except Exception as exc:  # noqa: BLE001 — best-effort, never un-lands a merge
+                print(f"  land · unverifiable-gaps comment skipped ({exc})", flush=True)
+            gap_note = " · unverifiable ACs: " + " | ".join(gaps)
+
         return TicketReport(ticket.id, Outcome.MERGED, iteration, cost, app.name, branch,
                             notes=f"merged to {app.base_branch}"
                             + (", Done" if cfg.mark_done_on_merge else ", awaiting QA")
-                            + smoke_note + ci_note)
+                            + smoke_note + ci_note + gap_note)
 
     # LIVE not validated -> DEV untouched; open a PR for you.
     git.abandon_trial(temp)
@@ -1887,6 +2087,12 @@ def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
             if result.failed:
                 _notify(cfg, f"⚠️ {ticket.id} — {len(result.failed)} out-of-scope finding(s) could not be "
                              "filed:\n" + "\n".join(f"• {t}: {e}" for t, e in result.failed))
+            # EU-284: a CRITICAL out-of-scope finding must not rot silently — the class is normally
+            # AUTO-FILED with no page (EU-92), but a critical discovery pages the Commander once,
+            # naming every newly-filed critical key+title. MEDIUM/LOW stay silent (current behavior).
+            if result.filed_critical:
+                names = "\n".join(f"• {k} — {t}" for k, t in result.filed_critical)
+                _notify(cfg, f"🚨 {ticket.id} — CRITICAL out-of-scope finding auto-filed ({source}):\n{names}")
         else:
             titles = "\n".join(f"• [{p.get('severity', '?')}] {p.get('title')}" for p in proposals)
             question = ("Out-of-scope findings surfaced while working this ticket — file them as their own "

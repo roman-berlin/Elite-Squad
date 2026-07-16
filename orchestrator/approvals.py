@@ -1,9 +1,9 @@
 """Approvals inbox — the officers PROPOSE, the Commander approves, the unit APPLIES.
 
-The Engineering Coach (doctrine upgrades) and the Engineering Manager (personnel actions) are propose-only: they
-write a report and stop. This collects those pending recommendations so the Commander can
-**Approve** (the unit runs the matching `--apply`, then commits + pushes the doctrine to The-General)
-or **Disapprove** (cleared, and the reason is logged to Unit Memory so it isn't re-proposed).
+A propose-only officer (e.g. the Engineering Coach's doctrine upgrades) writes a report and stops.
+This collects those pending recommendations so the Commander can **Approve** (the unit runs the
+matching apply coroutine, then commits + pushes the doctrine to The-General) or **Disapprove**
+(cleared, and the reason is logged to Unit Memory so it isn't re-proposed).
 
 It's the home for overnight self-improvement too: the unit drills at night, you approve in the
 morning. Only `officers/` is committed — never a blanket `git add -A` — so nothing unrelated ships.
@@ -15,15 +15,16 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from . import locking
 from .config import Config
 
-# kind -> (label, report filename). Each report maps to an officer `apply` coroutine.
-KINDS = {
-    "drill": ("Engineering Coach — doctrine upgrade", "drill-report.md"),
-    "adjutant": ("Engineering Manager — personnel action", "adjutant-report.md"),
-}
+# kind -> (label, report filename, apply coroutine). Each report maps to an officer `apply`
+# coroutine that approve() awaits generically — no officer is special-cased here. Empty until an
+# officer opts into this single-report approval flow (EU-61's proposal-batch queue below is the
+# separate, always-on approval path).
+KINDS: dict[str, tuple[str, str, Callable[[Config], Awaitable[str]]]] = {}
 
 
 def _state_file(cfg: Config) -> Path:
@@ -64,7 +65,7 @@ def pending(cfg: Config) -> list[dict]:
     content hasn't already been approved/disapproved."""
     st = _load(cfg)
     out: list[dict] = []
-    for kind, (label, _fname) in KINDS.items():
+    for kind, (label, _fname, _apply) in KINDS.items():
         p = _report_path(cfg, kind)
         try:
             body = p.read_text(encoding="utf-8") if p.exists() else ""
@@ -96,7 +97,7 @@ def _commit_push(msg: str) -> str:
 
 
 async def approve(cfg: Config, kind: str) -> str:
-    """Apply the recommendation (drill/adjutant --apply), then commit + push the doctrine."""
+    """Apply the recommendation via its registered apply coroutine, then commit + push the doctrine."""
     if kind not in KINDS:
         return f"unknown approval kind: {kind}"
     p = _report_path(cfg, kind)
@@ -104,13 +105,9 @@ async def approve(cfg: Config, kind: str) -> str:
         return f"no pending {kind} report to apply"
     body = p.read_text(encoding="utf-8")
     h = _hash(body)
-    if kind == "drill":
-        from . import drillmaster
-        summary = await drillmaster.apply(cfg)
-    else:
-        from . import adjutant
-        summary = await adjutant.apply(cfg)
-    pushed = _commit_push(f"{KINDS[kind][0]} — applied (Commander-approved)")
+    label, _fname, apply_fn = KINDS[kind]
+    summary = await apply_fn(cfg)
+    pushed = _commit_push(f"{label} — applied (Commander-approved)")
 
     def _mark(st: dict) -> dict:
         st[kind] = {"hash": h, "action": "approved", "ts": time.time()}
@@ -151,7 +148,7 @@ def disapprove(cfg: Config, kind: str, reason: str = "") -> None:
 # batch lands in this queue so the Commander can Approve (file to the board,
 # de-duped, with slice-1's Roman-default create) — optionally only a chosen
 # subset of the tickets — or Deny (discard). This is separate state from the
-# drill/adjutant KINDS above (those are single-report-hash approvals); a batch
+# KINDS above (those are single-report-hash approvals); a batch
 # is many tickets the Commander can pick through.
 # --------------------------------------------------------------------------- #
 
@@ -334,20 +331,36 @@ def approve_proposals(cfg: Config, batch_id: str, titles=None):
         _mutate_proposals(cfg, _release)
         raise
 
+    # EU-358: filing.file_findings captures per-finding create errors into result.failed instead of
+    # raising, so a batch whose EVERY create failed (Jira down, expired token) used to be stamped
+    # "approved" — the proposals left the pending queue with nothing on the board. Put such a batch
+    # back to pending so the approval stays actionable, and say so.
+    all_failed = bool(result.failed) and not result.filed and not result.deduped
+
     def _record(items: list[dict]) -> list[dict]:
         b = _find_batch(items, batch_id)
         if b is not None:
-            b["status"] = "approved"
-            b["filed"] = result.filed
-            b["deduped"] = result.deduped
-            b["selected_titles"] = [p["title"] for p in selected]
-            b["actioned_ts"] = time.time()
+            if all_failed:
+                b["status"] = "pending"
+            else:
+                b["status"] = "approved"
+                b["filed"] = result.filed
+                b["deduped"] = result.deduped
+                b["selected_titles"] = [p["title"] for p in selected]
+                b["actioned_ts"] = time.time()
         return items
     _mutate_proposals(cfg, _record)
     try:
         from . import notify
-        notify.send(f"✅ Approved & filed — {snapshot.get('source')}: "
-                    f"{result.filed_n} new, {result.deduped_n} already open.")
+        if all_failed:
+            first_err = result.failed[0][1] if result.failed else "unknown error"
+            notify.send(f"⚠️ Approval NOT filed — {snapshot.get('source')}: every ticket create "
+                        f"failed ({first_err}). Batch returned to pending; approve again once "
+                        "Jira is reachable.")
+        else:
+            extra = f", {len(result.failed)} FAILED" if result.failed else ""
+            notify.send(f"✅ Approved & filed — {snapshot.get('source')}: "
+                        f"{result.filed_n} new, {result.deduped_n} already open{extra}.")
     except Exception:  # noqa: BLE001
         pass
     return result

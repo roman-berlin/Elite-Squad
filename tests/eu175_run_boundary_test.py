@@ -130,11 +130,13 @@ _stop_inside_finally = False
 for ln in _ap_src.splitlines():
     if ln.strip() == "finally:":
         _fin_indent = len(ln) - len(ln.lstrip())
-    if 'audit.record("autopilot_stop")' in ln:
+    # EU-232: autopilot_stop now also carries reason=stop_reason or "once-complete" — match either
+    # the bare call or the reasoned one, so this stays a pure "inside finally" structural check.
+    if re.match(r'\s*audit\.record\("autopilot_stop"', ln):
         _stop_inside_finally = _fin_indent is not None and (len(ln) - len(ln.lstrip())) > _fin_indent
 chk("autopilot_stop is inside the finally", _stop_inside_finally)
 chk("autopilot_stop is gated by `if started:`",
-    bool(re.search(r'if started:\s*\n\s+audit\.record\("autopilot_stop"\)', _ap_src)))
+    bool(re.search(r'if started:\s*\n\s+audit\.record\("autopilot_stop"', _ap_src)))
 
 
 # ── 3. Both cockpit run routes bracket run_loop, with run_end INSIDE the finally ──

@@ -9,8 +9,12 @@ no `gate_preflight` (a Bun product) must NOT get that line — backward compatib
 These pin the doctor wiring so it can't silently regress to never surfacing the EU self-build's most
 fragile point (a venv-blind gate that dies on `import requests`).
 """
-import sys, types, tempfile
+import os, sys, types, tempfile
 from pathlib import Path
+
+# This harness calls health.checks() for REAL — keep the auth-liveness probe (a real `claude -p`
+# round-trip) off even when run standalone, outside run_all.py's stripped child env.
+os.environ["GENERAL_AUTH_PROBE"] = "0"
 
 sdk = types.ModuleType("claude_agent_sdk")
 class _D:

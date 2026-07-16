@@ -77,9 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
     st = sub.add_parser("standup", help="daily-meeting report (shipped / needs-you / decisions)")
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
-    dr = sub.add_parser("drill", help="Engineering Coach: review the unit's record, propose officer upgrades")
-    dr.add_argument("--telegram", action="store_true", help="also send a summary to Telegram")
-    dr.add_argument("--apply", action="store_true", help="EXECUTE the approved drill (writes the officer/squad edits; originals backed up first)")
     sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
     cnl = sub.add_parser("council", help="deep WEEKLY council (officers muster, brief you) — for the daily use `daily`")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
@@ -98,12 +95,6 @@ def build_parser() -> argparse.ArgumentParser:
     pmp.add_argument("--telegram", action="store_true", help="also send an ESCALATE proposal to Telegram")
     sr = sub.add_parser("ship-review", help="ready-to-prod review: Release Manager certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
     sr.add_argument("app", nargs="?", help="app to review (default: first configured)")
-    adj = sub.add_parser("adjutant", help="Engineering Manager (S-1): personnel review — propose hires/retirements")
-    adj.add_argument("--telegram", action="store_true", help="also brief the Commander on Telegram")
-    adj.add_argument("--apply", action="store_true", help="EXECUTE the approved personnel action (hire/retire; originals backed up first)")
-    adj.add_argument("--ticket", help="preview the task-scoped specialist roster for a Jira ticket whose "
-                                      "domain falls outside the fixed squad lanes (e.g. EU-85); advisory only")
-    adj.add_argument("--app", help="app whose backlog holds --ticket (default: first configured app)")
     sct = sub.add_parser("scout", help="QA Engineer (S-2): smoke-test DEV in a browser (e2e / a11y) and report")
     sct.add_argument("app")
     sct.add_argument("--url", help="a deployed DEV URL to test (else the app's local dev server)")
@@ -362,6 +353,14 @@ def _doctor(cfg_path: str) -> int:
         print(f"  ✗ could not load config: {exc}")
         return 1
     print(f"  ✓ config loaded ({len(cfg.apps)} app(s): {', '.join(a.name for a in cfg.apps)})")
+    # 2026-07-15: doctor is the Commander's live diagnostic — force a FRESH auth-liveness probe so
+    # the "Claude auth" line can't show a ≤15-min-stale verdict right after a /login fix (or right
+    # after a token died). health.checks() below then reads this probe from the warm cache.
+    try:
+        from . import auth_probe
+        auth_probe.probe(force=True)
+    except Exception:  # noqa: BLE001 - the probe must never crash the doctor
+        pass
     s = health.summary(cfg)
     print(f"  ✓ models: builder {s['models']['builder']} · reviewer {s['models']['reviewer']} · backend {s['backend']}")
     for c in s["checks"]:
@@ -440,6 +439,7 @@ async def _main(argv: list[str]) -> int:
     # QW4: every agent call also lands an `agent_call` audit event (model, tokens, duration).
     from . import agent as _agent
     _agent.configure_audit(AuditLog(cfg.audit_path))
+    _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
 
     if args.command == "serve":
         from . import server
@@ -453,23 +453,6 @@ async def _main(argv: list[str]) -> int:
         print(report)
         if getattr(args, "telegram", False):
             notify.send(report)
-        return 0
-
-    if args.command == "drill":
-        from . import drillmaster, notify
-        if getattr(args, "apply", False):
-            out = await drillmaster.apply(cfg)
-            print(out)
-            if getattr(args, "telegram", False):
-                notify.send("🎖️ Drill applied:\n\n" + out[:1500])
-            return 0
-        report = await drillmaster.drill(cfg)
-        print(report)
-        out = Path(cfg.audit_path).with_name("drill-report.md")
-        out.write_text(report, encoding="utf-8")
-        print(f"\n(written to {out})")
-        if getattr(args, "telegram", False):
-            notify.send("🎖️ Engineering Coach report ready:\n\n" + report[:1500])
         return 0
 
     if args.command == "daily":
@@ -608,33 +591,6 @@ async def _main(argv: list[str]) -> int:
         print(autopilot_mod.unblock(cfg, args.ticket))
         return 0
 
-    if args.command == "adjutant":
-        from . import adjutant, notify
-        if getattr(args, "apply", False):
-            out = await adjutant.apply(cfg)
-            print(out)
-            if getattr(args, "telegram", False):
-                notify.send("🪖 Personnel action applied:\n\n" + out[:1500])
-            return 0
-        # EU-85: `--ticket KEY` fetches that ticket and feeds its text to propose(), which detects
-        # an out-of-lane domain and returns an advisory preview of the specialist roster the unit
-        # would synthesize for it. Without --ticket, propose() runs the normal personnel review.
-        ticket_text = None
-        if getattr(args, "ticket", None):
-            app_name = getattr(args, "app", None) or cfg.apps[0].name
-            _app, _t = intake.from_tickets(cfg, app_name, [args.ticket])[0]
-            ticket_text = "\n".join(filter(None, [
-                _t.summary or "",
-                _t.description or "",
-                *list(_t.acceptance_criteria or []),
-            ]))
-        report = await adjutant.propose(cfg, ticket_text=ticket_text)
-        print(report)
-        Path(cfg.audit_path).with_name("adjutant-report.md").write_text(report, encoding="utf-8")
-        if getattr(args, "telegram", False):
-            notify.send("🪖 Engineering Manager — personnel review:\n\n" + report[:3000])
-        return 0
-
     if args.command in ("dashboard", "status"):
         from . import dashboard as D
         charged = bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -648,6 +604,11 @@ async def _main(argv: list[str]) -> int:
             _needs_cnt = _needs_mod.count(cfg)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
+        # EU-314: the static `general dashboard` command writes a single global HTML file with no
+        # active-project tab concept (no _tab_bar, no ?app= to switch). The per-project pipeline
+        # board is scoped to an active tab, so it is intentionally NOT rendered here — app_name is
+        # left unset and render_html emits no board, exactly as before. The board is a live-cockpit
+        # (/tasks) feature; the static file stays the unscoped multi-project overview.
         out.write_text(D.render_html(tasks, show_cost=charged, needs_count=_needs_cnt), encoding="utf-8")
         print(f"dashboard written: {out}  ({len(tasks)} task(s))")
         if getattr(args, "open", False):

@@ -5,8 +5,6 @@ total_cost_usd. The build-delegation stages it pinned (squad-lead planning, sold
 build_delegated's `sunk` out-param) were REMOVED in Phase-2 §2 along with the build squad; the
 provost security gate and the Test Engineer stage were likewise deleted. What remains worth
 guarding:
-  1. detect_domain_gap returns its own burn and threads ticket_id into run_agent (still used by
-     the Engineering Manager's advisory roster preview).
   5. loop._attempt: the ticket report cost — the number run_end sums — = builder + review.
   6. usage.record stamps "k" on the ledger row when a ticket_id is given (the choke-point that
      makes per-ticket burn slicing work).
@@ -34,9 +32,7 @@ sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
 import orchestrator.loop as loop                       # noqa: E402
-import orchestrator.squad as squad                     # noqa: E402
 import orchestrator.usage as usage                     # noqa: E402
-from orchestrator.agent import AgentRun                # noqa: E402
 from orchestrator.config import Config, AppConfig      # noqa: E402
 from orchestrator.contracts import (                   # noqa: E402
     BuildArtifact, BuildResult, GateResult, Outcome,
@@ -69,49 +65,6 @@ def _ticket(tid: str = "EU-139") -> Ticket:
 GAP_COST, GAP_IN, GAP_OUT = 0.041794, 18898, 552
 LEAD_COST, LEAD_IN, LEAD_OUT = 0.344076, 68517, 1507
 SOLDIER_COST = 0.15
-_calls: list[tuple[str, object]] = []   # (tag, ticket_id) per fake run_agent call
-
-
-async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None, **kw):
-    _calls.append((tag, ticket_id))
-    if tag == "gap-detect":
-        reply = '{"covered": true, "domain": "vanguard-fe"}'
-        return AgentRun(text=reply, final=reply, cost_usd=GAP_COST, num_turns=1,
-                        is_error=False, tools=[], input_tokens=GAP_IN, output_tokens=GAP_OUT)
-    return AgentRun(text="done", final="done", cost_usd=0.0, num_turns=1,
-                    is_error=False, tools=[])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 1. detect_domain_gap — burn returned, ticket id threaded to the ledger choke-point
-# ══════════════════════════════════════════════════════════════════════════════
-_orig_squad_runner = squad.run_agent
-squad.run_agent = _fake_run_agent
-
-_calls.clear()
-res = asyncio.run(squad.detect_domain_gap("some ticket", squad.SQUAD, ticket_id="EU-139"))
-chk("gap-detect: (gap, domain) prefix unchanged", res[:2] == (False, None), str(res[:2]))
-chk("gap-detect: burn dict carries the call's cost",
-    len(res) > 2 and abs(res[2].get("cost_usd", 0) - GAP_COST) < 1e-9, str(res[2:]))
-chk("gap-detect: burn dict carries the call's tokens",
-    res[2].get("input_tokens") == GAP_IN and res[2].get("output_tokens") == GAP_OUT, str(res[2]))
-chk("gap-detect: run_agent received ticket_id='EU-139' (ledger 'k' wiring)",
-    _calls == [("gap-detect", "EU-139")], str(_calls))
-
-_calls.clear()
-res_nt = asyncio.run(squad.detect_domain_gap("some ticket", squad.SQUAD))
-chk("gap-detect: no ticket context → ticket_id=None (no bogus 'k')",
-    _calls == [("gap-detect", None)] and res_nt[:2] == (False, None), str(_calls))
-
-
-async def _explode(prompt, options, tag="", **kw):
-    raise RuntimeError("model down")
-
-squad.run_agent = _explode
-res_err = asyncio.run(squad.detect_domain_gap("some ticket", squad.SQUAD, ticket_id="EU-139"))
-chk("gap-detect: exception → (False, None, {}) fail-safe",
-    res_err[:2] == (False, None) and res_err[2] == {}, str(res_err))
-squad.run_agent = _orig_squad_runner
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -153,10 +106,15 @@ class _StubBuilder:
 
 class _StubReviewer:
     @staticmethod
-    async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None):
+    async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None,
+                     already_bounced=None):
         if store is not None:
             store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))
         return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=REVIEW_C)
+
+    @staticmethod
+    def collect_unverifiable_fingerprints(result):   # EU-352: loop.py always calls this
+        return set()
 
 
 _land_costs: list[float] = []

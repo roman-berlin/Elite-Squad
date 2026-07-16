@@ -138,7 +138,7 @@ filed_calls = []
 
 class StubBacklog:
     def find_open_by_summary(self, summary): return None
-    def create_task(self, summary, description, labels=None, issue_type="Task"):
+    def create_task(self, summary, description, labels=None, issue_type="Task", priority=None):
         key = f"EU-{900 + len(filed_calls)}"
         filed_calls.append((summary, list(labels or [])))
         return key

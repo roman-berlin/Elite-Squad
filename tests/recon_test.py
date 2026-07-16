@@ -97,6 +97,50 @@ calls.clear()
 out = call()
 chk("planning hiccup -> solo (fail-safe)", out == "SOLO REPORT" and calls == ["provost-lead", "provost"], str(calls))
 
+# ---- EU-139: the solo path itself (_solo's run_agent call) must fail CLOSED, never crash ----
+cfg.delegation_enabled = False
+
+async def solo_crash(prompt, options, tag=""):
+    calls.append(tag)
+    raise RuntimeError("boom in solo")
+recon.run_agent = solo_crash
+calls.clear(); aud = Audit()
+try:
+    out = call(audit=aud)
+    raised = False
+except Exception:
+    out = None
+    raised = True
+chk("solo run_agent raising -> run_officer does NOT propagate the exception", not raised)
+chk("solo run_agent raising -> returns a fail-closed report string (not None/empty)",
+    isinstance(out, str) and len(out.strip()) > 0, str(out))
+chk("solo run_agent raising -> report reads as failed/closed, not a clean report",
+    isinstance(out, str) and any(w in out.lower() for w in ("fail", "error")), out)
+chk("solo run_agent raising -> officer_recon audit entry recorded with ok=False",
+    any(e.get("event") == "officer_recon" and e.get("officer") == "provost" and e.get("ok") is False
+        for e in aud.events), str(aud.events))
+
+# ---- EU-139: the exact SDK quirk from the root-cause ("... returned an error result: success") ----
+async def solo_success_quirk(prompt, options, tag=""):
+    calls.append(tag)
+    raise Exception("Claude Code returned an error result: success")
+recon.run_agent = solo_success_quirk
+calls.clear(); aud = Audit()
+try:
+    out = call(audit=aud)
+    raised = False
+except Exception:
+    out = None
+    raised = True
+chk("'error result: success' quirk in solo -> no crash", not raised)
+chk("'error result: success' quirk in solo -> fail-closed report returned",
+    isinstance(out, str) and len(out.strip()) > 0, str(out))
+chk("'error result: success' quirk in solo -> report reads as failed/closed",
+    isinstance(out, str) and any(w in out.lower() for w in ("fail", "error")), out)
+chk("'error result: success' quirk in solo -> officer_recon audit entry with ok=False",
+    any(e.get("event") == "officer_recon" and e.get("officer") == "provost" and e.get("ok") is False
+        for e in aud.events), str(aud.events))
+
 print("\n================ RECON SQUADS QA ================")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

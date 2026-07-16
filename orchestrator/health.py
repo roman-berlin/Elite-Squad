@@ -120,6 +120,29 @@ def checks(cfg) -> list[dict[str, str]]:
     auth = cfg.detected_auth()
     add("Claude login", "ok" if auth else "bad",
         auth or "no login — run `claude` then /login (or `claude setup-token`)")
+    # 2026-07-15 incident: a PRESENT credential can still be EXPIRED — the drain burned strikes on
+    # 5+ tickets ("Not logged in · Please run /login") while this file said healthy:True, because
+    # detected_auth() only proves a credential SOURCE exists. "Claude auth" is the LIVENESS check:
+    # a real probe round-trip (auth_probe.probe, cached ~15 min so summary stays fast). An outage
+    # must not read as a dead credential: 'unreachable' is warn, never bad; and when the probe
+    # can't run at all ('unknown') this degrades to exactly the old presence-only behaviour.
+    if auth:
+        try:
+            from . import auth_probe
+            pr = auth_probe.probe()
+        except Exception as exc:  # noqa: BLE001 - the liveness probe must never take health down
+            pr = {"state": "unknown", "detail": f"probe unavailable ({exc})"}
+        state, detail = pr.get("state"), pr.get("detail", "")
+        if state == "expired":
+            add("Claude auth", "bad",
+                f"EXPIRED — {detail}; run `claude` then /login "
+                "(or refresh CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY)")
+        elif state == "unreachable":
+            add("Claude auth", "warn", f"unreachable — {detail}; not treated as a dead credential")
+        elif state == "valid":
+            add("Claude auth", "ok", detail)
+        else:
+            add("Claude auth", "ok", f"presence-only — {detail}")
     try:
         import claude_agent_sdk  # noqa: F401
         add("Agent SDK", "ok", "importable")
