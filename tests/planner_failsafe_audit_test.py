@@ -97,6 +97,24 @@ ok("(2) audit event carries the swallowed error (type + message)",
    f"undiagnosable from audit (AUTO-155/156/157, 2026-07-16)")
 
 
+# (2b) the planner turn cap gives a batching-poor backend room to finish exploring —
+# GLM planners batch ~1 tool call per turn and hit the old cap of 14 mid-exploration
+# (4 of 6 GLM planner calls on 2026-07-16 fail-safed on "Reached maximum number of
+# turns (14)"), producing exactly the briefless BUILDs pinned above.
+class _OptsCapture:
+    def __init__(self, **kw):
+        _OptsCapture.last = kw
+
+
+audit_cap = FakeAudit()
+with patch.object(planner, "ClaudeAgentOptions", _OptsCapture), \
+     patch.object(planner, "run_agent", _boom):
+    asyncio.run(planner.plan(_CFG, _TICKET, audit=audit_cap))
+ok("(2b) planner max_turns is at least 24 (GLM turn-batching headroom)",
+   _OptsCapture.last.get("max_turns", 0) >= 24,
+   f"max_turns = {_OptsCapture.last.get('max_turns')}")
+
+
 # (3) happy path records no error field
 class _GoodRun:
     final = '{"verdict": "BUILD", "approach": "x", "testable_ac": ["a"], "in_scope_files": ["f"]}'

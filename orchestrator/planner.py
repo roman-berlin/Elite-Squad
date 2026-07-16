@@ -209,7 +209,12 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
             permission_mode="bypassPermissions",
             allowed_tools=["Read", "Grep", "Glob"],
             disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"],
-            setting_sources=[], max_turns=14, effort="high",
+            # 24 turns, not 14: GLM-routed planners batch ~1 tool call per turn (Anthropic batches
+            # many), so on monorepo tickets they hit the old cap mid-exploration and fail-safe into
+            # a briefless BUILD — 4 of 6 GLM planner calls on 2026-07-16 (AUTO-155/156/157/137,
+            # "Reached maximum number of turns (14)"), one of which (AUTO-156) then burned a full
+            # build into a turn-limit park. A read-only planner turn is far cheaper than that.
+            setting_sources=[], max_turns=24, effort="high",
         )
         run = await run_agent(_prompt(ticket), options, tag="planner", ticket_id=ticket.id)
         res = parse_plan(run.final or run.text)
