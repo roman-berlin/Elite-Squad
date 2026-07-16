@@ -1698,8 +1698,13 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                         entry_id=f"{ticket.id}#pm-findings-decisions",
                     )
                     if eid and eid not in parked_before:
-                        _notify(cfg, f"❓ {ticket.id} — needs YOUR decision "
-                                     f"({len(ftr.decisions)} reviewer finding(s)):\n{bullets}"
+                        # EU-337: page a PLAIN-LANGUAGE decision (problem + options + recommendation)
+                        # via _decision_brief — the same distillation the other escalation sites use —
+                        # instead of pasting the raw reviewer bullets/code identifiers the Commander
+                        # then has to reverse-engineer (the EU-330 "BAD" format). The stored decision
+                        # keeps the full `question`; only the phone ping is distilled.
+                        _notify(cfg, f"❓ {ticket.id} — needs YOUR decision:\n"
+                                     f"{await _decision_brief(cfg, ticket.id, question)}"
                                      f"\n\n{decisions.reply_hint(ticket.id)}")
             except Exception as exc:  # noqa: BLE001 - findings triage must never break the run
                 print(f"  · PM findings triage skipped: {exc}", flush=True)
