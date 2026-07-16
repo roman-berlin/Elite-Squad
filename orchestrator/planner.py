@@ -221,12 +221,20 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
         res.model_version = run.model_version
     except Exception as exc:  # noqa: BLE001 — the Planner must never break a run; default to BUILD
         res = PlannerResult(verdict="BUILD", raw=f"(planner error: {type(exc).__name__}: {exc})")
+        # Surface the swallowed failure in the live stream too — a briefless BUILD looks identical
+        # to a designed one downstream (2026-07-16: AUTO-155/156/157 fail-safed silently; AUTO-156
+        # then built briefless into a turn-limit park, with the burn unmetered).
+        print(f"  · planner failed ({type(exc).__name__}: {exc}) — building without a design brief",
+              flush=True)
     if audit is not None:
         try:
+            extra = {}
+            if res.raw.startswith("(planner error:"):
+                extra["error"] = res.raw[:300]   # make the fail-safe diagnosable from audit alone
             audit.record("planner", ticket_id=ticket.id, verdict=res.verdict,
                          testable_ac=len(res.testable_ac), in_scope_files=len(res.in_scope_files),
                          cost_usd=round(res.cost_usd, 6), provider=res.provider,
-                         model=res.model_version)
+                         model=res.model_version, **extra)
         except Exception:  # noqa: BLE001 — audit must never break a run
             pass
     return res
