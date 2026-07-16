@@ -45,6 +45,7 @@ def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) ->
         return GateResult(passed=True, report="(no commands configured)")
     where = cwd or app.workdir or app.repo_path
     failures: list[str] = []
+    full_failures: list[str] = []   # EU-342: untruncated, teed to a run-log for the Builder retry
     for cmd in commands:
         proc = None
         try:
@@ -96,10 +97,15 @@ def run_commands(app: AppConfig, commands: list[str], cwd: str | None = None) ->
                 except Exception:
                     pass
         if proc.returncode != 0:
-            tail = (stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")).strip()[-4000:]
-            failures.append(f"$ {cmd}\n(exit {proc.returncode})\n{tail}")
+            combined = (stdout.decode("utf-8", errors="replace") + "\n"
+                        + stderr.decode("utf-8", errors="replace")).strip()
+            # EU-342: the concise `report` keeps the last-4000 tail (audit rows, Jira comments,
+            # backward-compat); `full_report` keeps the COMPLETE output for the tee-on-failure log.
+            failures.append(f"$ {cmd}\n(exit {proc.returncode})\n{combined[-4000:]}")
+            full_failures.append(f"$ {cmd}\n(exit {proc.returncode})\n{combined}")
     if failures:
-        return GateResult(passed=False, report="\n\n".join(failures))
+        return GateResult(passed=False, report="\n\n".join(failures),
+                          full_report="\n\n".join(full_failures))
     return GateResult(passed=True, report="all commands passed")
 
 
