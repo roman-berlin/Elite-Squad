@@ -11,6 +11,7 @@ sys.path.insert(0, ".")
 
 import json
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -65,9 +66,14 @@ def test_kpis_includes_security_findings():
     """kpis() passes security_block_findings to the Security blocks card."""
     with tempfile.TemporaryDirectory() as tmpdir:
         audit_path = Path(tmpdir) / "test.jsonl"
+        # EU-244: must stay within warroom.STALE_BLOCK_CUTOFF_S (24h) of "now" or
+        # _active_security_blocks() drops it as stale and sec_card['value'] becomes 0 (the
+        # exact live regression the Commander caught on EU-313 while this harness's exit code
+        # was silently discarded — see EU-244).
+        fresh_ts = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
         audit_path.write_text(
             json.dumps({"event": "security_block", "ticket_id": "AUTO-01",
-                        "ts": "2026-06-30T12:00:00", "reason": "XSS flaw", "iteration": 1}) + "\n"
+                        "ts": fresh_ts, "reason": "XSS flaw", "iteration": 1}) + "\n"
         )
 
         # Use a simple object instead of a class
@@ -239,4 +245,6 @@ def test_security_reply_api_records_to_audit():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    # EU-244: propagate pytest's exit code — a bare pytest.main() call always exits the process 0,
+    # so a failing assertion here used to sail through run_all.py's exit-code-only verdict as GREEN.
+    sys.exit(pytest.main([__file__, "-v"]))

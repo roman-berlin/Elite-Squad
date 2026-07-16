@@ -100,8 +100,14 @@ def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
     * a tally line present and ``k < n`` → FAIL, even if the harness exited 0 (the soft-tally bug:
       ~28 harnesses print ``RESULT: … FAIL`` but never ``sys.exit(1)``);
     * a tally line present and ``k == n`` → pass iff the exit code is also 0;
-    * no tally line at all → trust the exit code unchanged (the assert-based harnesses raise on
-      failure, so a 0 exit is an honest pass — failing them on "no count" would be a false positive).
+    * no tally line at all, but a pytest ``N failed`` summary line is present → FAIL regardless of
+      exit code (EU-244: the pytest-style harnesses' ``__main__`` blocks now do
+      ``sys.exit(pytest.main(...))``, but this is defense-in-depth for the whole class — a harness
+      that regresses back to a bare ``pytest.main(...)`` call, or any future pytest harness that
+      forgets ``sys.exit``, still can't sail through on the always-0 exit code);
+    * no tally line and no pytest failure summary → trust the exit code unchanged (the assert-based
+      harnesses raise on failure, so a 0 exit is an honest pass — failing them on "no count" would
+      be a false positive).
 
     Returns ``(ok, checks, line, reason)``: ``checks`` is k for the running TOTAL CHECKS total,
     ``line`` is the tally line to display, and ``reason`` explains a tally-driven failure.
@@ -112,6 +118,13 @@ def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
         if m:
             line, count = ln.strip(), (int(m.group(1)), int(m.group(2)))
     if count is None:
+        # A pytest summary line reads "1 failed, 7 passed in 0.42s"; only a NON-ZERO failed count
+        # is a red run. Requiring >0 is what keeps a benign "0 failed" tally (e.g. eu195's custom
+        # "Results: 4 passed, 0 failed") from being misread as a failure.
+        pf = re.search(r"(\d+) failed", stdout)
+        if pf and int(pf.group(1)) > 0:
+            reason = f"pytest FAIL: {pf.group(0)} (harness exited {returncode})"
+            return False, 0, line, reason
         return returncode == 0, 0, line, ""          # no self-tally → judge on the exit code alone
     k, n = count
     if k < n:

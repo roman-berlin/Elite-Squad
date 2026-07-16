@@ -233,4 +233,6 @@ def test_doctor_cli_surfaces_backend():
 # Criterion 5 (python3 tests/run_all.py green) will be validated by running the full suite
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    # EU-244: propagate pytest's exit code — a bare pytest.main() call always exits the process 0,
+    # so a failing assertion here used to sail through run_all.py's exit-code-only verdict as GREEN.
+    sys.exit(pytest.main([__file__, "-v"]))
