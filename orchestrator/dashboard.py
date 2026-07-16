@@ -113,6 +113,83 @@ def _audit_sig(paths: list[Path]) -> tuple:
     return tuple(sig)
 
 
+# EU-345: incremental per-file line cache. The audit is APPEND-ONLY (a jsonl event log), so on the
+# common case — the drain just appended a few events to the local audit.jsonl — we seek to the last
+# consumed byte offset and parse ONLY the new bytes, instead of re-reading + splitting the whole 7 MB
+# file. Before this, the (size, mtime_ns) sig changed on every append, so the cache missed and the
+# dashboard re-parsed the entire history every ~5s auto-refresh while Roman watched a live build
+# (measured ~13s/request, "no warm-cache effect"). The offset is always kept at a newline boundary so
+# a partial trailing line waits for its newline; a size DECREASE (truncation / rotation, EU-363) falls
+# back to a full re-read. keyed by absolute path.
+_file_line_cache: dict[str, tuple[int, list[str], bytes]] = {}   # path -> (offset, lines, anchor)
+_ANCHOR_N = 64   # bytes ending at the committed offset, re-verified to prove append (not rewrite)
+
+
+def _read_file_lines(fp: Path) -> list[str]:
+    try:
+        size = fp.stat().st_size
+    except OSError:
+        return []
+    cached = _file_line_cache.get(str(fp))
+    start, prior = 0, []
+    if cached is not None and size >= cached[0]:
+        # The incremental delta-read is only valid if the file was APPENDED to — a same-path REWRITE
+        # (test write_text, or sync overwriting a peer shared/<host>.jsonl via scp) can grow the file
+        # with entirely different bytes, which would splice garbage onto the cached lines. Re-verify
+        # the bytes ending at the committed offset still match the stored anchor; if not, it's a
+        # rewrite → fall through to a full re-read. (A size DECREASE already falls through below.)
+        off, plines, anchor = cached
+        if size == off and _anchor_ok(fp, off, anchor):
+            return plines                 # unchanged since last read
+        if size > off and _anchor_ok(fp, off, anchor):
+            start, prior = off, plines    # genuine append — read only the delta
+    try:
+        with fp.open("rb") as fh:
+            fh.seek(start)
+            chunk = fh.read()
+    except OSError:
+        return prior
+    # Only COMMIT (advance the offset + cache) lines up to the last newline, so a half-written
+    # trailing line is re-read next call rather than cached mid-write. But still SURFACE that trailing
+    # line in the return, matching splitlines()'s handling of a newline-less final line (backward-
+    # compat: the live audit's final event is a complete line, sometimes without a trailing newline).
+    nl = chunk.rfind(b"\n")
+    if nl == -1:
+        trailing = chunk
+        committed_lines = []
+        commit_len = 0
+    else:
+        trailing = chunk[nl + 1:]
+        committed = chunk[:nl + 1]
+        committed_lines = [ln.strip() for ln in committed.decode("utf-8", errors="replace").splitlines()
+                           if ln.strip()]
+        commit_len = len(committed)
+    if commit_len:
+        prior = prior + committed_lines
+        new_off = start + commit_len
+        _file_line_cache[str(fp)] = (new_off, prior, _anchor_at(fp, new_off))
+    tail = trailing.decode("utf-8", errors="replace").strip()
+    return (prior + [tail]) if tail else prior
+
+
+def _anchor_at(fp: Path, offset: int) -> bytes:
+    """The up-to-_ANCHOR_N bytes ending at ``offset`` — a cheap fingerprint of the committed prefix's
+    tail, re-checked before an incremental delta-read to prove the file was appended-to, not rewritten."""
+    n = min(_ANCHOR_N, offset)
+    if n <= 0:
+        return b""
+    try:
+        with fp.open("rb") as fh:
+            fh.seek(offset - n)
+            return fh.read(n)
+    except OSError:
+        return b""
+
+
+def _anchor_ok(fp: Path, offset: int, anchor: bytes) -> bool:
+    return _anchor_at(fp, offset) == anchor
+
+
 def audit_lines(audit_path: str | Path) -> list[str]:
     """Every audit line for the unified view: this machine's live ``audit.jsonl`` PLUS each synced
     ``shared/<host>.jsonl`` published by the other machines (see orchestrator/sync.py). Exact-duplicate
@@ -120,7 +197,9 @@ def audit_lines(audit_path: str | Path) -> list[str]:
     they are counted once. Order is local-first then shared; callers that care sort by ts.
 
     TTL/mtime-cached so a burst of SSE board frames (and K open tabs) share a single read+merge instead
-    of re-parsing the whole history several times a second."""
+    of re-parsing the whole history several times a second. On a cache miss the per-file reader
+    (``_read_file_lines``) reads only newly-appended bytes (EU-345), so an active drain no longer forces
+    a full-history re-read every request."""
     global audit_lines_calls, audit_lines_reads
     audit_lines_calls += 1
     key = str(audit_path)
@@ -134,13 +213,8 @@ def audit_lines(audit_path: str | Path) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for fp in paths:
-        try:
-            text = fp.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            s = line.strip()
-            if s and s not in seen:
+        for s in _read_file_lines(fp):
+            if s not in seen:
                 seen.add(s)
                 out.append(s)
     _audit_cache[key] = (sig, now, out)
