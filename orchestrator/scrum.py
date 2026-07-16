@@ -143,10 +143,24 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
             except Exception:  # noqa: BLE001
                 pass
     result["keys"] = keys
-    result["ok"] = bool(keys)
+    # EU-358: ok means ALL fragments filed. A mid-batch Jira error used to still report ok=True and
+    # close the parent below — the unfiled fragments existed only in the LLM report, so that slice of
+    # the feature silently vanished (parent Done, nothing on the board to build it).
+    filed_all = bool(keys) and len(keys) == len(subs[:6]) and not result.get("error")
+    result["ok"] = filed_all
+
+    if keys and not filed_all and not getattr(parent, "ephemeral", False):
+        # Partial filing: keep the parent OPEN (the caller escalates on ok=False) and record exactly
+        # what landed, so the Commander — or a retry — can file the remainder instead of losing it.
+        try:
+            bl.add_comment(parent, "⚠️ Split INCOMPLETE — filed only " + ", ".join(keys)
+                           + f" of {len(subs[:6])} planned fragments ({result.get('error', 'Jira error')}). "
+                           "Parent left open; the remaining fragments still need filing.")
+        except Exception:  # noqa: BLE001
+            pass
 
     # Close the parent: a comment naming the fragments, then move it out of the queue (→ Done).
-    if keys and not getattr(parent, "ephemeral", False):
+    if filed_all and not getattr(parent, "ephemeral", False):
         try:
             bl.add_comment(parent, "🧩 Too heavy to land as one ticket — the Scrum Master split it into: "
                            + ", ".join(keys) + ". Closing this parent; the fragments land on their own.")
