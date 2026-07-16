@@ -63,6 +63,81 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
+# ── EU-187: cockpit terminal-panel hardening ────────────────────────────────────────────────────
+# POST /api/terminal used to run FREE-FORM shell (`Popen(cmd, shell=True)`) — an unauthenticated
+# local RCE surface (2026-07-06 audit, finding N4). It is now constrained to a vetted, no-shell
+# allowlist executed with shell=False over an argv parsed by shlex. Two hard rules the allowlist
+# enforces: (1) NO interpreters — python/bun/node/sh/… are equivalent to arbitrary code and are
+# deliberately absent; (2) file-reading commands may ONLY read paths that resolve INSIDE the
+# orchestrator working directory (absolute / `..`-escaping operands are rejected, so the endpoint
+# cannot exfiltrate /etc/passwd, ~/.ssh, or out-of-tree secrets).
+TERMINAL_ALLOWED_COMMANDS = frozenset({
+    "git", "ls", "pwd", "echo", "cat", "head", "tail", "grep", "wc",
+    "find", "date", "whoami", "uname", "df", "du", "which",
+})
+
+# Commands taking file/path operands — their operands are confined to the working directory.
+TERMINAL_PATH_COMMANDS = frozenset({"cat", "head", "tail", "grep", "wc", "find", "ls", "du"})
+
+# Shell chaining/substitution/redirection/globbing chars. Even under shell=False (where they are
+# inert to subprocess) a command string containing them is rejected outright — a no-shell
+# allowlisted command never needs them, and rejecting keeps the "no shell interpretation, ever"
+# intent unambiguous.
+_TERMINAL_METACHARACTERS = set(";|&$`()<>\\*?")
+
+
+def _terminal_validate(cmd: str, cwd: Path):
+    """Validate a cockpit-terminal command against the EU-187 no-shell allowlist.
+
+    Returns ``(argv, None)`` when the command is safe to run with shell=False, else
+    ``(None, error_message)`` (caller returns HTTP 403). NEVER executes anything — validation is
+    purely structural so it can be unit-tested in isolation (tests/eu187_terminal_allowlist_test.py).
+    """
+    import shlex
+
+    if any(c in (cmd or "") for c in _TERMINAL_METACHARACTERS):
+        bad = " ".join(sorted(set(cmd) & _TERMINAL_METACHARACTERS))
+        return None, f"Command contains disallowed shell character(s): {bad}"
+    try:
+        argv = shlex.split(cmd or "")
+    except ValueError as e:
+        return None, f"Could not parse command: {e}"
+    if not argv:
+        return None, "No command provided"
+
+    program = argv[0]
+    if program not in TERMINAL_ALLOWED_COMMANDS:
+        return None, (
+            f"Command {program!r} is not allowed. Only a vetted set of read-only commands may run "
+            f"in the terminal panel: {', '.join(sorted(TERMINAL_ALLOWED_COMMANDS))}."
+        )
+
+    # Confine file-reading commands to the working directory: reject any operand that resolves
+    # outside `cwd`. Flags (leading '-') and non-path tokens (e.g. a grep PATTERN) are left alone.
+    if program in TERMINAL_PATH_COMMANDS:
+        cwd_resolved = cwd.resolve()
+        for tok in argv[1:]:
+            if not tok or tok.startswith("-"):
+                continue
+            looks_like_path = tok.startswith(("/", "~", ".")) or "/" in tok
+            if not looks_like_path:
+                continue  # e.g. grep's PATTERN, or a subcommand word
+            candidate = Path(tok).expanduser()
+            try:
+                resolved = (candidate if candidate.is_absolute()
+                            else (cwd_resolved / candidate)).resolve()
+            except Exception:  # noqa: BLE001
+                return None, f"Invalid path operand: {tok!r}"
+            try:
+                resolved.relative_to(cwd_resolved)
+            except ValueError:
+                return None, (
+                    f"Path {tok!r} is outside the working directory. The terminal panel may only "
+                    "read files inside the orchestrator working directory."
+                )
+    return argv, None
+
+
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -437,12 +512,20 @@ def create_app(cfg: Config):
         same pattern as gate.py's ``run_commands``) so a backgrounded/forked child (e.g.
         a bare `vitest` typed into the terminal) can't outlive a timeout. On
         TimeoutExpired — and in a finally block covering every exit path — the WHOLE
-        process group is SIGKILL-ed via ``os.killpg``, not just the top shell PID.
+        process group is SIGKILL-ed via ``os.killpg``, not just the top process PID.
+
+        EU-187: free-form shell execution was a local RCE surface (unauthenticated command
+        execution as the cockpit's user). The endpoint now NEVER invokes a shell — the input is
+        tokenised with ``shlex`` and validated against a fixed allowlist BEFORE anything reaches
+        subprocess (see ``_terminal_validate`` / ``TERMINAL_ALLOWED_COMMANDS`` above), then run
+        with ``shell=False``.
 
         Security:
-        * Commands are executed in a subprocess with a timeout.
-        * No interactive shells — each command is a one-shot execution.
-        * Output is capped at 64KB to prevent memory issues.
+        * No shell — ``Popen(argv, shell=False)``, never a shell-interpreted string.
+        * argv[0] must be in the module allowlist (interpreters are absent) — else 403.
+        * File-reading commands are confined to the working directory — else 403.
+        * Shell metacharacters (chaining/substitution/redirection/globbing) — else 403.
+        * Commands run in a subprocess with a timeout; output capped at 64KB.
 
         Returns JSON ``{"output": "<combined stdout/stderr>", "error": "<error message or null>"}``.
         """
@@ -457,17 +540,26 @@ def create_app(cfg: Config):
         if any(c in cmd for c in ["\x00", "\n", "\r"]):
             return jsonify({"output": "", "error": "Invalid characters in command"}), 400
 
+        run_cwd = Path(cfg.config_path).parent if hasattr(cfg, "config_path") else Path.cwd()
+
+        # EU-187: allowlist + path-confinement + metachar check BEFORE anything runs. A rejected
+        # command returns 403 and never reaches Popen.
+        argv, err = _terminal_validate(cmd, run_cwd)
+        if err is not None:
+            return jsonify({"output": "", "error": err}), 403
+
         proc = None
         try:
-            # EU-146: Popen (not run) + start_new_session=True so the shell and any child
-            # it forks/backgrounds share one process group we can kill as a unit.
+            # EU-146: Popen (not run) + start_new_session=True so the process and any child it
+            # forks/backgrounds share one process group we can kill as a unit. EU-187: shell=False,
+            # a validated argv — never a shell-interpreted string.
             proc = subprocess.Popen(
-                cmd,
-                shell=True,
+                argv,
+                shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(Path(cfg.config_path).parent) if hasattr(cfg, "config_path") else None,
+                cwd=str(run_cwd),
                 env=dict(os.environ),
                 start_new_session=True,
             )

@@ -248,6 +248,10 @@ _TCFG = Config(
     use_worktree=False,
 )
 _TCFG.detected_auth = lambda: "test"
+# EU-187: the terminal endpoint confines file-reading commands to its working directory
+# (Path(config_path).parent). Anchor it to the isolated tmp dir so the large-output test below
+# can `cat` a fixture file without touching the repo tree.
+_TCFG.config_path = str(_TMP / "config.yaml")
 _TCLIENT = server.create_app(_TCFG).test_client()
 
 # Source-level check: terminal_api must use the same process-group pattern as gate.py
@@ -288,7 +292,10 @@ chk("newline in cmd: HTTP 400", resp.status_code == 400, f"status={resp.status_c
 chk("newline in cmd: error message",
     resp.get_json().get("error") == "Invalid characters in command", str(resp.get_json()))
 
-resp = _TCLIENT.post("/api/terminal", data={"cmd": f"python3 -c \"print('A' * 70000)\""})
+# EU-187 rejects interpreters, so the large-output cap is exercised with an allowlisted `cat`
+# of a >64KB fixture file inside the endpoint's working directory.
+(_TMP / "big.txt").write_text("A" * 70000)
+resp = _TCLIENT.post("/api/terminal", data={"cmd": "cat big.txt"})
 chk("large output: HTTP 200", resp.status_code == 200, f"status={resp.status_code}")
 j = resp.get_json()
 chk("large output: truncated to <= 65536 + marker", len(j.get("output", "")) <= 65536 + len(
@@ -298,44 +305,19 @@ chk("large output: truncation marker present",
 
 # AC-1/AC-2: a backgrounded child that outlives the 10s timeout must NOT survive as an
 # orphan — the whole process group (shell + backgrounded child) must be SIGKILL-ed, not
-# just the top shell PID. Uses a real 10s wait against the endpoint's hardcoded timeout.
-_pidfile = _TMP / "child.pid"
-if _pidfile.exists():
-    _pidfile.unlink()
-_cmd = f"sleep 30 & echo $! > {_pidfile}; sleep 20"
-_t0 = time.time()
-resp = _TCLIENT.post("/api/terminal", data={"cmd": _cmd})
-_elapsed = time.time() - _t0
-chk("timeout command: HTTP 408", resp.status_code == 408, f"status={resp.status_code}")
-chk("timeout command: error message",
-    resp.get_json().get("error") == "Command timed out (10s limit)", str(resp.get_json()))
-chk("timeout command: returns close to the 10s limit (not the shell's full 20s)",
-    _elapsed < 15, f"elapsed={_elapsed:.1f}s")
-
-_child_pid = None
-for _ in range(20):
-    if _pidfile.exists():
-        try:
-            _child_pid = int(_pidfile.read_text().strip())
-        except ValueError:
-            pass
-        if _child_pid:
-            break
-    time.sleep(0.1)
-
-if _child_pid is None:
-    chk("orphan check: backgrounded child pid captured", False, "pidfile never appeared")
-else:
-    _alive = True
-    try:
-        os.kill(_child_pid, 0)
-    except ProcessLookupError:
-        _alive = False
-    chk(
-        "orphan check: backgrounded 'sleep 30' child is DEAD after the request returns (EU-146)",
-        not _alive,
-        f"pid {_child_pid} still alive — orphaned process leaked",
-    )
+# just the top PID. EU-187 SUPERSEDES the live-orphan-through-the-endpoint path: the terminal
+# now runs shell=False against an allowlist, so a backgrounding command string (`sleep 30 & …`)
+# can no longer spawn an orphan at all — it is rejected with 403 before subprocess. That is a
+# strict superset of "the orphan is killed". EU-146's process-group machinery remains as
+# defense-in-depth for allowlisted commands and is still pinned by the source-level checks above
+# (Popen + start_new_session + killpg + finally). Here we assert the stronger EU-187 guarantee.
+_backgrounder = "sleep 30 & echo done; sleep 20"
+resp = _TCLIENT.post("/api/terminal", data={"cmd": _backgrounder})
+chk("EU-187 supersedes: a backgrounding command is rejected (403), never spawns an orphan",
+    resp.status_code == 403, f"status={resp.status_code}")
+chk("EU-187 supersedes: rejection names the disallowed shell character(s)",
+    "disallowed shell character" in (resp.get_json().get("error") or ""),
+    str(resp.get_json()))
 
 
 # ════════════════════════════════════════════════════════════
