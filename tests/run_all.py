@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -28,19 +29,66 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent          # the General repo root
 TESTS = sorted(p for p in (ROOT / "tests").glob("*_test.py"))
 
+# EU-360: reuse the orchestrator's own credential predicate so the suite's env strip can never drift
+# from the officer/gate subprocess boundary. Fallback keeps run_all import-robust (it is the
+# guard-of-guards — an import error here would take the whole suite down).
+sys.path.insert(0, str(ROOT))
+try:
+    from orchestrator.backends import is_sensitive_key as _is_sensitive_key
+except Exception:  # noqa: BLE001
+    def _is_sensitive_key(key: str) -> bool:
+        return key.startswith(("JIRA_", "TELEGRAM_")) or key == "GENERAL_COCKPIT_PROMOTE"
+
 # EU-139 gate incident (2026-07-05 22:24): a ticket run's gate executes this suite as a child of the
 # orchestrator, so harnesses inherit its live credentials — and a harness that stubbed the SDK but not
 # `orchestrator.notify` (eu108_sonnet_fallback_test) sent a REAL "Sonnet weekly cap hit" Telegram alert
-# to the ops chat mid-gate. The suite's contract is "no network, no real models": strip outbound
-# messaging credentials from every harness's environment so no test can page the Commander, no matter
-# which process spawns the suite. A harness that tests notify sets its own fake env in-process.
-_CHILD_ENV = {k: v for k, v in os.environ.items()
-              if k not in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
+# to the ops chat mid-gate. The suite's contract is "no network, no real models": strip EVERY sensitive
+# credential (EU-360 widened this from just TELEGRAM_* to the full is_sensitive_key set — JIRA_*, the
+# messaging tokens, GENERAL_COCKPIT_PROMOTE) from every harness's environment so no test can page the
+# Commander OR reach a real Jira, no matter which process spawns the suite. A harness that tests one of
+# these sets its own fake env in-process.
+_CHILD_ENV = {k: v for k, v in os.environ.items() if not _is_sensitive_key(k)}
 # 2026-07-15 (auth liveness): health.checks() now probes credential VALIDITY with a real
 # `claude -p` round-trip (network + a real model) unless GENERAL_AUTH_PROBE=0 — force it off for
 # every harness, same contract as the Telegram strip above. A harness that tests the probe stubs
 # auth_probe._run_probe / clears this var in-process (auth_liveness_test.py).
 _CHILD_ENV["GENERAL_AUTH_PROBE"] = "0"
+
+# EU-360: a per-harness wall-clock ceiling so one hung harness can no longer stall the whole suite
+# (subprocess.run had NO timeout — a wedged harness froze run_all, and with it any gate that shells
+# out to it). Generous: the known-heavy harnesses top out ~19s. Override with GENERAL_TEST_TIMEOUT.
+_HARNESS_TIMEOUT_S = int(os.environ.get("GENERAL_TEST_TIMEOUT", "300") or 300)
+
+
+def _run_harness(path: Path) -> tuple[str, str, int, bool]:
+    """Run one harness, bounded by _HARNESS_TIMEOUT_S. Returns (stdout, stderr, returncode, timed_out).
+
+    Uses a new session + killpg so a harness that spawned its own grandchild (e.g. the gate tests'
+    `sleep`) can't outlive the timeout. Decoding is error-tolerant (EU-360): a single invalid byte in
+    a harness's output used to crash the runner mid-suite with strict UTF-8 decoding."""
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(path)], cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace", env=_CHILD_ENV,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return "", f"(could not launch harness: {exc!r})", 1, False
+    try:
+        stdout, stderr = proc.communicate(timeout=_HARNESS_TIMEOUT_S)
+        return stdout or "", stderr or "", proc.returncode, False
+    except subprocess.TimeoutExpired as texc:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except Exception:  # noqa: BLE001 — reap raced or a grandchild still holds the pipe
+            stdout = texc.stdout if isinstance(texc.stdout, str) else ""
+            stderr = texc.stderr if isinstance(texc.stderr, str) else ""
+        return stdout or "", stderr or "", proc.returncode or -1, True
 
 
 def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
@@ -77,9 +125,14 @@ def main() -> int:
     red: list[str] = []
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     for t in TESTS:
-        r = subprocess.run([sys.executable, str(t)], cwd=str(ROOT), capture_output=True, text=True,
-                           env=_CHILD_ENV)
-        ok, checks, line, reason = _verdict(r.stdout, r.returncode)
+        stdout, stderr, returncode, timed_out = _run_harness(t)
+        if timed_out:
+            # A timeout is an unconditional FAIL regardless of any partial tally the harness printed
+            # before it wedged (EU-360) — the suite must never green a harness it had to kill.
+            ok, checks, line, reason = False, 0, "", (
+                f"TIMED OUT after {_HARNESS_TIMEOUT_S}s (killed — raise GENERAL_TEST_TIMEOUT if legit)")
+        else:
+            ok, checks, line, reason = _verdict(stdout, returncode)
         total_checks += checks
         if ok:
             passed += 1
@@ -92,7 +145,7 @@ def main() -> int:
             # from the run log (2026-07-05: four harnesses failed only in CI and the email showed
             # nothing but names). --verbose widens the tail.
             tail = 25 if verbose else 12
-            print("\n".join(("      " + x) for x in (r.stdout + r.stderr).strip().splitlines()[-tail:]))
+            print("\n".join(("      " + x) for x in (stdout + stderr).strip().splitlines()[-tail:]))
     print("=" * 64)
     print(f"  HARNESSES: {passed} passed / {passed + failed}     TOTAL CHECKS: {total_checks}")
     if red:
