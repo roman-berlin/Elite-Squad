@@ -331,20 +331,36 @@ def approve_proposals(cfg: Config, batch_id: str, titles=None):
         _mutate_proposals(cfg, _release)
         raise
 
+    # EU-358: filing.file_findings captures per-finding create errors into result.failed instead of
+    # raising, so a batch whose EVERY create failed (Jira down, expired token) used to be stamped
+    # "approved" — the proposals left the pending queue with nothing on the board. Put such a batch
+    # back to pending so the approval stays actionable, and say so.
+    all_failed = bool(result.failed) and not result.filed and not result.deduped
+
     def _record(items: list[dict]) -> list[dict]:
         b = _find_batch(items, batch_id)
         if b is not None:
-            b["status"] = "approved"
-            b["filed"] = result.filed
-            b["deduped"] = result.deduped
-            b["selected_titles"] = [p["title"] for p in selected]
-            b["actioned_ts"] = time.time()
+            if all_failed:
+                b["status"] = "pending"
+            else:
+                b["status"] = "approved"
+                b["filed"] = result.filed
+                b["deduped"] = result.deduped
+                b["selected_titles"] = [p["title"] for p in selected]
+                b["actioned_ts"] = time.time()
         return items
     _mutate_proposals(cfg, _record)
     try:
         from . import notify
-        notify.send(f"✅ Approved & filed — {snapshot.get('source')}: "
-                    f"{result.filed_n} new, {result.deduped_n} already open.")
+        if all_failed:
+            first_err = result.failed[0][1] if result.failed else "unknown error"
+            notify.send(f"⚠️ Approval NOT filed — {snapshot.get('source')}: every ticket create "
+                        f"failed ({first_err}). Batch returned to pending; approve again once "
+                        "Jira is reachable.")
+        else:
+            extra = f", {len(result.failed)} FAILED" if result.failed else ""
+            notify.send(f"✅ Approved & filed — {snapshot.get('source')}: "
+                        f"{result.filed_n} new, {result.deduped_n} already open{extra}.")
     except Exception:  # noqa: BLE001
         pass
     return result
