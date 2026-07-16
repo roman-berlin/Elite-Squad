@@ -109,6 +109,28 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
         return False
 
 
+def _gate_retry_feedback(cfg, app: AppConfig, ticket: Ticket, kind: str, result) -> str:
+    """EU-342 (tee-on-failure): save the COMPLETE gate output to a run-log file and hand the Builder
+    signal-sliced evidence + that file's path, instead of the raw last-4000-char tail. The Builder
+    then reads the real failure from the file rather than re-running the suite inside its own turns
+    to rediscover it — the single biggest retry-token contributor (EU-38) and a driver of the
+    turn-exhaustion class (EU-248). Falls back to the truncated report if the full output or the log
+    write isn't available; never raises."""
+    full = (getattr(result, "full_report", "") or getattr(result, "report", "") or "")
+    evidence = extract_failure_evidence(full)
+    ref = ""
+    try:
+        from . import run_logger
+        if full.strip() and not (cfg and getattr(cfg, "dry_run", False)):
+            path = run_logger.write_note_log(cfg, app.name, ticket.id,
+                                             f"=== {kind} full output (EU-342) ===\n{full}")
+            ref = (f"\n\nFull {kind.lower()} output saved to: {path}\n"
+                   "(read that file for the COMPLETE output — do not re-run the suite to rediscover it).")
+    except Exception:  # noqa: BLE001 — the tee is best-effort; the evidence above always ships
+        ref = ""
+    return f"{kind} failed; fix these:\n{evidence}{ref}"
+
+
 def _already_landed(app: AppConfig, ticket_id: str) -> str | None:
     """EU-225: deterministic, read-only evidence that ``ticket_id`` already SHIPPED — its id in the
     Technical Writer's changelog (written only on a successful live land) AND a commit on
@@ -1262,7 +1284,25 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         print(f"  build · pass {iteration}/{cfg.max_iterations} (effort {eff} — {eff_reason}) "
               f"— builder working (can take a few minutes)…", flush=True)
         _bar(BUILD, active=BUILD)
-        req = BuildRequest(ticket=ticket, branch=branch, prior_issues=last_changes, iteration=iteration, adr=adr)
+        # EU-341: on a retry, prepend the deterministic forensics classification of the prior failure
+        # (category → recommended action) + how many times this ticket has failed before, so the
+        # Builder acts on the KNOWN fix instead of rediscovering it (the reflexion pattern, wired
+        # through EXISTING forensics.classify/attempts — no new memory store). Best-effort.
+        _feedback = last_changes
+        if iteration > 1 and getattr(cfg, "retry_forensics_enabled", True) and last_changes:
+            try:
+                from . import forensics as _forensics
+                _cls = _forensics.classify("", last_changes[0])
+                if _cls.get("category") != "unknown":
+                    _hist = _forensics.attempts(cfg, ticket.id)
+                    _hint = f"⚠️ KNOWN FAILURE PATTERN ({_cls['label']}): {_cls['action']}"
+                    if len(_hist) > 1:
+                        _hint += (f"\nThis ticket has already failed {len(_hist)}× — do NOT repeat the "
+                                  "earlier dead ends; apply the fix above before anything else.")
+                    _feedback = [f"{_hint}\n\n{last_changes[0]}", *last_changes[1:]]
+            except Exception:  # noqa: BLE001 — forensics enrichment is best-effort, never blocks a build
+                _feedback = last_changes
+        req = BuildRequest(ticket=ticket, branch=branch, prior_issues=_feedback, iteration=iteration, adr=adr)
         # EU-72: hand the builder the typed SpecArtifact (primary context) + the shared pool it
         # publishes its BuildArtifact into.
         # EU-197: Wrap builder with transcript context to capture full tool inputs + reasoning
@@ -1437,7 +1477,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             if gate_comment and backlog and not ticket.ephemeral:
                 commenter.post_comment(backlog, ticket.key, gate_comment)
             _bar(GATE, fail=GATE)
-            last_changes = [f"Verification failed; fix these:\n{gate.report}"]
+            last_changes = [_gate_retry_feedback(cfg, app, ticket, "Verification", gate)]
             continue
         last_gate_fp = ""   # a passing gate breaks the "consecutive" chain (flakes ≠ stuck)
         if app.gate_commands:
@@ -1460,7 +1500,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             last_gate_fp = fp
             print("  gate · deterministic checks FAILED → sending fixes back to builder", flush=True)
             _bar(GATE, fail=GATE)
-            last_changes = [f"Deterministic checks failed; fix these:\n{det.report}"]
+            last_changes = [_gate_retry_feedback(cfg, app, ticket, "Deterministic checks", det)]
             continue
         last_gate_fp = ""   # all gates green this pass — reset the consecutive-failure chain
 

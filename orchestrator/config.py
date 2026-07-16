@@ -240,6 +240,12 @@ class Config:
     # can't recur. Set False to fall back to the conservative "build anyway".
     autoclose_already_landed: bool = True
 
+    # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
+    # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a
+    # recurring failure carries its known fix instead of the Builder rediscovering it. Reuses the
+    # EXISTING forensics.classify/attempts — no new memory store. Set False to disable.
+    retry_forensics_enabled: bool = True
+
     # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
     #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
     #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as
