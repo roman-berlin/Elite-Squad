@@ -237,10 +237,19 @@ def _plan_limit_dedup_loaded() -> bool:
 def _plan_limit_dedup_write(sent: bool, episode: str | None = None) -> None:
     """Best-effort persist of the dedup flag + its episode signature — never raises
     (instrumentation must never break a notification). Clearing (``sent=False``) also drops the
-    episode so a later cap starts from a clean slate."""
-    payload = {"plan_limit_alert_sent": sent, "episode": episode if sent else None}
+    episode so a later cap starts from a clean slate.
+
+    EU-211: merges into the existing document rather than clobbering it — the file also holds
+    the dual-watermark dedup keys (``_dual_watermark_dedup_write``), and each writer must
+    preserve the other's keys so both dedup domains coexist in one sidecar."""
+    def _merge(current):
+        doc = dict(current) if isinstance(current, dict) else {}
+        doc["plan_limit_alert_sent"] = sent
+        doc["episode"] = episode if sent else None
+        return doc
+
     try:
-        locking.locked_rmw(_PLAN_LIMIT_DEDUP_FILE, lambda _: payload,
+        locking.locked_rmw(_PLAN_LIMIT_DEDUP_FILE, _merge,
                            default={}, corrupt_to_default=True)
     except OSError:
         pass
@@ -327,6 +336,37 @@ def reset_plan_limit_alert() -> None:
 _dual_low_watermark_alerted: set[str] = set()
 
 
+def _dual_watermark_dedup_read() -> set[str]:
+    """Best-effort read of the on-disk dual-watermark dedup set (EU-211). Missing/corrupt file
+    reads as an empty set — losing the dedup on a bad read is far safer than silently
+    suppressing a real alert (fail-open, matching ``_plan_limit_dedup_read``)."""
+    try:
+        data = json.loads(_PLAN_LIMIT_DEDUP_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            providers = data.get("dual_low_watermark_alerted") or []
+            if isinstance(providers, list):
+                return {str(p) for p in providers}
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
+def _dual_watermark_dedup_write(providers: set[str]) -> None:
+    """Best-effort persist of the dual-watermark dedup set — never raises (instrumentation must
+    never break a notification). Merges into the shared ``sonnet_alert_dedup.json`` document so
+    the co-located plan-limit keys (``_plan_limit_dedup_write``) are preserved (EU-211)."""
+    def _merge(current):
+        doc = dict(current) if isinstance(current, dict) else {}
+        doc["dual_low_watermark_alerted"] = sorted(providers)
+        return doc
+
+    try:
+        locking.locked_rmw(_PLAN_LIMIT_DEDUP_FILE, _merge,
+                           default={}, corrupt_to_default=True)
+    except OSError:
+        pass
+
+
 def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
     """Send a Telegram alert when a provider crosses the budget bad threshold (low-watermark).
 
@@ -336,8 +376,14 @@ def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
 
     Returns True if sent, False if not configured or failed. Only sends ONCE per provider
     per session (resets on process restart) to avoid spamming.
+
+    EU-211: the in-memory set is unioned with the on-disk dedup set before the check, so a
+    restarted process picks up prior sends from disk and does not re-fire the same alert.
     """
     global _dual_low_watermark_alerted
+
+    # EU-211: adopt any prior sends recorded on disk by a previous (restarted) process.
+    _dual_low_watermark_alerted |= _dual_watermark_dedup_read()
 
     # Only alert once per provider per session
     if provider in _dual_low_watermark_alerted:
@@ -381,6 +427,7 @@ def dual_low_watermark_alert(provider: str, usage_data: dict) -> bool:
     sent = send(message)
     if sent:
         _dual_low_watermark_alerted.add(provider)
+        _dual_watermark_dedup_write(_dual_low_watermark_alerted)
 
     return sent
 
@@ -391,12 +438,16 @@ def reset_dual_low_watermark_alert(provider: str | None = None) -> None:
     Args:
         provider: If "claude" or "glm", clears only that provider's flag.
                   If None, clears all providers (e.g. at midnight or after quota reset).
+
+    EU-211: clears the on-disk dedup set too (per-provider drop, or a full wipe when
+    ``provider`` is None), so a restarted process doesn't resurrect a cleared flag from disk.
     """
     global _dual_low_watermark_alerted
     if provider is None:
         _dual_low_watermark_alerted.clear()
     else:
         _dual_low_watermark_alerted.discard(provider)
+    _dual_watermark_dedup_write(_dual_low_watermark_alerted)
 
 
 def incoming_texts(updates: list, cfg=None) -> list[tuple[int, str, str]]:
