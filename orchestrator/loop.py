@@ -6,6 +6,8 @@ bounds, the cost budget, every backlog transition, and the keep-dev-green merge.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import fcntl
 import os
 import re
@@ -321,12 +323,19 @@ def _bar(done: int, active: int = -1, fail: int = -1) -> None:
     print("    " + "   ".join(cells), flush=True)
 
 
-def _worktree_path(app: AppConfig, cfg: Config) -> str:
-    """Where the CTO keeps this app's private worktree (a sibling of the repo)."""
+def _worktree_path(app: AppConfig, cfg: Config, slot: int = 0) -> str:
+    """Where the CTO keeps this app's private worktree (a sibling of the repo).
+
+    EU-380: slot 0 is the historic per-app path (unchanged for the serial drain and every existing
+    caller); a concurrent drain gives each extra builder its own `<app>-s<N>` worktree so two
+    tickets of one app never share a tree or a git index. git_ops.reap_stale_worktrees derives its
+    protected set from this function across range(max_concurrent_builders), so slot paths are
+    canonical — the reaper must never eat an idle slot (the EU-334 self-reap class)."""
+    name = app.name if slot <= 0 else f"{app.name}-s{slot}"
     if getattr(cfg, "worktree_dir", None):
-        return str(Path(cfg.worktree_dir).expanduser() / app.name)
+        return str(Path(cfg.worktree_dir).expanduser() / name)
     repo = Path(app.repo_path).expanduser().resolve()
-    return str(repo.parent / ".general-worktrees" / app.name)
+    return str(repo.parent / ".general-worktrees" / name)
 
 
 def _worktree_setup_command(app: AppConfig, cfg: Config, workdir: str) -> str | None:
@@ -348,12 +357,13 @@ def _worktree_setup_command(app: AppConfig, cfg: Config, workdir: str) -> str | 
     return cmd
 
 
-def _make_git(cfg: Config, app: AppConfig) -> Git:
+def _make_git(cfg: Config, app: AppConfig, slot: int = 0) -> Git:
     """Build the git custodian for an app. With use_worktree on, the CTO gets a
     dedicated linked worktree (based on origin/<base>) so it never fights the user's
-    manual checkout. Falls back to in-tree if isolation can't engage (e.g. no origin)."""
+    manual checkout. Falls back to in-tree if isolation can't engage (e.g. no origin).
+    EU-380: ``slot`` selects the builder slot's worktree; 0 = the historic path."""
     if getattr(cfg, "use_worktree", False):
-        wt = _worktree_path(app, cfg)
+        wt = _worktree_path(app, cfg, slot)
         try:
             git = Git(app.repo_path, app.base_branch, app.protected_branch, worktree_path=wt)
             created = git.setup()
@@ -574,6 +584,175 @@ def _fetch_fragments_to_worklist(cfg: Config, app: AppConfig,
 
 async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                      audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
+    """Dispatch: the historic serial drain (default), or the EU-380 concurrent drain when
+    max_concurrent_builders > 1. The serial body is untouched — flipping the knob back to 1
+    restores today's exact behaviour."""
+    n = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
+    if n <= 1:
+        return await _run_inner_serial(cfg, worklist, audit, stop_event, stop_between_tickets)
+    return await _run_inner_concurrent(cfg, worklist, audit, stop_event, stop_between_tickets, n)
+
+
+def _fragment_keys_from_report(report: TicketReport) -> list[str]:
+    """Fragment keys from a scrum-split REQUEUE, or []. Extracted from the serial drain's EU-201
+    injection block so both drains parse the one notes format ('… split into AUTO-101, AUTO-102')."""
+    if not (report.outcome == Outcome.REQUEUED and report.notes
+            and "split into" in report.notes.lower()):
+        return []
+    m = re.search(r"split into ([^.\n]+)", report.notes)
+    if not m:
+        return []
+    return [k.strip() for k in m.group(1).strip().split(",") if k.strip()]
+
+
+def _split_lineage(ticket: Ticket) -> str | None:
+    """The auto-split parent key of a fragment, or None. EU-380 prereq 3: two fragments of ONE
+    split are written in dependency order and must never build concurrently — the picker would
+    otherwise preferentially co-schedule exactly the tickets that must be serial (they're filed
+    together with adjacent Rank)."""
+    m = re.search(r"Auto-split from ([A-Z][A-Z0-9]+-\d+)", ticket.description or "")
+    return m.group(1) if m else None
+
+
+async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
+                                audit: AuditLog, stop_event, stop_between_tickets,
+                                n: int) -> list[TicketReport]:
+    """EU-380: N builder slots over a shared queue. What makes this safe:
+
+    - Each slot has its OWN worktree (loop._worktree_path slot suffix) and its own AppConfig COPY —
+      _make_git mutates app.workdir, so a shared AppConfig would point two builders at one tree.
+    - Lands stay effectively serialized: _land is synchronous, so on this event loop it can never
+      interleave with another slot's land; the overlap concurrency buys lives in the awaited LLM
+      passes (measured 59-65% of ticket wall clock). A cross-PROCESS race is still possible and is
+      what EU-379's in-process re-trial absorbs at re-merge+re-gate cost, not rebuild cost.
+    - Split siblings never co-run (_split_lineage mutex), and a fragment chain injects at the FRONT
+      of the queue to preserve EU-201's dependency order.
+    - A base-level verdict halts ITS app's further picks (same contract as the serial drain).
+    - Per-ticket run logs: the concurrent path writes the EU-253 note file instead of claiming the
+      per-app log handle — two slots registering one key would clobber each other; stdout is still
+      attributed per-slot via the EU-272 ContextVar."""
+    budget = Budget(cfg.max_cost_usd)
+    reports: list[TicketReport] = []
+    queue: deque[tuple[AppConfig, Ticket]] = deque(worklist)
+    gits: dict[tuple[str, int], Git] = {}
+    backlogs: dict[str, BacklogAdapter] = {}
+    ensured: set[tuple[str, int]] = set()
+    base_halted: set[str] = set()
+    in_flight_lineage: set[str] = set()
+    in_flight_ids: set[str] = set()
+    locks = ExitStack()
+    slot_busy: set[tuple[str, int]] = set()
+
+    def _stopped() -> bool:
+        return ((stop_event is not None and stop_event.is_set())
+                or (stop_between_tickets is not None and stop_between_tickets.is_set()))
+
+    def _pick() -> tuple[AppConfig, Ticket] | None:
+        """Next eligible ticket, honouring the app-halt and sibling-mutex sets. Rotates blocked
+        items to the tail; returns None when nothing is currently eligible."""
+        for _ in range(len(queue)):
+            app, ticket = queue.popleft()
+            if app.name in base_halted:
+                reports.append(TicketReport(ticket.id, Outcome.SKIPPED, 0, 0.0, app.name,
+                                            notes="skipped — base-level verdict for this app"))
+                continue
+            lineage = _split_lineage(ticket)
+            if (lineage and (lineage in in_flight_lineage or lineage in in_flight_ids)) or \
+                    (ticket.id in in_flight_lineage):
+                queue.append((app, ticket))   # a sibling (or its parent) is mid-build — defer
+                continue
+            return app, ticket
+        return None
+
+    async def _worker(slot: int) -> None:
+        while not _stopped() and not budget.exceeded():
+            picked = _pick()
+            if picked is None:
+                if not queue or not in_flight_ids:
+                    return                      # drained, or only ineligible work and nobody active
+                await asyncio.sleep(2)          # siblings in flight — wait for a completion
+                continue
+            app, ticket = picked
+            lineage = _split_lineage(ticket)
+            in_flight_ids.add(ticket.id)
+            if lineage:
+                in_flight_lineage.add(lineage)
+            try:
+                key = (app.name, slot)
+                if key not in gits and getattr(cfg, "use_worktree", False):
+                    try:
+                        locks.enter_context(_worktree_lock(_worktree_path(app, cfg, slot)))
+                    except WorktreeBusy:
+                        slot_busy.add(key)
+                if key in slot_busy:
+                    audit.record("worktree_busy_deferred", ticket_id=ticket.id, app=app.name)
+                    reports.append(TicketReport(ticket.id, Outcome.SKIPPED, 0, 0.0, app.name,
+                                                notes="deferred — worktree busy (another run active)"))
+                    continue
+                backlog = None
+                try:
+                    run_logger.write_note_log(
+                        cfg, app.name, ticket.id,
+                        f"[EU-380] concurrent drain (slot {slot}, {n} builders) — per-ticket stdout "
+                        f"is attributed in the shared stream by app; consult the drain log.")
+                except Exception:  # noqa: BLE001 — log setup must never block a run
+                    pass
+                try:
+                    try:
+                        if key not in gits:
+                            app_slot = copy.copy(app)   # _make_git mutates app.workdir — never share
+                            gits[key] = (_make_git(cfg, app_slot, slot), app_slot)
+                        git, app_slot = gits[key]
+                        if ticket.ephemeral:
+                            backlog = NoneBacklog()
+                        else:
+                            if app.name not in backlogs:
+                                backlogs[app.name] = make_backlog(app)
+                            backlog = backlogs[app.name]
+                        if key not in ensured:
+                            git.ensure_clean()
+                            ensured.add(key)
+                        report = await process_ticket(ticket, app_slot, cfg, git, backlog, audit,
+                                                      budget, stop_event)
+                    except Exception as exc:  # noqa: BLE001 — one bad ticket must not kill the run
+                        report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
+                finally:
+                    pass
+                reports.append(report)
+                if (report.notes or "").startswith(_BASE_LEVEL_PREFIXES):
+                    base_halted.add(app.name)
+                    audit.record("base_halt_run", ticket_id=ticket.id, app=app.name,
+                                 reason=(report.notes or "")[:200])
+                fragment_keys = _fragment_keys_from_report(report)
+                if fragment_keys:
+                    fragment_items = _fetch_fragments_to_worklist(cfg, app, fragment_keys)
+                    if fragment_items:
+                        queue.extendleft(reversed(fragment_items))   # front, in dependency order
+                        audit.record("fragment_injection", ticket_id=ticket.id,
+                                     fragment_count=len(fragment_items), fragment_keys=fragment_keys)
+                try:
+                    from . import forensics
+                    forensics.maybe_postmortem(cfg, report, audit)
+                except Exception:  # noqa: BLE001 — diagnostics must never break the run
+                    pass
+            finally:
+                in_flight_ids.discard(ticket.id)
+                if lineage:
+                    in_flight_lineage.discard(lineage)
+
+    try:
+        await asyncio.gather(*(_worker(s) for s in range(n)))
+        if _stopped():
+            audit.record("run_stopped", reason="commander stop (concurrent drain)")
+        if budget.exceeded():
+            audit.record("budget_stop", spent=budget.spent)
+    finally:
+        locks.close()
+    return reports
+
+
+async def _run_inner_serial(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
+                            audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     gits: dict[str, Git] = {}
@@ -731,6 +910,19 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
 
 
 async def process_ticket(ticket, app, cfg, git, backlog, audit, budget, stop_event=None) -> TicketReport:
+    branch = ticket.branch_name(app.branch_prefix)
+    # EU-272: bind this context's stdout attribution to the ticket's app — under a concurrent
+    # drain the old single-active-run heuristic collapses to None on every line; the ContextVar
+    # flows through this coroutine's awaits so each slot's prints tag as its own app.
+    _tee_token = cockpit_state.set_run_app(app.name)
+    try:
+        return await _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget, stop_event)
+    finally:
+        cockpit_state.reset_run_app(_tee_token)
+
+
+async def _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget,
+                                stop_event=None) -> TicketReport:
     branch = ticket.branch_name(app.branch_prefix)
     audit.record("ticket_start", ticket_id=ticket.id, app=app.name, branch=branch,
                  dry_run=cfg.dry_run, ephemeral=ticket.ephemeral)
@@ -2094,9 +2286,42 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
     # LIVE + validated -> fast-forward DEV to the trial and push: the ONLY moment DEV changes.
     if not reason:
         merge_sha = git.current_sha()   # the validated merge commit — SRE reverts THIS if DEV breaks
-        try:
-            git.land_trial(temp)
-        except LandRaceError as exc:
+        # EU-379: on a land race, re-trial IN-PROCESS instead of requeuing to a fresh build. The
+        # feature branch is intact (land_trial only deletes the throwaway temp before raising), so
+        # losing the race costs one re-merge + one gate run (~3 min), not a full planner+builder
+        # rebuild (mean ~6M tokens; the requeue path re-runs everything from scratch). Bounded:
+        # 3 total attempts, then fall through to today's REQUEUE — the never-worse fallback. At
+        # N=1 concurrency races never happen in practice (land_race_requeue: 0 events all-time),
+        # so this path stays dormant until a concurrent drain (EU-380) arms it.
+        landed = False
+        race_detail = ""
+        for _attempt in range(3):
+            try:
+                git.land_trial(temp)
+                landed = True
+                break
+            except LandRaceError as exc:
+                race_detail = str(exc).splitlines()[0][:200]
+                if _attempt == 2:
+                    break              # attempts exhausted — fall through to the requeue below
+                audit.record("land_race_retrial", ticket_id=ticket.id, base=app.base_branch,
+                             attempt=_attempt + 1, detail=race_detail)
+                print(f"  land · {ticket.id}: {app.base_branch} advanced mid-land — re-trialing "
+                      f"in-process (attempt {_attempt + 2}/3; branch intact, gate re-runs).",
+                      flush=True)
+                # Re-merge onto the NEW tip and re-prove it — the gate must run against what will
+                # actually land; skipping it here would land an ungated combined tree (the exact
+                # thing EU-259 rejected rebase-and-push for).
+                if not git.trial_merge(branch, temp, merge_msg):
+                    break              # no longer merges cleanly against the new tip → requeue
+                regate = run_gate(app, git.changed_paths())
+                audit.record("dev_gate", ticket_id=ticket.id, passed=regate.passed,
+                             failing=[] if regate.passed else _gate_failures(regate.report),
+                             report_tail="" if regate.passed else (regate.report or "").strip()[-2000:])
+                if not regate.passed:
+                    break              # red against the new tip → the requeue path is honest
+                merge_sha = git.current_sha()
+        if not landed:
             # EU-259: the base advanced under us (a concurrent land) — nothing was merged. This is a
             # benign race, NOT a build/infra error: requeue so the next drain re-trials this ticket
             # against the new base AND re-runs the gate. No Jira status changed yet (that happens
@@ -2104,7 +2329,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             # does not tick the EU-219 error counter; a distinct audit event keeps forensics honest.
             # land_trial already detached to a clean base and deleted the trial branch before raising.
             audit.record("land_race_requeue", ticket_id=ticket.id, base=app.base_branch,
-                         detail=str(exc).splitlines()[0][:200])
+                         detail=race_detail)
             print(f"  land · {ticket.id}: {app.base_branch} advanced mid-land — re-trialing next "
                   "drain (nothing merged, gate will re-run).", flush=True)
             return TicketReport(ticket.id, Outcome.REQUEUED, iteration, cost, app.name, branch,

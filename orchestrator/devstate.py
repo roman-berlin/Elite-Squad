@@ -41,9 +41,9 @@ def build_doc(cfg=None) -> str:
     lines: list[str] = [_HEADING, ""]
 
     # Pipeline — from phases.PHASES, the single source the loop executes.
-    lines.append(f"- Pipeline: {' → '.join(phases.PHASES)}. There is no Tests phase — the Test "
-                 "Engineer was retired (c276155): the Builder writes the tests, the deterministic "
-                 "gate runs them.")
+    lines.append(f"- Pipeline: {' → '.join(phases.PHASES)}. There is no Tests phase — the "
+                 "test_engineer role was retired (c276155): the Builder writes the tests, the "
+                 "deterministic gate runs them.")
 
     # Routing dormancy — from the live flag, not from memory of a decision.
     if routing.is_routing_enabled():

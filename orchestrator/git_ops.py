@@ -87,11 +87,16 @@ def reap_stale_worktrees(cfg) -> None:
     # reaper must never touch them. Only NON-canonical leftovers (renamed/removed apps, crashed
     # ad-hoc clones) are candidates.
     canonical: set[str] = set()
+    # EU-380: every builder slot's worktree is canonical, not just slot 0 — an idle slot the
+    # reaper eats would be recreated mid-drain at full worktree_setup cost, or worse, reaped
+    # WHILE its builder works (the EU-334 self-reap → false-red-base class).
+    _slots = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
     for a in getattr(cfg, "apps", []) or []:
-        try:
-            canonical.add(str(Path(loop._worktree_path(a, cfg)).resolve()))
-        except Exception:  # noqa: BLE001 — a bad app entry must not disable the reaper
-            continue
+        for _slot in range(_slots):
+            try:
+                canonical.add(str(Path(loop._worktree_path(a, cfg, _slot)).resolve()))
+            except Exception:  # noqa: BLE001 — a bad app entry must not disable the reaper
+                continue
 
     for app in getattr(cfg, "apps", []) or []:
         repo_path = getattr(app, "repo_path", "")

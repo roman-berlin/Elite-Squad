@@ -9,6 +9,7 @@ stay valid for callers and tests, and every importer shares the SAME mutable obj
 from __future__ import annotations
 
 import collections as _collections
+import contextvars
 import os
 import threading
 import time
@@ -365,6 +366,25 @@ def _sse(event: str, data: str) -> str:
     return f"event: {event}\n{body}\n"
 
 
+# EU-272: run-scoped stdout attribution. The global len(active_runs)==1 heuristic below collapses
+# to None the moment two runs are in flight — under a concurrent drain (EU-380) that is 100% of
+# lines. A ContextVar set by the run wrapper (same pattern as backends._BACKEND, EU-189) flows
+# through asyncio tasks, so each slot's prints attribute to ITS app with no global state.
+_RUN_APP: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("run_app", default=None)
+
+
+def set_run_app(app_key: str | None):
+    """Bind this (async) context's stdout attribution to ``app_key``; returns the reset token."""
+    return _RUN_APP.set(app_key)
+
+
+def reset_run_app(token) -> None:
+    try:
+        _RUN_APP.reset(token)
+    except Exception:  # noqa: BLE001 — a cross-context reset must never crash a run teardown
+        pass
+
+
 class _Tee:
     """Mirror stdout to the real terminal AND the ring buffer (skips the noisy poll line)."""
     def __init__(self, real):
@@ -373,11 +393,13 @@ class _Tee:
     def write(self, s: str):
         self._real.write(s)
         # EU-104: tag each captured line with the currently-active project so per-tab live-feed
-        # panels can filter to their own project's output.  When exactly one project is active we
-        # attribute the line to it; when zero or multiple are active we fall back to None (the
-        # line is unattributed and appears only in the global / unfiltered view).
-        runs = active_runs()
-        app_key = runs[0] if len(runs) == 1 else None
+        # panels can filter to their own project's output. EU-272: the run-scoped ContextVar wins
+        # when set (correct under concurrency); otherwise the old single-active-run heuristic —
+        # exactly today's behaviour for threads and paths that never bound a context.
+        app_key = _RUN_APP.get()
+        if app_key is None:
+            runs = active_runs()
+            app_key = runs[0] if len(runs) == 1 else None
         for line in s.splitlines():
             t = line.rstrip()
             if t and "/api/board" not in t and "GET /api/" not in t:

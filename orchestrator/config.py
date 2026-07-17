@@ -191,6 +191,12 @@ class Config:
     # turns (builder.budget_for); base 70K ≈ half the ~140K of intake a 96-turn pass accumulates.
     # 0 disables. Anthropic-only (GLM passes ignore it). SDK floor: 20,000.
     builder_task_budget: int = 70_000
+    # EU-380: builder slots per drain. 1 (default) = the historic serial drain, byte-identical
+    # path. >1 = N concurrent builders over a shared queue, each in its own slot worktree
+    # (<app>-s<N>), split-siblings mutexed, lands effectively serialized on the event loop and
+    # race-absorbed by EU-379's in-process re-trial. Measured envelope: N=2 ≈ 1.7x throughput,
+    # N=3 ≈ 2.9x; N≥5 collides with the observed 235M-token/5h plan ceiling — don't.
+    max_concurrent_builders: int = 1
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = False  # OFF by default (2026-07-05 audit): 135/135 round-≥2 reviewer
                                             # objections were textually NEW, so bumping effort on retry (and the
