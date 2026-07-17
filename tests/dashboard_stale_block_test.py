@@ -173,6 +173,78 @@ def test_dashboard_stale_block_test_zero_and_nonzero_cases():
 
 
 # ---------------------------------------------------------------------------
+# Tests: EU-290 — the interactive findings list must match the headline count.
+#
+# EU-313 filtered only the COUNT: kpis() still passed the all-time `sec_blocks` as
+# "security_block_findings", so the card read "0" while rendering the 17-day-old EU-116 block
+# expanded-by-default with a live "Record response" box posting to /api/security-reply. The
+# producing gate was DELETED in the Phase-2 collapse (provost.py: security_gate is gone, commit
+# c24f459), so that block can never be actionable — it was a permanent false "needs-you" signal.
+
+def test_stale_block_yields_empty_findings_list():
+    """EU-290: a stale block must drop out of the findings list too, not just the count —
+    otherwise the card renders a retired subsystem's history as a current, actionable item."""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = _make_cfg(Path(d))
+        audit = Path(cfg.audit_path)
+        old_ts = _ts(datetime.now() - timedelta(days=17))   # the real EU-116 block's age
+        _write_audit_ev(audit, "security_block", old_ts, ticket_id="EU-116",
+                        reason="Claude Code returned an error result: success; failing closed")
+        cards = warroom.kpis(cfg, [], None)
+    card = next(c for c in cards if c["label"] == "Security blocks")
+    assert card["value"] == 0, f"stale block must not count, got value={card['value']}"
+    assert card.get("security_block_findings") == [], (
+        "a stale block must not be passed to the interactive findings list — the headline count "
+        f"and the list must agree; got {card.get('security_block_findings')}")
+
+
+def test_stale_block_card_renders_no_actionable_response_form():
+    """EU-290 AC: no dashboard KPI presents an all-time historical event from a retired
+    subsystem as current/actionable. With only a stale block on file the card must render the
+    empty branch — no EU-116 row, no /api/security-reply box that cannot unblock anything."""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = _make_cfg(Path(d))
+        audit = Path(cfg.audit_path)
+        old_ts = _ts(datetime.now() - timedelta(days=17))
+        _write_audit_ev(audit, "security_block", old_ts, ticket_id="EU-116", reason="stale finding")
+        cards = warroom.kpis(cfg, [], None)
+    card = next(c for c in cards if c["label"] == "Security blocks")
+    html_out = warroom._kpi_html([card])
+    assert "EU-116" not in html_out, f"the stale block is still rendered on the card: {html_out}"
+    assert "/api/security-reply" not in html_out, (
+        "a response form is still offered for a block that cannot be unblocked (the gate that "
+        f"produced it is deleted): {html_out}")
+    assert "secempty" in html_out, f"expected the empty branch to render, got: {html_out}"
+
+
+def test_zero_count_card_is_not_expanded_by_default():
+    """EU-290: an empty Security-blocks card must not sit permanently expanded — an always-open
+    <details> around 'No security blocks recorded yet.' is exactly the fixed false "needs-you"
+    signal the ticket is about. It stays open when there IS something to act on."""
+    with tempfile.TemporaryDirectory() as d:
+        cfg = _make_cfg(Path(d))
+        audit = Path(cfg.audit_path)
+        _write_audit_ev(audit, "security_block", _ts(datetime.now() - timedelta(days=17)),
+                        ticket_id="EU-116", reason="stale finding")
+        empty_html = warroom._kpi_html(
+            [next(c for c in warroom.kpis(cfg, [], None) if c["label"] == "Security blocks")])
+    assert "<details class=\"kpi \" open>" not in empty_html and " open>" not in empty_html, (
+        f"the zero-count card is still expanded by default: {empty_html}")
+
+    with tempfile.TemporaryDirectory() as d:
+        cfg = _make_cfg(Path(d))
+        audit = Path(cfg.audit_path)
+        _write_audit_ev(audit, "security_block", _ts(datetime.now() - timedelta(hours=2)),
+                        ticket_id="EU-313", reason="fresh finding")
+        live_html = warroom._kpi_html(
+            [next(c for c in warroom.kpis(cfg, [], None) if c["label"] == "Security blocks")])
+    assert " open>" in live_html, (
+        f"a card with a LIVE block must still be expanded so the finding is visible: {live_html}")
+    assert "/api/security-reply" in live_html, (
+        f"a live block must keep its actionable response form: {live_html}")
+
+
+# ---------------------------------------------------------------------------
 # Tests: unrelated KPI cards are untouched
 
 def test_merged_and_tokens_cards_unchanged():
@@ -206,6 +278,9 @@ if __name__ == "__main__":
         test_kpis_stale_block_renders_zero,
         test_kpis_fresh_block_renders_nonzero_with_age,
         test_dashboard_stale_block_test_zero_and_nonzero_cases,
+        test_stale_block_yields_empty_findings_list,
+        test_stale_block_card_renders_no_actionable_response_form,
+        test_zero_count_card_is_not_expanded_by_default,
         test_merged_and_tokens_cards_unchanged,
     ]
     passed = failed = 0

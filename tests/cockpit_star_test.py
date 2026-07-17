@@ -3,7 +3,9 @@
 With the project selector on "All projects" the toolbar passes current_app="*". "*" is truthy, so the
 old `current_app or cfg.apps[0].name` / `request.form.get("app") or ...` fallbacks never fired and the
 literal "*" flowed into cfg.app("*") -> KeyError. This crashed Patrol (swallowed into last_msg) and the
-"+ New task" -> Run path ("could not start: '*'") from the DEFAULT all-projects view.
+"+ New task" -> Run path ("could not start: '*'") from the DEFAULT all-projects view. (EU-289 has since
+removed that "+ New task" affordance — intake is Jira-only — but /api/run stays for scripted use and is
+still exercised directly below, so the "*" hardening it needs remains under test.)
 
 Asserts the complete fix:
   - _control_bar(cfg, "*") bakes a CONCRETE app into every single-app ACTION button (no value="*"),
@@ -104,7 +106,7 @@ srv._state["last_msg"] = ""
 done.clear()
 client.post("/api/run", data={"kind": "task", "text": "do x", "app": "*"})
 done.wait(3)
-chk("New task -> Run on 'All projects' starts (no 'could not start')",
+chk("/api/run on 'All projects' starts (no 'could not start')",
     "could not start" not in (srv._state.get("last_msg") or ""), srv._state.get("last_msg"))
 chk("intake received a concrete app, not '*'", captured.get("app") == "automatixy", str(captured))
 for _ in range(40):

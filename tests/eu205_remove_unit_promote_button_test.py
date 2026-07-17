@@ -125,9 +125,11 @@ chk(
 # Test 4: Cockpit loads without error; sync status view renders cleanly
 try:
     bar = cockpit_views._control_bar(cfg, "EU", healthy=True, is_mac=True)
+    # EU-289 removed the "+ New task" affordance (intake is Jira-only), so this sanity check
+    # sentinels on "Reports" instead — Patrol/Ship review survive inside the merged QA menu.
     has_basic_elements = (
         "<div class=tbar>" in bar and
-        "New task" in bar and
+        "Reports" in bar and
         "Patrol" in bar and
         "Ship review" in bar
     )

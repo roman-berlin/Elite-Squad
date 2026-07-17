@@ -206,7 +206,8 @@ def _bug_title(text: str) -> str:
 
 def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
     """Frame a bug report for the unit (and save an optional screenshot beside the audit log).
-    Single source of truth for both the '+ New task → Bug' panel and the legacy /report form."""
+    EU-289: the toolbar's '+ New task → Bug' panel was the other caller until it was removed
+    (intake is Jira-only); the /report form + /api/report are what still route through here."""
     desc = f"Fix this problem found during QA on DEV:\n{text or '(no description)'}"
     if screenshot is not None and getattr(screenshot, "filename", ""):
         import re
@@ -614,12 +615,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # same concrete project as ``app0`` for the "Choose a ticket" nav link too.
     nav_app = app0  # concrete project (or first configured app if none active); never "*"
     tab_bar = _tab_bar(cfg, current_app)
-    apps = "".join(
-        f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
-        f"{html.escape(a.name)}</option>" for a in cfg.apps)
-    effort = "".join(f"<option value='{e}'>{e}</option>"
-                     for e in ("low", "medium", "high", "xhigh", "max"))
-    run_dis = "disabled" if (_state["active"] or not healthy) else ""
+    # EU-289: the app/effort <select> options and the run_dis gate lived only in the "+ New task"
+    # panel, which is gone (intake is Jira-only) — so they went with it. The /api/run route itself
+    # stays for scripted use; only the affordance was removed.
     if _state["active"]:
         status = '<span class="tbnote run">&#9679; run in progress…</span>'
     elif _state.get("last_msg"):
@@ -876,26 +874,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <div class=tclu>
     <span class=tclabel>build</span>
     <div class=tcrow>
-      <details class=menu>
-        {_btn("&#43; New task", tag="summary")}
-        <div class="panel form">
-          <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
-            <input type=hidden name=kind value=task>
-            <div class=row style="gap:16px;margin-bottom:3px">
-              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
-              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
-            </div>
-            <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
-            <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
-            <div class=row>
-              <select name=app title=project style="flex:1">{apps}</select>
-              <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
-            </div>
-            <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
-            <button {run_dis}>&#9654; Run</button>
-          </form>
-        </div>
-      </details>
       {backend_control(cfg, app0)}
       {ap_html}
       {ship_html}
@@ -905,8 +883,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <div class=tclu>
     <span class=tclabel>QA</span>
     <div class=tcrow>
-      <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128225; Patrol", attrs=f' {busy("patrolling")}' if busy("patrolling") else "")}</form>
-      <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128640; Ship review", attrs=f' {busy("shipreview")}' if busy("shipreview") else "")}</form>
+      <details class=menu>
+        {_btn("&#128269; QA", tag="summary")}
+        <div class="panel">
+          <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128225; Patrol", attrs=f' {busy("patrolling")}' if busy("patrolling") else "")}</form>
+          <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128640; Ship review", attrs=f' {busy("shipreview")}' if busy("shipreview") else "")}</form>
+        </div>
+      </details>
     </div>
   </div>
 
@@ -922,10 +905,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
           <a href="/tasks">&#128203; Task log{fr_tasks}</a>
           <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
           <a href="/memory">&#128221; Unit memory{fr_mem}</a>
-          <a href="/usage">&#128202; Token usage{fr_usage}</a>
-          <a href="/budget">&#128176; Budget monitor</a>
+          <a href="/usage">&#128202; Usage &amp; budget{fr_usage}</a>
           <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
-          <a href="/roster-doc">&#128101; Unit roster</a>
         </div>
       </details>
     </div>

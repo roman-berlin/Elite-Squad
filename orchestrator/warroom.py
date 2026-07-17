@@ -229,6 +229,12 @@ def _last_council(cfg) -> Optional[datetime]:
 # older than this (with no newer event for its ticket) no longer counts as an active block.
 STALE_BLOCK_CUTOFF_S = 24 * 3600
 
+# EU-298: freshness window for the "synced: <peers> · <age> ago" footer. A state clone that
+# stopped syncing days ago rendered in the same neutral grey as a 2-minute-old one (the observed
+# case was "synced: mac · 156h 38m ago"), so a dead sync read as current. Matches the block
+# cutoff — a peer silent for a day has stopped publishing, not merely paused.
+STALE_SYNC_CUTOFF_S = 24 * 3600
+
 # Event types that resolve/supersede an earlier security_block for the same ticket_id: another
 # security_block (a fresh gate hit), any dashboard-terminal outcome (merged/PR/escalated/etc — the
 # ticket moved on), or a plain "build" (the Builder re-attempted the ticket).
@@ -315,7 +321,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    sec_blocks = _load_security_blocks(cfg)  # all-time — still feeds the interactive findings list
+    sec_blocks = _load_security_blocks(cfg)  # all-time — the historical record (see /forensics)
     active_sec_blocks = _active_security_blocks(cfg, sec_blocks)  # EU-313: only still-live blocks count
     sec_block_count = len(active_sec_blocks)
     # EU-313: age of the most recent still-active block, for the card to surface inline (e.g.
@@ -342,7 +348,14 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
-         "security_block_findings": sec_blocks,  # EU-145: pass actual findings for interactive card
+         # EU-145 passes the findings themselves so the card can render an interactive response
+         # form. EU-313 filtered the COUNT to active blocks but kept handing the ALL-TIME list
+         # here, so the card read "0" while still rendering the 2026-06-29 EU-116 block — the only
+         # security_block ever recorded — expanded, with a live "Record response" box. The gate
+         # that produced it was deleted in the Phase-2 collapse (c24f459), so nothing it reports
+         # can be unblocked: a permanent false "needs-you" signal. EU-290: the list now tracks the
+         # count. The historical record still lives at /forensics?cat=security_block.
+         "security_block_findings": active_sec_blocks,
          "active_age": sec_block_age},  # EU-313: age of the most recent active block (None if none)
     ]
 
@@ -899,8 +912,12 @@ def _kpi_html(cards: list[dict]) -> str:
             # decision stays in force; this appends inline into the existing kv div instead.
             age = c.get("active_age")
             kv_text = f'{_esc(c["value"])} · {_esc(age)}' if age else _esc(c["value"])
+            # EU-290: only expand when there is something to act on. A zero-count card sitting
+            # permanently open around "No security blocks recorded yet." is the same fixed
+            # false "needs-you" signal, just with the number fixed.
+            open_attr = " open" if findings else ""
             out.append(
-                f'<details class="kpi {tone}" open>'
+                f'<details class="kpi {tone}"{open_attr}>'
                 f'<summary class=kpisum><div class=kv>{kv_text}</div>'
                 f'<div class=kl>{_esc(c["label"])}</div></summary>'
                 f'{issues_html}'
@@ -1450,12 +1467,25 @@ def _sync_html_uncached(cfg) -> str:
         return ""
     peers = ", ".join(sorted(p.stem for p in files))
     ago = ""
+    # EU-298: flag a footer whose newest peer publish is past STALE_SYNC_CUTOFF_S. The age text
+    # was always there but rendered in the same neutral grey as a fresh sync, so "156h 38m ago"
+    # read as current. The marker is deliberately textual as well as coloured — a colour-only
+    # signal is invisible to colour-blind/monochrome readers. The stat() failure path below keeps
+    # its original bare output: with no mtime there is no age to judge staleness against.
+    cls = "synced"
     try:
         newest = max(f.stat().st_mtime for f in files)
-        ago = " · " + _fmt_dur(datetime.now().timestamp() - newest) + " ago"
+        age = datetime.now().timestamp() - newest
+        ago = " · " + _fmt_dur(age) + " ago"
+        if age >= STALE_SYNC_CUTOFF_S:
+            cls = "synced stale"
+            ago += " · stale"
     except OSError:
         pass
-    return f'<div class=synced>&#8646; synced: {html.escape(peers)}{html.escape(ago)}</div>'
+    # The fresh case keeps its original unquoted single-class wrapper byte-for-byte; only the
+    # stale case needs the quoted two-class form.
+    wrap = "<div class=synced>" if cls == "synced" else f'<div class="{cls}">'
+    return f'{wrap}&#8646; synced: {html.escape(peers)}{html.escape(ago)}</div>'
 
 
 _BACKLOG_CACHE: dict[str, tuple[float, list]] = {}   # scope -> (fetched_ts, [(AppConfig, Ticket)])
@@ -2046,6 +2076,9 @@ margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pul
 .lv.stuck{color:var(--bad);background:var(--badbg)}
 /* synced badge — which machines' audits are merged into this view */
 .synced{margin:6px 24px 0;font-size:11px;color:#5b6b86;letter-spacing:.02em}
+/* EU-298: a sync older than STALE_SYNC_CUTOFF_S reads as a warning, not as neutral chrome —
+   reuses the EU-285a --warn token rather than a new colour literal */
+.synced.stale{color:var(--warn)}
 /* hero — the live-run headline (biggest thing when a run is in flight) */
 .hero{margin:18px 24px 0;padding:16px 20px;border:1px solid var(--accentline);border-radius:var(--r-xl);
 background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));position:relative;overflow:hidden;box-shadow:var(--shadow-2)}

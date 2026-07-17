@@ -1,4 +1,8 @@
-"""'+ New task' defaults to LIVE (build + merge to DEV); dry-run is opt-in; the dry flag clears after a run."""
+"""/api/run defaults to LIVE (build + merge to DEV); dry-run is opt-in; the dry flag clears after a run.
+
+EU-289 removed the "+ New task" toolbar panel that used to drive this route (intake is Jira-only);
+the route itself stays for scripted use, which is what this harness exercises directly.
+"""
 import sys, types, tempfile, threading, time
 from pathlib import Path
 

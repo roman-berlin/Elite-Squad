@@ -98,13 +98,15 @@ chk("Jira label glyph preserved", "&#128268; Jira" in bar)
 chk("Roster link preserved (/roster-doc)", 'href="/roster-doc"' in bar)
 chk("Roster still a top-level class=\"btn\" element (EU-68/EU-94 contract)",
     'class="btn" href="/roster-doc"' in bar)
-chk("New-task Run form preserved (/api/run)", "action=/api/run" in bar)
-chk("New-task Run button label preserved", "&#9654; Run" in bar)
+# EU-289 retired the "+ New task" panel (intake is Jira-only), so EU-299's "preserve the Run
+# form verbatim" pins are superseded — tests/eu289_toolbar_cleanup_test.py now pins its ABSENCE.
 chk("Autopilot form preserved (/api/autopilot)", "action=/api/autopilot" in bar)
 chk("Open logs link preserved (is_mac=True)", "&#128194; Open logs" in bar and "open-logs" in bar)
 
-for _href in ("/tasks", "/council", "/memory", "/usage", "/budget", "/forensics",
-             "/roster-doc"):
+# EU-289 de-duped this menu: "Budget monitor" (/budget) merged into "Usage & budget" (/usage),
+# and the duplicate "Unit roster" item went (the top-level Roster btn above still covers
+# /roster-doc). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
+for _href in ("/tasks", "/council", "/memory", "/usage", "/forensics", "/roster-doc"):
     chk(f"Reports menu link preserved: {_href}", f'href="{_href}"' in bar)
 
 # ---------------------------------------------------------------------------

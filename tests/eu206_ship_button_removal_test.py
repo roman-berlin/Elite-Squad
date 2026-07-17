@@ -92,8 +92,9 @@ chk("No ship button class in control bar",
     "Found: ship button class should not appear")
 
 # Verify the control bar still renders other elements (sanity check)
+# EU-289 removed "+ New task" (intake is Jira-only) — sentinel on Roster/Reports instead.
 chk("Control bar still renders other elements",
-    "New task" in bar_html and "Reports" in bar_html,
+    "Roster" in bar_html and "Reports" in bar_html,
     "Control bar should still have other buttons")
 
 # ── TEST: Verify with different app ──
