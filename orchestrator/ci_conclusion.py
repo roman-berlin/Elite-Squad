@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -40,8 +41,14 @@ _CI_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Module fallbacks. Real deployments tune these through the Config fields of the same name (EU-271);
+# an explicit kwarg to check() still wins over both, which is how the harness injects fast values.
 _POLL_INTERVAL_SEC = 15.0
 _DEFAULT_TIMEOUT_SEC = 300.0
+
+# gh conclusions that are NOT a failure. "neutral"/"skipped" are how a path-filtered or conditional
+# workflow reports "nothing to do" — treating them as red would make every land red on such repos.
+_OK_CONCLUSIONS = ("success", "skipped", "neutral")
 
 GhRunner = Callable[[list], str]
 
@@ -77,6 +84,22 @@ def should_run(cfg: Config, ticket: Ticket) -> bool:
     return bool(_CI_KEYWORDS.search(haystack))
 
 
+def _resolve_sec(explicit: Optional[float], cfg, field_name: str, fallback: float,
+                 *, floor: float = 0.0) -> float:
+    """Resolve a timing knob: explicit kwarg > cfg field > module default (EU-271). Reading cfg HERE
+    rather than at the call site means the knob binds for every caller — the land path passes cfg
+    through and gets the configured window without having to remember two more kwargs."""
+    value = explicit
+    if value is None:
+        value = getattr(cfg, field_name, None)
+    if value is None:
+        value = fallback
+    try:
+        return max(floor, float(value))
+    except (TypeError, ValueError):  # a garbled config value must not break a land
+        return fallback
+
+
 def _real_gh_runner(app: AppConfig) -> GhRunner:
     cwd = app.workdir or app.repo_path
 
@@ -90,8 +113,10 @@ def _real_gh_runner(app: AppConfig) -> GhRunner:
 
 
 def _list_runs(runner: GhRunner, sha: str) -> list:
+    # workflowName (EU-270) so a failing job can be attributed to the workflow it came from —
+    # "CodeQL / Analyze" vs a bare "Analyze" that could belong to any of the commit's runs.
     out = runner(["run", "list", "--commit", sha, "--json",
-                  "databaseId,status,conclusion,url,headSha", "--limit", "10"])
+                  "databaseId,status,conclusion,url,headSha,workflowName", "--limit", "10"])
     data = json.loads(out) if out and out.strip() else []
     return data if isinstance(data, list) else []
 
@@ -107,45 +132,85 @@ def _failing_jobs(runner: GhRunner, run_id) -> list:
 
 
 def _summarize(runner: GhRunner, terminal_runs: list) -> CIConclusion:
-    run = terminal_runs[0]  # `gh run list --commit` is newest-first; this is the merge commit's run
-    conclusion = (run.get("conclusion") or "").lower()
-    url = run.get("url", "") or ""
-    if conclusion == "success":
-        return CIConclusion(status="green", conclusion=conclusion, run_url=url, raw=json.dumps(run))
-    try:
-        failing = _failing_jobs(runner, run.get("databaseId"))
-    except Exception as exc:  # noqa: BLE001 — job detail is best-effort; the conclusion itself still stands
-        failing = [f"(could not list failing jobs: {exc})"]
-    return CIConclusion(status="red", conclusion=conclusion or "unknown",
-                        failing_jobs=failing, run_url=url, raw=json.dumps(run))
+    """Fold EVERY completed run for the commit into one verdict. This used to read terminal_runs[0]
+    under the comment "this is the merge commit's run" — a false premise (EU-270): `gh run list
+    --commit` returns one run PER WORKFLOW FILE, so on any repo with a second push-triggered workflow
+    (CodeQL/deploy beside ci.yml) the newest run was reported while a sibling was red — reintroducing
+    the exact false-green EU-251 exists to prevent. Green only when EVERY run is green."""
+    failed = [r for r in terminal_runs
+              if (r.get("conclusion") or "").lower() not in _OK_CONCLUSIONS]
+    if not failed:
+        run = terminal_runs[0]
+        return CIConclusion(status="green", conclusion=(run.get("conclusion") or "").lower(),
+                            run_url=run.get("url", "") or "", raw=json.dumps(terminal_runs))
+    failing: list = []
+    for run in failed:
+        wf = (run.get("workflowName") or "").strip()
+        try:
+            names = _failing_jobs(runner, run.get("databaseId"))
+        except Exception as exc:  # noqa: BLE001 — job detail is best-effort; the conclusion still stands
+            names = [f"(could not list failing jobs: {exc})"]
+        failing.extend(f"{wf} / {n}" if wf else n for n in names)
+    first = failed[0]
+    return CIConclusion(status="red", conclusion=(first.get("conclusion") or "").lower() or "unknown",
+                        failing_jobs=failing,
+                        # the FAILING run's url — pointing the ticket at a green sibling would bury it
+                        run_url=first.get("url", "") or "", raw=json.dumps(terminal_runs))
 
 
 def check(cfg: Config, app: AppConfig, ticket: Ticket, merge_sha: str, audit=None, *,
           gh_runner: Optional[GhRunner] = None,
           poll_interval_sec: Optional[float] = None,
           timeout_sec: Optional[float] = None) -> CIConclusion:
-    """Poll GitHub Actions for the merge commit's run until it reaches a terminal conclusion or the
-    bounded wait expires. Green/red are read from the REAL run; a timeout returns status='timeout'
-    (not success, not failure — unconfirmed). Never raises into the loop: a `gh` hiccup (including the
-    binary being missing) keeps polling until the timeout, then reports as 'timeout'."""
+    """Poll GitHub Actions for the merge commit until EVERY workflow run reaches a terminal
+    conclusion or the bounded wait expires. Green/red are read from the REAL runs; a timeout returns
+    status='timeout' (not success, not failure — unconfirmed). Never raises into the loop.
+
+    Timing resolves explicit kwarg > cfg (ci_conclusion_{timeout,poll_interval}_sec) > module default,
+    so the knob works even for a caller that just passes cfg through (EU-271)."""
     runner = gh_runner or _real_gh_runner(app)
-    interval = max(0.01, _POLL_INTERVAL_SEC if poll_interval_sec is None else poll_interval_sec)
-    timeout = max(0.0, _DEFAULT_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
+    interval = _resolve_sec(poll_interval_sec, cfg, "ci_conclusion_poll_interval_sec",
+                            _POLL_INTERVAL_SEC, floor=0.01)
+    timeout = _resolve_sec(timeout_sec, cfg, "ci_conclusion_timeout_sec", _DEFAULT_TIMEOUT_SEC)
     tid = getattr(ticket, "id", "?")
+
+    def _finish(res: CIConclusion) -> CIConclusion:
+        print(f"  🔎 CI · {app.name}@{merge_sha[:12]} → {res.status}"
+              + (f" ({res.conclusion})" if res.conclusion else ""), flush=True)
+        if audit is not None:
+            audit.record("ci_conclusion", ticket_id=tid, app=app.name, sha=merge_sha,
+                         status=res.status, conclusion=res.conclusion, failing_jobs=res.failing_jobs)
+        return res
+
+    # EU-271: a `gh` that isn't installed cannot appear mid-poll, so the pre-fix behaviour — 20
+    # identical failures over the full 300s window — was pure dead time on the SYNCHRONOUS loop.
+    # Bail on the first probe instead. Still 'timeout' (unconfirmed), never green: fail-closed.
+    if gh_runner is None and shutil.which("gh") is None:
+        return _finish(CIConclusion(status="timeout",
+                                    raw="gh not found on PATH — CI conclusion unchecked"))
+
     print(f"  🔎 CI · polling GH Actions for {app.name}@{merge_sha[:12]} (bounded {timeout:.0f}s)…",
           flush=True)
-
     result = CIConclusion(status="timeout",
                           raw=f"no terminal GH Actions run for {merge_sha[:12]} within {timeout:.0f}s")
     elapsed = 0.0
     while True:
         try:
             runs = _list_runs(runner, merge_sha)
-            terminal = [r for r in runs if (r.get("status") or "").lower() == "completed"]
-        except Exception as exc:  # noqa: BLE001 — a gh hiccup keeps polling till timeout, never raises
-            terminal = []
+        except FileNotFoundError as exc:  # EU-271: missing binary — terminal, never retry
+            result.raw = f"gh not found: {exc}"
+            break
+        except Exception as exc:  # noqa: BLE001 — a transient gh hiccup keeps polling, never raises
+            runs = []
             result.raw = f"gh error: {exc}"
-        if terminal:
+        terminal = [r for r in runs if (r.get("status") or "").lower() == "completed"]
+        # EU-270: a red run is terminal on its own — report it without waiting for a slow sibling.
+        # Otherwise only a commit whose runs have ALL completed can be called green; a still-pending
+        # sibling keeps us polling (and, on expiry, reports 'timeout' — never a green).
+        if any((r.get("conclusion") or "").lower() not in _OK_CONCLUSIONS for r in terminal):
+            result = _summarize(runner, terminal)
+            break
+        if runs and len(terminal) == len(runs):
             result = _summarize(runner, terminal)
             break
         elapsed += interval
@@ -153,13 +218,7 @@ def check(cfg: Config, app: AppConfig, ticket: Ticket, merge_sha: str, audit=Non
             break
         time.sleep(interval)
 
-    print(f"  🔎 CI · {app.name}@{merge_sha[:12]} → {result.status}"
-          + (f" ({result.conclusion})" if result.conclusion else ""), flush=True)
-    if audit is not None:
-        audit.record("ci_conclusion", ticket_id=tid, app=app.name, sha=merge_sha,
-                     status=result.status, conclusion=result.conclusion,
-                     failing_jobs=result.failing_jobs)
-    return result
+    return _finish(result)
 
 
 def _file_followup(app: AppConfig, ticket: Ticket, result: CIConclusion):

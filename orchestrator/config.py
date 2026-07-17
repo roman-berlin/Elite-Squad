@@ -203,6 +203,21 @@ class Config:
                                             # FLAG it (Telegram + audit + ticket comment) if red — never reverts, that's
                                             # the SRE's job. NO-OP for any app without a `smoke_command` (smoke.should_run),
                                             # so arming it costs nothing until an app opts a command in.
+    # EU-271: declared fields, not phantoms. ci_conclusion.py read `ci_conclusion_enabled` via a
+    # getattr default while Config never declared it — and Config.load routes YAML through
+    # _known_only, which DROPS unknown keys, so the documented off-switch was silently discarded at
+    # load time and the 300s window was unreachable without a code change.
+    ci_conclusion_enabled: bool = True          # EU-251 ARMED by default: after a live land, read the REAL
+                                                # GitHub Actions conclusion for the merge commit instead of
+                                                # trusting the Builder's "CI will go green". NO-OP for a
+                                                # non-CI ticket (ci_conclusion.should_run gates every gh call).
+    ci_conclusion_timeout_sec: float = 300.0    # THROUGHPUT TRADE-OFF: the poll is synchronous, so a CI-labelled
+                                                # land blocks the loop for up to this long. Real GH runs often
+                                                # exceed 300s, in which case the outcome is an unconfirmed
+                                                # 'timeout' rather than the intended red catch — lower it to
+                                                # favour throughput, raise it to buy more real conclusions, or
+                                                # set ci_conclusion_enabled=false to opt out entirely.
+    ci_conclusion_poll_interval_sec: float = 15.0  # seconds between `gh run list` probes within that window
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"

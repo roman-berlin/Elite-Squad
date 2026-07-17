@@ -1916,6 +1916,50 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                                  notes="max_iterations reached without a passing review" + gap_note))
 
 
+# EU-261: the land commit is PERMANENT history, and until now it was formatted straight from two
+# untrusted strings — `ticket.summary` (a Jira title, which for a filed finding is the whole finding
+# text: 88ec96a and dfa0cab both have 185-char subjects) and `build.summary`, which builder.py sets to
+# `run.final` — the RAW final assistant message. The Builder's prompt asks for "≤5 tight bullets" but
+# that is advisory only, so 11 product DEV commits since 07-01 open their body with chat preamble
+# (af6df5a: "Perfect! All tests are passing. Let me now create a summary of the changes made:").
+# These two helpers are pure so the shape of history is a tested contract (eu261_commit_message_test).
+_SUBJECT_MAX = 72  # git convention: a subject that stays readable in `git log --oneline`
+
+# A heading line that marks where the real summary starts ("## Summary", "**Summary**", "Summary:").
+# Anchored at line-start and barred from sentence punctuation so ordinary prose that merely mentions
+# the word ("Let me now create a summary of the changes made:") can never match.
+_SUMMARY_HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s*)?\**\s*Summary\b[^.!?]*$", re.IGNORECASE)
+# Same bullet/numbered shapes builder._section_bullets recognises — the fallback anchor.
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)\S")
+
+
+def _strip_preamble(text: str) -> str:
+    """Drop the Builder's chat preamble: return ``text`` from its first ## Summary heading or first
+    bullet, whichever comes FIRST. Earliest-anchor (rather than heading-then-bullet) is deliberate —
+    it can only ever keep MORE than the alternative, so a summary that leads with bullets and heads a
+    later section 'Summary' doesn't lose those leading bullets. When neither anchor matches, the text
+    passes through untouched: this trims noise, it must never be a lossy filter."""
+    lines = (text or "").splitlines()
+    for i, ln in enumerate(lines):
+        if _SUMMARY_HEADING_RE.match(ln) or _BULLET_RE.match(ln):
+            return "\n".join(lines[i:]).strip()
+    return (text or "").strip()
+
+
+def _commit_message(ticket, build) -> str:
+    """The land commit's message: a ≤72-char `{id}: {summary…}` subject, the preamble-stripped build
+    summary as the body, and the Reviewed-by trailer last. The FULL untrimmed summary stays on the
+    BuildResult and in the audit trail, so nothing is lost — only the permanent history is tidied."""
+    prefix = f"{ticket.id}: "
+    subject = prefix + builder_mod._digest(ticket.summary, limit=max(12, _SUBJECT_MAX - len(prefix)))
+    parts = [subject]
+    body = _strip_preamble(getattr(build, "summary", "") or "")
+    if body:
+        parts.append(body)
+    parts.append("Reviewed-by: autodev-reviewer")
+    return "\n\n".join(parts)
+
+
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
           commenter=None) -> TicketReport:
     if commenter is None:
@@ -1926,7 +1970,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         )
     """Passed review. Validate the merge on a THROWAWAY trial branch so DEV is never
     touched until the single, final, validated merge."""
-    git.commit_all(f"{ticket.id}: {ticket.summary}\n\n{build.summary}\n\nReviewed-by: autodev-reviewer")
+    git.commit_all(_commit_message(ticket, build))
     temp = f"{app.branch_prefix}/_trial"
     merge_msg = f"Merge {branch} into {app.base_branch} ({ticket.id})"
     print(f"  land · trial-merging into {app.base_branch} (throwaway branch — DEV untouched)…", flush=True)

@@ -207,6 +207,165 @@ chk("gh failure -> reported as timeout (unconfirmed), not success",
     not raised and res4.status == "timeout", getattr(res4, "status", "raised"))
 
 
+# --- 6) EU-270: `gh run list --commit` returns one run PER WORKFLOW FILE ----------------------- #
+# The module used to read terminal_runs[0] under the comment "this is the merge commit's run", which
+# is false for any repo with more than one push-triggered workflow (CodeQL/deploy beside ci.yml). A
+# read-only probe against the pre-fix module returned 'green' for a green+FAILURE sibling pair —
+# reintroducing the exact false-green EU-251 exists to prevent.
+def _runs_json(runs):
+    return json.dumps(runs)
+
+# (a) newest run green, sibling workflow RED -> the commit is RED, never green.
+def gh_multi_red(args):
+    if args[:2] == ["run", "list"]:
+        return _runs_json([
+            {"databaseId": 1, "status": "completed", "conclusion": "success", "workflowName": "ci",
+             "url": "https://github.com/x/y/actions/runs/1", "headSha": "multi1"},
+            {"databaseId": 2, "status": "completed", "conclusion": "failure", "workflowName": "CodeQL",
+             "url": "https://github.com/x/y/actions/runs/2", "headSha": "multi1"},
+        ])
+    if args[:2] == ["run", "view"] and "2" in args:
+        return json.dumps({"jobs": [{"name": "Analyze", "conclusion": "failure"}]})
+    if args[:2] == ["run", "view"]:
+        return json.dumps({"jobs": []})
+    raise AssertionError(f"unexpected gh call: {args}")
+
+au5 = Audit()
+bl5 = StubBacklog()
+res5, note5, _ = land_ci_step(cfg, app(), ticket(id="AUTO-270", labels=["ci"]), bl5, "multi1", au5,
+                              gh_multi_red, poll_interval_sec=0.01, timeout_sec=0.05)
+chk("multi-workflow: green newest + red sibling -> status == 'red' (no false green)",
+    res5.status == "red", res5.status)
+chk("multi-workflow: the RED sibling's job is named in failing_jobs",
+    any("Analyze" in j for j in res5.failing_jobs), res5.failing_jobs)
+chk("multi-workflow: failing job is prefixed with its workflow name",
+    any("CodeQL" in j for j in res5.failing_jobs), res5.failing_jobs)
+chk("multi-workflow: run_url points at the FAILING run, not the green sibling",
+    res5.run_url.endswith("/2"), res5.run_url)
+chk("multi-workflow: exactly one follow-up filed", len(bl5.created) == 1, bl5.created)
+
+# (b) green run + still-in-progress sibling -> must NOT be confirmed green.
+def gh_multi_pending(args):
+    if args[:2] == ["run", "list"]:
+        return _runs_json([
+            {"databaseId": 3, "status": "completed", "conclusion": "success", "workflowName": "ci",
+             "url": "https://github.com/x/y/actions/runs/3", "headSha": "multi2"},
+            {"databaseId": 4, "status": "in_progress", "conclusion": None, "workflowName": "deploy",
+             "url": "https://github.com/x/y/actions/runs/4", "headSha": "multi2"},
+        ])
+    raise AssertionError(f"unexpected gh call: {args}")
+
+au6 = Audit()
+bl6 = StubBacklog()
+res6, note6, _ = land_ci_step(cfg, app(), ticket(id="AUTO-270b", labels=["ci"]), bl6, "multi2", au6,
+                              gh_multi_pending, poll_interval_sec=0.01, timeout_sec=0.03)
+chk("multi-workflow: in-progress sibling -> not confirmed green",
+    res6.status != "green" and not res6.confirmed_success, res6.status)
+chk("multi-workflow: in-progress sibling -> reported as timeout (unconfirmed)",
+    res6.status == "timeout", res6.status)
+
+# (c) every workflow green -> still green (the happy path must not regress).
+def gh_multi_green(args):
+    if args[:2] == ["run", "list"]:
+        return _runs_json([
+            {"databaseId": 5, "status": "completed", "conclusion": "success", "workflowName": "ci",
+             "url": "https://github.com/x/y/actions/runs/5", "headSha": "multi3"},
+            {"databaseId": 6, "status": "completed", "conclusion": "skipped", "workflowName": "deploy",
+             "url": "https://github.com/x/y/actions/runs/6", "headSha": "multi3"},
+        ])
+    raise AssertionError(f"unexpected gh call: {args}")
+
+au7 = Audit()
+bl7 = StubBacklog()
+res7, note7, _ = land_ci_step(cfg, app(), ticket(id="AUTO-270c", labels=["ci"]), bl7, "multi3", au7,
+                              gh_multi_green, poll_interval_sec=0.01, timeout_sec=0.05)
+chk("multi-workflow: all runs green/skipped -> status == 'green'", res7.status == "green", res7.status)
+chk("multi-workflow: green path files no follow-up", bl7.created == [], bl7.created)
+
+# A red sibling is terminal: it must be caught WITHOUT waiting for a pending sibling to finish.
+def gh_red_plus_pending(args):
+    if args[:2] == ["run", "list"]:
+        return _runs_json([
+            {"databaseId": 8, "status": "completed", "conclusion": "failure", "workflowName": "ci",
+             "url": "https://github.com/x/y/actions/runs/8", "headSha": "multi4"},
+            {"databaseId": 9, "status": "in_progress", "conclusion": None, "workflowName": "deploy",
+             "url": "https://github.com/x/y/actions/runs/9", "headSha": "multi4"},
+        ])
+    if args[:2] == ["run", "view"]:
+        return json.dumps({"jobs": [{"name": "Test", "conclusion": "failure"}]})
+    raise AssertionError(f"unexpected gh call: {args}")
+
+res8, _, _ = land_ci_step(cfg, app(), ticket(id="AUTO-270d", labels=["ci"]), StubBacklog(), "multi4",
+                          Audit(), gh_red_plus_pending, poll_interval_sec=0.01, timeout_sec=0.05)
+chk("multi-workflow: an already-red run is reported red without awaiting a pending sibling",
+    res8.status == "red", res8.status)
+
+
+# --- 7) EU-271: config knobs + fast-bail when `gh` is unavailable ------------------------------ #
+import time as _time
+from dataclasses import fields as _dc_fields
+
+from orchestrator import config as config_mod
+
+_cfg_fields = {f.name for f in _dc_fields(config_mod.Config)}
+chk("config declares a real ci_conclusion_enabled field", "ci_conclusion_enabled" in _cfg_fields)
+chk("config declares a real ci_conclusion_timeout_sec field", "ci_conclusion_timeout_sec" in _cfg_fields)
+chk("config declares a real ci_conclusion_poll_interval_sec field",
+    "ci_conclusion_poll_interval_sec" in _cfg_fields)
+# The teeth: Config.load routes YAML through _known_only, which DROPS undeclared keys with a warning
+# — so before EU-271 the documented off-switch was silently discarded at load time.
+_kept = config_mod._known_only(config_mod.Config, {"ci_conclusion_enabled": False}, where="config")
+chk("ci_conclusion_enabled survives _known_only (the off-switch is actually reachable)",
+    _kept == {"ci_conclusion_enabled": False}, _kept)
+chk("ci_conclusion_enabled=False disables the check via should_run",
+    not ci_conclusion.should_run(ns(ci_conclusion_enabled=False), ticket(labels=["ci"])))
+
+# check() must honour the cfg fields with NO explicit kwargs — otherwise the knob is decorative.
+_cfg_fast = ns(ci_conclusion_poll_interval_sec=0.01, ci_conclusion_timeout_sec=0.03)
+_t0 = _time.perf_counter()
+res9 = ci_conclusion.check(_cfg_fast, app(), ticket(labels=["ci"]), "shaCfg", Audit(),
+                           gh_runner=gh_timeout)
+_elapsed9 = _time.perf_counter() - _t0
+chk("cfg timeout/poll are honoured without explicit kwargs (no 300s block)",
+    res9.status == "timeout" and _elapsed9 < 1.0, f"{res9.status} in {_elapsed9:.2f}s")
+
+# An explicit kwarg must still win over cfg — the injection contract the rest of this harness uses.
+_cfg_slow = ns(ci_conclusion_poll_interval_sec=99.0, ci_conclusion_timeout_sec=99.0)
+_t0 = _time.perf_counter()
+res10 = ci_conclusion.check(_cfg_slow, app(), ticket(labels=["ci"]), "shaKw", Audit(),
+                            gh_runner=gh_timeout, poll_interval_sec=0.01, timeout_sec=0.03)
+chk("explicit kwargs still override cfg", res10.status == "timeout"
+    and (_time.perf_counter() - _t0) < 1.0)
+
+# gh missing: a binary that isn't on PATH can NEVER appear mid-poll, so burning the whole 300s
+# window on 20 identical failures is pure dead time on the synchronous loop.
+_missing_calls = []
+def gh_missing(args):
+    _missing_calls.append(args)
+    raise FileNotFoundError(2, "No such file or directory: 'gh'")
+
+_t0 = _time.perf_counter()
+res11 = ci_conclusion.check(ns(), app(), ticket(labels=["ci"]), "shaGone", Audit(),
+                            gh_runner=gh_missing)  # DEFAULT timeout on purpose: pins the 300s burn
+_elapsed11 = _time.perf_counter() - _t0
+chk("gh missing: bails after at most one probe (no 20-poll burn)",
+    len(_missing_calls) <= 1, len(_missing_calls))
+chk("gh missing: returns fast at the DEFAULT timeout", _elapsed11 < 1.0, f"{_elapsed11:.2f}s")
+chk("gh missing: reported as unconfirmed, never green",
+    res11.status == "timeout" and not res11.confirmed_success, res11.status)
+chk("gh missing: raw explains why the check was skipped", "gh" in res11.raw.lower(), res11.raw)
+
+# A transient gh hiccup (RuntimeError) must STILL retry — only a missing binary is terminal.
+_flaky_calls = []
+def gh_flaky(args):
+    _flaky_calls.append(args)
+    raise RuntimeError("gh: API rate limit exceeded")
+
+ci_conclusion.check(ns(), app(), ticket(labels=["ci"]), "shaFlaky", Audit(), gh_runner=gh_flaky,
+                    poll_interval_sec=0.01, timeout_sec=0.05)
+chk("transient gh error still retries (not treated as terminal)", len(_flaky_calls) > 1, len(_flaky_calls))
+
+
 passed = sum(1 for _, c, _ in results if c)
 for n, c, d in results:
     print(f"  {'✓' if c else '✗'} {n}" + (f"  [{d}]" if (not c and d) else ""))
