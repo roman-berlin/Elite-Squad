@@ -46,6 +46,7 @@ blocked_tickets.json
 # Unit Memory — versioned DOCTRINE (memory/UNIT.md) is tracked; the officer-maintained LIVING LOG is
 # runtime + server-canonical, so it survives the server's `git reset --hard` self-update (see memory.py).
 memory/UNIT.live.md
+memory/DEV_STATE.md
 memory/backups/
 # runtime state — regenerated as the unit runs; never version it (avoids churn + Mac/server pull conflicts)
 usage.jsonl

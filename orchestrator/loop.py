@@ -2186,6 +2186,13 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             pass
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).
         _record_changelog(cfg, ticket, app, review.summary or build.summary, turl)
+        # EU-378: a land is when dev's facts change — re-derive the STATE OF DEV brief so the
+        # NEXT officer's preamble reflects the code that just merged, not the pre-land world.
+        try:
+            from . import devstate
+            devstate.refresh(cfg)
+        except Exception as _exc:  # noqa: BLE001 — a brief refresh must never break a land
+            print(f"  · dev-state refresh skipped ({_exc})", flush=True)
 
         # SRE: run the heavier post-merge suite on the landed DEV; if it's red, roll the merge
         # back (forward-only) and hand the ticket back rather than leave DEV broken.

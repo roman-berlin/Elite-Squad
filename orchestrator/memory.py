@@ -148,14 +148,28 @@ def _cap_lessons(live: str, limit: int) -> str:
 
 
 def preamble() -> str:
-    """Compact block prepended to every officer's system prompt: the versioned doctrine PLUS the live,
-    officer-maintained log. '' when there's no memory at all."""
+    """Compact block prepended to every officer's system prompt: the code-derived STATE OF DEV
+    brief, then the versioned doctrine, then the live officer-maintained log. '' when there's no
+    memory at all.
+
+    EU-378 ordering is load-bearing twice over: (1) precedence — the brief is derived from code
+    and cannot drift, while the scribe-written log can (and did: 5 of 12 lessons described
+    officers that don't exist), so the brief must outrank it; (2) survival — builder._trim_preamble
+    truncates the TAIL on oversize, so a brief appended at the end would be exactly what gets cut."""
+    from . import devstate
+    ds = devstate.brief()
     doctrine, live = _doctrine(), _live_log(limit=PREAMBLE_LESSONS)
-    if not doctrine and not live:
+    if not ds and not doctrine and not live:
         return ""
-    body = (doctrine + ("\n\n" + live if live else "")).strip()
-    return ("=== UNIT MEMORY — the unit's living protocol. Read it before you act; obey the "
-            "Standing Orders. ===\n" + body + "\n=== END UNIT MEMORY ===\n\n")
+    parts = []
+    if ds:
+        parts.append("=== STATE OF DEV (code-derived; where a lesson below disagrees with this, "
+                     "THIS wins) ===\n" + ds + "\n=== END STATE OF DEV ===")
+    if doctrine or live:
+        body = (doctrine + ("\n\n" + live if live else "")).strip()
+        parts.append("=== UNIT MEMORY — the unit's living protocol. Read it before you act; obey "
+                     "the Standing Orders. ===\n" + body + "\n=== END UNIT MEMORY ===")
+    return "\n\n".join(parts) + "\n\n"
 
 
 # --------------------------------------------------------------------------- #

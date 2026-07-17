@@ -424,6 +424,13 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
         await roster.refresh(cfg, audit)
     except Exception as exc:  # noqa: BLE001
         print(f"  Roster refresh skipped: {exc}", flush=True)
+    # EU-378: re-derive the STATE OF DEV brief alongside the roster (same no-LLM, code-derived
+    # contract) so every officer's preamble reflects today's code, not last week's councils.
+    try:
+        from . import devstate
+        devstate.refresh(cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Dev-state refresh skipped: {exc}", flush=True)
     print(f"\n  council saved → {saved}\n", flush=True)
     return briefing
 
