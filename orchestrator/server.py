@@ -219,6 +219,43 @@ def compute_merge_stats(audit_path: str, time_range: str, now: float | None = No
     }
 
 
+# EU-361: guards the compare-and-set on the one-shot ceremony flags below. Separate from
+# cockpit_state's run locks on purpose — a ceremony is not a run and must not contend with one.
+_flag_lock = threading.Lock()
+
+# EU-149's cap on what /api/terminal returns; EU-362 made it the cap on what it ever HOLDS.
+_TERMINAL_OUTPUT_CAP = 65536
+# EU-362: /api/terminal's output pump is an implementation detail of one request, NOT one of the
+# cockpit's background workers. Bound to the real class at import so a harness following the house
+# pattern of stubbing ``server.threading`` to run workers inline can't starve the pipe and hang the
+# child it is trying to test.
+_PumpThread = threading.Thread
+
+
+def _claim_flag(name: str, value=True) -> bool:
+    """Compare-and-set a one-shot ceremony flag. True = the caller now OWNS the ceremony and must
+    clear the flag when done; False = someone else already owns it, do nothing.
+
+    EU-361 (2026-07-16 audit): all seven ceremony routes used to read the flag in the request
+    thread but SET it inside ``_bg()`` —
+
+        if not _state.get("standuping"):
+            def _bg():
+                _state["standuping"] = True     # ...several thread-scheduler ticks later
+
+    Under ``app.run(..., threaded=True)`` two clicks milliseconds apart both passed the ``if`` and
+    both spawned a worker: two concurrent standups / councils / scribes, or two ``group_chat``
+    rounds answering the same message. ``ship_review`` already set its flag before the thread (the
+    in-repo precedent); this closes the window for the other seven with a real lock, so the check
+    and the set can't be split at all.
+    """
+    with _flag_lock:
+        if _state.get(name):
+            return False
+        _state[name] = value
+        return True
+
+
 def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     """EU-190/EU-223: set this run's backend from the persisted sticky preference (cockpit
     /api/model), resolving an optional PER-APP override first, then the global sticky pref, then
@@ -243,7 +280,15 @@ def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     return None
 
 
-def create_app(cfg: Config):
+def create_app(cfg: Config, port: int = 8787):
+    """Build the cockpit Flask app. ``port`` is the port ``serve()`` will actually bind.
+
+    EU-361: the port is a parameter (not a constant) because the EU-254 Host guard below has to
+    know the real bind address. ``general serve --port N`` (main.py) is a supported flag, and with
+    the port hardcoded to 8787 every legitimate POST on any other port was rejected as a
+    DNS-rebinding attempt. Defaults to 8787 so the single-operator flow — and every existing
+    ``create_app(cfg)`` caller — is unchanged.
+    """
     from flask import Flask, Response, redirect, request
     app = Flask(__name__)
     audit = AuditLog(cfg.audit_path)
@@ -297,9 +342,20 @@ def create_app(cfg: Config):
     # 127.0.0.1:8787). "localhost" (no port) is allowed alongside the real bind so the Flask test
     # client's default synthetic Host keeps working — the dev server never actually listens on the
     # default HTTP port, so that value can't arise from a real request.
+    #
+    # EU-361: the allowed set is built from the REAL bind port (``create_app``'s ``port`` arg), not
+    # a hardcoded 8787. `general serve --port 9000` used to 403 every legitimate POST, because the
+    # browser's honest `Host: 127.0.0.1:9000` matched nothing in this set.
     # ----------------------------------------------------------------------------------------------
-    _ALLOWED_HOSTS = {"127.0.0.1:8787", "localhost:8787", "localhost"}
+    _ALLOWED_HOSTS = {f"127.0.0.1:{port}", f"localhost:{port}", "localhost"}
     _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+    # EU-361: routes that are state-changing despite being GETs, so the guard below can't be
+    # side-stepped by the verb alone. /api/open-logs spawns `open` via subprocess.Popen — a
+    # side effect on the Commander's desktop — so an attacker page's <img src=…>/link/fetch to it
+    # must be rejected exactly like a POST. Kept as an explicit allowlist rather than "guard every
+    # GET": the dashboard's read-only polls (/api/board every 5s, the SSE streams) must stay
+    # unguarded, which is the EU-254 contract these routes were carved out of.
+    _STATE_CHANGING_GETS = {"/api/open-logs"}
 
     def _origin_host(value: str) -> str:
         from urllib.parse import urlsplit
@@ -310,7 +366,8 @@ def create_app(cfg: Config):
 
     @app.before_request
     def _csrf_origin_guard():
-        if request.method not in _STATE_CHANGING_METHODS:
+        if (request.method not in _STATE_CHANGING_METHODS
+                and request.path not in _STATE_CHANGING_GETS):
             return None
         if (request.host or "").lower() not in _ALLOWED_HOSTS:
             return Response("Forbidden: mismatched Host header.", status=403, mimetype="text/plain")
@@ -406,14 +463,23 @@ def create_app(cfg: Config):
         view["autopilot"] = ap
         return view
 
-    def _claim_cockpit_run(app_name: str):
+    def _claim_cockpit_run(app_name: str, *, stop_event=None):
         """Claim ``app_name``'s run slot for a manual cockpit run (EU-64: per-project).
 
         Honours BOTH guards: the per-project one (a second run on the SAME project is refused, other
         projects unaffected) AND the still-unit-wide one that autopilot / Telegram-resume hold on the
         legacy ``_state`` (until those migrate, a manual project run must not overlap them). Returns
         the per-app run-state dict on success — the caller owns the run and MUST ``release_run`` it —
-        or None when refused, with ``last_msg`` already set on the right state for the banner."""
+        or None when refused, with ``last_msg`` already set on the right state for the banner.
+
+        EU-361: ``stop_event`` is published with the claim, in the REQUEST thread. It used to be
+        minted inside the worker's ``_bg()``, so between "POST /api/run returns the redirect" and
+        "the OS schedules the worker" the run was already ``active`` (the board shows Stop) but
+        ``st['stop_event']`` was still None — a Stop click in that window found no event and
+        silently did nothing. ``claim_run`` has always accepted the event (cockpit_state.claim_run);
+        the autopilot Start path already passed it this way — this brings the three manual run
+        routes onto the same pattern.
+        """
         key = app_name or None
         st = get_state(key)
         busy = "a run is already in progress for this project — wait for it to finish, then start the new one"
@@ -425,7 +491,7 @@ def create_app(cfg: Config):
             _state["last_msg"] = ("a run is already in progress — stop it and wait for it to finish, "
                                   "then start the new one")
             return None
-        if not claim_run(key):
+        if not claim_run(key, stop_event=stop_event):
             # Lost the start race (TOCTOU) or hit the max-parallel-runs cap.
             st["last_msg"] = busy if is_active(key) else (
                 "too many projects are running at once — wait for one to finish, then start this one")
@@ -520,6 +586,12 @@ def create_app(cfg: Config):
         subprocess (see ``_terminal_validate`` / ``TERMINAL_ALLOWED_COMMANDS`` above), then run
         with ``shell=False``.
 
+        EU-362 (2026-07-16 audit): the 64KB cap is applied WHILE READING, on a pump thread, not
+        after ``communicate()`` has already materialised the whole output in memory — the cockpit
+        is a long-lived process and one `find /` typed into the panel used to cost it however many
+        megabytes that printed. Past the cap the pipe is still drained and discarded: stop reading
+        and the child blocks forever on a full pipe buffer.
+
         Security:
         * No shell — ``Popen(argv, shell=False)``, never a shell-interpreted string.
         * argv[0] must be in the module allowlist (interpreters are absent) — else 403.
@@ -549,54 +621,96 @@ def create_app(cfg: Config):
             return jsonify({"output": "", "error": err}), 403
 
         proc = None
+        pgid = None
         try:
             # EU-146: Popen (not run) + start_new_session=True so the process and any child it
             # forks/backgrounds share one process group we can kill as a unit. EU-187: shell=False,
             # a validated argv — never a shell-interpreted string.
+            # EU-362: stderr is folded into stdout so there is ONE pipe to pump — two pipes would
+            # need hand-rolled select/deadlock avoidance, which is exactly what communicate() was
+            # here to do.
             proc = subprocess.Popen(
                 argv,
                 shell=False,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 cwd=str(run_cwd),
                 env=dict(os.environ),
                 start_new_session=True,
             )
+            # EU-362: capture the process-group id NOW, while the child is certainly alive.
+            # start_new_session makes it == proc.pid, but reading it back later is not equivalent:
+            # once the leader is reaped ``os.getpgid(proc.pid)`` raises ProcessLookupError, which
+            # is precisely why the finally sweep below never killed anything.
             try:
-                stdout, stderr = proc.communicate(timeout=10)
+                pgid = os.getpgid(proc.pid)
+            except OSError:
+                pgid = None
+
+            kept: list[str] = []
+            stats = {"kept": 0, "total": 0}
+
+            def _pump(pipe):
+                """Drain the child's output, retaining at most _TERMINAL_OUTPUT_CAP characters.
+
+                EU-362: everything past the cap is read and thrown away rather than left in the
+                pipe — a child that fills the pipe buffer blocks in write() forever, so we must
+                keep reading; we just must not keep the bytes."""
+                try:
+                    while True:
+                        chunk = pipe.read(4096)
+                        if not chunk:
+                            break
+                        stats["total"] += len(chunk)
+                        room = _TERMINAL_OUTPUT_CAP - stats["kept"]
+                        if room > 0:
+                            piece = chunk[:room]
+                            kept.append(piece)
+                            stats["kept"] += len(piece)
+                except Exception:  # noqa: BLE001 — a closed/killed pipe just ends the pump
+                    pass
+
+            pump = _PumpThread(target=_pump, args=(proc.stdout,), daemon=True)
+            pump.start()
+            try:
+                proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                # EU-146: Kill the entire process group, not just the shell PID.
+                # EU-146: Kill the entire process group, not just the shell PID. (Safe to resolve
+                # the pgid from the pid here — the process has NOT been reaped on this path.)
                 try:
                     os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
                 except (ProcessLookupError, OSError):
                     proc.kill()
                 # Reap the zombie so it doesn't linger.
                 try:
-                    proc.communicate(timeout=1)
+                    proc.wait(timeout=1)
                 except Exception:
                     pass
                 return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
-            output = (stdout or "") + (stderr or "")
-            # Cap output at 64KB
-            if len(output) > 65536:
-                output = output[:65536] + "\n... (output truncated)"
+            pump.join(timeout=2)   # the child is gone; let the pump drain what's left in the pipe
+            output = "".join(kept)
+            if stats["total"] > _TERMINAL_OUTPUT_CAP:
+                output += "\n... (output truncated)"
             return jsonify({"output": output, "error": None})
         except Exception as e:
             return jsonify({"output": "", "error": str(e)}), 500
         finally:
             # EU-146: Final sweep — if anything in the group is still alive (e.g. a
-            # backgrounded grandchild the communicate() reap above didn't catch), kill it.
-            if proc is not None and proc.poll() is None:
+            # backgrounded grandchild the reap above didn't catch), kill it.
+            # EU-362: this used to be guarded by ``proc.poll() is None``, which is always false
+            # here — proc.wait() has already returned by the time we reach the finally on the
+            # success path — so the sweep was dead code and a `sleep 30 &` typed into the panel
+            # survived every non-timeout request. It now always runs, against the pgid captured at
+            # spawn. An empty group just returns ESRCH, which is what the except swallows.
+            if pgid is not None:
                 try:
-                    os.killpg(os.getpgid(proc.pid), 9)
+                    os.killpg(pgid, 9)
                 except (ProcessLookupError, OSError):
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    pass
+            if proc is not None:
                 try:
-                    proc.communicate(timeout=1)
+                    proc.wait(timeout=1)
                 except Exception:
                     pass
 
@@ -849,6 +963,7 @@ def create_app(cfg: Config):
         st = get_state(appq or None)
 
         def gen():
+            appkey = appq or None
             log_path = st.get("log_path")
             if not log_path:
                 yield _sse("log", "No active run log to stream.")
@@ -859,32 +974,47 @@ def create_app(cfg: Config):
                 yield _sse("log", f"Log file not found: {log_path}")
                 return
 
+            def _drain(f: Path, start: int):
+                """SSE frames for everything appended to ``f`` past byte ``start``."""
+                with f.open("r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(start)
+                    for line in fh.readlines():
+                        yield _sse("log", line.rstrip("\n\r"))
+
             # Stream the log file, sending new lines as they're added
             last_size = 0
             last_check = 0.0
 
             while True:
                 try:
+                    current_st = get_state(appkey)   # fresh state EVERY tick — see the roll below
                     current_size = log_file.stat().st_size
                     if current_size > last_size:
-                        with log_file.open("r", encoding="utf-8", errors="replace") as f:
-                            f.seek(last_size)
-                            new_lines = f.readlines()
-                            for line in new_lines:
-                                yield _sse("log", line.rstrip("\n\r"))
+                        yield from _drain(log_file, last_size)
                         last_size = current_size
                         last_check = time.time()
                     else:
-                        # Check if run is still active - get fresh state
-                        current_st = get_state(appq or None)
+                        # EU-361 (2026-07-16 audit): re-read the run's log path on every tick. It
+                        # used to be captured ONCE, above, before the loop — but a drain opens a NEW
+                        # log file per ticket, so from ticket #2 on this stream sat tailing the
+                        # FIRST ticket's finished, never-growing log. The unit was working; the
+                        # cockpit looked frozen. Rolling only from the else-branch is deliberate:
+                        # the finished file is fully drained first, so the tail of ticket N is never
+                        # traded for the head of ticket N+1.
+                        nxt = (current_st.get("log_path") or "").strip()
+                        if nxt and nxt != str(log_file) and Path(nxt).exists():
+                            log_file, last_size = Path(nxt), 0
+                            last_check = time.time()
+                            time.sleep(0.5)
+                            continue
                         if not current_st.get("active") and not current_st.get("autopilot_on"):
-                            # Run ended - send remaining lines and close
-                            if current_size > last_size:
-                                with log_file.open("r", encoding="utf-8", errors="replace") as f:
-                                    f.seek(last_size)
-                                    new_lines = f.readlines()
-                                    for line in new_lines:
-                                        yield _sse("log", line.rstrip("\n\r"))
+                            # Run ended — drain whatever landed since the stat above, then close.
+                            # (The pre-EU-361 code re-tested ``current_size > last_size`` here, which
+                            # is by construction false inside this else-branch: the final lines of
+                            # every run were silently dropped. Re-stat instead.)
+                            final_size = log_file.stat().st_size
+                            if final_size > last_size:
+                                yield from _drain(log_file, last_size)
                             yield _sse("done", "Run ended.")
                             break
                         # No new lines - send keepalive every 2s
@@ -915,6 +1045,14 @@ def create_app(cfg: Config):
         lines). Sends a ``: heartbeat\n\n`` comment roughly every 15s while idle, and resyncs
         against the ring buffer's current contents if it has wrapped past what this stream last
         saw (the bookmark fell off the back of the deque).
+
+        EU-343: that resync loses every line in the gap — under a burst (a big stack-trace dump,
+        verbose sub-process output) more than ``maxlen`` lines can land inside one 0.5s poll
+        window. It now emits a gap marker first, so the hole is visible rather than silent; the
+        operator is usually watching this panel during exactly the incident that causes the burst.
+        The resync itself cannot duplicate: ``bookmark`` is always the deque's tail (it is only
+        ever assigned ``new_items[-1]``) and production only appends, so everything in the resync
+        snapshot is strictly newer than the bookmark and was never sent.
         """
         from flask import Response
 
@@ -933,10 +1071,22 @@ def create_app(cfg: Config):
                             if snapshot[i] is bookmark:
                                 idx = i
                                 break
-                        # idx is None => the bookmark wrapped off the ring buffer since our last
-                        # poll (maxlen exceeded) — resync to whatever it currently holds instead
-                        # of guessing how much was missed.
-                        new_items = snapshot if idx is None else snapshot[idx + 1:]
+                        if idx is None:
+                            # idx is None => the bookmark wrapped off the ring buffer since our
+                            # last poll (maxlen exceeded) — resync to whatever it currently holds
+                            # instead of guessing how much was missed.
+                            # EU-343: say so. Resyncing silently leaves the panel looking healthy
+                            # with a hole in it. The count is deliberately absent: it would have to
+                            # be inferred from the shared log sequence, which release_run also bumps
+                            # WITHOUT appending to _LOG (cockpit_state._bump_log_seq_only), so any
+                            # number here would be a guess dressed up as a fact. "Some lines were
+                            # dropped, here is where the stream resumes" is what we actually know.
+                            yield (f"data: ... lines dropped — the {_LOG.maxlen}-line terminal "
+                                   f"buffer wrapped past this stream during a burst; resuming from "
+                                   f"the newest {len(snapshot)} lines ...\n\n")
+                            new_items = snapshot
+                        else:
+                            new_items = snapshot[idx + 1:]
                     if new_items:
                         for line, _key in new_items:
                             yield f"data: {line}\n\n"
@@ -1042,14 +1192,14 @@ def create_app(cfg: Config):
                           for kw in ("CRITICAL", "HIGH", "VULN", "EXPLOIT", "RCE"))
 
         if is_critical:
-            # TODO: Create Jira ticket for critical issues
-            # For now, just note it in the audit log
-            try:
-                audit.record("security_reply_ticket_created", ticket_id=ticket_id,
-                            iteration=iteration, response=response,
-                            note="Jira ticket creation not yet implemented")
-            except Exception as e:
-                print(f"Failed to record ticket creation: {e}")
+            # TODO: Create Jira ticket for critical issues.
+            # EU-361 (2026-07-16 audit): this branch used to record a `security_reply_ticket_created`
+            # audit event right under this TODO, with note="not yet implemented" — a forensics trail
+            # asserting a ticket exists on the one path where none is created. Nothing consumed the
+            # event, so it was pure false signal; the `security_reply` event recorded above already
+            # captures the reply itself. Dropped rather than renamed: when the Jira call lands here,
+            # THAT is what should record a `_created` event.
+            pass
 
         # Redirect back to the cockpit (maintains the app selection)
         app = request.form.get("app") or request.args.get("app") or "*"
@@ -1224,7 +1374,9 @@ def create_app(cfg: Config):
             return redirect(f"/tickets?app={app_name}")
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.
-        st = _claim_cockpit_run(app_name)
+        # EU-361: the stop_event is minted HERE, not in _bg — see _claim_cockpit_run's docstring.
+        ev = threading.Event()
+        st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
@@ -1257,9 +1409,10 @@ def create_app(cfg: Config):
         _state["last_run"] = {"app": app_name, "tickets": list(keys)}
 
         def _bg():
+            # EU-361: ``ev`` is the event _claim_cockpit_run already published on ``st`` in the
+            # request thread — the worker closes over it instead of minting its own, so Stop can
+            # never race the thread scheduler.
             st["last_msg"] = ""
-            ev = threading.Event()
-            st["stop_event"] = ev
             errored = False
             reports = []
             # EU-175: bracket this cockpit-initiated run_loop with run_start/run_end (mirroring main.py's
@@ -1309,7 +1462,9 @@ def create_app(cfg: Config):
         drain_app = app_name
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.
-        st = _claim_cockpit_run(app_name)
+        # EU-361: the stop_event is minted HERE, not in _bg — see _claim_cockpit_run's docstring.
+        ev = threading.Event()
+        st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
@@ -1349,9 +1504,10 @@ def create_app(cfg: Config):
             return redirect("/")
 
         def _bg():
+            # EU-361: ``ev`` is the event _claim_cockpit_run already published on ``st`` in the
+            # request thread — the worker closes over it instead of minting its own, so Stop can
+            # never race the thread scheduler.
             st["last_msg"] = ""
-            ev = threading.Event()
-            st["stop_event"] = ev
             errored = False
             reports = []
             # EU-175: bracket this cockpit-initiated run_loop with run_start/run_end (mirroring main.py's
@@ -1435,9 +1591,8 @@ def create_app(cfg: Config):
 
     @app.post("/api/standup")
     def standup_api():
-        if not _state.get("standuping"):
+        if _claim_flag("standuping"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["standuping"] = True
                 try:
                     from . import council
                     asyncio.run(council.hold_standup(cfg, audit=audit))
@@ -1450,9 +1605,8 @@ def create_app(cfg: Config):
 
     @app.post("/api/council")
     def council_api():
-        if not _state.get("councilling"):
+        if _claim_flag("councilling"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["councilling"] = True
                 try:
                     from . import council
                     asyncio.run(council.hold_council(cfg, audit=audit))
@@ -1495,9 +1649,8 @@ def create_app(cfg: Config):
 
     @app.post("/api/scribe")
     def scribe_api():
-        if not _state.get("scribing"):
+        if _claim_flag("scribing"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["scribing"] = True
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
                     _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Technical Writer.")
@@ -1595,11 +1748,10 @@ def create_app(cfg: Config):
         topic = (request.form.get("topic") or "").strip()
         if not topic:
             return redirect("/meeting")
-        if not _state.get("meeting"):
+        if _claim_flag("meeting"):   # EU-361: claimed here, not inside _bg
             officers = request.form.getlist("officer") or None
 
             def _bg():
-                _state["meeting"] = True
                 try:
                     from . import council
                     asyncio.run(council.hold_meeting(cfg, topic, officers=officers, audit=audit))
@@ -1813,9 +1965,8 @@ def create_app(cfg: Config):
         # EU-63: patrol the ONE concrete project of the active tab — the "All projects"/`*` sweep is gone.
         app_name = _scope(request.form.get("app"))
         targets = [app_name] if app_name else []
-        if not _state.get("patrolling"):
+        if _claim_flag("patrolling"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["patrolling"] = True
                 try:
                     from . import patrol as patrol_mod
                     for name in targets:
@@ -1867,9 +2018,8 @@ def create_app(cfg: Config):
     @app.post("/api/approve")
     def approve_api():
         kind = (request.form.get("kind") or "").strip()
-        if kind and not _state.get("approving"):
+        if kind and _claim_flag("approving", kind):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["approving"] = kind
                 try:
                     from . import approvals
                     asyncio.run(approvals.approve(cfg, kind))
@@ -2995,12 +3145,21 @@ def create_app(cfg: Config):
                 'if(groupform)groupform.addEventListener("submit",async function(ev){'
                 'ev.preventDefault();'
                 'var text=groupinput.value;if(!text.trim())return;'
-                'var ok=false;'
-                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});ok=!!(r&&r.ok);}'
+                'var ok=false,busy=false;'
+                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});'
+                'ok=!!(r&&r.ok);busy=!!(r&&r.status===409);}'
                 'catch(e){ok=false;}'
-                'if(!ok){groupinput.classList.add("cerr");'
+                # EU-319: a 409 means the officers are mid-reply and the send was REFUSED, not that
+                # it failed — the text stays in the composer either way (that is the data-loss fix),
+                # but backpressure gets its own copy and no red `cerr` ring, because retrying in a
+                # few seconds is the correct move and nothing is broken.
+                'if(!ok){'
+                'if(busy){if(grouperr){grouperr.textContent="The unit is still replying — your message was NOT sent. Press Enter to try again in a moment.";'
+                'grouperr.classList.add("on");}}'
+                'else{groupinput.classList.add("cerr");'
                 'if(grouperr){grouperr.textContent="Message not sent — check your connection and press Enter to retry.";'
-                'grouperr.classList.add("on");}groupinput.focus();return;}'
+                'grouperr.classList.add("on");}}'
+                'groupinput.focus();return;}'
                 'groupinput.classList.remove("cerr");if(grouperr)grouperr.classList.remove("on");'
                 'groupinput.value="";'
                 'await refreshGroup(true);'
@@ -3018,22 +3177,37 @@ def create_app(cfg: Config):
     @app.post("/api/group")
     def group_api():
         from urllib.parse import quote
+
+        from flask import jsonify
         text = (request.form.get("text") or "").strip()
         officer = (request.form.get("officer") or "").strip() or None
-        if text and not _state.get("grouping"):
-            from . import council
-            council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
-            def _bg():
-                _state["grouping"] = True
-                try:
-                    asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
-                                                   audit=audit, echo=False))
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"group chat failed: {exc}"
-                finally:
-                    _state["grouping"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/group?officer=" + quote(officer) if officer else "/group")
+        _dest = "/group?officer=" + quote(officer) if officer else "/group"
+        if not text:
+            return redirect(_dest)
+        # EU-319 + EU-361: claim the room ATOMICALLY, in the request thread. Two problems used to
+        # live in one line (``if text and not _state.get("grouping")``):
+        #   * the flag was set inside _bg(), so two quick sends both passed the check (EU-361);
+        #   * a send that lost the check fell straight through to the 302 below, so the EU-307
+        #     Enter-to-send fetch followed the redirect, saw r.ok, cleared the composer — and the
+        #     Commander's typed message was GONE with the UI reporting success (EU-319: real data
+        #     loss on his own channel, found 2026-07-14 reviewing EU-307's landed code).
+        # A 409 is the honest answer: nothing was queued. The composer keeps the text and says so.
+        if not _claim_flag("grouping"):
+            return jsonify({"queued": False, "busy": True,
+                            "error": "the unit is still replying — nothing was sent"}), 409
+        from . import council
+        council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
+
+        def _bg():
+            try:
+                asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
+                                               audit=audit, echo=False))
+            except Exception as exc:  # noqa: BLE001
+                _state["last_msg"] = f"group chat failed: {exc}"
+            finally:
+                _state["grouping"] = False
+        threading.Thread(target=_bg, daemon=True).start()
+        return redirect(_dest)
 
     @app.get("/api/chat-thread")
     def chat_thread_api():
@@ -3275,7 +3449,9 @@ def create_app(cfg: Config):
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.
-        st = _claim_cockpit_run(app_name)
+        # EU-361: the stop_event is minted HERE, not in _bg — see _claim_cockpit_run's docstring.
+        ev = threading.Event()
+        st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
@@ -3303,16 +3479,28 @@ def create_app(cfg: Config):
             return redirect("/")
 
         def _bg():
+            # EU-361: ``ev`` comes from _claim_cockpit_run (request thread) — see the run_api twin.
             st["last_msg"] = ""
-            ev = threading.Event()
-            st["stop_event"] = ev
             errored = False
+            reports = []
+            # EU-361: report_api's run was the one cockpit-initiated run_loop with NO EU-175
+            # boundary — run_api / run_selected_api both bracket theirs. Without the pair, a bug
+            # reported through '/report' opened a session that forensics could never close, leaving
+            # an unpaired boundary and a phantom "Working" card (the same ghost-session class EU-175
+            # closed everywhere else).
+            if audit is not None:
+                audit.record("run_start", mode=("DRY-RUN" if rcfg.dry_run else "LIVE"),
+                             tickets=len(worklist or []))
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
+                reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
                 st["last_msg"] = str(exc)
             finally:
+                # EU-361: run_end fires from the finally — same as its run_api twin — so a worker
+                # that dies on an exception still closes its own boundary.
+                if audit is not None:
+                    audit.record("run_end", tickets=len(reports or []))
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
@@ -3343,7 +3531,9 @@ def create_app(cfg: Config):
 
 def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
     try:
-        app = create_app(cfg)
+        # EU-361: hand the app the port we are about to bind — the EU-254 Host guard validates
+        # against it, so `general serve --port N` must not leave the guard pinned to 8787.
+        app = create_app(cfg, port=port)
     except ImportError:
         raise SystemExit("Flask is required for the control panel. Run: pip install -r requirements.txt")
     # Stale-process forensics (2026-07-09): the resident serve process kept running PRE-EU-201 code

@@ -139,18 +139,35 @@ chk("autopilot_stop is gated by `if started:`",
     bool(re.search(r'if started:\s*\n\s+audit\.record\("autopilot_stop"', _ap_src)))
 
 
-# ── 3. Both cockpit run routes bracket run_loop, with run_end INSIDE the finally ──
+# ── 3. EVERY cockpit run route brackets run_loop, with run_end INSIDE the finally ──
+# EU-361 (2026-07-16 audit) widened this contract from two routes to three: report_api ran a
+# run_loop with no boundary at all, so a bug reported through '/report' opened a session forensics
+# could never close — the same ghost-session class EU-175 closed for /api/run and /api/run-selected.
+# The count is the point of the check: a NEW cockpit route that runs run_loop without bracketing it
+# must fail here rather than quietly reopen the hole.
+_COCKPIT_RUN_ROUTES = 3   # run_api, run_selected_api, report_api
 _server_src = Path("orchestrator/server.py").read_text(encoding="utf-8")
-chk("server: both run routes record run_start (guarded)", _server_src.count('audit.record("run_start"') == 2)
+chk("server: every run route records run_start (guarded)",
+    _server_src.count('audit.record("run_start"') == _COCKPIT_RUN_ROUTES,
+    f"found {_server_src.count('audit.record(\"run_start\"')}/{_COCKPIT_RUN_ROUTES}")
 # run_end must sit INSIDE the finally (guarded), not merely exist — a run_end moved out of the finally
 # is the exact ghost-session regression (skipped on exception). Assert the finally→guard→run_end shape
-# for BOTH routes.
-_finally_runend = re.findall(r'finally:\s*\n\s+if audit is not None:\s*\n\s+audit\.record\("run_end"', _server_src)
-chk("server: both routes' run_end is the guarded first statement of the finally",
-    len(_finally_runend) == 2, f"matched {len(_finally_runend)}/2")
+# for EVERY route. Comment lines between `finally:` and the guard are tolerated: this is a check on
+# the code's shape, and a house comment explaining WHY the record sits there must not fail it.
+_C = r"(?:[ \t]*#[^\n]*\n)*"
+_finally_runend = re.findall(
+    rf'finally:[ \t]*\n{_C}\s+if audit is not None:[ \t]*\n{_C}\s+audit\.record\("run_end"', _server_src)
+chk("server: every route's run_end is the guarded first statement of the finally",
+    len(_finally_runend) == _COCKPIT_RUN_ROUTES,
+    f"matched {len(_finally_runend)}/{_COCKPIT_RUN_ROUTES}")
+# Pairwise: the Nth run_start must precede the Nth run_loop (a route that records its boundary
+# AFTER the run has already started still leaves the window EU-175 exists to close).
+_start_at = [m.start() for m in re.finditer(r'audit\.record\("run_start"', _server_src)]
+_loop_at = [m.start() for m in re.finditer(r"run_loop\(rcfg", _server_src)]
 chk("server: run_start precedes run_loop in each run route",
-    all(_server_src.index('audit.record("run_start"', s) < _server_src.index("run_loop(rcfg", s)
-        for s in [0, _server_src.index("run_loop(rcfg") + 1]))
+    len(_start_at) == len(_loop_at) == _COCKPIT_RUN_ROUTES
+    and all(s < l for s, l in zip(_start_at, _loop_at)),
+    f"starts={_start_at} loops={_loop_at}")
 
 
 passed = [n for n, ok, _ in results if ok]
