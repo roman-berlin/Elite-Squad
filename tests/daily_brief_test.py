@@ -80,25 +80,33 @@ if hasattr(council, "daily_brief"):
           any("needs your call" in s.lower() for s in sent), str(sent))
     check("daily_brief returns the synthesis text", isinstance(out, str) and "FOCUS" in out)
 
-    # ── NEW (2026-07-08): the daily must read as "yesterday shipped / today's focus / needs you" and
+    # ── NEW (2026-07-08): the daily must read as "recently shipped / today's focus / needs you" and
     #    must NOT carry cumulative all-time history (Commander: "I don't need to know 91/134 landed"). ──
     from orchestrator import dashboard
     from datetime import datetime, timedelta
     import json as _json
     _dd = tempfile.mkdtemp()
     _ap = Path(_dd) / "audit.jsonl"
-    # Start 2 days ago but MERGE yesterday: the run must bucket by MERGE time (ended), so it lands under
-    # "yesterday" — this pins that standup keys on ended, not started, and (with the astimezone fix) on the
-    # reader's local day.
-    _startts = (datetime.now() - timedelta(days=2)).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
-    _mergets = (datetime.now() - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+    # Start 2 days ago but MERGE 3h ago: the run must bucket by MERGE time (ended), so it lands in the
+    # shipped window — this pins that standup keys on ended, not started, and (with the astimezone fix)
+    # on the reader's clock.
+    #
+    # EU-336 CONTRACT CHANGE (2026-07-17): the shipped headline moved from a yesterday/today calendar
+    # split to a rolling 24h window, so this fixture was deliberately re-pinned — the merge moved from
+    # "yesterday 12:00" to "3h ago" and the assertion from the word "yesterday" to the window wording.
+    # The load-bearing intent (ended-not-started bucketing) is unchanged and still discriminates: a run
+    # started 2d ago is outside the window, so keying on `started` would drop AUTO-99 and go red. The
+    # old fixture was also latently FLAKY under the new window — a merge at yesterday 12:00 is inside
+    # 24h only when the suite runs before local noon.
+    _startts = (datetime.now() - timedelta(days=2)).replace(minute=0, second=0, microsecond=0).isoformat()
+    _mergets = (datetime.now() - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0).isoformat()
     with open(_ap, "w") as _f:
         _f.write(_json.dumps({"ts": _startts, "event": "ticket_start", "ticket_id": "AUTO-99", "app": "automatixy"}) + "\n")
         _f.write(_json.dumps({"ts": _mergets, "event": "merged", "ticket_id": "AUTO-99", "app": "automatixy"}) + "\n")
     _cfg2 = Config(apps=[]); _cfg2.audit_path = str(_ap)
     _su = dashboard.standup(_cfg2)
-    check("standup surfaces YESTERDAY's shipped work by MERGE time (started 2d ago, merged yesterday)",
-          "yesterday" in _su.lower() and "AUTO-99" in _su, _su[:220])
+    check("standup surfaces recently shipped work by MERGE time (started 2d ago, merged 3h ago)",
+          "last 24h" in _su.lower() and "AUTO-99" in _su, _su[:220])
     # A directive test, not a mere keyword mention: the prompt must NEGATE ('do not cite') the cumulative
     # concept AND name a concrete forbidden token — a reworded 'DO cite the all-time history' fails this.
     _ds = council._DAILY_SYSTEM.lower()

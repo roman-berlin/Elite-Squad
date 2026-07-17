@@ -910,6 +910,31 @@ function kpick(id){var f=document.getElementById('f');f.value=id;flt();f.scrollI
 _NEEDS_YOU_CATEGORIES = {"errored", "parked", "pr"}
 _NEEDS_YOU_MAX = 10   # bound the digest; anything past this collapses into an "…and N more" tail
 
+# EU-336: the shipped headline is a ROLLING window, not a calendar day. A 24/7 unattended unit does
+# most of its work overnight, which lands after midnight — under the old yesterday/today split the
+# freshest merges (the EU-294 collapse landed 01:00–04:00 on 2026-07-15) fell into a conditional
+# "…and today so far" afterthought while the headline reported yesterday. The daily fires ~08:30, so
+# a 24h window is also gap-free and dupe-free brief-to-brief.
+_SHIPPED_WINDOW_HOURS = 24
+_DECISION_MAX = 120   # one capped line per decision in the brief; the full text lives in the cockpit
+
+
+def _one_line(text: str, limit: int = _DECISION_MAX) -> str:
+    """Collapse an officer's (often multi-paragraph) decision text to ONE capped line for the brief.
+    Ends with '…' iff anything was dropped, so the caller can tell a clipped item from a short one.
+
+    EU-336: the stored decision keeps the FULL question — this is render-side only, the same split
+    EU-337 (77c2216) drew for the reviewer-findings phone ping. Before this, the 2026-07-15 brief
+    rendered EU-139's entry as a wall of reviewer analysis ("Looking at the evidence: 1. EU-139's
+    actual fix works: … 2. The two 'failing' tests pass in isolation…") — unreadable on a phone."""
+    rows = [s for s in (l.strip().lstrip("*# ").strip() for l in str(text or "").splitlines()) if s]
+    if not rows:
+        return "(no question text)"
+    first, dropped = rows[0], len(rows) > 1
+    if len(first) > limit:
+        first, dropped = first[:limit - 1].rstrip(), True
+    return first + ("…" if dropped else "")
+
 
 def _needs_you_label(row: dict[str, Any]) -> str:
     """The bracketed tag for one Needs-you row, e.g. 'AUTO-14 [errored]' / 'AUTO-9 [blocked]'."""
@@ -939,32 +964,32 @@ def _needs_you_rows(cfg) -> list[dict[str, Any]]:
 
 
 def standup(cfg) -> str:
-    """The deterministic core of the morning daily: what shipped YESTERDAY, what needs you now, and
-    what awaits a decision. The daily fires ~08:30, so 'yesterday' is the completed work the Commander
-    wants to see; 'today so far' is added only once same-day merges exist. No cumulative/all-time
-    history — that is deliberately out (the Commander does not want it in the daily)."""
+    """The deterministic core of the morning daily: what shipped in the LAST 24H, what needs you now,
+    and what awaits a decision. The shipped window is deliberately rolling rather than a
+    yesterday/today calendar split (EU-336) — the unit works overnight, so its freshest merges land
+    after midnight and a calendar split demoted exactly the work the Commander most wants to see. No
+    cumulative/all-time history — that is deliberately out (the Commander does not want it in the daily)."""
     from . import decisions
     from datetime import timedelta
     tasks = load_tasks(cfg.audit_path)
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
-    yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    cutoff = now.astimezone() - timedelta(hours=_SHIPPED_WINDOW_HOURS)
 
-    def _day(t) -> str | None:                              # when it landed (merge time), else run start —
+    def _landed(t) -> datetime | None:                      # when it landed (merge time), else run start —
         d = t.get("ended") or t.get("started")              # .astimezone() normalizes an audit ts written on
-        return d.astimezone().strftime("%Y-%m-%d") if d else None  # another host (EU-181) to the reader's local
-        #                                                     day, so today/yday boundaries agree cross-host
-    shipped_y = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == yday]
-    shipped_t = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == today]
+        return d.astimezone() if d else None                # another host (EU-181) to the reader's clock, so
+        #                                                     the window's edge agrees cross-host
+    def _in_window(t) -> bool:
+        d = _landed(t)
+        return d is not None and d > cutoff   # undateable run → not counted; the count stays exact
+    shipped = [t for t in tasks if t["outcome"] == "merged→dev" and _in_window(t)]
     needs_rows = _needs_you_rows(cfg)
     pending = decisions.load(cfg)
 
     lines = [f"🫡 Daily stand-up — {today}", ""]
-    lines.append(f"✅ Shipped to DEV yesterday ({len(shipped_y)}): "
-                 + (", ".join(t["ticket_id"] for t in shipped_y) or "—"))
-    if shipped_t:
-        lines.append(f"✅ …and today so far ({len(shipped_t)}): "
-                     + ", ".join(t["ticket_id"] for t in shipped_t))
+    lines.append(f"✅ Shipped to DEV (last 24h) ({len(shipped)}): "
+                 + (", ".join(t["ticket_id"] for t in shipped) or "—"))
     shown = needs_rows[:_NEEDS_YOU_MAX]
     needs_line = ", ".join(f'{r["ticket_id"]} [{_needs_you_label(r)}]' for r in shown) or "—"
     overflow = len(needs_rows) - len(shown)
@@ -972,8 +997,14 @@ def standup(cfg) -> str:
         needs_line += f" …and {overflow} more (cockpit → /needs)"
     lines.append(f"🟡 Needs you ({len(needs_rows)}): " + needs_line)
     if pending:
-        lines.append("❓ Awaiting your decision:")
-        lines += [f'   • {p["id"]}: {p.get("question", "")}' for p in pending]
+        # EU-336: one capped line per item — never the officer's raw multi-paragraph text. The
+        # "(cockpit → /needs)" pointer rides the header only when something was actually clipped,
+        # mirroring the "…and N more (cockpit → /needs)" overflow idiom on the Needs-you line above.
+        rendered = [(p["id"], _one_line(p.get("question", ""))) for p in pending]
+        clipped = any(q.endswith("…") for _, q in rendered)
+        lines.append("❓ Awaiting your decision:"
+                     + (" (full text: cockpit → /needs)" if clipped else ""))
+        lines += [f"   • {pid}: {q}" for pid, q in rendered]
     else:
         lines.append("❓ Awaiting your decision: —")
     return "\n".join(lines)
