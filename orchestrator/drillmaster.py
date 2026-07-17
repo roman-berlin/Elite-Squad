@@ -11,8 +11,6 @@ without adding officers.
 """
 from __future__ import annotations
 
-import shutil
-import time
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions
@@ -20,6 +18,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import memory, models
 from .agent import run_agent
 from .config import Config
+from .doctrine import snapshot_doctrine
 from .officers import display
 from .signals import collect_signals, format_signals
 
@@ -98,22 +97,8 @@ async def drill(cfg: Config) -> str:
 
 # --------------------------------------------------------------------------- #
 # Apply — execute an APPROVED drill (write-capable). Originals are snapshotted
-# first so every change is reversible.
+# first (snapshot_doctrine, in .doctrine) so every change is reversible.
 # --------------------------------------------------------------------------- #
-def snapshot_doctrine(cfg: Config) -> Path:
-    """Back up the officer files + the squad agents before any applied change."""
-    root = Path(__file__).resolve().parent.parent
-    dest = Path(cfg.audit_path).resolve().parent / "backups" / time.strftime("doctrine-%Y%m%d-%H%M%S")
-    dest.mkdir(parents=True, exist_ok=True)
-    off = root / "officers"
-    if off.exists():
-        shutil.copytree(off, dest / "officers", dirs_exist_ok=True)
-    squads = Path.home() / ".claude" / "agents"
-    if squads.exists():
-        shutil.copytree(squads, dest / "claude-agents", dirs_exist_ok=True)
-    return dest
-
-
 DRILL_APPLY_SYSTEM = """\
 You are the Engineering Coach, now EXECUTING an approved drill (not proposing). Apply the single
 highest-leverage upgrade from the approved drill report: the precise edit(s) to an officer file
