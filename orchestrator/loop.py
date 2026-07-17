@@ -32,6 +32,7 @@ from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidenc
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
+from . import usage
 from .git_ops import Git, GitError, LandRaceError
 from .officers import display
 from .phases import BUILD, GATE, LAND, PHASES, REVIEW
@@ -660,11 +661,44 @@ def _fetch_fragments_to_worklist(cfg: Config, app: AppConfig,
     return items
 
 
+def _glm_budget_preflight_block(cfg: Config, audit: AuditLog) -> bool:
+    """EU-222: fail the run closed, before any worklist processing, if GLM is the ACTIVE backend
+    and its quota is exhausted/near-exhausted. max_cost_usd already counts GLM spend (the SDK's
+    real, non-zero total_cost_usd for glm-4.6 feeds Budget.add same as Claude) — it was only ever
+    inert because the default max_cost_usd=0.0 disables the cap. This is a separate GLM
+    quota-availability gate, not a parallel price table. Returns True (and records + notifies) if
+    the run should stop; False if the gate is a no-op (GLM healthy, or the configured backend isn't
+    GLM at all).
+
+    The gate keys off cfg.model_backend — the backend dispatch ACTUALLY uses — NOT
+    status['active_provider']. active_provider is a global-pref source that can diverge from
+    cfg.model_backend; deferring to it (the old `active_provider != 'glm'` early-return) opened a
+    fail-closed bypass where GLM would dispatch against an exhausted quota while the pref still read
+    'claude'. So: block iff the configured backend is GLM and GLM is over/near cap."""
+    if backends.normalize(getattr(cfg, "model_backend", "opus")) != backends.GLM:
+        return False
+    status = usage.dual_provider_budget_status(cfg)
+    glm = status.get("glm", {})
+    if not (glm.get("over") or glm.get("bad")):
+        return False
+    msg = (f"GLM budget pre-flight: run blocked before dispatch — GLM quota is "
+           f"{'over cap' if glm.get('over') else 'near cap (>=95%)'} ({glm})")
+    audit.record("glm_budget_preflight_block", glm_status=glm)
+    _notify(cfg, msg)
+    return True
+
+
 async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                      audit: AuditLog, stop_event=None, stop_between_tickets=None) -> list[TicketReport]:
     """Dispatch: the historic serial drain (default), or the EU-380 concurrent drain when
     max_concurrent_builders > 1. The serial body is untouched — flipping the knob back to 1
-    restores today's exact behaviour."""
+    restores today's exact behaviour.
+
+    EU-222: before either drain touches the worklist, a fail-closed GLM budget pre-flight runs —
+    if GLM is the active backend and its quota is exhausted, the run stops here with a clear
+    audit event + notify instead of silently dispatching against a blind dollar cap."""
+    if _glm_budget_preflight_block(cfg, audit):
+        return []
     n = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
     if n <= 1:
         return await _run_inner_serial(cfg, worklist, audit, stop_event, stop_between_tickets)
