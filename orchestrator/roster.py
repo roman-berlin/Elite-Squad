@@ -21,11 +21,21 @@ from . import scrum
 # The human-facing display NAME for each key is NOT stored here: it's resolved from officers.OFFICER_NAMES
 # (the single source of truth) when the roster is built (see _OFFICERS), so renaming an officer is one edit
 # there and this doc can never drift. Keys are stable identifiers and never change.
+#
+# EU-260: a key belongs here ONLY while code actually implements it — this list is what council.refresh()
+# rebuilds ROSTER.md from every morning, so a row for a deleted officer is a phantom the whole unit reads
+# as context. `test_engineer` was one: c276155 (Phase-2 §2) deleted its module AND charter, but the row
+# survived and re-emitted the phantom daily. Retiring an officer means deleting its row here, not just its
+# module. Note "implemented" is not the same as "has a module of its own": `adjutant` kept its row because
+# EU-325 deleted only adjutant.py (the `general adjutant` CLI / EU-85 preview) — the Engineering Manager
+# still sits on the daily council (council.COUNCIL[0]), which is why its model attr is discussion_model.
+# tests/eu260_org_reality_test.py enforces both directions.
 _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
     ("general", "Orchestrator", "Chairs the unit, talks 1:1 with you, synthesises the daily council, "
      "and routes your guidance to the officers.", "discussion_model"),
     ("adjutant", "S-1 · Personnel", "Owns the roster — proposes hires/retirements when a real "
-     "capability gap appears (you approve and apply).", "reviewer_model"),
+     "capability gap appears (you approve and apply). Speaks at the daily council; propose-only.",
+     "discussion_model"),
     ("pm", "S-5 · Product", "Makes the product / IA / scope calls the Builder can't make "
      "alone, so the unit keeps shipping; escalates only the critical, irreversible ones.", "reviewer_model"),
     ("scrum", "S-6 · Scrum Master", scrum.__doc__.split("\n\n")[0].strip(), "reviewer_model"),
@@ -33,9 +43,6 @@ _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
      "tests for the change against the plan's acceptance criteria.", "builder_model"),
     ("inspector", "Reviewer", "Quality & risk gate — reviews every change, demands fixes, and "
      "guards the standard before anything merges.", "reviewer_model"),
-    ("test_engineer", "Tests & coverage gate", "Owns the test suite — writes a happy-path and a "
-     "regression test with every code change, and puts the `bun test --coverage` delta in the PR "
-     "description as a real gate.", "reviewer_model"),
     ("scout", "S-2 · QA / Recon", "Hunts what actually breaks in the running app on DEV — runtime, UX, "
      "accessibility — and files findings as tickets.", "reviewer_model"),
     ("provost", "Security", "The security gate — blocks a merge on a CRITICAL/HIGH finding "
@@ -70,7 +77,7 @@ def mermaid_chart() -> str:
              f"  C([Commander · Roman]) --> G[{display('general')} · orchestrator]"]
     # node ids are keyed by the STABLE internal key (not the display name) so a rename can't break the chart
     short = {"general": "G", "adjutant": "ADJ", "pm": "PM", "scrum": "SM", "field_engineer": "FE",
-             "inspector": "IG", "test_engineer": "TE", "scout": "SC", "provost": "PR",
+             "inspector": "IG", "scout": "SC", "provost": "PR",
              "quartermaster": "QM", "sentinel": "SN", "drillmaster": "DM", "liaison": "LN"}
     for key, role, _d, _m in _OFFICER_ROWS:
         if key == "general":

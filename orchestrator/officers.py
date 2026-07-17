@@ -24,6 +24,10 @@ Rename map (old army name -> new display name) applied below:
 from __future__ import annotations
 
 # internal key -> human-facing display name. Keys are immutable; only the values are renamed.
+# This map is deliberately a SUPERSET of the live roster: it is a label dictionary, not a roster, so
+# retired keys stay (display("test_engineer") must still render historical audit records written while
+# the officer was in post). Who is actually in post is roster._OFFICER_ROWS — EU-260 removed the
+# Test Engineer from *there* (c276155 deleted its module + charter) and left this entry alone on purpose.
 OFFICER_NAMES: dict[str, str] = {
     "general": "CTO",
     "adjutant": "Engineering Manager",

@@ -22,10 +22,15 @@ cfg = Config(apps=[], audit_path=str(Path(tempfile.mkdtemp()) / "audit.jsonl"))
 
 # --- structure is read from the code (can't drift) ---
 doc = roster.build_doc(cfg, "Shipped 3 tickets to DEV today.")
+# EU-260: the Test Engineer left this list when it left the code — c276155 (Phase-2 §2) deleted
+# test_engineer.py + officers/test-engineer.md and dropped the Tests phase, but the roster row survived
+# and re-emitted the retired officer into ROSTER.md daily. tests/eu260_org_reality_test.py pins that it
+# stays gone (and that the Engineering Manager, still seated on the council, does NOT).
 for officer in ["CTO", "Engineering Manager", "Product Manager", "Dev Team Lead", "Code Reviewer",
-                "Test Engineer", "QA Engineer", "Security Engineer", "Release Manager", "SRE",
+                "QA Engineer", "Security Engineer", "Release Manager", "SRE",
                 "Engineering Coach", "Scrum Master", "Mayor"]:
     chk(f"doc lists {officer}", officer in doc)
+chk("doc does NOT list the retired Test Engineer (EU-260)", "Test Engineer" not in doc)
 chk("doc carries the status line", "Shipped 3 tickets to DEV today." in doc)
 chk("doc dated 'As of'", "_As of" in doc)
 
@@ -33,7 +38,7 @@ chk("doc dated 'As of'", "_As of" in doc)
 mer = roster.mermaid_chart()
 chk("chart is mermaid flowchart", mer.startswith("```mermaid") and "flowchart TD" in mer)
 chk("chart roots at the Commander -> CTO", "Commander · Roman" in mer and "G[CTO" in mer)
-chk("chart hangs every officer off the General", mer.count("G --> ") == 12)   # 13 officers minus the General (EU-66 adds the Mayor / liaison; EU-110 adds Scrum Master)
+chk("chart hangs every officer off the General", mer.count("G --> ") == 11)   # 12 officers minus the General (EU-66 adds the Mayor / liaison; EU-110 adds Scrum Master; EU-260 retires the Test Engineer)
 
 # --- model column is auto-aware ---
 fixed = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, builder_model="claude-opus-4-8")
