@@ -169,6 +169,14 @@ try:
     gsrc = Path("orchestrator/git_ops.py").read_text()
     ok("(7) reap_stale_worktrees canonicalizes every slot path",
        "for _slot in range(_slots):" in gsrc and "_worktree_path(a, cfg, _slot)" in gsrc)
+    # (7b) 2026-07-17 live incident: Elite-Unit-s1 was eaten within hours — a reap invoked with a
+    # cfg LACKING the knob (bare harness in a worktree; defaults = 1 slot) saw the idle slot as
+    # non-canonical (detached-at-base + flock-free = "merged and dead"). Slots must be protected
+    # BY NAME PATTERN, independent of the caller's cfg knob value.
+    ok("(7b) slot worktrees are pattern-protected regardless of the cfg's knob",
+       're.fullmatch(re.escape(getattr(a, "name", "")) + r"-s\\d+", _base)' in gsrc,
+       "a defaults-cfg reap would eat idle slots (the -s1 incident, 2026-07-17)")
+
 finally:
     loop._process_ticket_inner = _orig_inner
     loop.run_logger.write_note_log = _orig_note

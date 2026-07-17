@@ -180,6 +180,17 @@ def reap_stale_worktrees(cfg) -> None:
                     continue
             except OSError:
                 continue
+            # EU-380 hardening (2026-07-17): protect builder-slot worktrees BY PATTERN, not by the
+            # cfg knob's value. Elite-Unit-s1 was eaten within hours of its first creation: an idle
+            # slot is detached-at-base + flock-free (= "merged and dead"), and any reap invoked
+            # with a cfg that lacks max_concurrent_builders (harnesses run bare in a worktree where
+            # config.yaml is gitignored-absent; defaults = 1 slot) sees it as NON-canonical. The
+            # slot naming is ours (<app>-s<N>, loop._worktree_path), so the pattern is authoritative
+            # regardless of which cfg object the caller happened to hold.
+            _base = Path(wt_path).name
+            if any(re.fullmatch(re.escape(getattr(a, "name", "")) + r"-s\d+", _base)
+                   for a in getattr(cfg, "apps", []) or []):
+                continue
 
             # QW7 (2026-07-05): the orchestrator creates EVERY .general-worktrees worktree with
             # `worktree add --detach` (see _fresh_worktree below), so a detached HEAD is the ONLY
