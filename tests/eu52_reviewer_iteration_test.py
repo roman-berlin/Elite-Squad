@@ -44,7 +44,8 @@ def fake_for_reviewer(cfg, diff="", iteration=1):
     seen["iteration"] = iteration
     return models.SONNET, f"sonnet (it={iteration})"
 ran = {}
-async def fake_run_agent(prompt, options, tag="", cfg=None, routing_tier=None):
+async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None,
+                          cfg=None, routing_tier=None):   # EU-258: mirror the real signature
     ran["model"] = getattr(options, "model", None)
     return RR('{"verdict": "PASS", "spec_met": true}')
 reviewer_mod.run_agent = fake_run_agent

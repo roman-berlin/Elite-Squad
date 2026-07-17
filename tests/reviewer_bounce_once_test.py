@@ -204,7 +204,8 @@ _UNVERIFIABLE_BLOCK_JSON = "```json\n" + json.dumps({
 }) + "\n```"
 
 
-async def _fake_run_agent_pass1(prompt, options, tag="", cfg=None, routing_tier=None):
+async def _fake_run_agent_pass1(prompt, options, tag="", ticket_id=None, pass_number=None,
+                          cfg=None, routing_tier=None):   # EU-258: mirror the real signature
     return _RR(_UNVERIFIABLE_BLOCK_JSON)
 
 

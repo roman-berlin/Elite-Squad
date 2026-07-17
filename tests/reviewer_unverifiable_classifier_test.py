@@ -134,7 +134,8 @@ _PASS_MET_JSON = ('```json\n{"verdict":"PASS","spec_conformance":{"met":true,"ga
                   '"quality":{"issues":[]},"required_changes":[],"summary":"all 6 tests pass"}\n```')
 
 
-async def _fake_run_agent(prompt, options, tag="", cfg=None, routing_tier=None):
+async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None,
+                          cfg=None, routing_tier=None):   # EU-258: mirror the real signature
     _captured_options["allowed_tools"] = getattr(options, "allowed_tools", None)
     return _RR(_PASS_MET_JSON)
 

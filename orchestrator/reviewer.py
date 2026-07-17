@@ -575,7 +575,13 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     except Exception:  # noqa: BLE001 — routing failure must not break the review
         routing_tier = None
 
-    run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer", cfg=cfg, routing_tier=routing_tier)
+    # EU-258: stamp the ticket id + pass number onto the ledger row (fields k/p), as the Builder has
+    # since EU-38 — both are in scope here and were simply never passed, leaving 480/480 tag="reviewer"
+    # rows unattributable ($430.50, 13.9% of window spend at triage 2026-07-16). Ledger/analytics only:
+    # loop.py's _burn("reviewer", ...) already feeds the live per-ticket budget gates.
+    run = await run_agent_with_fallback(_prompt(diff, ticket, build_artifact), options, tag="reviewer",
+                                        ticket_id=ticket.id, pass_number=iteration, cfg=cfg,
+                                        routing_tier=routing_tier)
 
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
