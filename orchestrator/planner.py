@@ -218,6 +218,14 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
         )
         run = await run_agent(_prompt(ticket), options, tag="planner", ticket_id=ticket.id)
         res = parse_plan(run.final or run.text)
+        if res.verdict == "BUILD" and not res.testable_ac and not res.in_scope_files \
+                and not res.approach:
+            # EU-266: a garbled/JSON-less reply used to fall back to a SILENT briefless BUILD —
+            # indistinguishable in audit from a designed one. Stamp the raw with the error marker
+            # so the audit event (below) carries WHY the brief is empty; the build still proceeds
+            # (fail-safe contract unchanged), it just stops lying about being planned.
+            res.raw = (f"(planner error: unparseable plan reply — briefless BUILD; "
+                       f"head: {(run.final or run.text or '')[:120]!r})")
         res.cost_usd = run.cost_usd
         res.num_turns = run.num_turns
         res.input_tokens = getattr(run, "input_tokens", 0)
