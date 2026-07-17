@@ -135,6 +135,13 @@ apps:
     # False by default; only an app with this monorepo/vitest shape should opt in.
     test_collectability_enabled: true
     gate_timeout_sec: 900            # per-command hard cap (default 1800). Kills a hung/runaway test run.
+                                     # EU-218: for THIS repo's own self-gate (`python3 tests/run_all.py`,
+                                     # the EU app's gate_commands), keep the default 1800s — measured
+                                     # full-suite wall-clock is ~214s (382 harnesses), an ~8.4x margin.
+                                     # run_all.py prints WALL-CLOCK every run and warns if it creeps past
+                                     # 50% of the budget (override with GENERAL_GATE_TIMEOUT_SEC); raise
+                                     # this value deliberately (with a comment, as here) only if that
+                                     # warning fires for real added work, not to paper over a hang.
     gate_env:                        # extra env for gate commands so tests can't exhaust RAM
       NODE_OPTIONS: "--max-old-space-size=3072"
     postmerge_commands:              # Sentinel's heavier post-merge net on the landed <base> (e2e/integration

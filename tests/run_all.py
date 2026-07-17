@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent          # the General repo root
@@ -68,6 +69,17 @@ _CHILD_ENV["GENERAL_PID_FILE"] = str(Path(_PID_FILE_DIR) / "autopilot.pid")
 # (subprocess.run had NO timeout — a wedged harness froze run_all, and with it any gate that shells
 # out to it). Generous: the known-heavy harnesses top out ~19s. Override with GENERAL_TEST_TIMEOUT.
 _HARNESS_TIMEOUT_S = int(os.environ.get("GENERAL_TEST_TIMEOUT", "300") or 300)
+
+# EU-218: the gate that runs this suite (config.example.yaml's per-app `gate_commands`, default
+# `AppConfig.gate_timeout_sec`) has a 1800s hard cap — locking_test's 12 heavy child processes were
+# the dominant wall-clock contributor pushing full-suite runtime toward it (EU-201 hit it twice).
+# Measured 2026-07-17 on this repo's suite (382 harnesses): ~214s real, an ~8.4x margin under 1800s.
+# `_GATE_TIMEOUT_SEC` documents the timeout the suite is budgeted against; override with
+# GENERAL_GATE_TIMEOUT_SEC to match a raised per-app gate_timeout_sec. `_WALLCLOCK_MARGIN` is the
+# fraction of that budget the suite must stay under — crossing it is a signal to trim a harness (or
+# raise gate_timeout_sec deliberately) BEFORE the suite actually times out in CI.
+_GATE_TIMEOUT_SEC = int(os.environ.get("GENERAL_GATE_TIMEOUT_SEC", "1800") or 1800)
+_WALLCLOCK_MARGIN = 0.5
 
 
 def _run_harness(path: Path) -> tuple[str, str, int, bool]:
@@ -158,6 +170,7 @@ def main() -> int:
     passed = failed = total_checks = 0
     red: list[str] = []
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    _t0 = time.monotonic()
     for t in TESTS:
         stdout, stderr, returncode, timed_out = _run_harness(t)
         if timed_out:
@@ -180,10 +193,21 @@ def main() -> int:
             # nothing but names). --verbose widens the tail.
             tail = 25 if verbose else 12
             print("\n".join(("      " + x) for x in (stdout + stderr).strip().splitlines()[-tail:]))
+    elapsed = time.monotonic() - _t0
+    budget = _GATE_TIMEOUT_SEC * _WALLCLOCK_MARGIN
     print("=" * 64)
     print(f"  HARNESSES: {passed} passed / {passed + failed}     TOTAL CHECKS: {total_checks}")
+    print(f"  WALL-CLOCK: {elapsed:.1f}s  (gate timeout {_GATE_TIMEOUT_SEC}s, "
+          f"{_WALLCLOCK_MARGIN:.0%} margin budget {budget:.0f}s)")
     if red:
         print("  FAILED:", " ".join(red))
+    elif elapsed > budget:
+        # EU-218: still ALL GREEN, but flag the creeping wall-clock loudly — this is the early-warning
+        # signal for the EU-201 class (the gate itself timing out mid-run) before it recurs.
+        print(f"  ⚠ WALL-CLOCK WARNING: {elapsed:.1f}s exceeds the {_WALLCLOCK_MARGIN:.0%} safety "
+              f"margin of the {_GATE_TIMEOUT_SEC}s gate timeout — trim a harness or raise "
+              f"gate_timeout_sec deliberately (GENERAL_GATE_TIMEOUT_SEC/config.example.yaml).")
+        print("  ALL GREEN")
     else:
         print("  ALL GREEN")
     print("=" * 64)
