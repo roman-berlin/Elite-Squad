@@ -743,6 +743,40 @@ def _base_gate_once(app: AppConfig, run) -> GateResult:
     return run_deterministic_checks(app, [], "")
 
 
+def publish_base_green(app: AppConfig, cfg, sha: str) -> None:
+    """EU-376: publish a green dev_gate verdict into the base-gate cache for ``sha``.
+
+    A drain mints a new base sha on every land, and base_gate_check is the cache's ONLY writer —
+    so the next ticket's base gate always MISSED and re-ran the full suite on the exact commit
+    object the previous ticket's dev_gate proved green ~3 minutes earlier (measured 2026-07-16:
+    all 14 cache entries were distinct shas = 14 misses; dev_gate green at 00:30:54, base gate
+    re-proved the same 4831566 at 00:33:58 — 178s of pure duplication per ticket).
+
+    Safety by construction: callers publish ONLY a green verdict (a published red would resurrect
+    the EU-334/EU-228 false-red-halt class) for a sha that land_trial has already fast-forwarded
+    to <base> (an honest ff means the trial commit IS the new base tip). Lint parity: the base
+    gate runs the suite PLUS the base's lint (_base_gate_once), the dev_gate runs the suite only —
+    so where lint_commands is armed the dev_gate proof is strictly weaker and must not be
+    published. Best-effort: a cache write failure just restores the old re-run behaviour."""
+    if not sha or getattr(app, "lint_commands", None):
+        return
+    cache_path = Path(cfg.audit_path).with_name("red_base_cache.json")
+    key = f"{app.repo_path}@{sha}"
+    try:
+        from . import locking
+
+        def _put(data):
+            data = data if isinstance(data, dict) else {}
+            data[key] = {"passed": True, "fp": "", "report": "", "ts": time.time()}
+            if len(data) > _RED_BASE_CACHE_MAX:
+                for old in sorted(data, key=lambda k: data[k].get("ts", 0))[:len(data) - _RED_BASE_CACHE_MAX]:
+                    data.pop(old, None)
+            return data
+        locking.locked_rmw(cache_path, _put, default={}, corrupt_to_default=True)
+    except Exception:  # noqa: BLE001 — cache write failure must never block the land
+        pass
+
+
 def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, str]:
     """§3 item 1 — the EU-174 killer. Run the verification gate (and the base's lint) against
     the CLEAN base tree, BEFORE the first build pass. Returns (passed, fingerprint, report).

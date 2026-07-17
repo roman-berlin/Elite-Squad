@@ -26,7 +26,7 @@ from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
 from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
-                   gate_fingerprint, run_deterministic_checks, run_gate)
+                   gate_fingerprint, publish_base_green, run_deterministic_checks, run_gate)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -2109,6 +2109,12 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                   "drain (nothing merged, gate will re-run).", flush=True)
             return TicketReport(ticket.id, Outcome.REQUEUED, iteration, cost, app.name, branch,
                                 notes="dev advanced during land — re-trial next drain (gate re-runs)")
+        # EU-376: the dev_gate above proved THIS exact commit green, and land_trial just
+        # fast-forwarded it to <base> — publish the verdict so the NEXT ticket's base_gate_check
+        # hits the cache instead of re-running the identical full suite on the identical commit
+        # object (measured 2026-07-16: 14/14 misses, 178s of duplication per ticket). Green-only
+        # and post-push by construction; publish_base_green itself refuses lint-armed apps.
+        publish_base_green(app, cfg, merge_sha)
         # EU-81: the commit is now on remote <base> — the ticket's definition of done is met.
         # Everything below is best-effort post-land housekeeping (retire the merged feature
         # branch, then fast-forward the Mac checkout so the running cockpit never serves stale
