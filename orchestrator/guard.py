@@ -21,6 +21,8 @@ anything it doesn't recognise is allowed, so it never gets in the way of normal 
 """
 from __future__ import annotations
 
+import glob as _glob
+import os
 import re
 from pathlib import Path
 
@@ -160,22 +162,82 @@ _CMD_SUBST = re.compile(r"\$\(|`")
 # Filename suffixes that mark a template/sample — they carry no real secret, so let them through.
 _TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist", ".tmpl")
 
+# EU-371 (2026-07-16 total audit): the denylist above matches LITERAL paths, so ONE character defeated
+# it — `cat .env*`, `cat .en?` and `cat jira_connections.*` all returned (False, '') while plain
+# `cat .env` was denied, and the shell expands the glob straight back to the real file. These are the
+# secret BASENAME stems a glob must never be aimed at; the prefix-of-stem test below is what sees
+# `.en?`, where the literal prefix matches no rule at all. (`.pem`/`.key` are suffixes, not stems —
+# those arrive with no usable prefix and are caught by the de-glob/expansion arms instead.)
+_SECRET_STEMS = (
+    ".env", ".git/", ".github/", "id_rsa", "secret.", "secrets.",
+    "jira_connections.json", "audit.jsonl", "usage_ledger.jsonl",
+)
+_GLOB_META = re.compile(r"[*?\[]")
+_GLOB_META_ALL = re.compile(r"[*?\[\]]")
+# Shorter than this a literal prefix implies no intent — `a*` would "aim at" audit.jsonl and deny a
+# perfectly ordinary `cat a*`. Below the floor the stem arm stands down and only a real expansion
+# (which sees an actual secret on disk) can deny.
+_MIN_STEM_PREFIX = 3
+
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 # Tools that take a path and can EXPOSE a secret: writes (clobber/leak) plus Read (exfil source).
 _PATH_TOOLS = _WRITE_TOOLS | {"Read"}
 
 
-def _shell_secret_ref(cmd: str) -> str:
+def _is_template(ref: str) -> bool:
+    """True for a template/sample filename (``.env.example``) — it carries no real secret."""
+    return ref.lower().endswith(_TEMPLATE_SUFFIXES)
+
+
+def _glob_targets_secret(ref: str, workdir: str | None) -> bool:
+    """True when the GLOB ``ref`` is aimed at a protected secret path (EU-371).
+
+    Three arms, because no single one covers the bypass class:
+
+    * **de-glob** — strip the metacharacters and re-test the denylist. Sees ``.env*`` → ``.env`` and
+      ``[.]env`` → ``.env``.
+    * **stem prefix** — the literal prefix before the first metacharacter, tested as a prefix OF a
+      secret stem. This is the only arm that sees ``.en?`` / ``jira_connections.*``, where the
+      de-globbed form matches nothing. Deliberately fails CLOSED — it denies even when the file is
+      ABSENT at guard time, because a glob aimed at a secret stem has no legitimate use.
+    * **expansion** — what the shell will really hand the command. Catches the no-usable-prefix forms
+      (``.*``, ``*.pem``) that the stem arm must skip so ``*.ts`` stays allowed.
+
+    Expansion errors fail OPEN, per the guard's "deny only on a clear match" contract; the de-glob and
+    stem arms are pure string tests and cannot error.
+    """
+    if not _GLOB_META.search(ref):
+        return False
+    deglobbed = _GLOB_META_ALL.sub("", ref)
+    if deglobbed and not _is_template(deglobbed) and _SECRET_PATH.search(deglobbed):
+        return True
+    prefix = ref[:_GLOB_META.search(ref).start()]
+    if prefix and not _is_template(prefix):
+        base = os.path.basename(prefix).lower()
+        if len(base) >= _MIN_STEM_PREFIX and any(s.startswith(base) for s in _SECRET_STEMS):
+            return True
+    try:
+        hits = _glob.glob(ref, root_dir=workdir) if workdir else _glob.glob(ref)
+    except Exception:  # noqa: BLE001 - a weird pattern must never crash a run or false-deny
+        return False
+    return any(_SECRET_PATH.search(h) and not _is_template(h) for h in hits)
+
+
+def _shell_secret_ref(cmd: str, workdir: str | None = None) -> str:
     """Return the first whitespace/quote/@-separated token in a shell command that names a protected
     secret path (``.env``, ``*.pem``/``*.key``, ``id_rsa``, ``secrets.*``, ``.git/``, ``.github/``),
-    skipping templates. Empty string if none — this is how we deny `cat .env` / `curl --data @/x/.env`."""
+    skipping templates. Empty string if none — this is how we deny `cat .env` / `curl --data @/x/.env`.
+
+    EU-371: a token carrying a glob metacharacter is resolved by ``_glob_targets_secret`` rather than
+    matched literally, so one trailing ``*`` no longer walks the whole denylist. ``workdir`` (the
+    officer's worktree) is the root the expansion arm resolves against."""
     for tok in re.split(r"[\s'\"=|;&()<>`]+", cmd):
         ref = tok.lstrip("@")
         if not ref:
             continue
-        if ref.lower().endswith(_TEMPLATE_SUFFIXES):
+        if _is_template(ref):
             continue
-        if _SECRET_PATH.search(ref):
+        if _SECRET_PATH.search(ref) or _glob_targets_secret(ref, workdir):
             return ref
     return ""
 
@@ -240,7 +302,8 @@ def is_dangerous(tool_name: str, tool_input: dict | None, workdir: str | None = 
             return True, ("vitest watch mode — orphaned processes accumulate and leak memory; "
                           "use `vitest run` or add `--run` flag to exit after tests complete")
         # (a) shell read/exfil of a real secret path (cat .env, curl --data @/x/.env, nc < secrets.yaml)
-        hit = _shell_secret_ref(cmd)
+        # EU-371: also the globbed forms (`cat .env*`, `cat .en?`) — workdir roots the expansion arm.
+        hit = _shell_secret_ref(cmd, workdir)
         if hit:
             return True, f"shell access to a protected/secret path ({hit})"
         # (b) outbound network tool uploading a dotfile/secret payload (catches generic dotfiles too)
