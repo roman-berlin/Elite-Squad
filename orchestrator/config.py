@@ -174,10 +174,13 @@ class Config:
     #     (code, tickets, diffs) to Z.ai, a third-party sub-processor. The interactive cockpit picker
     #     is the explicit, gated path; a YAML default is a standing opt-in. Meetings/ceremonies
     #     (standup/council/etc.) currently stay on Opus regardless.
-    #   • The fleet dollar cap (max_cost_usd) does NOT price GLM (glm-4.6 isn't in the SDK's
-    #     Anthropic pricing table → ~$0), so it does not bound GLM runs; per_ticket_token_budget /
-    #     per_ticket_time_budget_min still do. Per-provider GLM pricing + an automation opt-in are
-    #     tracked for Phase 2.
+    #   • The fleet dollar cap (max_cost_usd) DOES count GLM spend — the SDK's ResultMessage.total_cost_usd
+    #     for glm-4.6 calls is non-zero (confirmed live in state/usage_ledger.jsonl) and feeds Budget.add
+    #     the same as Claude calls; it was only ever inert because the default max_cost_usd=0.0 disables
+    #     the cap. EU-222 adds a separate GLM quota-availability pre-flight (loop._run_inner) that fails
+    #     the run closed, before any worklist processing, when GLM is the active backend and
+    #     usage.dual_provider_budget_status() reports it over/near its quota — a quota-availability gate,
+    #     not a parallel price table.
     model_backend: str = "opus"
 
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
