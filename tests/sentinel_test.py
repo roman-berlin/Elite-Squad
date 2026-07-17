@@ -74,7 +74,11 @@ ok4, _ = sentinel.guard(on, app(["x"]), ns(id="AUTO-4", ephemeral=False), g4, "s
 chk("runner exception -> treated as red, reverts", (not ok4) and g4.reverted == "sha_boom")
 
 # --- guard RED due to misconfigured (missing script) -> no revert, log misconfigured ---
-sentinel.gate.run_commands = lambda a, c: GateResult(passed=False, report="ERROR: No such file or directory: two_tenant_smoke.py")
+# EU-359: fed the block shape gate.run_commands really emits ("$ <cmd>\n(exit <code>)\n<tail>").
+# The old synthetic free-text report was a shape the runner never produces, and matching it anywhere
+# in the body is what let genuine reds through as "misconfigured".
+sentinel.gate.run_commands = lambda a, c: GateResult(
+    passed=False, report="$ bun run two_tenant_smoke\n(exit 127)\nsh: 1: two_tenant_smoke.py: not found")
 g5, au5 = FakeGit(), Audit()
 ok5, note5 = sentinel.guard(on, app(["bun run two_tenant_smoke"]), ns(id="AUTO-5", ephemeral=False), g5, "sha_misconfigured", au5)
 chk("misconfigured (missing script) -> healthy True", ok5)
@@ -82,14 +86,29 @@ chk("misconfigured (missing script) -> NO revert", g5.reverted is None)
 chk("misconfigured (missing script) -> audit contains misconfigured", any("misconfigured" in str(v) for _, ev in au5.events for v in ev.values()))
 chk("misconfigured (missing script) -> note says misconfigured", "misconfigured" in note5.lower())
 
-# --- guard RED due to misconfigured (missing env vars) -> no revert, log misconfigured ---
-sentinel.gate.run_commands = lambda a, c: GateResult(passed=False, report="ERROR: TENANT_A_EMAIL not set. TENANT_B_EMAIL not set.")
+# --- missing env is caught BEFORE the suite runs -> no revert, log misconfigured ---
+# EU-359 moved this protection earlier: the requirement is derived from the app's own command
+# ($SENTINEL_ABSENT_EMAIL), so the gate never runs at all rather than being reverse-engineered from
+# whatever the script printed.
+sentinel.gate.run_commands = lambda a, c: GateResult(passed=True, report="should not run")
 g6, au6 = FakeGit(), Audit()
-ok6, note6 = sentinel.guard(on, app(["bun run two_tenant_smoke"]), ns(id="AUTO-6", ephemeral=False), g6, "sha_env_missing", au6)
+ok6, note6 = sentinel.guard(on, app(["./two_tenant_smoke.py --email $SENTINEL_ABSENT_EMAIL"]),
+                            ns(id="AUTO-6", ephemeral=False), g6, "sha_env_missing", au6)
 chk("misconfigured (missing env) -> healthy True", ok6)
 chk("misconfigured (missing env) -> NO revert", g6.reverted is None)
-chk("misconfigured (missing env) -> audit contains misconfigured", any("misconfigured" in str(v) for _, ev in au6.events for v in ev.values()))
+chk("misconfigured (missing env) -> audit contains misconfigured", any("missing env" in str(v) for _, ev in au6.events for v in ev.values()))
 chk("misconfigured (missing env) -> note says misconfigured", "misconfigured" in note6.lower())
+
+# --- EU-359: a suite that RAN and printed env/file words is a genuine RED -> revert ---
+# The 2026-07-16 audit's headline false-skip: a real product regression whose output happens to
+# contain "not set" / "No such file or directory" must never be waved onto DEV.
+sentinel.gate.run_commands = lambda a, c: GateResult(
+    passed=False, report="$ bun run two_tenant_smoke\n(exit 1)\nERROR: TENANT_A_EMAIL not set. TENANT_B_EMAIL not set.")
+g7, au7 = FakeGit(), Audit()
+ok7, note7 = sentinel.guard(on, app(["bun run two_tenant_smoke"]), ns(id="AUTO-7", ephemeral=False), g7, "sha_ran_red", au7)
+chk("suite ran + env text in output -> healthy False", not ok7)
+chk("suite ran + env text in output -> reverts", g7.reverted == "sha_ran_red", str(g7.reverted))
+chk("suite ran + env text in output -> not called misconfigured", "misconfigured" not in note7.lower())
 
 # --- REAL git: a landed --no-ff merge is reverted forward-only and pushed ---
 tmp = Path(tempfile.mkdtemp())
