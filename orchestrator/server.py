@@ -2872,6 +2872,14 @@ def create_app(cfg: Config):
                 'else cinner.insertBefore(newPending,cinner.firstChild);}'
                 'else if(oldPending)oldPending.remove();'
                 'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
+                # EU-318 — capture the fetched window's max seq BEFORE the append loop below moves
+                # those nodes OUT of frag. The old code scanned frag for `total` AFTER the move, so on
+                # any burst tick total undercounted by the burst size (thread 10-29, 6 new → fetch
+                # 16-35 → 30-35 moved out → frag max 29 → total 30, not 36), making the load-earlier
+                # offset too small and a click within ~5s prepend duplicate bubbles.
+                'var fetchedMax=-1;'
+                'frag.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s>fetchedMax)fetchedMax=s;});'
                 'if(newThread&&oldThread){'
                 'var maxSeq=-1;'
                 'oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
@@ -2886,11 +2894,9 @@ def create_app(cfg: Config):
                 # where total = max fetched data-seq + 1. Insert the control when it newly appears,
                 # remove it when the fetched fragment no longer has one, update its offset otherwise.
                 'var newLE=frag.querySelector(".load-earlier"),oldLE=cinner.querySelector(".load-earlier");'
-                'if(newLE){var minSeq=Infinity,total=0;'
+                'if(newLE){var minSeq=Infinity,total=fetchedMax+1;'
                 'if(oldThread)oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
                 'var s=parseInt(m.dataset.seq,10);if(s<minSeq)minSeq=s;});'
-                'frag.querySelectorAll(".msg[data-seq]").forEach(function(m){'
-                'var s=parseInt(m.dataset.seq,10);if(s+1>total)total=s+1;});'
                 'var off=(minSeq===Infinity)?parseInt(newLE.dataset.offset||"0",10):(total-minSeq);'
                 'if(oldLE){oldLE.dataset.offset=off;oldLE.dataset.limit=newLE.dataset.limit;}'
                 'else{newLE.dataset.offset=off;cinner.insertBefore(newLE,oldThread||null);}}'
@@ -2935,7 +2941,15 @@ def create_app(cfg: Config):
                 'try{var r=await fetch("/api/chat-thread?offset="+off,{cache:"no-store"});'
                 'var t=r.ok?await r.text():"";'
                 'if(t.trim()){var th=document.querySelector("#cinner .thread"),f=document.createElement("div");'
-                'f.innerHTML=t;while(f.lastChild){th.insertBefore(f.lastChild,th.firstChild);}'
+                'f.innerHTML=t;'
+                # EU-318 — dedup by data-seq before prepending. Belt-and-braces to the offset fix in
+                # refreshChat: the 5s poll can still land between this click's fetch and its insert,
+                # so drop any fetched bubble whose seq is already on screen rather than double-render.
+                'var have={};th.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'have[m.dataset.seq]=1;});'
+                'f.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'if(have[m.dataset.seq])m.remove();});'
+                'while(f.lastChild){th.insertBefore(f.lastChild,th.firstChild);}'
                 'btn.dataset.offset=off+lim;btn.disabled=false;btn.textContent=prev;}'
                 'else{btn.remove();}}catch(e){btn.disabled=false;btn.textContent=prev;}}'
                 '</script>')
