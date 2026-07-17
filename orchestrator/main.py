@@ -116,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
     apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
     apc.add_argument("--interval", type=int, default=60, help="seconds to wait when the queue is empty (default 60)")
+    apc.add_argument("--force", action="store_true",
+                     help="start even when a detached daemon already holds the PID file")
     ub = sub.add_parser("unblock", help="clear a parked (escalated) ticket so autopilot retries it")
     ub.add_argument("ticket", nargs="?", default=None, help="ticket id; omit to clear all parked")
 
@@ -581,6 +583,15 @@ async def _main(argv: list[str]) -> int:
                 and not backends.available("glm")):
             print("GLM is selected but GLM_AUTH_TOKEN is not configured — set it (and restart) "
                   "or run with --model opus.")
+            return 2
+        # EU-368: the same detached-daemon guard the cockpit has had since EU-103 (server.py:605).
+        # Without it this path walked straight into autopilot()'s unconditional _write_pid(), so the
+        # CLI overwrote a live launchd daemon's record and two daemons drained one queue against one
+        # PID file — the EU-355 hermeticity incident class, but in production.
+        if autopilot_mod.daemon_is_external() and not getattr(args, "force", False):
+            print("autopilot is already running as a detached daemon — stop it first (unload the "
+                  "launchd keepalive agent, or close the terminal it runs in) before starting "
+                  "another, or pass --force if you're sure.")
             return 2
         await autopilot_mod.autopilot(cfg, args.app, once=getattr(args, "once", False),
                                       interval=getattr(args, "interval", 60))

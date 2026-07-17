@@ -289,18 +289,26 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
     backend_label = "Claude"  # Default, updated below
     try:
         from . import backends as _bk, backend_pref as _bp
-        _cur = _bk.normalize(_bp.active(cfg) if cfg is not None else _bk.NATIVE)
+        _last = state.get("last_run") or {}
+        # EU-223: name the affected app (the paused run's project) so the switch — and the
+        # server-side handler — flips only THAT app's backend, not the whole unit.
+        _affected_app = (_last.get("app") or "").strip() or None
+        # EU-242: resolve the CURRENT backend through the affected app, not the global pref. The
+        # switch this banner renders is app-scoped (it posts `app=` and the handler calls
+        # set_active(..., app_name=app_param), server.py:1183-1186), so a global-derived _cur made
+        # the offer disagree with the thing being switched whenever that app carried an EU-223
+        # override: global=GLM + app=Opus offered "Continue on Opus" to an app already on Opus,
+        # which cleared the banner and auto-resumed straight back into the same limit. active()
+        # falls through to the global pref when there's no override, so the no-override path is
+        # byte-for-byte unchanged.
+        _cur = _bk.normalize(_bp.active(cfg, _affected_app) if cfg is not None else _bk.NATIVE)
         backend_label = "Claude (Opus)" if _cur == _bk.NATIVE else "GLM (Z.ai)"
         _alts = _bk.alternates(_cur)
         if _alts:
             _alt = _alts[0]
             _label = "GLM (Z.ai)" if _alt == _bk.GLM else "Claude (Opus)"
-            _last = state.get("last_run") or {}
             _tickets = [t for t in (_last.get("tickets") or []) if t]
             _resume = (" &amp; resume " + html.escape(", ".join(_tickets))) if _tickets else ""
-            # EU-223: name the affected app (the paused run's project) so the switch — and the
-            # server-side handler — flips only THAT app's backend, not the whole unit.
-            _affected_app = (_last.get("app") or "").strip() or None
             continue_offer = (
                 "<form method=post action=/api/continue-on-alternate style='margin:8px 0 0'>"
                 f"<input type=hidden name=backend value='{html.escape(_alt)}'>"

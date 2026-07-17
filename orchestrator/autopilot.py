@@ -15,6 +15,7 @@ would be re-picked every cycle. Use --once for dry-run checks.
 """
 from __future__ import annotations
 
+import contextvars
 import inspect
 import json
 import os
@@ -52,6 +53,74 @@ _USAGE_HOLD_COOLDOWN_S = 1800.0
 # propagation + a self-update restart; short enough that a genuinely re-opened ticket isn't stuck.
 _MERGED_COOLDOWN_S = 600.0
 
+
+def _proc_start(pid: int) -> str | None:
+    """The OS-reported start time of ``pid``, or None when it can't be determined.
+
+    EU-368: a pid is NOT an identity — it's a slot number the kernel reuses. Pairing it with the
+    process's start time is: the kernel will not hand out the same pid twice within the same second
+    (recycling requires wrapping through the whole pid space), so (pid, start) names exactly one
+    process for as long as it lives. ``ps -o lstart=`` is the only stdlib-free source that works on
+    BOTH darwin (no /proc) and the linux VPS, which is why this shells out rather than adding psutil.
+    Timeout-bound per EU-366's hang-proofed subprocess seams — a wedged ps must never freeze the
+    cockpit badge, which calls this on the status path."""
+    import subprocess
+
+    try:
+        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart="],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None                       # no such process
+    return r.stdout.strip() or None
+
+
+# Our OWN start time never changes, so probe once and keep it: _pid_file_holds_our_pid() sits behind
+# daemon_is_external(), which the cockpit calls on every status render — a `ps` fork per page render
+# would be a needless regression of the EU-345 dashboard-latency work. A FOREIGN pid is deliberately
+# NOT cached: a stale cache entry is exactly the recycled-pid lie this ticket exists to kill.
+_our_start: str | None = None
+_our_start_probed = False
+
+
+def _our_proc_start() -> str | None:
+    global _our_start, _our_start_probed
+    if not _our_start_probed:
+        _our_start = _proc_start(os.getpid())
+        _our_start_probed = True
+    return _our_start
+
+
+def _read_pid_record() -> tuple[int, str | None] | None:
+    """Parse the PID file into ``(pid, start)``, or None when there's nothing usable there.
+
+    ``start`` is None for a LEGACY bare-int file (written by a pre-EU-368 daemon) or when the writing
+    process couldn't probe its own start time — callers must then fall back to a bare liveness probe.
+    Never raises: a missing, unreadable or garbled file simply has no record."""
+    try:
+        raw = _PID_FILE.read_text().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        doc = None
+    if isinstance(doc, dict):
+        try:
+            pid = int(doc["pid"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        start = doc.get("start")
+        return pid, (str(start) if start else None)
+    try:
+        return int(raw), None             # legacy bare-int format
+    except ValueError:
+        return None                       # garbage
+
+
 # Refcount of live in-process autopilot() runs holding the (process-wide) PID file. The cockpit
 # runs each per-app drain as a thread of the ONE serve process, so every drain writes the SAME
 # pid — a bare contents==getpid() ownership check let the FIRST drain to exit delete the file
@@ -73,7 +142,9 @@ def _write_pid() -> None:
     with _pid_lock:
         _pid_holders += 1
         try:
-            _PID_FILE.write_text(str(os.getpid()))
+            # EU-368: pid + start time, not a bare pid — see _proc_start for why the pair is what
+            # makes "is that still OUR daemon?" answerable at all.
+            _PID_FILE.write_text(json.dumps({"pid": os.getpid(), "start": _our_proc_start()}))
         except OSError:
             pass
 
@@ -96,30 +167,48 @@ def _remove_pid() -> None:
             _pid_holders -= 1
         if _pid_holders > 0:
             return   # a sibling in-process drain still runs — the file must outlive THIS exit
-        try:
-            if _PID_FILE.read_text().strip() == str(os.getpid()):
+        if _pid_file_holds_our_pid():
+            try:
                 _PID_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
+            except OSError:
+                pass
 
 
 def daemon_running() -> bool:
-    """Return True when the autopilot daemon process is alive.
+    """Return True when THIS unit's autopilot daemon process is alive.
 
-    Reads _PID_FILE and probes the recorded PID with ``os.kill(pid, 0)`` (signal 0 = existence
-    check, no signal delivered). Returns False if the file is missing, unreadable, non-numeric,
-    or the process is no longer alive — i.e. any I/O or permission error means "not running".
+    Liveness = the recorded pid answers ``os.kill(pid, 0)`` (signal 0 = existence check, no signal
+    delivered) AND the process now sitting on that pid is the same one the record describes. Returns
+    False if the file is missing, unreadable, garbled, or the process is gone — i.e. any I/O or
+    permission error means "not running".
+
+    EU-368 (2026-07-16 total audit): the identity half is the point. A bare kill(0) asks "is SOME
+    process alive at this number?", and after a crash the answer drifts to yes as soon as the kernel
+    recycles the dead daemon's pid to something unrelated — a long-dead daemon then reads as alive
+    forever, autostart (EU-224) refuses to relaunch it, and the cockpit badge lies. Comparing the
+    recorded start time against the live pid's start time asks the question we actually mean.
+
+    A LEGACY bare-int record (no identity, written by a pre-EU-368 daemon) deliberately falls back to
+    the old kill(0)-only answer rather than reading as stale: during an upgrade the cockpit runs new
+    code while the launchd daemon may still be old, and answering "gone" for a daemon that is very
+    much alive would open the second-daemon hole this same ticket closes. The window is one daemon
+    lifetime — the next _write_pid() re-records it in the identified format.
 
     This is the single source of truth for the cockpit ON/OFF badge (EU-73): it reflects reality
     even when autopilot was launched outside the cockpit process (terminal that was later closed,
     launchd keepalive daemon) where the in-memory ``_state['autopilot']['on']`` flag is stale.
     """
+    rec = _read_pid_record()
+    if rec is None:
+        return False
+    pid, start = rec
     try:
-        pid = int(_PID_FILE.read_text().strip())
         os.kill(pid, 0)  # probe only — raises OSError(ESRCH) if gone, OSError(EPERM) if alive but not ours
-        return True
     except (OSError, ValueError):
         return False
+    if start is None:
+        return True                       # legacy record — no identity to check against
+    return _proc_start(pid) == start
 
 
 def _alert_unclean_restart(audit) -> bool:
@@ -130,15 +219,15 @@ def _alert_unclean_restart(audit) -> bool:
     Under the launchd keepalive daemon this fires on every auto-restart after a crash, so a
     restart is never silent: one audit event + one Telegram alert. Returns True when it fired.
     Best-effort — never raises, never blocks startup."""
-    try:
-        stale = _PID_FILE.read_text().strip()
-        if stale and stale != str(os.getpid()) and not daemon_running():
-            audit.record("autopilot_unclean_restart", stale_pid=stale)
-            notify.send(f"⚠️ Autopilot restarted after an unclean shutdown "
-                        f"(previous PID {stale} died without cleanup).")
-            return True
-    except OSError:
-        pass
+    rec = _read_pid_record()
+    if rec is None:
+        return False
+    stale = str(rec[0])
+    if stale != str(os.getpid()) and not daemon_running():
+        audit.record("autopilot_unclean_restart", stale_pid=stale)
+        notify.send(f"⚠️ Autopilot restarted after an unclean shutdown "
+                    f"(previous PID {stale} died without cleanup).")
+        return True
     return False
 
 
@@ -147,11 +236,15 @@ def _pid_file_holds_our_pid() -> bool:
 
     A cockpit Start runs autopilot in a background thread of the cockpit process, which writes this
     process's PID via ``_write_pid()``. This lets the per-app Start guard tell its OWN in-process
-    autopilot apart from a detached daemon living in a DIFFERENT process."""
-    try:
-        return _PID_FILE.read_text().strip() == str(os.getpid())
-    except OSError:
+    autopilot apart from a detached daemon living in a DIFFERENT process.
+
+    EU-368: the identity is checked too, so a record left by a DEAD predecessor whose pid the kernel
+    has since handed to us doesn't read as ours — _remove_pid() sits on this, and deleting on a
+    number-only match is how a foreign record gets clobbered in the first place."""
+    rec = _read_pid_record()
+    if rec is None or rec[0] != os.getpid():
         return False
+    return rec[1] is None or rec[1] == _our_proc_start()
 
 
 def daemon_is_external() -> bool:
@@ -336,23 +429,48 @@ def _ticket_project(ticket_id: str) -> str:
     return ticket_id.split("-", 1)[0]
 
 
-# EU-274: per-(file, thread) memory of the last `counts` snapshot THIS drain wrote. It is a SECONDARY
+# EU-278: the identity of the drain running on this thread/task — the app it was started for, and the
+# Jira projects that app owns. Stamped ONCE by autopilot() at drain start (_enter_drain_scope) and
+# read back by save_error_counts, whose (cfg, counts) signature deliberately carries no owner: cfg is
+# NOT a usable source of scope, because server.py hands each per-app drain a `copy.copy(cfg)` that
+# still lists EVERY app — trusting it would make each drain claim every project and clobber its
+# neighbours' keys, which is precisely the EU-274 defect.
+#
+# A ContextVar rather than a thread-local so it survives both shapes the drain runs in: a cockpit
+# thread per app, and an asyncio task inside that thread. Threads and tasks each start from an empty
+# context, so an unstamped caller reads None and claims nothing.
+_drain_scope: contextvars.ContextVar[tuple[str, frozenset[str]] | None] = contextvars.ContextVar(
+    "general_drain_scope", default=None)
+
+
+def _enter_drain_scope(cfg: Config, app_name: str | None) -> None:
+    """Stamp THIS drain's identity for the rest of its life. Best-effort: an unresolvable app leaves
+    the scope unstamped, which only costs the empty-counts reset below (safe direction)."""
+    apps = []
+    try:
+        apps = [cfg.app(app_name)] if app_name else list(getattr(cfg, "apps", None) or [])
+    except (KeyError, AttributeError):
+        apps = []
+    projects = frozenset(
+        p for p in ((getattr(a, "backlog", None) or {}).get("project_key") for a in apps) if p)
+    _drain_scope.set((app_name or "*", projects))
+
+
+# EU-274: per-(file, drain) memory of the last `counts` snapshot THIS drain wrote. It is a SECONDARY
 # delete signal, only needed for the one case the primary (project-prefix) signal can't cover: a save
 # whose `counts` is EMPTY because the drain's last tracked ticket just parked/succeeded (its key
-# popped) — an empty dict carries no prefix to reveal which project it owns, so without this the drop
-# wouldn't propagate and the park-after-3 counter would never reset. Bounded by pruning rows of dead
-# threads on every save (see _prune_dead_error_counts_seen), so it can't grow with run-thread churn and
-# a recycled OS-thread ident can't inherit a dead predecessor's baseline; the value-match guard in the
-# merge is a second belt on ident reuse (a key is dropped via this path only if disk still holds the
-# exact value this thread last wrote).
-_error_counts_seen: dict[tuple[str, int], dict[str, int]] = {}
+# popped) — an empty dict carries no prefix to reveal which project it owns.
+#
+# EU-278: keyed on the DRAIN's identity (its app name), not `threading.get_ident()`. The old key was
+# the OS thread's number, which the kernel recycles: _prune_dead_error_counts_seen dropped only rows
+# whose ident was NOT live, so a recycled-but-live ident kept its dead predecessor's row and a new
+# drain could inherit a baseline that was never its own — the one path left that could reintroduce
+# the foreign-key clobber EU-274 fixed. (The old comment here claimed the prune prevented exactly
+# that; it did not.) An app name is stable for the drain's whole life and unique across concurrent
+# drains — EU-64 gives each project a single writer — so ident reuse is no longer representable, and
+# the cache is bounded by app count instead of run-thread churn, which is why the prune is gone.
+_error_counts_seen: dict[tuple[str, str], dict[str, int]] = {}
 _error_counts_seen_lock = threading.Lock()
-
-
-def _prune_dead_error_counts_seen(live_idents: set[int]) -> None:
-    """Drop _error_counts_seen rows for threads that have exited. Call under _error_counts_seen_lock."""
-    for key in [k for k in _error_counts_seen if k[1] not in live_idents]:
-        _error_counts_seen.pop(key, None)
 
 
 def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
@@ -367,18 +485,24 @@ def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
     #   (a) its project is one this drain is writing right now — call-time context from `counts`, so it
     #       needs no warm cache and already deletes a stale same-project key on a drain's very FIRST
     #       save after a restart (this closes the cold-cache resurrection gap the earlier attempt had); or
-    #   (b) this same thread wrote the key last save at the value still on disk — the only extra case,
+    #   (b) this same drain wrote the key last save at the value still on disk — the only extra case,
     #       for when (a) has no signal because `counts` emptied as the last tracked ticket parked.
     #
     # A key whose project no other-writer touches and that neither signal claims stays put, so a
     # concurrent foreign increment is never clobbered.
+    #
+    # EU-278: when `counts` is EMPTY it carries no prefix, so (a) is silent and (b) is the only signal
+    # left — and (b) is cold on a drain's first save after a restart. That combination (fresh process,
+    # last tracked ticket parks) left the parked key on disk at the threshold, so the next /unblock
+    # bought it ~1 retry instead of 3. Falling back to the drain's OWN declared projects gives (a) the
+    # call-time signal it's missing. Scope comes from the stamped drain identity, never from cfg.apps
+    # — see _drain_scope for why cfg would over-claim. Unstamped => empty => claims nothing.
     path = _error_counts_file(cfg)
-    cache_key = (str(path), threading.get_ident())
-    live = {t.ident for t in threading.enumerate()}
+    scope = _drain_scope.get()
+    cache_key = (str(path), scope[0] if scope else "")
     with _error_counts_seen_lock:
-        _prune_dead_error_counts_seen(live)
         baseline = _error_counts_seen.get(cache_key, {})
-    owned = {_ticket_project(k) for k in counts}
+    owned = {_ticket_project(k) for k in counts} or set(scope[1] if scope else ())
 
     def _merge(current):
         current = current if isinstance(current, dict) else {}
@@ -912,6 +1036,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         _alert_unclean_restart(audit)   # QW5: a restart after a crash is never silent
         _write_pid()
         wrote_pid = True
+        # EU-278: stamp WHO this drain is before any save_error_counts can fire, so an empty-counts
+        # park can tell its own parked key from a concurrent drain's without guessing from cfg.
+        _enter_drain_scope(cfg, app_name)
         if _on_main_thread:
             _orig_sigterm = signal.getsignal(signal.SIGTERM)
             signal.signal(signal.SIGTERM, _handle_sigterm)

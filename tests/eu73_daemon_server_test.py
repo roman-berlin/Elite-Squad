@@ -14,6 +14,7 @@ and autopilot_graceful_stop_test.py:
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
@@ -86,15 +87,31 @@ def chk(name: str, cond, detail: str = "") -> None:
 # =============================================================================
 
 def _test_write_pid_writes_current_pid() -> None:
-    """_write_pid() must write os.getpid() as decimal text to _PID_FILE."""
+    """_write_pid() must record os.getpid() in _PID_FILE.
+
+    EU-368 replaced the bare decimal pid with a {"pid", "start"} identity record — a pid alone can't
+    answer "is that still OUR daemon?" once the kernel recycles it. The pin is still that the file
+    records THIS process; it just reads the pid out of the record instead of string-matching bytes."""
     mock_path = MagicMock()
     with patch.object(_ap_mod, "_PID_FILE", mock_path):
         _ap_mod._write_pid()
-    mock_path.write_text.assert_called_once_with(str(os.getpid()))
     chk(
-        "_write_pid() writes the current PID as text",
-        mock_path.write_text.called
-        and mock_path.write_text.call_args == ((str(os.getpid()),),),
+        "_write_pid() writes exactly once",
+        mock_path.write_text.call_count == 1,
+        f"calls={mock_path.write_text.call_args_list}",
+    )
+    try:
+        _doc = json.loads(mock_path.write_text.call_args[0][0])
+    except Exception as _exc:  # noqa: BLE001
+        _doc = {"_parse_error": str(_exc)}
+    chk(
+        "_write_pid() records the current PID",
+        _doc.get("pid") == os.getpid(),
+        f"call={mock_path.write_text.call_args}",
+    )
+    chk(
+        "_write_pid() records a start-time identity alongside the PID (EU-368)",
+        bool(_doc.get("start")),
         f"call={mock_path.write_text.call_args}",
     )
 
