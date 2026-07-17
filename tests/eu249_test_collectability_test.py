@@ -347,7 +347,11 @@ _PASS_JSON = ('```json\n{"verdict":"PASS","spec_conformance":{"met":true,"gaps":
              '"quality":{"issues":[]},"required_changes":[],"summary":"looks fine"}\n```')
 
 
-async def _fake_run_agent(prompt, options, tag="", cfg=None, routing_tier=None):
+# EU-258: widened to match the real agent.run_agent_with_fallback signature, which has always
+# accepted ticket_id/pass_number — the reviewer call site now passes them (stub drift, not a
+# contract change: production behaviour here is unchanged).
+async def _fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None,
+                          cfg=None, routing_tier=None):
     return _RR(_PASS_JSON)
 
 

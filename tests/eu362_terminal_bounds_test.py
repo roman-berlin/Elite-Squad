@@ -53,6 +53,10 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp), base_branch=
                              protected_branch="MAIN", backlog_backend="none")],
              audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
 cfg.detected_auth = lambda: "test"
+# /api/terminal runs in Path(cfg.config_path).parent (server.py:615) and EU-187 confines every path
+# operand to it — point it at the tmpdir so this harness's large-output fixture never lands in the
+# repo tree (and so `cat <fixture>` resolves at all).
+cfg.config_path = str(tmp / "config.yaml")
 client = server.create_app(cfg).test_client()
 
 CAP = 65536
@@ -65,12 +69,23 @@ CAP = 65536
 # peak (communicate() materialises the whole thing as one str before the cap is applied); the
 # capped reader never holds more than the cap plus a chunk. The 2MB threshold sits an order of
 # magnitude away from both, so this measures the leak, not allocator noise.
+#
+# The command must be one the EU-187 allowlist actually permits: interpreters (python/bun/node/sh)
+# are DELIBERATELY absent from TERMINAL_ALLOWED_COMMANDS, and `( ) *` are rejected metacharacters —
+# so the obvious `python3 -c "print('A'*N)"` is doubly-403 and would test nothing. `cat` IS
+# allowlisted and takes a cwd-confined path operand, which is the real large-output vector in
+# production (state/audit.jsonl is already ~8MB — exactly the unbounded read EU-362 is about).
 _BIG = 8 * 1024 * 1024
-tracemalloc.start()
-_before = tracemalloc.get_traced_memory()[0]
-resp = client.post("/api/terminal", data={"cmd": f"python3 -c \"print('A' * {_BIG}, end='')\""})
-_peak = tracemalloc.get_traced_memory()[1] - _before
-tracemalloc.stop()
+_big_file = tmp / "eu362_big_output.txt"
+_big_file.write_text("A" * _BIG)
+try:
+    tracemalloc.start()
+    _before = tracemalloc.get_traced_memory()[0]
+    resp = client.post("/api/terminal", data={"cmd": f"cat {_big_file.name}"})
+    _peak = tracemalloc.get_traced_memory()[1] - _before
+    tracemalloc.stop()
+finally:
+    _big_file.unlink(missing_ok=True)
 
 chk("large output: HTTP 200", resp.status_code == 200, f"status={resp.status_code}")
 j = resp.get_json() or {}
@@ -120,10 +135,13 @@ r = client.post("/api/terminal", data={"cmd": ""})
 chk("empty cmd: HTTP 400 (EU-149 contract)", r.status_code == 400, f"status={r.status_code}")
 r = client.post("/api/terminal", data={"cmd": "echo bad\nrm -rf /"})
 chk("newline in cmd: HTTP 400 (EU-149 contract)", r.status_code == 400, f"status={r.status_code}")
-r = client.post("/api/terminal", data={"cmd": "echo out; echo err 1>&2"})
+# stderr folding, driven through the EU-187 allowlist: `echo out; echo err 1>&2` is rejected outright
+# (`; & >` are metacharacters), so provoke real stderr with an allowlisted command instead — a `cat`
+# of a missing file writes ONLY to stderr, so seeing it in `output` proves the fold.
+r = client.post("/api/terminal", data={"cmd": "cat eu362_definitely_missing.txt"})
+_out = (r.get_json() or {}).get("output", "")
 chk("stderr is still folded into the returned output (EU-149 contract)",
-    "out" in (r.get_json() or {}).get("output", "") and "err" in (r.get_json() or {}).get("output", ""),
-    str(r.get_json()))
+    "No such file" in _out or "cat:" in _out, str(r.get_json())[:160])
 
 print("\n============ EU-362 TERMINAL RESOURCE-BOUNDS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)

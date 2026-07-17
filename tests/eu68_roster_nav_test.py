@@ -106,10 +106,20 @@ chk('Roster is a top-level class="btn" element (not hidden inside the Reports dr
 
 # The Reports <details> sub-menu must NOT be the ONLY place the link appears:
 # verify the first occurrence has class="btn" (top-level), not a plain <a> (dropdown-only).
-first_occurrence_is_toplevel = bar.find(top_btn_markup) < bar.find('<a href="/roster-doc"')
+#
+# EU-289 (2026-07-17) removed the duplicate "Unit roster" anchor from the Reports dropdown, which
+# exposed a bug in this check: it compared raw .find() results, and a MISSING dropdown anchor
+# returns -1, so `900 < -1` went False — i.e. it only passed while the duplicate it was meant to
+# tolerate still existed. No-dropdown is the strongest form of EU-68's "one click, not buried in a
+# sub-menu" AC, so treat absent as a pass and only fail when a dropdown anchor genuinely precedes
+# the top-level button.
+_top_at = bar.find(top_btn_markup)
+_drop_at = bar.find('<a href="/roster-doc"')
+first_occurrence_is_toplevel = _top_at != -1 and (_drop_at == -1 or _top_at < _drop_at)
 chk("First occurrence of roster-doc is the top-level btn, not the dropdown anchor",
     first_occurrence_is_toplevel,
-    "roster-doc first occurrence is inside the dropdown, not in the top bar")
+    f"roster-doc first occurrence is inside the dropdown, not in the top bar "
+    f"(top={_top_at}, dropdown={_drop_at})")
 
 chk('Roster button carries the descriptive title attribute ("Officers")',
     "Officers" in bar,
