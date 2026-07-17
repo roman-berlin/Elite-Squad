@@ -110,11 +110,12 @@ def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
     * a tally line present and ``k < n`` → FAIL, even if the harness exited 0 (the soft-tally bug:
       ~28 harnesses print ``RESULT: … FAIL`` but never ``sys.exit(1)``);
     * a tally line present and ``k == n`` → pass iff the exit code is also 0;
-    * no tally line at all, but a pytest ``N failed`` summary line is present → FAIL regardless of
-      exit code (EU-244: the pytest-style harnesses' ``__main__`` blocks now do
-      ``sys.exit(pytest.main(...))``, but this is defense-in-depth for the whole class — a harness
-      that regresses back to a bare ``pytest.main(...)`` call, or any future pytest harness that
-      forgets ``sys.exit``, still can't sail through on the always-0 exit code);
+    * no tally line at all, but a pytest ``N failed`` **or** ``N error(s) in <float>s`` summary line
+      is present → FAIL regardless of exit code (EU-244: the pytest-style harnesses' ``__main__``
+      blocks now do ``sys.exit(pytest.main(...))``, but this is defense-in-depth for the whole class
+      — a harness that regresses back to a bare ``pytest.main(...)`` call, or any future pytest
+      harness that forgets ``sys.exit``, still can't sail through on the always-0 exit code; EU-373
+      added the error term, which is what a collection/import failure reports *instead of* "failed");
     * no tally line and no pytest failure summary → trust the exit code unchanged (the assert-based
       harnesses raise on failure, so a 0 exit is an honest pass — failing them on "no count" would
       be a false positive).
@@ -131,9 +132,19 @@ def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
         # A pytest summary line reads "1 failed, 7 passed in 0.42s"; only a NON-ZERO failed count
         # is a red run. Requiring >0 is what keeps a benign "0 failed" tally (e.g. eu195's custom
         # "Results: 4 passed, 0 failed") from being misread as a failure.
+        #
+        # EU-373: "failed" alone misses half the class. A pytest COLLECTION/import error never
+        # prints "failed" — verified 2026-07-17 against this repo's venv, a bad import prints only
+        # "=== 1 error in 0.03s ===" — so a harness that lost its sys.exit would sail through GREEN
+        # on the very error that means none of its checks ran at all. The error term is ANCHORED to
+        # pytest's summary shape ("N error(s) in <float>s") rather than a bare "(\d+) error": the
+        # failed probe is unanchored and only survives on its >0 guard, while harness prose about
+        # error handling ("3 error responses") would false-red an unanchored error term.
         pf = re.search(r"(\d+) failed", stdout)
-        if pf and int(pf.group(1)) > 0:
-            reason = f"pytest FAIL: {pf.group(0)} (harness exited {returncode})"
+        pe = re.search(r"(\d+) errors? in [\d.]+s", stdout)
+        hit = pf if (pf and int(pf.group(1)) > 0) else (pe if (pe and int(pe.group(1)) > 0) else None)
+        if hit:
+            reason = f"pytest FAIL: {hit.group(0)} (harness exited {returncode})"
             return False, 0, line, reason
         return returncode == 0, 0, line, ""          # no self-tally → judge on the exit code alone
     k, n = count

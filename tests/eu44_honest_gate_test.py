@@ -61,6 +61,33 @@ chk("...and the real count is still summed", checks(SHADOW, 0) == 2)
 # ---- 8) degenerate 0/0 tally is k==n, not a failure ----
 chk("0/0 passed is not treated as a failure", ok("  0/0 passed\n", 0) is True)
 
+# ---- 9) the pytest-summary branch (EU-244 defense-in-depth) — previously UNPINNED ----
+# EU-373: the branch only probed "N failed". A pytest COLLECTION/import error prints no "failed" at
+# all — verified 2026-07-17 against the repo venv's pytest, a bad import yields exactly
+# "=== 1 error in 0.03s ===" (+ "Interrupted: 1 error during collection") and exit 2 — so _verdict
+# returned GREEN on it at rc=0. Harmless today (every pytest harness does sys.exit(pytest.main(...))
+# so the non-zero rc catches it), but the branch exists precisely for a harness that loses that
+# sys.exit, and for that class it was blind to the entire error half.
+PYTEST_ERR = ("==================== ERRORS ====================\n"
+              "ERROR broken_test.py\n"
+              "!!!!!! Interrupted: 1 error during collection !!!!!!\n"
+              "=============================== 1 error in 0.03s ===============================\n")
+chk("pytest collection error (no 'failed' line) with a lying exit 0 is FAILED", ok(PYTEST_ERR, 0) is False)
+chk("...and the reason names the error summary so the operator sees why", "1 error" in reason(PYTEST_ERR, 0))
+chk("pytest collection error with pytest's real exit 2 is FAILED", ok(PYTEST_ERR, 2) is False)
+
+PYTEST_FAILED = "==================== 1 failed, 7 passed in 0.42s ====================\n"
+chk("pytest 'N failed' summary with a lying exit 0 is FAILED", ok(PYTEST_FAILED, 0) is False)
+chk("...and the reason names the failed count", "1 failed" in reason(PYTEST_FAILED, 0))
+
+# No false positives: the >0 guard and the summary anchoring must both hold. A harness printing its
+# own "0 failed" tally (eu195) or narrating errors in prose is NOT a pytest red run.
+chk("a benign '0 failed' custom tally still passes", ok("Results: 4 passed, 0 failed\n", 0) is True)
+chk("a harness narrating '3 error responses' in prose is not misread as a pytest error summary",
+    ok("  [PASS] classifier handles 3 error responses gracefully\n", 0) is True)
+chk("a '0 errors in 0.01s' summary is not a failure (the >0 guard)",
+    ok("=========== 0 errors in 0.01s ===========\n", 0) is True)
+
 print("\n=============== EU-44 HONEST-GATE (run_all) ===============")
 passed = sum(1 for _, c, _ in results if c)
 for n, c, det in results:

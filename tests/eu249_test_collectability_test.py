@@ -241,6 +241,66 @@ finally:
 chk("gate AC3: a diff with no added/renamed test files never runs vitest (0 shell-outs) and passes",
     r5.passed and _calls["n"] == 0, f"calls={_calls['n']}, report={r5.report}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 4b. EU-263: a test file with NO owning apps/<x> must never be run from the monorepo root
+# ══════════════════════════════════════════════════════════════════════════════
+# The old grouping (`by_root.setdefault(_owning_app_root(f) or "", [])`) filed an unowned path under
+# "" and ran `bunx vitest run <path>` with cwd=repo_root. The armed target (automatixy) has NO root
+# vitest config and no root vitest dep, yet ships 8 test files outside apps/ — packages/
+# shared-consent/src/consent-hash.test.ts, scripts/ci/postmerge-coverage.test.ts, and 6 DENO tests
+# under supabase/functions/*/index.test.ts (`deno test --allow-env`, not vitest at all). Adding any
+# of them in a diff would have spuriously RED-ed the gate on a file vitest was never meant to
+# collect. They are skipped instead — and the skip is REPORTED, not silent.
+_shells: list[tuple[str, str]] = []
+
+
+def _rc_stub_record(app_, commands, cwd=None):
+    _shells.append((" ".join(commands), str(cwd)))
+    return GateResult(passed=True, report="vitest ok")
+
+
+for _unowned in ("packages/shared-consent/src/consent-hash.test.ts",
+                 "supabase/functions/delete-account/index.test.ts",
+                 "scripts/ci/postmerge-coverage.test.ts"):
+    _shells.clear()
+    try:
+        gate_mod.run_commands = _rc_stub_record
+        _r = gate_mod.test_collectability_gate(armed, [_unowned], _added_diff(_unowned))
+    finally:
+        gate_mod.run_commands = _orig_rc
+    chk(f"EU-263: an added test file with no owning apps/<x> never shells out ({_unowned})",
+        _r.passed and len(_shells) == 0, f"passed={_r.passed}, shells={_shells}")
+    chk(f"EU-263: ...and the skip is named in the report, not silent ({_unowned})",
+        _unowned in _r.report, _r.report)
+
+# A mixed diff still runs the apps/<x>-owned half — exactly one shell-out, cwd'd into the OWNING app
+# (never repo_root) — so the guard skips only the unowned file, it doesn't disarm the gate.
+_shells.clear()
+_MIXED_UNOWNED = "supabase/functions/delete-account/index.test.ts"
+try:
+    gate_mod.run_commands = _rc_stub_record
+    _rm = gate_mod.test_collectability_gate(armed, [GOOD_PATH, _MIXED_UNOWNED],
+                                            _added_diff(GOOD_PATH) + _added_diff(_MIXED_UNOWNED))
+finally:
+    gate_mod.run_commands = _orig_rc
+chk("EU-263: a mixed diff still runs the apps/<x>-owned file — exactly 1 shell-out",
+    _rm.passed and len(_shells) == 1, f"passed={_rm.passed}, shells={_shells}")
+chk("EU-263: ...that shell-out is cwd'd into the owning app, never the monorepo root",
+    len(_shells) == 1 and _shells[0][1] == os.path.join(str(REPO), "apps/zeltivo-crm"), str(_shells))
+chk("EU-263: ...and the unowned file is still reported as skipped",
+    _MIXED_UNOWNED in _rm.report, _rm.report)
+
+# Belt-and-braces: run_scoped_vitest itself must not re-acquire cwd=repo_root for an unowned path,
+# even if a future caller forgets to filter.
+_shells.clear()
+try:
+    gate_mod.run_commands = _rc_stub_record
+    _rd = gate_mod.run_scoped_vitest(armed, ["supabase/functions/delete-account/index.test.ts"], str(REPO))
+finally:
+    gate_mod.run_commands = _orig_rc
+chk("EU-263: run_scoped_vitest never runs an unowned path from the monorepo root (0 shell-outs)",
+    len(_shells) == 0, str(_shells))
+
 # AC4: the gate is a per-app opt-in — an UNARMED app (e.g. the EU python gate) never triggers ANY
 # check, even on a diff that would otherwise fail collectability.
 _calls["n"] = 0

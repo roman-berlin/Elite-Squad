@@ -631,19 +631,31 @@ def run_scoped_vitest(app: AppConfig, test_files: list[str], repo_root: str) -> 
     """Run ONLY the given added test files via ``bunx vitest run`` in single-run mode (AUTO-57
     lesson: vitest, not a bare ``bun test``), grouped and cwd'd by owning app — diff-scoped so it is
     immune to pre-existing full-suite failures elsewhere in the app (AUTO-122's 22 zeltivo-crm
-    failures). Reuses ``run_commands`` for the shared timeout / EU-146 process-group cleanup."""
+    failures). Reuses ``run_commands`` for the shared timeout / EU-146 process-group cleanup.
+
+    Only files under an ``apps/<x>`` root are run; an unowned path is skipped, never run from the
+    monorepo root (EU-263)."""
     by_root: dict[str, list[str]] = {}
     for f in test_files:
-        by_root.setdefault(_owning_app_root(f) or "", []).append(f)
+        root = _owning_app_root(f)
+        if root is None:
+            # EU-263: a path with no owning apps/<x> has no app to cwd into and no vitest config to
+            # run against. The old grouping filed it under "" and fell back to cwd=repo_root, which
+            # for the armed target (automatixy) has neither a root vitest config nor a root vitest
+            # dep — so adding any of its 8 out-of-apps/ test files (packages/shared-consent/…,
+            # scripts/ci/…, and 6 DENO tests under supabase/functions/*/index.test.ts that vitest
+            # was never meant to collect) would have spuriously RED-ed the gate. The caller filters
+            # and reports these; this guard is what makes the repo_root fallback unreachable.
+            continue
+        by_root.setdefault(root, []).append(f)
     failures: list[str] = []
     for root, files in by_root.items():
-        rels = [f[len(root) + 1:] if root and f.startswith(root + "/") else f for f in files]
+        rels = [f[len(root) + 1:] if f.startswith(root + "/") else f for f in files]
         cmd = ("bunx vitest run " + " ".join(shlex.quote(r) for r in rels)
               + " --pool=forks --poolOptions.forks.maxForks=2")
-        cwd = os.path.join(repo_root, root) if root else repo_root
-        res = run_commands(app, [cmd], cwd=cwd)
+        res = run_commands(app, [cmd], cwd=os.path.join(repo_root, root))
         if not res.passed:
-            failures.append(f"[{root or '.'}] scoped vitest FAILED\n{res.report}")
+            failures.append(f"[{root}] scoped vitest FAILED\n{res.report}")
     if failures:
         return GateResult(passed=False, report="\n\n".join(failures))
     return GateResult(passed=True, report="scoped vitest run passed")
@@ -665,7 +677,19 @@ def test_collectability_gate(app: AppConfig, changed_paths: list[str], diff: str
     if problems:
         return GateResult(passed=False, report="\n".join(f"  · {p}" for p in problems))
     collectable = [f for f in test_files if not phantom_nested_test_paths([f])]
-    return run_scoped_vitest(app, collectable, repo_root)
+    # EU-263: only apps/<x>-owned files are runnable — the scoped run cwd's into the owning app, and
+    # an unowned path has no config there to run against (see run_scoped_vitest). Skipping is the
+    # honest outcome, but it is REPORTED rather than silent: a Deno/supabase test quietly never
+    # running is the same invisibility class this gate exists to catch.
+    runnable = [f for f in collectable if _owning_app_root(f) is not None]
+    skipped = [f for f in collectable if _owning_app_root(f) is None]
+    res = run_scoped_vitest(app, runnable, repo_root)
+    if not skipped:
+        return res
+    note = ("not run by the scoped vitest — no owning 'apps/<x>', so no vitest config to run "
+            "against (check this file's own runner):\n"
+            + "\n".join(f"  · {s}" for s in skipped))
+    return GateResult(passed=res.passed, report=f"{res.report}\n{note}")
 
 
 def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:
