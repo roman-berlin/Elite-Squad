@@ -255,6 +255,15 @@ class Config:
     # can't recur. Set False to fall back to the conservative "build anyway".
     autoclose_already_landed: bool = True
 
+    # EU-375: the fallback for the case above when there is NO landed-code evidence — the Planner
+    # says CLOSE/ANSWER/REFILE but nothing proves the work already shipped. Rather than build it
+    # anyway (AUTO-57, 2026-07-16: a correct CLOSE verdict still burned 1.5M tokens into the 60-min
+    # wall clock), park it with the Planner's reason for the Commander. Never closes anything — the
+    # evidence-keyed close above owns that; this only declines to spend a build on a ticket the
+    # Planner judged isn't work. Fires once per ticket, so /unblock is an unambiguous "build it".
+    # Set False to restore the pre-EU-375 "build anyway".
+    planner_verdict_park: bool = True
+
     # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
     # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a
     # recurring failure carries its known fix instead of the Builder rediscovering it. Reuses the

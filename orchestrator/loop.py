@@ -937,6 +937,58 @@ def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
     return set()
 
 
+def _planner_verdict_parked_before(cfg: Config, ticket_id: str) -> bool:
+    """True if this ticket was ALREADY parked once on a Planner non-BUILD verdict.
+
+    The park (below) would otherwise cycle forever: the Commander /unblocks, the Planner re-runs,
+    re-verdicts CLOSE, and parks again. A prior park means he has seen the Planner's reason and
+    re-queued anyway — an explicit "build it". Deliberately UNBOUNDED (no time window): unlike
+    EU-358's no_changes life-sentence, this guard fails toward BUILDING (today's behaviour), so a
+    stale hit can only cost a build, never strand a real ticket.
+    """
+    try:
+        import json
+        from . import dashboard as _D
+        for line in _D.audit_lines(cfg.audit_path):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("event") == "planner_verdict_park" and e.get("ticket_id") == ticket_id:
+                return True
+    except Exception:  # noqa: BLE001 — an unreadable audit must fail open (build), never strand
+        pass
+    return False
+
+
+def _planner_verdict_question(ticket_id: str, verdict: str, reason: str) -> str:
+    """The Commander-facing ask for a parked Planner verdict — plain language, concrete options.
+
+    The reason is the Planner's own words, so it can carry leaked monologue ("## ANALYSIS",
+    "Looking at the…"). decisions.add REJECTS such a question (returns None), which would drop the
+    park and fall through to the build this exists to prevent — so strip those shapes here rather
+    than lose the park.
+    """
+    # The reason is rendered as ONE line prefixed by "The Planner's reason:", so the validator's
+    # line-START openers ("Looking at the…", "I need to…") are already defused by the collapse and
+    # must NOT be excised — dropping those lines would throw away the substance (the commit sha that
+    # justifies the verdict). Only the two markers it rejects ANYWHERE need removing.
+    text = " ".join((reason or "").split())     # collapse to one line: no interior line-starts left
+    text = text.replace("#", "")                # no markdown headers; also defuses the '## ANALYSIS' marker
+    text = re.sub(r"(?i)reality check on\b", "", text).strip()
+    why = text[:500] or "(the Planner gave no reason)"
+    return (
+        f"{ticket_id} was not built: the Planner reviewed it and judged it {verdict} — not work to "
+        f"build. Nothing was closed or changed; it is parked for your call.\n\n"
+        f"The Planner's reason: {why}\n\n"
+        f"Your options:\n"
+        f"• Agree — close {ticket_id} on the board (recommended if the reason above checks out).\n"
+        f"• Disagree — reply /unblock {ticket_id} and the unit builds it next cycle, no questions "
+        f"asked (this ask fires once per ticket, so it will not park again).\n"
+        f"• Re-scope — edit the ticket description, then /unblock {ticket_id}."
+    )
+
+
 def _changes_sig(changes: list[str]) -> str:
     """A stable fingerprint of a review's required changes, so two passes that get the SAME blocking
     feedback can be detected as 'stuck' (the build isn't addressing it) and escalated instead of burning
@@ -1229,8 +1281,41 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                           flush=True)
                     return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name,
                                                  branch, notes=f"already landed — closed to QA: {_ev}"))
-                print(f"  planner · verdict {_pres.verdict} — building anyway (conservative; verdict "
-                      "routing is a guarded follow-up)", flush=True)
+                # No provable code evidence — but the Planner still says this isn't work to build.
+                # Building anyway is what burned AUTO-57 (2026-07-16: correct CLOSE verdict at
+                # 16:57, built regardless, 1.5M tokens into the 60-min wall-clock cap → errored).
+                # So PARK it for the Commander instead: one cheap Planner call, not a whole build.
+                # Deliberately NOT an auto-close — closing on verdict alone with no code evidence is
+                # the senior_pm mistake §2 undid; EU-225's evidence-keyed close above still owns
+                # that. Fires ONCE per ticket (see _planner_verdict_parked_before) so a /unblock is
+                # an unambiguous "build it" and can't ping-pong. The Planner is prompted to be
+                # conservative here ("when in doubt, BUILD") so a non-BUILD verdict is high-signal.
+                _park_ok = (getattr(cfg, "planner_verdict_park", True)
+                            and _pres.verdict in ("CLOSE", "ANSWER", "REFILE")
+                            and not ticket.ephemeral and not cfg.dry_run
+                            and not _planner_verdict_parked_before(cfg, ticket.id))
+                if _park_ok:
+                    _q = _planner_verdict_question(ticket.id, _pres.verdict, _pres.answer or _pres.approach)
+                    _entry = None
+                    try:
+                        _entry = decisions.add(cfg, ticket, app.name, _q)
+                    except Exception as _exc:  # noqa: BLE001 — a park failure falls through to build
+                        print(f"  · planner-verdict park failed ({_exc}) — building instead.", flush=True)
+                    if _entry:
+                        audit.record("planner_verdict_park", ticket_id=ticket.id,
+                                     verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
+                        _notify(cfg, f"⏸️ {ticket.id} — the Planner says {_pres.verdict}, not work to "
+                                     f"build. Parked for your call (nothing closed).\n\n"
+                                     + decisions.reply_hint(ticket.id))
+                        print(f"  ⏸️ {ticket.id}: Planner {_pres.verdict} + no landed-code evidence "
+                              "→ parked for the Commander, not built.", flush=True)
+                        return _resolve(TicketReport(
+                            ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                            notes=f"Planner verdict {_pres.verdict} — parked for the Commander"))
+                    # decisions.add rejected the ask (or raised) → fall through and build, which is
+                    # the pre-EU-375 behaviour: never silently drop the ticket.
+                print(f"  planner · verdict {_pres.verdict} — building anyway (conservative; "
+                      "not parked)", flush=True)
             else:
                 print(f"  planner · BUILD · {len(_pres.testable_ac)} testable AC · "
                       f"{len(_pres.in_scope_files)} in-scope files", flush=True)
