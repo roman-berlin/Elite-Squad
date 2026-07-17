@@ -32,6 +32,11 @@ _APPROVAL_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# EU-372: how long a two-phase claim (resolve(claim=True) → commit()) may sit before we assume the
+# claiming process died and re-offer the decision. Generous by design: the real window is seconds
+# (a Jira comment round-trip + a thread spawn), so 15 min can only elapse if nobody is coming back.
+_CLAIM_TTL_SEC = 900.0
+
 
 def _question_fingerprint(question: str) -> str:
     """Short SHA-1 of the normalised question text — used as the dedup key (EU-89).
@@ -280,28 +285,80 @@ def reply_hint(ticket_id: str | None = None) -> str:
     return "↩️ Reply  TICKET-ID: <your decision>  to target one — or reply plainly for the oldest pending."
 
 
-def resolve(cfg, answer: str, ticket_id: str | None = None, *, comment: bool = True) -> dict | None:
+def _reap_stale_claims(items: list[dict]) -> list[dict]:
+    """Un-claim in-flight decisions whose claimer is long gone (EU-372).
+
+    A claim (see ``resolve(claim=True)``) is only meaningful while the process that took it is alive
+    to commit it. If that process dies mid-resume, the claim would otherwise tombstone the entry
+    forever: never committed, never offered to another reply. The claim window is a couple of seconds
+    (``_comment_answer``'s Jira round-trip, then the thread spawn), so anything older than the TTL by
+    definition belongs to a dead process and is safe to re-offer. Entries with a missing/garbage
+    ``claimed_at`` reap too — a claim we can't date can't be trusted to be live.
+
+    Time-based on purpose: the unit's hosts (VPS + Mac) share this store via periodic git sync, so a
+    claiming pid is not meaningfully checkable from here — and pid-liveness probes are the known
+    flaky class this repo has been digging out of (EU-355)."""
+    now = time.time()
+    for e in items:
+        if not e.get("in_flight"):
+            continue
+        try:
+            claimed_at = float(e.get("claimed_at") or 0)
+        except (TypeError, ValueError):
+            claimed_at = 0
+        if now - claimed_at > _CLAIM_TTL_SEC:
+            e.pop("in_flight", None)
+            e.pop("claimed_at", None)
+    return items
+
+
+def resolve(cfg, answer: str, ticket_id: str | None = None, *, comment: bool = True,
+            claim: bool = False) -> dict | None:
     """Pop and return the matching pending decision (by id, else oldest).
 
     EU-61: by default also posts the answer back to the tracker as a comment (the Commander answered in
     Telegram → echo the decision onto the Jira ticket). Pass ``comment=False`` when the answer ALREADY
-    came from a Jira comment (the autopilot's Jira-native resume), so it isn't echoed back."""
+    came from a Jira comment (the autopilot's Jira-native resume), so it isn't echoed back.
+
+    EU-372: ``claim=True`` makes the removal two-phase — the entry is MARKED in-flight and left in the
+    store, and the caller must :func:`commit` it once the work it guards has durably started. The
+    default (``claim=False``) still pops in one shot, because the other callers have no run to wait
+    for and depend on the one-shot pop: the Jira-native resume (``loop._resume_from_jira_answer``)
+    and the cockpit's dismiss (``server.needs_resolve``) — a contract also pinned by
+    ``eu48_state_writers_concurrency_test`` ("resolve() drains the store"). Only ``handle_reply``,
+    the one path with a real gap between the pop and the run starting, opts in.
+
+    Either way the entry is selected under a single lock and an already-claimed entry is never
+    offered, so a decision is still resolved exactly once (EU-48)."""
     popped: list[dict] = []
 
     def _mutate(items):
-        items = list(items or [])
+        items = _reap_stale_claims(list(items or []))
         if not items:
             return items
-        idx = 0
+        # An in-flight entry is being resumed by someone else right now — not on offer.
+        free = [(i, it) for i, it in enumerate(items) if not it.get("in_flight")]
+        if not free:
+            return items
         if ticket_id:
-            idx = next((i for i, it in enumerate(items)
-                        if it["id"].lower() == ticket_id.lower()), None)
+            idx = next((i for i, it in free if it["id"].lower() == ticket_id.lower()), None)
             if idx is None:
                 return items   # no match — leave the store untouched
-        popped.append(items.pop(idx))
+        else:
+            idx = free[0][0]   # oldest FREE entry
+        if claim:
+            # Two-phase: hand the caller a copy but keep the entry until commit() confirms the
+            # resume actually started. A crash in between re-surfaces the question instead of
+            # stranding the ticket parked with nothing pending.
+            entry = items[idx]
+            entry["in_flight"] = True
+            entry["claimed_at"] = time.time()
+            popped.append(dict(entry))
+        else:
+            popped.append(items.pop(idx))
         return items
 
-    # Find-and-remove in one locked read-modify-write so a concurrent add/resolve can't lose a
+    # Find-and-claim/remove in one locked read-modify-write so a concurrent add/resolve can't lose a
     # decision or hand the same one to two replies.
     locking.locked_rmw(_store(cfg), _mutate, default=[])
     if not popped:
@@ -311,6 +368,18 @@ def resolve(cfg, answer: str, ticket_id: str | None = None, *, comment: bool = T
     if comment:
         _comment_answer(cfg, it, answer)
     return it
+
+
+def commit(cfg, entry_id: str) -> None:
+    """Finish a ``resolve(claim=True)`` — drop the claimed entry for good (EU-372).
+
+    Call this only once the work the decision guards has durably started; until then the claim is
+    what makes a crash recoverable. Idempotent: a re-commit (or an entry already ghost-cleared by
+    ``autopilot._clear_ghost_decisions``) is a no-op."""
+    def _mutate(items):
+        return [e for e in (items or []) if e.get("id") != entry_id]
+
+    locking.locked_rmw(_store(cfg), _mutate, default=[])
 
 
 def to_worklist(cfg, resolved: dict):
@@ -407,9 +476,16 @@ def _file_out_of_scope_resume(cfg, resolved: dict) -> None:
 
 def handle_reply(cfg, audit, text: str) -> bool:
     """Resolve a pending decision from a reply and re-run the ticket. Returns True
-    if a ticket was resumed."""
+    if a ticket was resumed.
+
+    EU-372: the decision is CLAIMED, not popped, until the resume has actually started — and it is
+    committed only on the paths that got the work moving. Before this, resolve() removed the entry
+    up front and a crash anywhere in the gap below (notably ``_comment_answer``'s Jira round-trip
+    inside resolve, and the loop import in ``_run_bg``) left the ticket parked on 'Blocked' with no
+    pending entry: the question vanished from 'Needs you' and no run was ever coming. Leaving the
+    claim in place on the failure paths means the reaper re-offers the question instead."""
     ticket_id, answer = parse_reply(text)
-    resolved = resolve(cfg, answer, ticket_id)
+    resolved = resolve(cfg, answer, ticket_id, claim=True)
     if not resolved:
         return False
     notify.send(f"▶️ Resuming {resolved['id']} with your decision: {answer}")
@@ -419,11 +495,13 @@ def handle_reply(cfg, audit, text: str) -> bool:
     # findings from the stored report and return without queuing a rebuild.
     if str(resolved.get("id", "")).endswith("#out-of-scope"):
         _file_out_of_scope_resume(cfg, resolved)
+        commit(cfg, resolved["id"])   # the filing is the work — it is done
         return True
     worklist = to_worklist(cfg, resolved)
     # Run the resumed build in a background thread so we never block the Telegram
     # poll thread — /unblock and other replies keep being processed meanwhile.
     _run_bg(cfg, audit, worklist)
+    commit(cfg, resolved["id"])   # the run thread is live — the decision is durably consumed
     return True
 
 
@@ -645,7 +723,17 @@ def poll_once(cfg, audit) -> int:
     message -> advance the offset) is run under the cross-thread + cross-process lock keyed on
     the offset file (``locking.locked_call``), so two pollers racing this window — e.g. a
     leaked second poller thread, or two processes on a misconfigured host — can never both
-    fetch the same update batch and each run route_message's side effects on it."""
+    fetch the same update batch and each run route_message's side effects on it.
+
+    EU-372: the offset advances only AFTER an update has been routed. Telegram's getUpdates is a
+    single-consumer queue — acking past an update means it is never redelivered — so advancing
+    first made any crash inside route_message (a SIGKILL, the 5h plan-limit stop, a host reboot)
+    silently eat the Commander's message. Acking after routing flips the failure mode to
+    at-least-once: a killed process leaves the update queued and Telegram redelivers it on
+    restart. The re-route window is one file write wide, and a redelivered reply whose decision
+    already resolved finds nothing pending (resolve() is exactly-once under the store lock) and
+    falls through to the CTO chat — a benign duplicate, where the old behaviour was a silent,
+    permanent loss."""
     if not notify.configured():
         return 0
 
@@ -654,15 +742,29 @@ def poll_once(cfg, audit) -> int:
         updates = notify.get_updates(offset=(last + 1) if last is not None else None, timeout=0)
         handled = 0
         for uid, text, origin in notify.incoming_texts(updates, cfg):
+            if origin == "ops":
+                try:
+                    if route_message(cfg, audit, text):
+                        handled += 1
+                except Exception as exc:  # noqa: BLE001
+                    # A message that fails DETERMINISTICALLY must not wedge the queue behind it:
+                    # poll_loop swallows and retries every 5s, so leaving this update un-acked
+                    # would re-explode on it forever and no later message would ever be seen.
+                    # Report it and consume it. A process CRASH takes the other path — it never
+                    # reaches the ack below, so Telegram redelivers (which is the EU-372 fix).
+                    try:
+                        if audit is not None:
+                            audit.record("telegram_route_failed", update_id=uid,
+                                         text=(text or "")[:300], error=str(exc))
+                    except Exception:  # noqa: BLE001 - audit failure must not break the poller
+                        pass
+                    notify.send(f"⚠️ couldn't handle your message ({exc}) — it was dropped, "
+                                "please re-send it.")
+            # else: defensive only — incoming_texts emits nothing but "ops" since the EU-65 liaison
+            # channel was DELETED (Phase-2 §2, 2026-07-06). Anything else is dropped, never routed,
+            # but is still acked so it can't re-serve forever.
             if uid is not None:
                 _write_offset(cfg, uid)
-            if origin != "ops":
-                # Defensive only: incoming_texts emits nothing but "ops" since the EU-65 liaison
-                # channel was DELETED (Phase-2 §2, 2026-07-06). Anything else is dropped, never
-                # routed.
-                continue
-            if route_message(cfg, audit, text):
-                handled += 1
         return handled
 
     return locking.locked_call(_offset_file(cfg), _fetch_and_route)
