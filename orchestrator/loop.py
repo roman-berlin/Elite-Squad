@@ -70,6 +70,79 @@ def _changelog_path() -> Path:
     return Path(__file__).resolve().parent.parent / "Documentation" / "Development_Status.md"
 
 
+def _git_commit_changelog(target: Path, base: str = "dev") -> None:
+    """EU-335: best-effort commit (+ push) of the changelog append so the primary checkout doesn't
+    re-dirty on every land — that dirtiness was blocking ~/bin/general-autopull.sh's clean-tree
+    fast-forward guard (git status --porcelain never came back empty), leaving the cockpit serving
+    stale code all night. Mirrors sync.py's ``_git`` helper: GIT_TERMINAL_PROMPT=0 so a push with no
+    cached credentials fails fast instead of hanging, capture_output, a timeout, and every failure
+    swallowed rather than raised. No-ops cleanly when ``target`` isn't inside a real git work tree
+    (e.g. the eu41 tests' bare tmp paths) so those tests keep passing unchanged.
+
+    ITERATION 2 — DIVERGENCE SAFETY (the whole reason iteration 1 was rejected): committing the
+    append unconditionally on whatever the local tip happened to be created a LOCAL commit on a stale
+    base, which diverged from origin/<base> and permanently blocked the very ff-only pull this fix
+    exists to unblock (the land then failed to merge cleanly). So we now:
+      1) only act on the ``base`` branch (never main / a feature branch / detached HEAD);
+      2) first ``git fetch`` + ``git merge --ff-only origin/<base>`` — commit ONLY if the local tip is
+         a clean fast-forward of origin (so our commit is a pure descendant, never a divergence). If
+         the ff can't happen while an origin/<base> exists, we log + no-op and leave the append
+         uncommitted rather than risk a divergent stray commit;
+      3) commit with a git identity scoped to the single invocation (``-c user.name=...``) instead of
+         writing persistent repo git config on every land."""
+    try:
+        cwd = target.parent
+
+        def _git(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+
+        probe = _git("rev-parse", "--is-inside-work-tree")
+        if probe.returncode != 0 or probe.stdout.strip() != "true":
+            return  # not a repo (arbitrary tmp path, as the eu41 tests use) -> nothing to commit
+
+        # (1) Branch guard: only ever commit/push on the base branch. On main, a feature branch, or a
+        # detached HEAD we no-op (leaving the append for the normal base-branch land to pick up).
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if branch != base:
+            print(f"  changelog commit skipped: on '{branch}', not base '{base}'", flush=True)
+            return
+
+        # (2) Sync-before-commit so our commit is a clean descendant of origin, never a divergence.
+        has_remote_base = _git("rev-parse", "--verify", "--quiet", f"origin/{base}").returncode == 0
+        fetched = _git("fetch", "origin", base, timeout=60)
+        if fetched.returncode == 0:
+            has_remote_base = _git("rev-parse", "--verify", "--quiet", f"origin/{base}").returncode == 0
+        if has_remote_base:
+            ff = _git("merge", "--ff-only", f"origin/{base}")
+            if ff.returncode != 0:
+                # Local has diverged from origin/<base>; committing here would deepen the divergence
+                # and block autopull's ff. Leave the append uncommitted — safe, recoverable.
+                print(f"  changelog commit skipped: cannot ff onto origin/{base} "
+                      f"(divergence) — {ff.stderr.strip()}", flush=True)
+                return
+        # else: no origin/<base> at all (offline / no remote configured) — nothing to diverge from,
+        # so a local commit is safe and keeps the tree clean.
+
+        _git("add", "--", str(target))
+        if _git("diff", "--cached", "--quiet").returncode == 0:
+            return  # nothing staged (e.g. path gitignored, or already committed by the ff) -> done
+        commit = _git(
+            "-c", "user.name=Elite Unit", "-c", "user.email=unit@localhost",
+            "commit", "-m", f"chore: changelog append ({target.name})",
+        )
+        if commit.returncode != 0:
+            print(f"  changelog commit skipped: {commit.stderr.strip()}", flush=True)
+            return
+        push = _git("push", "origin", base, timeout=60)
+        if push.returncode != 0:
+            print(f"  changelog push skipped: {push.stderr.strip()}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - best-effort, must never break the land
+        print(f"  changelog commit skipped: {exc}", flush=True)
+
+
 def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str | None,
                       test_url: str, *, today: str | None = None,
                       path: str | Path | None = None) -> bool:
@@ -82,7 +155,11 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
 
     The read of existing entries and the write of the rebuilt file happen INSIDE one held lock via
     ``locking.locked_text_rmw`` — two lands racing this call (two drains landing at once) must not
-    both read the same stale ``old`` list and clobber each other's append (EU-276)."""
+    both read the same stale ``old`` list and clobber each other's append (EU-276).
+
+    EU-335: the append is then best-effort git-committed (and pushed) in place, so the primary
+    checkout's tree goes back to clean immediately rather than re-dirtying and re-blocking the
+    autopull ff on the very next land."""
     if cfg.dry_run or ticket.ephemeral:
         return False
     try:
@@ -105,6 +182,7 @@ def _record_changelog(cfg: Config, ticket: Ticket, app: AppConfig, summary: str 
             return header + "\n" + "\n".join([entry, *old]) + "\n"
 
         locking.locked_text_rmw(target, _mutate, default="")
+        _git_commit_changelog(target, base=app.base_branch or "dev")
         return True
     except Exception as exc:  # noqa: BLE001 - release-hygiene logging must never break the run
         print(f"  changelog skipped: {exc}", flush=True)
