@@ -225,6 +225,23 @@ def turns_for(cfg: Config, effort: str) -> int:
     return max(base, int(base * _TURN_SCALE.get(effort, 1.0)))
 
 
+def budget_for(cfg: Config, effort: str) -> int:
+    """EU-377: the pass's task_budget (tokens of NEW content — model output + tool results read),
+    scaled by effort like turns_for. 0 disables (no budget sent).
+
+    Why this and not max_turns alone: the builder's cost is quadratic in turns (fitted over 319
+    passes: in_tok ≈ 728·N² + 26,491·N, a 36x replay multiple), and 70% of the 1,455-tok/turn
+    context growth is TOOL RESULTS — full suite stdout read in, then re-sent every remaining
+    turn. A turn cap can't see that; a task budget counts exactly it. The server shows the model
+    a countdown, so it paces itself and lands gracefully instead of grinding to the turn ceiling
+    and dying (ceiling runs: 10.4% of passes, 27.7% of builder spend, 24.4% outright failures)."""
+    base = int(getattr(cfg, "builder_task_budget", 0) or 0)
+    if base <= 0:
+        return 0
+    # The SDK floor is 20,000; anything lower would be rejected.
+    return max(20_000, int(base * _TURN_SCALE.get(effort, 1.0)))
+
+
 # EU-38: prior_issues/feedback is the single biggest input-token contributor on retries — it grows
 # every iteration and is fed back verbatim. Cap it (configurable; keep the NEWEST, which is the most
 # relevant review feedback) so a deep ticket on pass 4 doesn't blow past the input-token budget.
@@ -524,6 +541,15 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         max_turns=turns_for(cfg, eff),
         effort=eff,
     )
+    # EU-377: pace the pass with an API-side task budget (tokens of NEW content — output + tool
+    # results read). The model sees a countdown and wraps up gracefully instead of grinding to the
+    # turn ceiling and dying. Anthropic-only: GLM/z.ai won't honour the beta header the SDK sends
+    # with output_config.task_budget, so a routed-GLM pass keeps today's turn-cap-only behaviour.
+    _budget = budget_for(cfg, eff)
+    if _budget:
+        from . import backends as _backends
+        if not _backends.is_glm(cfg):
+            options.task_budget = {"total": _budget}
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
     # Sonnet-cap → one-shot Opus retry for this pass (per-call, no weekly pin — see run_agent_with_fallback)

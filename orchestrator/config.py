@@ -184,6 +184,13 @@ class Config:
     builder_effort: str = "high"            # default / fallback base when sizing is off
     reviewer_effort: str = "high"
     builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
+    # EU-377: API-side task budget for a build pass — tokens of NEW content (model output + tool
+    # results read), NOT the replayed transcript. The model sees a countdown and paces itself to a
+    # graceful land instead of grinding to the turn ceiling (ceiling runs measured 2026-07-17:
+    # 10.4% of passes, 27.7% of builder spend, 24.4% of them fail outright). Effort-scaled like
+    # turns (builder.budget_for); base 70K ≈ half the ~140K of intake a 96-turn pass accumulates.
+    # 0 disables. Anthropic-only (GLM passes ignore it). SDK floor: 20,000.
+    builder_task_budget: int = 70_000
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = False  # OFF by default (2026-07-05 audit): 135/135 round-≥2 reviewer
                                             # objections were textually NEW, so bumping effort on retry (and the
