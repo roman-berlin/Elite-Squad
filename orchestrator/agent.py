@@ -339,8 +339,10 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     # (subprocess_cli.py), so blank the orchestrator-only Jira/Telegram creds in options.env — a
     # key merely ABSENT from options.env still inherits from the parent. Applied at this single
     # seam (after apply(), for both backends) rather than inside apply(), which stays a pure
-    # model/backend transform. Model auth (CLAUDE_CODE_OAUTH_TOKEN / the GLM z.ai bearer) is not
-    # sensitive by this predicate, so it passes through untouched.
+    # model/backend transform. Native model auth (CLAUDE_CODE_OAUTH_TOKEN) is not sensitive by
+    # this predicate, so it passes through untouched; the raw GLM_AUTH_TOKEN *is* stripped since
+    # EU-371(3) — harmless for GLM runs, because apply() above already read it in the parent and
+    # injected it into options.env under ANTHROPIC_AUTH_TOKEN, a key the strip never touches.
     _strip = _backends.secret_strip_overrides()
     if _strip:
         _merged_env = dict(getattr(options, "env", None) or {})

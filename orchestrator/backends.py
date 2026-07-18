@@ -180,6 +180,11 @@ SENSITIVE_KEYS: frozenset[str] = frozenset({
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "GENERAL_COCKPIT_PROMOTE",
+    # EU-371(3), 2026-07-16 total audit: the paid z.ai bearer was inherited by every officer/gate
+    # subprocess building untrusted product code (EU-255 stripped Jira/Telegram only). Safe to
+    # strip for GLM runs too — :func:`apply` reads the token in the PARENT (os.environ, untouched)
+    # and hands it to the child as ANTHROPIC_AUTH_TOKEN, a different key (see ``_glm_env``).
+    "GLM_AUTH_TOKEN",
 })
 SENSITIVE_PREFIXES: tuple[str, ...] = ("JIRA_", "TELEGRAM_")
 
