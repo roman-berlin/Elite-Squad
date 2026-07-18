@@ -590,22 +590,59 @@ class Workspace:
 
 # Server-side per-session workspace store. Keyed by an opaque session id supplied by the routes
 # (cookie / header). Guarded so concurrent requests for the same session can't corrupt the tab list.
+#
+# EU-362 — the store is BOUNDED. ``server._session_id()`` mints a fresh ``token_hex`` for any
+# request that arrives without the session cookie, so every curl / health probe / uptime monitor
+# hit of ``/`` used to add a Workspace here permanently — a slow-motion leak in a cockpit that
+# runs for days (2026-07-16 total audit, item 1). Two bounds, both enforced on every store access:
+#   TTL  — a session untouched for ``_WORKSPACE_TTL_S`` is dead (a real browser re-sends its
+#          cookie on every poll, so live sessions are re-stamped constantly);
+#   LRU  — ``_WORKSPACE_MAX`` hard-caps the dict however fast one-shot probes mint fresh ids,
+#          evicting the least-recently-touched sessions first. 256 concurrent cockpit sessions is
+#          far beyond a single-operator unit; an evicted-but-alive browser degrades gracefully —
+#          its next request rebuilds an empty workspace (or rehydrates from localStorage).
+_WORKSPACE_TTL_S = 24 * 3600
+_WORKSPACE_MAX = 256
 _workspaces: "dict[str, Workspace]" = {}
+_workspace_touch: "dict[str, float]" = {}   # session id -> last-access ts (the LRU/TTL ledger)
 _workspace_lock = threading.Lock()
+
+
+def _evict_workspaces(now: float, keep: str) -> None:
+    """Enforce the TTL + LRU bounds. Caller holds ``_workspace_lock``; ``keep`` (the session being
+    served right now) is never evicted."""
+    for sid, ts in list(_workspace_touch.items()):
+        if sid != keep and now - ts > _WORKSPACE_TTL_S:
+            _workspaces.pop(sid, None)
+            _workspace_touch.pop(sid, None)
+    if len(_workspaces) > _WORKSPACE_MAX:
+        for sid, _ts in sorted(_workspace_touch.items(), key=lambda kv: kv[1]):
+            if sid == keep:
+                continue
+            _workspaces.pop(sid, None)
+            _workspace_touch.pop(sid, None)
+            if len(_workspaces) <= _WORKSPACE_MAX:
+                break
 
 
 def workspace_for(session_id: str) -> Workspace:
     """The (lazily created) server-side workspace for ``session_id``. Same object on every call, so
-    routes mutate the live tab set in place; persists for the process lifetime of the session.
+    routes mutate the live tab set in place; persists while the session stays live (EU-362: idle
+    sessions expire after ``_WORKSPACE_TTL_S`` and the store is LRU-capped at ``_WORKSPACE_MAX``).
 
-    Thread-safety: ``_workspace_lock`` guards only this dict (the lazy-create step below); each
-    ``Workspace`` carries its own ``_lock`` for concurrent tab mutations (``add_tab``,
+    Thread-safety: ``_workspace_lock`` guards only this dict (the lazy-create/evict steps below);
+    each ``Workspace`` carries its own ``_lock`` for concurrent tab mutations (``add_tab``,
     ``remove_tab``, ``set_active``). The two locks are independent and never nested."""
     with _workspace_lock:
+        now = time.time()
+        _workspace_touch[session_id] = now
         ws = _workspaces.get(session_id)
         if ws is None:
             ws = Workspace()
             _workspaces[session_id] = ws
+        # Sweep AFTER the insert so the cap counts the incoming session too (evicting before it
+        # lands would let the store settle at cap+1); ``keep`` shields the session being served.
+        _evict_workspaces(now, keep=session_id)
         return ws
 
 
@@ -615,7 +652,10 @@ def rehydrate_workspace(session_id: str, data: dict | None) -> Workspace:
     fresh server session; the rebuilt workspace re-enforces mutual exclusion via ``from_dict``."""
     ws = Workspace.from_dict(data)
     with _workspace_lock:
+        now = time.time()
+        _workspace_touch[session_id] = now       # EU-362: the other store writer stamps too
         _workspaces[session_id] = ws
+        _evict_workspaces(now, keep=session_id)  # sweep after the insert — see workspace_for
     return ws
 
 
@@ -623,6 +663,7 @@ def reset_workspaces() -> None:
     """Drop every stored workspace — test seam / session-clear hook."""
     with _workspace_lock:
         _workspaces.clear()
+        _workspace_touch.clear()
 
 
 # --------------------------------------------------------------------------------------------------

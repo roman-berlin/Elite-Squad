@@ -62,6 +62,14 @@ ALL_PROJECTS = "*"
 # decision/approval/run is never stale for more than a moment.
 _SUMMARY_CACHE: "dict[tuple, tuple[float, dict]]" = {}
 _SUMMARY_TTL = 3.0
+# EU-362: the cache key embeds the audit signature + per-source-file mtimes, so every audit append
+# orphans ALL previously cached entries — their keys can never be looked up again — while nothing
+# evicted them: a long-lived serve process retained one dead entry per audit append per open tab
+# (2026-07-16 total audit, item 3). Bounds, enforced on every write: expired entries are purged
+# (past the TTL they can never be served), and the cache is hard-capped, dropping oldest-stamped
+# first. The cap only needs to cover the handful of (audit signature, app scope) keys live inside
+# one TTL window — one per open tab plus the "*" aggregate — so 16 is generous.
+_SUMMARY_CACHE_MAX = 16
 
 
 def _ticket_prefix(ticket_id) -> str:
@@ -126,6 +134,14 @@ def summary(cfg: Config, app_name: Optional[str] = None) -> dict:
     if hit is not None and now - hit[0] < _SUMMARY_TTL:
         return hit[1]
     result = _summary_uncached(cfg, app_name)
+    # EU-362: bound the cache on the write path. Purge entries past the TTL first (signature-pinned
+    # keys make them unreachable, not just stale), then LRU-cap what survives so a burst of audit
+    # appends can't grow the dict between purges.
+    for k in [k for k, (ts, _) in _SUMMARY_CACHE.items() if now - ts >= _SUMMARY_TTL]:
+        _SUMMARY_CACHE.pop(k, None)
+    while len(_SUMMARY_CACHE) >= _SUMMARY_CACHE_MAX:
+        oldest = min(_SUMMARY_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _SUMMARY_CACHE.pop(oldest, None)
     _SUMMARY_CACHE[key] = (now, result)
     return result
 
