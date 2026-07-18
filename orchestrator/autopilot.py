@@ -517,12 +517,25 @@ def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
         merged.update(counts)
         return merged
 
-    try:
-        locking.locked_rmw(path, _merge, default={})
+    # EU-381: ONE bounded retry before the best-effort swallow. Evidence (2026-07-17, EU-218's
+    # 10-consecutive-runs AC): eu256's AC3 union went red once in 10 full suites (~5% under maximal
+    # box load) with no locking defect — locked_rmw serialises correctly by construction — so the
+    # lost increment came from a single transient flock/open OSError being swallowed here, silently
+    # dropping the write and resetting park-after-3 progress. A transient clears in milliseconds,
+    # so one short-paused retry recovers it; a deterministic failure (e.g. corrupt JSON ->
+    # ValueError) just fails the retry too and falls back to the original best-effort contract —
+    # never an exception out of a save, so the drain can't break on bookkeeping.
+    for attempt in (0, 1):
+        try:
+            locking.locked_rmw(path, _merge, default={})
+        except (OSError, ValueError):
+            if attempt:
+                return           # both tries failed -> keep the best-effort swallow (drop the write)
+            time.sleep(0.05)     # brief pause for the transient to clear, then the one retry
+            continue
         with _error_counts_seen_lock:
             _error_counts_seen[cache_key] = dict(counts)
-    except (OSError, ValueError):
-        pass
+        return
 
 
 def _auto_clear_merged_ghosts(cfg: Config, blocked: set[str], audit: "AuditLog") -> set[str]:
