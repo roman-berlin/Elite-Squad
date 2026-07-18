@@ -28,7 +28,8 @@ from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport)
 from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
-                   gate_fingerprint, publish_base_green, run_deterministic_checks, run_gate)
+                   gate_fingerprint, publish_base_green, run_deterministic_checks, run_gate,
+                   select_gate_groups)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -210,6 +211,94 @@ def _gate_retry_feedback(cfg, app: AppConfig, ticket: Ticket, kind: str, result)
     except Exception:  # noqa: BLE001 — the tee is best-effort; the evidence above always ships
         ref = ""
     return f"{kind} failed; fix these:\n{evidence}{ref}"
+
+
+def _gate_execution_evidence(app: AppConfig, gate, changed_paths: list[str] | None = None) -> str:
+    """EU-265: machine-sourced execution evidence for the Reviewer's EU-268 execution-AC gate.
+
+    By the time the loop calls ``reviewer.review()``, ``run_gate`` has ALREADY run this pass's
+    verification suite green (a red gate bounces back to the Builder and never reaches review) —
+    yet that proof used to stay loop-side, so `_enforce_execution_gate` saw only the Builder's
+    prose and forced FAIL on every "all tests pass"-shaped AC, looping the ticket to max-passes/
+    escalation (triage 2026-07-17: the honesty gate's spec-mandated conservative '' default).
+    This renders the loop's own subprocess result — the gate verdict + the commands that ran — as
+    a short trusted string the reviewer accepts as first-class evidence.
+
+    Returns '' (NO evidence) unless a REAL gate ran and passed:
+      • a red / absent gate → '' (never reached in the loop, but the helper is defensive);
+      • a trivially-green no-op gate — ``run_gate``'s "(no gate commands configured)" /
+        ``run_commands``'s "(no commands configured)" → '' — an app with no gate must NEVER get
+        free execution evidence, or the AUTO-109 hole EU-268 closed re-opens;
+      • no resolvable commands → '' (same reasoning, stub-shaped passes included).
+    The command list mirrors run_gate's selection (EU-19): the touched components' per-app groups
+    when a monorepo mapping matched, else the repo-wide gate_commands."""
+    if gate is None or not getattr(gate, "passed", False):
+        return ""
+    report = (getattr(gate, "report", "") or "").strip()
+    if not report or report.startswith("(no "):
+        return ""
+    groups = select_gate_groups(app, changed_paths or [])
+    cmds = [c for _, cs in groups for c in cs] if groups else list(app.gate_commands or [])
+    if not cmds:
+        return ""
+    return "\n".join([f"verification gate PASSED — {report}", "commands run:"]
+                     + [f"$ {c}" for c in cmds])
+
+
+def _maybe_close_epic(backlog, ticket: Ticket, audit: AuditLog) -> None:
+    """EU-374 (EU-301 step 5): close the parent Epic when its final VERIFY child lands.
+
+    scrum.split decomposes an oversized ticket into an Epic + Task children (linked via `parent`)
+    with a mandatory last "Verify & close" child carrying the parent's AC — but nothing ever
+    transitioned the Epic itself, so auto-split Epics accumulated open forever. Called from the
+    land path right after the child's own QA/Done transition; the Epic closes only when:
+      • the landed child IS the verify child (scrum.is_verify_child — it runs LAST by design), and
+      • it has an Epic parent (jira.parent_epic_key — non-Epic parents never count), and
+      • the child snapshot actually CONTAINS the landed child (an empty/partial search result —
+        auth-blind 200, board hiccup — must never vacuously "prove" the siblings done), and
+      • every OTHER child is already Done/QA/Closed (raw status name or statusCategory=done; the
+        landed child itself is exempt — its just-written QA transition may not be visible in the
+        search snapshot yet).
+    Best-effort by contract: any error leaves the Epic open for a human and NEVER un-lands the
+    merge. No-op for backends without the Epic helpers (getattr-guarded)."""
+    try:
+        if getattr(ticket, "ephemeral", False):
+            return
+        from . import scrum as _scrum
+        if not _scrum.is_verify_child(ticket.summary, ticket.description):
+            return
+        get_parent = getattr(backlog, "parent_epic_key", None)
+        get_children = getattr(backlog, "epic_children", None)
+        close = getattr(backlog, "close_ticket", None)
+        if not (get_parent and get_children and close):
+            return
+        epic_key = get_parent(ticket.key)
+        if not epic_key:
+            return
+        children = get_children(epic_key) or []
+        if not any((c.get("key") or "") == ticket.key for c in children):
+            return
+        _done = ("qa", "done", "closed")
+        open_sibs = [c.get("key") for c in children
+                     if (c.get("key") or "") != ticket.key
+                     and not ((c.get("status") or "").strip().lower() in _done
+                              or (c.get("status_category") or "").strip().lower() == "done")]
+        if open_sibs:
+            print(f"  land · Epic {epic_key} stays open — sibling(s) not Done/QA yet: "
+                  + ", ".join(str(k) for k in open_sibs), flush=True)
+            return
+        kk = ", ".join((c.get("key") or "?") for c in children)
+        ok = close(epic_key,
+                   comment=(f"✅ All children landed ({kk}) and the verify child {ticket.id} just "
+                            "merged — closing this Epic (EU-374, auto-close on verify-child land)."),
+                   audit=audit)
+        if ok:
+            audit.record("epic_autoclosed", ticket_id=ticket.id, epic=epic_key,
+                         children=[(c.get("key") or "?") for c in children])
+            print(f"  land · Epic {epic_key} closed — all children Done/QA "
+                  f"(verify child {ticket.id} landed).", flush=True)
+    except Exception as exc:  # noqa: BLE001 — a board hiccup leaves the Epic open, never breaks a land
+        print(f"  land · epic auto-close skipped ({exc})", flush=True)
 
 
 def _already_landed(app: AppConfig, ticket_id: str) -> str | None:
@@ -1897,13 +1986,19 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         _bar(REVIEW, active=REVIEW)
         print("  review · reviewer reading the diff…", flush=True)
         diff = git.diff_against_base()
+        # EU-265: the gate above just ran this pass's REAL test suite green — hand that proof to
+        # the Reviewer's EU-268 execution-AC gate as machine evidence, so an "all tests pass" AC
+        # is satisfied by the gate that literally ran the tests instead of force-FAILing every
+        # pass on missing Builder prose. '' for a no-op gate (see _gate_execution_evidence).
+        gate_evidence = _gate_execution_evidence(app, gate, git.changed_paths())
         # EU-72: hand the Reviewer the Builder's BuildArtifact (primary context) + the pool it
         # publishes its ReviewVerdict into. EU-52: escalate the reviewer on re-review.
         # EU-197: Wrap reviewer with transcript context to capture full tool inputs + reasoning
         with _officer_transcript_context(app, ticket, "reviewer", cfg):
             review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
                                                store=store, build_artifact=store.build,
-                                               already_bounced=bounced_unverifiable)
+                                               already_bounced=bounced_unverifiable,
+                                               gate_evidence=gate_evidence)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
@@ -1918,7 +2013,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             with _officer_transcript_context(app, ticket, "reviewer", cfg):
                 review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
                                                    store=store, build_artifact=store.build,
-                                                   already_bounced=bounced_unverifiable)
+                                                   already_bounced=bounced_unverifiable,
+                                                   gate_evidence=gate_evidence)
             cost += review.cost_usd
             budget.add(review.cost_usd)
             _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry
@@ -2506,6 +2602,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # recently-merged guard in autopilot is what actually prevents the re-pick.
                 print(f"  land · ticket status update skipped ({exc})", flush=True)
                 audit.record("merge_transition_failed", ticket_id=ticket.id, error=str(exc)[:200])
+            # EU-374 (EU-301 step 5): if this was the Epic's final VERIFY child and every sibling
+            # is already Done/QA, close the Epic itself — otherwise auto-split Epics accumulate
+            # open forever. Best-effort inside the helper: never un-lands the merge.
+            _maybe_close_epic(backlog, ticket, audit)
         done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,

@@ -225,7 +225,7 @@ chk(
 # ===========================================================================
 
 async def _stub_review_fail(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                            already_bounced=None):
+                            already_bounced=None, gate_evidence=""):   # EU-265: real signature
     return ReviewResult(
         verdict=Verdict.FAIL, spec_met=False,
         quality_issues=[QualityIssue(severity="minor", area="style", detail="stub fail")],

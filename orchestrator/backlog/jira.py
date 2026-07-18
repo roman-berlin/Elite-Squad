@@ -355,6 +355,48 @@ class JiraAdapter(BacklogAdapter):
         r.raise_for_status()
         return r.json().get("key")
 
+    # -- Epic completion (EU-374, closes EU-301's step 5) ------------------ #
+    def parent_epic_key(self, key: str) -> str | None:
+        """The key of the EPIC this issue is a child of (the team-managed ``parent`` field EU-301
+        links children with), or None. Deliberately Epic-only: on these next-gen boards ``parent``
+        also carries sub-task→Task links, and the Epic auto-close must never fire on one of those.
+        Any API/shape hiccup returns None — the caller (loop._maybe_close_epic) is best-effort and
+        an unresolved parent simply leaves the Epic open."""
+        try:
+            r = self.session.get(self._url(f"issue/{key}"), params={"fields": "parent"})
+            r.raise_for_status()
+            parent = ((r.json().get("fields") or {}).get("parent") or {})
+            ptype = ((((parent.get("fields") or {}).get("issuetype") or {}).get("name")) or "")
+            if parent.get("key") and ptype.strip().lower() == "epic":
+                return parent["key"]
+            return None
+        except requests.RequestException:
+            return None
+
+    def epic_children(self, epic_key: str) -> list[dict[str, str]]:
+        """All child issues of an Epic (``parent = <epic>`` JQL, the EU-301 linkage) as
+        ``[{key, summary, status, status_category}]`` — exactly what the Epic auto-close needs to
+        decide whether every sibling is Done/QA. Raises on an HTTP failure (and on Jira's
+        auth-blind 200, see _raise_if_unauthenticated) instead of returning [] — an empty list
+        must mean "the Epic truly has no children", never "the search broke", or a hiccup could
+        vacuously prove the siblings done (the caller also re-checks the landed child is present)."""
+        r = self.session.post(self._url("search/jql"), json={
+            "jql": f'parent = "{epic_key}" ORDER BY created ASC',
+            "maxResults": 100, "fields": ["summary", "status"]})
+        r.raise_for_status()
+        self._raise_if_unauthenticated(r)
+        out: list[dict[str, str]] = []
+        for it in r.json().get("issues", []) or []:
+            f = it.get("fields", {}) or {}
+            status = (f.get("status") or {}) or {}
+            out.append({
+                "key": it.get("key", "") or "",
+                "summary": (f.get("summary") or "").strip(),
+                "status": (status.get("name") or "").strip(),
+                "status_category": (((status.get("statusCategory") or {}).get("key")) or "").strip(),
+            })
+        return out
+
     def find_open_by_summary(self, summary: str) -> str | None:
         """Return an OPEN ticket with a matching summary (de-dup), else None — None means the search
         RAN and found no duplicate. A search that could not run raises BacklogSearchError instead, so

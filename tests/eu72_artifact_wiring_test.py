@@ -153,7 +153,7 @@ class WiringBuilder:
 class WiringReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                     already_bounced=None):
+                     already_bounced=None, gate_evidence=""):   # EU-265: mirror the real signature
         cap["review_artifact"] = build_artifact
         if store is not None:
             store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))

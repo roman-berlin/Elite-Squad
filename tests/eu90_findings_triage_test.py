@@ -153,7 +153,7 @@ _review_raw: list[str] = [""]            # review.raw (reviewer ===TICKETS=== bl
 
 
 async def _stub_review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                       already_bounced=None):
+                       already_bounced=None, gate_evidence=""):   # EU-265: real signature
     return ReviewResult(
         verdict=Verdict.FAIL,
         spec_met=False,

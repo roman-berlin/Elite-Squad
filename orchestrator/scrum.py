@@ -68,6 +68,39 @@ def parse_subtickets(text: str | None) -> list[dict[str, str]]:
 _MAX_SPLIT_DEPTH = 3
 _DEPTH_RE = re.compile(r"<!--\s*autosplit-depth:\s*(\d+)\s*-->")
 
+# EU-374: the verify child's identity markers. The PRODUCER (verify_child below) and the DETECTOR
+# (is_verify_child, read by loop._maybe_close_epic on every land) both derive from these constants
+# so they can never drift apart — a drifted marker would silently disable the Epic auto-close.
+VERIFY_TITLE_PREFIX = "Verify & close:"
+_VERIFY_BODY_MARKER = "then close the epic"
+
+
+def verify_child(parent) -> dict[str, str]:
+    """EU-301: the mandatory FINAL verify-and-close child appended to every split — the end-to-end
+    integration check the individual pieces don't each cover, carrying the PARENT's acceptance
+    criteria. It runs LAST; its land is what triggers the Epic auto-close (EU-374). Pure builder so
+    the harness can pin producer/detector coherence without an LLM call."""
+    _parent_ac = list(getattr(parent, "acceptance_criteria", None) or [])
+    _verify_ac = ("\n".join(f"- {a}" for a in _parent_ac) if _parent_ac
+                  else (getattr(parent, "description", "") or parent.summary or "")[:1500])
+    return {
+        "title": f"{VERIFY_TITLE_PREFIX} {parent.summary or parent.id}",
+        "body": (f"Verify the whole feature works end-to-end, {_VERIFY_BODY_MARKER}. This is the "
+                 "integration check the individual pieces don't each cover — run it LAST, after the "
+                 "sibling pieces land.\n\nAcceptance criteria (the ORIGINAL feature's):\n" + _verify_ac),
+    }
+
+
+def is_verify_child(summary: str | None, description: str | None) -> bool:
+    """EU-374: does this ticket look like a split's final verify child? Matches either identity
+    marker — the title prefix OR the body phrase — so a board-side title edit alone can't hide the
+    child from the Epic auto-close (and the auto-close is further double-keyed in
+    loop._maybe_close_epic: the ticket must ALSO have an Epic parent with every sibling Done/QA,
+    so a stray phrase in an ordinary ticket can never close a random Epic)."""
+    s = (summary or "").strip().lower()
+    d = (description or "").lower()
+    return s.startswith(VERIFY_TITLE_PREFIX.lower()) or _VERIFY_BODY_MARKER in d
+
 
 def _split_depth(parent) -> int:
     """How many times this ticket's lineage has already been auto-split (0 for an original ticket). Reads
@@ -142,15 +175,7 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
     # carrying the PARENT's acceptance criteria (the end-to-end integration check the pieces don't
     # each cover). The verify child runs last and is what confirms the decomposed feature as a whole.
     children = list(subs[:5])
-    _parent_ac = list(getattr(parent, "acceptance_criteria", None) or [])
-    _verify_ac = ("\n".join(f"- {a}" for a in _parent_ac) if _parent_ac
-                  else (getattr(parent, "description", "") or parent.summary or "")[:1500])
-    children.append({
-        "title": f"Verify & close: {parent.summary or parent.id}",
-        "body": ("Verify the whole feature works end-to-end, then close the epic. This is the "
-                 "integration check the individual pieces don't each cover — run it LAST, after the "
-                 "sibling pieces land.\n\nAcceptance criteria (the ORIGINAL feature's):\n" + _verify_ac),
-    })
+    children.append(verify_child(parent))   # EU-374: built from the shared markers (see above)
 
     keys: list[str] = []
     for s in children:

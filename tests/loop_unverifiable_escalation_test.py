@@ -185,7 +185,7 @@ def _mkcfg(tag: str) -> Config:
 
 
 async def _stub_review_unverifiable(diff, ticket, app, cfg, iteration=1, *, store=None,
-                                    build_artifact=None, already_bounced=None):
+                                    build_artifact=None, already_bounced=None, gate_evidence=""):
     # verdict FAIL / not ship-ready, no quality_issues (keeps the PM-findings-triage side path a
     # no-op) — unverifiable_gaps is populated directly, independent of quality_issues, exactly as
     # `_enforce_bounce_once` (EU-351) would leave it on a demoted finding.
@@ -247,7 +247,7 @@ try:
 
     # --- zero comments when unverifiable_gaps is empty ---
     async def _stub_review_no_gaps(diff, ticket, app, cfg, iteration=1, *, store=None,
-                                   build_artifact=None, already_bounced=None):
+                                   build_artifact=None, already_bounced=None, gate_evidence=""):
         return ReviewResult(
             verdict=Verdict.FAIL, spec_met=False, quality_issues=[],
             required_changes=["fix the widget spacing"], unverifiable_gaps=[],

@@ -271,6 +271,46 @@ def _ac_requires_execution(ac: str) -> bool:
     return bool(_EXECUTION_AC_RE.search(ac))
 
 
+# EU-265: the sub-class of execution ACs that name a BROWSER/DEVICE surface — the exact AUTO-109
+# failure mode ("All 6 Google Sync tests pass on Desktop Chrome and Mobile Safari"). A green REPO
+# gate (pytest/run_all) proves nothing about a cross-browser matrix, so loop-supplied gate evidence
+# must never satisfy these unless the gate itself ran that matrix (see _gate_evidence_covers).
+_BROWSER_MATRIX_AC_RE = re.compile(
+    r"(?i)("
+    r"\bdesktop\s+chrome\b|\bmobile\s+safari\b|\bmobile\s+chrome\b|\bdesktop\s+firefox\b|\bdesktop\s+safari\b"
+    r"|\bverify\s+(?:in|on)\s+(?:the\s+)?(?:browser|device|mobile|desktop)\b"
+    r"|\b(?:e2e|end-to-end|playwright|cypress)\b"
+    r")"
+)
+
+# Markers in the LOOP's gate evidence that the gate itself ran a browser/e2e suite (the commands
+# are listed in the evidence, so "npx playwright test" shows up here when it actually ran).
+_GATE_BROWSER_SUITE_RE = re.compile(r"(?i)\b(playwright|cypress)\b")
+
+
+def _ac_requires_browser_matrix(ac: str) -> bool:
+    """True when the execution AC is browser/device-scoped (see _BROWSER_MATRIX_AC_RE)."""
+    if not ac:
+        return False
+    return bool(_BROWSER_MATRIX_AC_RE.search(ac))
+
+
+def _gate_evidence_covers(ac: str, gate_evidence: str) -> bool:
+    """EU-265: does the LOOP's machine-sourced gate evidence satisfy this execution AC?
+
+    ``gate_evidence`` is authored by the ORCHESTRATOR (loop._gate_execution_evidence) from a real
+    subprocess exit code — never by the Builder LLM — so unlike the handoff prose it is trusted. A
+    green repo gate satisfies a generic "all tests pass" AC (the gate literally just ran those
+    tests), but NOT a browser/device-matrix AC unless the gate commands actually ran that matrix
+    (playwright/cypress named in the evidence) — AUTO-109 was precisely a cross-browser AC, and
+    that hole must stay closed (EU-268)."""
+    if not gate_evidence:
+        return False
+    if not _ac_requires_browser_matrix(ac):
+        return True
+    return bool(_GATE_BROWSER_SUITE_RE.search(gate_evidence))
+
+
 def _has_execution_evidence(build_artifact: BuildArtifact | None, diff: str | None = None) -> bool:
     """True when the Builder's HANDOFF NARRATIVE carries a marker that a test suite was actually run
     and passed (a test log / gate report), as opposed to the Builder merely asserting the AC's own
@@ -293,17 +333,29 @@ def _has_execution_evidence(build_artifact: BuildArtifact | None, diff: str | No
 
 
 def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact: BuildArtifact | None,
-                            diff: str) -> ReviewResult:
+                            diff: str, *, gate_evidence: str = "") -> ReviewResult:
     """EU-268: force spec_met=False + FAIL (with a named spec gap) when the ticket has an
     execution-dependent acceptance criterion and the handoff/diff carries no execution evidence —
     even if the LLM verdict said spec_met=true. Does NOT grant the Reviewer any new capability
     (Bash stays disallowed); it only stops the Reviewer's own verdict JSON from defaulting an
     unverifiable AC to true. A genuinely evidenced execution AC (a test log/gate report present) is
-    left unchanged, so real verified passes still ship."""
+    left unchanged, so real verified passes still ship.
+
+    EU-265: ``gate_evidence`` is the loop's own machine-sourced proof that a REAL verification gate
+    ran green immediately before this review (loop._gate_execution_evidence — a subprocess exit
+    code, not Builder prose). Without it, every ticket whose AC matches "all tests pass" was forced
+    to FAIL on every pass DESPITE the gate having just run those tests, burned all max_passes, then
+    escalated (_enforce_bounce_once never relieves an execution-gate gap — reviewer.py, EU-351).
+    Scoped per _gate_evidence_covers: generic test-pass ACs are satisfied; browser/device-matrix
+    ACs still force FAIL unless the gate itself ran that matrix. Defaults to '' (direct callers /
+    older stubs), which keeps the EU-268 conservative behaviour byte-identical."""
     exec_acs = [ac for ac in (ticket.acceptance_criteria or []) if _ac_requires_execution(ac)]
     if not exec_acs or _has_execution_evidence(build_artifact, diff):
         return result
-    for ac in exec_acs:
+    unverified = [ac for ac in exec_acs if not _gate_evidence_covers(ac, gate_evidence)]
+    if not unverified:
+        return result
+    for ac in unverified:
         gap = (f"AC requires test execution but no passing test log/gate report attached — "
                f"unverified: \"{ac}\"")
         if gap not in result.spec_gaps:
@@ -516,7 +568,8 @@ def _effort_for_diff(category: str, cfg: Config) -> tuple[str, int]:
 async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iteration: int = 1,
                  *, store: PerTicketArtifactStore | None = None,
                  build_artifact: BuildArtifact | None = None,
-                 already_bounced: set[str] | None = None) -> ReviewResult:
+                 already_bounced: set[str] | None = None,
+                 gate_evidence: str = "") -> ReviewResult:
     from . import models, provider as _provider
     # EU-72: read the Builder's BuildArtifact (passed by the loop, or from the shared pool) as the
     # primary handoff; the full diff is still under review below. After parsing, publish a typed
@@ -585,7 +638,9 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
 
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
-    result = _enforce_execution_gate(result, ticket, build_artifact, diff)   # EU-268 deterministic backstop
+    # EU-268 deterministic backstop; EU-265 threads the loop's real green-gate proof into it.
+    result = _enforce_execution_gate(result, ticket, build_artifact, diff,
+                                     gate_evidence=gate_evidence)
     result = _enforce_bounce_once(result, already_bounced or set())   # EU-351 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final
