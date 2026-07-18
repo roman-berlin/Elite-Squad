@@ -453,6 +453,13 @@ async def _main(argv: list[str]) -> int:
         # message precedes any auto-resumed drain's output.
         from . import autopilot as _ap
         _ap.warn_dirty_tree(cfg, "serve")
+        # EU-387: if THIS boot is the respawn a self-update exit asked for, record the completion
+        # and clear the one-shot flag (a second boot must not re-consume it).
+        from .audit import AuditLog as _AL
+        try:
+            _ap.consume_self_restart_flag(cfg, _AL(cfg.audit_path))
+        except Exception:  # noqa: BLE001 — boot bookkeeping must never block serving
+            pass
         # EU-385 (EU-224a): auto-resume drains persisted as RUNNING when the previous process
         # died — the crash-respawn recovery that closed the 66-minute dead-drain gap. A drain the
         # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and

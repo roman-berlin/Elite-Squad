@@ -2617,8 +2617,13 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             from pathlib import Path as _P
             if _P(app.repo_path).resolve() == _P(__file__).resolve().parent.parent:
                 audit.record("self_update_pending_restart", ticket_id=ticket.id)
-                _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restart serve/autopilot "
-                             "so the running processes load it (the keepalive daemons respawn on kill).")
+                # EU-387: flag the pending restart for the drain's cycle boundary — with
+                # self_update_auto_restart on (default), the process exits cleanly once idle and
+                # the keepalive respawns it on this landed code; EU-385 re-arms the drains on boot.
+                from . import autopilot as _ap
+                _ap.flag_self_update(cfg, ticket.id, sha=merge_sha)
+                _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restarting automatically "
+                             "once idle (self_update_auto_restart); drains re-arm on the new sha.")
         except Exception:  # noqa: BLE001 — the signal is best-effort
             pass
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).

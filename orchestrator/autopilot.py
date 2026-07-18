@@ -63,6 +63,94 @@ _MERGED_COOLDOWN_S = 600.0
 _DIRTY_PATHS_CAP = 50   # bound the audit line — one giant tree must not balloon audit.jsonl
 
 
+# EU-387: the distinctive exit code for a deliberate self-update restart. EX_TEMPFAIL (75) —
+# launchd KeepAlive / systemd Restart=always respawn on any exit, but 75 in the log tells the
+# forensic reader "this was the unit restarting itself onto new code", never a crash. (78 is
+# taken: the AUTO-128 sentinel revert branch.)
+SELF_RESTART_EXIT_CODE = 75
+
+
+def _self_restart_flag(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("self_restart_pending.json")
+
+
+def flag_self_update(cfg: Config, ticket_id: str, sha: str = "") -> None:
+    """EU-387: called by loop._land when a live land changed the unit's OWN repo. Writes the
+    pending-restart flag the drain's cycle boundary consumes — the land site itself is MID-RUN
+    (its worklist may hold more tickets), so the exit decision can't be made there."""
+    import json as _json
+    try:
+        _self_restart_flag(cfg).write_text(_json.dumps(
+            {"ticket": ticket_id, "sha": sha, "ts": time.time()}), encoding="utf-8")
+    except OSError:
+        pass                                # best-effort: the notify still fired
+
+
+def consume_self_restart_flag(cfg: Config, audit=None) -> dict | None:
+    """EU-387 boot half: one-shot consume. Called from serve boot — a present flag means THIS
+    process is the respawn the exit asked for; record it and clear so a second boot is a no-op."""
+    import json as _json
+    p = _self_restart_flag(cfg)
+    if not p.exists():
+        return None
+    try:
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    if audit is not None:
+        try:
+            audit.record("self_restart_completed", ticket_id=data.get("ticket"),
+                         old_sha=data.get("sha"))
+        except Exception:  # noqa: BLE001
+            pass
+    return data
+
+
+def _maybe_self_restart(cfg: Config, audit) -> None:
+    """EU-387: at a drain cycle boundary, exit the process onto the new code — but ONLY when it is
+    safe: the flag is set, the knob is on, NO run is in flight for ANY app (never a mid-build
+    kill), and the tree is clean (EU-386: a dirty respawn would silently activate un-gated WIP —
+    the mirror image of the stale-process incident this feature exists to end). The keepalive
+    (launchd com.roman.general.cockpit / the VPS systemd unit) respawns within ~5s; EU-385's boot
+    resume then re-arms the drains whose intent files say RUNNING. Knob off or dirty tree →
+    notify-only (flag cleared so it can't ping-pong)."""
+    p = _self_restart_flag(cfg)
+    if not p.exists():
+        return
+    if not getattr(cfg, "self_update_auto_restart", True):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return                              # notify-only mode: today's exact behaviour
+    from . import cockpit_state as _cs
+    if _cs.active_run_count() > 0:
+        return                              # something is mid-build somewhere — defer, re-check next cycle
+    dirty, paths = tree_forensics()
+    if dirty:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        notify.send("⚠️ Self-update restart REFUSED — the working tree is dirty "
+                    f"({', '.join(paths[:5])}{'…' if len(paths) > 5 else ''}). A respawn would "
+                    "activate un-gated WIP (EU-386). Falling back to notify-only; restart by hand "
+                    "after committing/stashing.")
+        audit.record("self_restart_refused", reason="dirty tree", paths=paths[:10])
+        return
+    audit.record("self_restart_exit", exit_code=SELF_RESTART_EXIT_CODE)
+    notify.send("♻️ Self-update restart: the unit is exiting cleanly onto its own landed code — "
+                "the keepalive respawns it in seconds and armed drains auto-resume (EU-385).")
+    print(f"  ♻️ SELF-UPDATE RESTART — clean exit {SELF_RESTART_EXIT_CODE}; keepalive respawns "
+          "on the new sha.", flush=True)
+    _remove_pid()
+    os._exit(SELF_RESTART_EXIT_CODE)
+
+
 def tree_forensics() -> tuple[bool, list[str]]:
     """Whether the working tree is dirty, and which paths — from ``git status --porcelain``.
 
@@ -1675,6 +1763,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     # Track that we've announced these repos so we don't spam every cycle
                     repos_announced = frozenset(set(repos_announced) | set(repos))
 
+
+            # EU-387: a self-land earlier flagged a pending restart — this cycle boundary is where
+            # "nothing is mid-build anywhere" is knowable, so the graceful exit decision lives
+            # here (never at the land site, which is mid-run by definition). No-op without a flag.
+            _maybe_self_restart(cfg, audit)
 
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
             # EU-78: auto-clear ghost-parked tickets whose latest audit run already succeeded

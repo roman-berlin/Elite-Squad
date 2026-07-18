@@ -200,6 +200,11 @@ class Config:
     # race-absorbed by EU-379's in-process re-trial. Measured envelope: N=2 ≈ 1.7x throughput,
     # N=3 ≈ 2.9x; N≥5 collides with the observed 235M-token/5h plan ceiling — don't.
     max_concurrent_builders: int = 1
+    # EU-387 (closes the EU-224/EU-384 epic): after a live land to the unit's OWN repo, exit the
+    # process cleanly at the next fully-idle drain cycle (exit 75) so the keepalive respawns it on
+    # the new code, and EU-385's boot resume re-arms the drains. Refuses on a dirty tree (EU-386).
+    # False = today's notify-only behaviour. Requires a keepalive (launchd/systemd) to be useful.
+    self_update_auto_restart: bool = True
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = False  # OFF by default (2026-07-05 audit): 135/135 round-≥2 reviewer
                                             # objections were textually NEW, so bumping effort on retry (and the
