@@ -21,6 +21,10 @@ Scenarios:
      JSON file, and vice-versa — both dedup domains coexist in one sidecar.
   6. A missing or corrupt ``sonnet_alert_dedup.json`` reads as an empty dual-watermark set
      (fail-open: a real alert must never be silently suppressed by a bad read).
+  7. EU-390: a per-provider reset AFTER a restart (in-memory set empty, disk holds both
+     providers) removes only the named provider from disk — the other provider's dedup entry
+     survives. Fail-first: before EU-390 the reset persisted the (empty) in-memory set verbatim,
+     wiping the OTHER provider's on-disk entry too -> RED.
 
 Written fail-first: against notify.py before this ticket, ``_dual_watermark_dedup_read`` /
 ``_dual_watermark_dedup_write`` do not exist at all (AttributeError), and
@@ -186,6 +190,42 @@ try:
           notify._dual_watermark_dedup_read() == set())
 finally:
     notify._PLAN_LIMIT_DEDUP_FILE = _orig_dedup_file
+
+
+# ═══════════ 7. EU-390: per-provider reset after a restart must not wipe the other provider ═══════ #
+_dir5 = _mkdtemp()
+notify._PLAN_LIMIT_DEDUP_FILE = _dir5 / "sonnet_alert_dedup.json"
+notify._dual_low_watermark_alerted = set()
+
+try:
+    with patch("orchestrator.notify.configured", return_value=True), \
+         patch("orchestrator.notify.send", return_value=True) as mock_send:
+        # Persist BOTH providers to disk, then simulate a restart (in-memory set empties).
+        notify.dual_low_watermark_alert("claude", claude_usage)
+        notify.dual_low_watermark_alert("glm", glm_usage)
+        notify._dual_low_watermark_alerted = set()
+
+        # AC: reset('claude') on the fresh process must drop only 'claude' — before EU-390 it
+        # persisted the empty in-memory set verbatim, erasing 'glm' from disk as collateral.
+        notify.reset_dual_low_watermark_alert("claude")
+        on_disk = json.loads(notify._PLAN_LIMIT_DEDUP_FILE.read_text(encoding="utf-8"))
+        persisted = set(on_disk.get("dual_low_watermark_alerted") or [])
+        check("post-restart per-provider reset: 'glm' survives on disk",
+              persisted == {"glm"}, persisted)
+
+        # And the surviving dedup still holds: a glm alert must refuse to re-fire.
+        sends_before = mock_send.call_count
+        sent_glm = notify.dual_low_watermark_alert("glm", glm_usage)
+        check("post-restart-reset glm alert still deduped (no re-fire)",
+              sent_glm is False and mock_send.call_count == sends_before,
+              (sent_glm, mock_send.call_count))
+
+        # While 'claude' — the provider actually reset — is free to alert again.
+        sent_claude = notify.dual_low_watermark_alert("claude", claude_usage)
+        check("the reset provider (claude) may alert again", sent_claude is True, sent_claude)
+finally:
+    notify._PLAN_LIMIT_DEDUP_FILE = _orig_dedup_file
+    notify._dual_low_watermark_alerted = set()
 
 
 print("\n============ EU-211 DUAL-WATERMARK PERSIST QA ============")

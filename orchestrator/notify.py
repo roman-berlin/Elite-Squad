@@ -441,8 +441,14 @@ def reset_dual_low_watermark_alert(provider: str | None = None) -> None:
 
     EU-211: clears the on-disk dedup set too (per-provider drop, or a full wipe when
     ``provider`` is None), so a restarted process doesn't resurrect a cleared flag from disk.
+
+    EU-390: the on-disk set is unioned into memory BEFORE the discard/clear (mirroring
+    ``dual_low_watermark_alert``) — a restarted process has an empty in-memory set, and
+    persisting that verbatim on a per-provider reset would wipe the OTHER provider's
+    dedup entry from disk as collateral, letting its alert re-fire.
     """
     global _dual_low_watermark_alerted
+    _dual_low_watermark_alerted |= _dual_watermark_dedup_read()
     if provider is None:
         _dual_low_watermark_alerted.clear()
     else:
