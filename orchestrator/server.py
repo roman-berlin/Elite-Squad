@@ -1472,6 +1472,27 @@ def create_app(cfg: Config, port: int = 8787):
         # Unknown/already-deleted id: nothing to remove — land back on the list either way.
         return redirect("/models")
 
+    @app.post("/models/test")
+    def models_test_api():
+        """EU-237: probe the form's CURRENT field values (not the saved record) so the operator
+        can validate a backend before saving — NO state change, ever. A blank api_key with a
+        ``record_id`` (the edit form's hidden field) means "retest with the stored key": the
+        credential is resolved server-side via the record's credential_ref and used only inside
+        the probe — the JSON reply carries {success, message} and never the key (the message is
+        built by backends.test_backend_connection, which never embeds it). Covered by the EU-254
+        origin guard like every other POST here."""
+        fields, api_key = _model_form_fields()
+        if not api_key:
+            rid = (request.form.get("record_id") or "").strip()
+            record = ModelRegistry(cfg).get(rid) if rid else None
+            ref = (record or {}).get("credential_ref") or ""
+            if ref:
+                api_key = _Secrets(cfg).get(ref) or ""
+        # Flask serializes the returned dict as the JSON body (200 either way — "the test ran and
+        # says no" is a successful REQUEST; only the EU-254 guard produces a non-200 here).
+        return backends.test_backend_connection(
+            fields["provider"], fields["base_url"], fields["model_id"], api_key)
+
     @app.post("/api/run-selected")
     def run_selected_api():
         app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project

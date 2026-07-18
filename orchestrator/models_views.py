@@ -1,5 +1,6 @@
 """EU-235: the /models cockpit pages — CRUD views over the model registry (EU-233) + the
-secrets store (EU-234).
+secrets store (EU-234). EU-237 adds the form's Test-connection button, wired to POST
+/models/test (``backends.test_backend_connection``) with an inline pass/fail result.
 
 String-builder views in the house style (``html.escape`` + f-string fragments rendered through
 ``cockpit_views._wrap``): this repo has NO ``templates/`` directory and the cockpit deliberately
@@ -63,7 +64,36 @@ _STYLE = (
     ".mdlerr{background:var(--badbg);border:1px solid var(--badline);color:var(--bad);"
     "border-radius:var(--r-md);padding:10px 14px;margin:0 0 14px;font-size:13px}"
     ".mdlerr ul{margin:6px 0 0 18px;padding:0}"
+    # EU-237: the inline Test-connection result — hidden until a test runs, then busy/ok/err.
+    ".mtest{display:none;border-radius:var(--r-md);padding:9px 12px;margin-top:4px;font-size:13px}"
+    ".mtest.busy{display:block;background:var(--panel2);border:1px solid var(--line2);"
+    "color:var(--dim)}"
+    ".mtest.ok{display:block;background:var(--okbg);border:1px solid var(--okline);"
+    "color:var(--ok)}"
+    ".mtest.err{display:block;background:var(--badbg);border:1px solid var(--badline);"
+    "color:var(--bad)}"
     "</style>")
+
+# EU-237: the Test-connection wiring appended after the form. Posts the form's CURRENT values
+# (FormData — same fields, same encoding as a submit, incl. the edit form's hidden record_id so a
+# blank key means "retest the stored one") to /models/test and paints the {success, message} JSON
+# into the inline result box. Same-origin fetch, so the EU-254 origin guard passes it; the reply
+# never contains the key (see server.models_test_api), so nothing sensitive can land in the DOM.
+_TEST_SCRIPT = (
+    "<script>(function(){"
+    "var btn=document.getElementById('mtest'),out=document.getElementById('mtestout');"
+    "if(!btn||!out)return;"
+    "btn.addEventListener('click',function(){"
+    "var form=btn.closest('form');"
+    "out.className='mtest busy';out.textContent='Testing connection\\u2026';btn.disabled=true;"
+    "fetch('/models/test',{method:'POST',body:new FormData(form)})"
+    ".then(function(r){return r.json();})"
+    ".then(function(d){out.className='mtest '+(d.success?'ok':'err');"
+    "out.textContent=(d.success?'\\u2713 ':'\\u2717 ')+(d.message||'');})"
+    ".catch(function(){out.className='mtest err';"
+    "out.textContent='\\u2717 test request failed \\u2014 is the cockpit still running?';})"
+    ".finally(function(){btn.disabled=false;});"
+    "});})();</script>")
 
 
 def render_models_list(cfg) -> str:
@@ -117,7 +147,8 @@ def render_model_form(cfg, record: dict | None = None, values: dict | None = Non
     re-render). ``record`` = the existing registry record (edit mode); ``values`` = the submitted
     form fields to re-fill after a validation failure (they win over ``record``, so the operator
     never loses input); ``errors`` = messages to show — the registry's own ``_validate`` wording,
-    translated by the route, not a duplicated schema here."""
+    translated by the route, not a duplicated schema here. Carries the EU-237 Test-connection
+    button + inline result box (see ``_TEST_SCRIPT``) so a config can be probed before saving."""
     base = dict(record or {})
     if values:
         base.update(values)
@@ -155,9 +186,15 @@ def render_model_form(cfg, record: dict | None = None, values: dict | None = Non
                      '<span class=mhint>Stored in the gitignored secrets store (EU-234) — only a '
                      'masked reference ever renders.</span>')
 
+    # EU-237: the edit form carries its record id so a Test-connection click with a BLANK key
+    # field can mean "retest the stored credential" — resolved server-side, never sent to the
+    # browser. The add form has no record yet, so it carries nothing.
+    record_id_input = (f'<input type=hidden name=record_id '
+                       f'value="{html.escape(str(record.get("id") or ""))}">' if editing else "")
     inner = (
         _STYLE + err_html
         + f'<form method=post action="{action}" class=mform>'
+        + record_id_input
         + ('<label>Display name<input type=text name=display_name '
            f'value="{_val("display_name")}" required></label>')
         + f'<label>Provider<select name=provider required>{popts}</select></label>'
@@ -171,8 +208,11 @@ def render_model_form(cfg, record: dict | None = None, values: dict | None = Non
         + f'<label>API key{key_input}</label>'
         + '<div class=mactions>'
         + f'<button type=submit>{"Save changes" if editing else "Add backend"}</button>'
+        # type=button: the test must never submit/persist the form (EU-237's no-state-change rule).
+        + '<button type=button id=mtest class=mbtn>Test connection</button>'
         + '<a href="/models" class=mcancel>Cancel</a></div>'
-        + '</form>')
+        + '<div id=mtestout class=mtest role=status></div>'
+        + '</form>' + _TEST_SCRIPT)
     return _wrap(title, inner)
 
 

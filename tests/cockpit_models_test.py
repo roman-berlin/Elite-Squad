@@ -17,6 +17,21 @@ throwaway state dir, see model_registry.py's module docstring):
   7. The POST routes sit behind the EU-254 CSRF/Origin guard (cross-origin POST -> 403) — the
      EU-292 finding on the abandoned WIP branch, landed here instead.
   8. GET / carries a nav link to /models (the EU-293 finding, landed here instead).
+
+EU-237 extends the same harness (sections 10-12) with the connection test:
+
+  9. backends.test_backend_connection(provider, base_url, model_id, api_key) probes the
+     form-supplied config — Anthropic shape POST <base>/v1/messages, OpenAI shape
+     POST <base>/v1/chat/completions, both a 1-max-token ping with a 5s timeout — returning
+     {success, message}; static-invalid input (blank key / bad URL / bad provider) fails with
+     ZERO HTTP calls, and the api_key NEVER appears in any message.
+ 10. POST /models/test runs that probe from the form's current values: 200 JSON either way,
+     no registry/secrets mutation, the raw key never echoed, EU-254 guard applies; a blank
+     api_key with a record_id resolves the STORED credential server-side (edit-mode retest).
+ 11. Both form renders carry the Test-connection button + inline result wiring; the edit form
+     carries the hidden record_id that makes the blank-key retest work.
+
+All HTTP is the scripted `requests` stub below — no real network anywhere in this harness.
 """
 import os
 import sys
@@ -41,6 +56,34 @@ sys.modules["claude_agent_sdk"] = sdk
 req = types.ModuleType("requests")
 req.Session = lambda: types.SimpleNamespace(
     auth=None, headers=types.SimpleNamespace(update=lambda *a, **k: None))
+
+
+# EU-237: backends.test_backend_connection imports `requests` lazily and calls requests.post,
+# catching requests.exceptions.{ConnectionError,Timeout} — give the stub a scriptable post + that
+# exceptions namespace so the harness can play success / HTTP errors / network failures with zero
+# real HTTP (the house no-network rule).
+class _ReqConnectionError(Exception):
+    pass
+
+
+class _ReqTimeout(Exception):
+    pass
+
+
+req.exceptions = types.SimpleNamespace(ConnectionError=_ReqConnectionError, Timeout=_ReqTimeout)
+HTTP_CALLS: list[dict] = []                     # every stubbed POST, newest last
+HTTP_SCRIPT: dict = {"status": 200, "raise": None}   # what the NEXT stubbed POST does
+
+
+def _fake_post(url, headers=None, json=None, timeout=None):
+    HTTP_CALLS.append({"url": url, "headers": dict(headers or {}), "json": json,
+                       "timeout": timeout})
+    if HTTP_SCRIPT["raise"] is not None:
+        raise HTTP_SCRIPT["raise"]
+    return types.SimpleNamespace(status_code=HTTP_SCRIPT["status"])
+
+
+req.post = _fake_post
 sys.modules["requests"] = req
 sys.path.insert(0, ".")
 # No real `claude -p` auth round-trip when this harness runs standalone (run_all sets this too).
@@ -206,9 +249,129 @@ chk("POST delete: secret removed with it", _SEC.get(f"secret://{RID}") is None)
 chk("POST delete: unknown id is a clean no-op redirect",
     _CLIENT.post("/models/delete/no-such-id").status_code == 302)
 
+# ============ 10) EU-237: backends.test_backend_connection (scripted HTTP) ============ #
+from orchestrator import backends
+
+HTTP_CALLS.clear()
+HTTP_SCRIPT.update({"status": 200, "raise": None})
+res = backends.test_backend_connection(
+    "anthropic", "https://api.anthropic.com", "claude-opus-4-6", RAW_KEY)
+chk("test_backend_connection: anthropic 200 -> success", res.get("success") is True, str(res))
+call = HTTP_CALLS[-1] if HTTP_CALLS else {}
+chk("anthropic shape: POST <base>/v1/messages",
+    call.get("url") == "https://api.anthropic.com/v1/messages", str(call.get("url")))
+chk("anthropic shape: 1-max-token ping", (call.get("json") or {}).get("max_tokens") == 1,
+    str(call.get("json")))
+chk("anthropic shape: 5s timeout", call.get("timeout") == 5.0, str(call.get("timeout")))
+chk("anthropic 200: message never echoes the key", RAW_KEY not in str(res), str(res))
+
+HTTP_CALLS.clear()
+res = backends.test_backend_connection("openai", "https://api.openai.com", "gpt-4o", RAW_KEY)
+call = HTTP_CALLS[-1] if HTTP_CALLS else {}
+chk("openai shape: POST <base>/v1/chat/completions",
+    call.get("url") == "https://api.openai.com/v1/chat/completions", str(call.get("url")))
+chk("openai shape: bearer auth header carries the key",
+    call.get("headers", {}).get("authorization") == f"Bearer {RAW_KEY}",
+    str(sorted(call.get("headers", {}))))
+chk("openai 200 -> success", res.get("success") is True, str(res))
+
+HTTP_CALLS.clear()
+backends.test_backend_connection("openai", "https://proxy.example/v1", "gpt-4o", RAW_KEY)
+chk("base URL already ending /v1 is not doubled",
+    (HTTP_CALLS[-1]["url"] if HTTP_CALLS else "") == "https://proxy.example/v1/chat/completions",
+    str([c["url"] for c in HTTP_CALLS]))
+
+HTTP_SCRIPT["status"] = 401
+res = backends.test_backend_connection("anthropic", "https://api.anthropic.com", "m", RAW_KEY)
+chk("HTTP 401 -> failure naming the key",
+    res.get("success") is False and "key" in str(res.get("message", "")).lower(), str(res))
+chk("HTTP 401: key never in the message", RAW_KEY not in str(res), str(res))
+HTTP_SCRIPT["status"] = 200
+
+HTTP_SCRIPT["raise"] = _ReqConnectionError()
+res = backends.test_backend_connection("anthropic", "https://api.anthropic.com", "m", RAW_KEY)
+chk("connection error -> failure mentions reachability",
+    res.get("success") is False and "reach" in str(res.get("message", "")).lower(), str(res))
+HTTP_SCRIPT["raise"] = _ReqTimeout()
+res = backends.test_backend_connection("openai", "https://api.openai.com", "m", RAW_KEY)
+chk("timeout -> failure mentions the timeout",
+    res.get("success") is False and "timed out" in str(res.get("message", "")), str(res))
+HTTP_SCRIPT["raise"] = None
+
+HTTP_CALLS.clear()
+res_nokey = backends.test_backend_connection("anthropic", "https://api.anthropic.com", "m", "")
+res_nourl = backends.test_backend_connection("anthropic", "not-a-url", "m", RAW_KEY)
+res_noprov = backends.test_backend_connection("bogus", "https://api.anthropic.com", "m", RAW_KEY)
+chk("blank key / bad URL / bad provider each fail cleanly",
+    all(r.get("success") is False and r.get("message") for r in (res_nokey, res_nourl, res_noprov)),
+    str((res_nokey, res_nourl, res_noprov)))
+chk("static-invalid input makes ZERO HTTP calls", HTTP_CALLS == [], str(HTTP_CALLS))
+chk("static failures never echo the key",
+    all(RAW_KEY not in str(r) for r in (res_nokey, res_nourl, res_noprov)))
+
+# ============ 11) EU-237: POST /models/test — probe, no state change, no key echo ============ #
+HTTP_CALLS.clear()
+HTTP_SCRIPT.update({"status": 200, "raise": None})
+before = (_REG.list(), _SEC.list_refs())
+resp = _CLIENT.post("/models/test", data=FORM)
+body = resp.get_data(as_text=True)
+data = resp.get_json(silent=True) or {}
+chk("POST /models/test: HTTP 200 JSON", resp.status_code == 200 and resp.is_json,
+    f"status={resp.status_code} ct={resp.content_type}")
+chk("POST /models/test: success true on upstream 200", data.get("success") is True, str(data))
+chk("POST /models/test: message present", bool(data.get("message")), str(data))
+chk("POST /models/test: raw key never echoed", RAW_KEY not in body, body[:400])
+chk("POST /models/test: no state change", (_REG.list(), _SEC.list_refs()) == before,
+    f"before={before} after={(_REG.list(), _SEC.list_refs())}")
+
+HTTP_SCRIPT["status"] = 401
+resp = _CLIENT.post("/models/test", data=FORM)
+data = resp.get_json(silent=True) or {}
+chk("POST /models/test: upstream 401 -> 200 JSON success:false + message",
+    resp.status_code == 200 and data.get("success") is False and data.get("message"), str(data))
+chk("POST /models/test: failure reply never echoes the key",
+    RAW_KEY not in resp.get_data(as_text=True))
+HTTP_SCRIPT["status"] = 200
+
+resp = _CLIENT.post("/models/test", data=FORM, headers={"Origin": "http://evil.example"})
+chk("cross-origin POST /models/test -> 403 (EU-254 guard)", resp.status_code == 403,
+    f"status={resp.status_code}")
+
+# Blank key + record_id (the edit form's retest): the STORED credential is resolved server-side.
+_CLIENT.post("/models/add", data=FORM)      # section 9 deleted the only record — re-add one
+recs2 = _REG.list()
+RID2 = str((recs2[0] if recs2 else {}).get("id") or "")
+NOKEY_FORM = {**{k: v for k, v in FORM.items() if k != "api_key"}, "api_key": ""}
+HTTP_CALLS.clear()
+resp = _CLIENT.post("/models/test", data={**NOKEY_FORM, "record_id": RID2})
+data = resp.get_json(silent=True) or {}
+sent_auth = (HTTP_CALLS[-1]["headers"].get("authorization", "") if HTTP_CALLS else "")
+chk("blank key + record_id: stored key resolved server-side and probe succeeds",
+    data.get("success") is True and RAW_KEY in sent_auth,
+    f"data={data} auth_carries_key={RAW_KEY in sent_auth}")
+chk("blank key + record_id: stored key STILL never echoed",
+    RAW_KEY not in resp.get_data(as_text=True))
+
+HTTP_CALLS.clear()
+resp = _CLIENT.post("/models/test", data=NOKEY_FORM)
+data = resp.get_json(silent=True) or {}
+chk("blank key, no record: clean failure with zero HTTP calls",
+    data.get("success") is False and HTTP_CALLS == [], f"data={data} calls={HTTP_CALLS}")
+
+# ============ 12) EU-237: the form carries the Test-connection wiring ============ #
+body = _CLIENT.get("/models/add").get_data(as_text=True)
+chk("add form: Test connection button", "Test connection" in body and "id=mtest" in body,
+    body[:400])
+chk("add form: inline result target", "id=mtestout" in body)
+chk("add form: posts to /models/test", "fetch('/models/test'" in body)
+body = _CLIENT.get(f"/models/edit/{RID2}").get_data(as_text=True)
+chk("edit form: Test connection button", "Test connection" in body and "id=mtest" in body)
+chk("edit form: hidden record_id enables the blank-key retest",
+    "name=record_id" in body and f'value="{RID2}"' in body, body[:400])
+
 # ============ Summary (k/n contract run_all.py verifies) ============ #
 passed_n = sum(1 for _, ok, _ in results if ok)
-print("\n========= EU-235 cockpit /models CRUD tests =========")
+print("\n========= EU-235/EU-237 cockpit /models tests =========")
 for name, ok, det in results:
     label = "PASS" if ok else "FAIL"
     extra = f"  ({det})" if det and not ok else ""

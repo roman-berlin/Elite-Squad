@@ -425,3 +425,88 @@ def glm_test_connection(timeout: float = 8.0) -> tuple[bool, str]:
     if code == 400:
         return False, f"request rejected (HTTP 400) — the endpoint is reachable; check GLM_MODEL ({model})"
     return False, f"GLM endpoint returned HTTP {code}"
+
+
+# ── EU-237: form-supplied backend connection test (the /models "Test connection" button) ─────────
+
+def test_backend_connection(provider: str, base_url: str, model_id: str, api_key: str,
+                            timeout: float = 5.0) -> dict:
+    """LIVE probe of a FORM-SUPPLIED backend config — the POST /models/test handler behind the
+    /models add/edit form's Test-connection button (EU-237). Returns ``{"success", "message"}``
+    (a dict, not :func:`glm_test_connection`'s tuple: the route hands it straight back as the
+    JSON body).
+
+    Unlike :func:`glm_test_connection` (env-configured GLM), every input arrives from the form:
+    nothing is read from env or the registry, nothing is persisted, and the ``api_key`` is used
+    solely inside the one probe request — it NEVER appears in the returned message (the EU-234
+    boundary: messages carry the base URL / model id / HTTP status, never the credential).
+
+    ``provider`` decides the request shape (the registry's PROVIDERS enum is the source of truth):
+
+    * ``anthropic`` — POST ``<base>/v1/messages`` (the Anthropic messages shape).
+    * ``openai``    — POST ``<base>/v1/chat/completions`` (the OpenAI chat shape).
+
+    Both send a 1-max-token ``ping`` so a successful test costs ~nothing, with a short 5s default
+    timeout so the cockpit button answers fast. Never raises — any failure maps to an actionable
+    ``message`` like the GLM prober's.
+    """
+    from .model_registry import PROVIDERS  # deferred: avoid a hard import cycle at module load
+
+    def _fail(message: str) -> dict:
+        return {"success": False, "message": message}
+
+    prov = (provider or "").strip().lower()
+    base = (base_url or "").strip().rstrip("/")
+    model = (model_id or "").strip()
+    key = (api_key or "").strip()
+    # Static validation first (no network) — same spirit as glm_config_issues: catch what is
+    # knowable without a call, so a half-filled form gets an instant, targeted answer.
+    if prov not in PROVIDERS:
+        return _fail(f"unknown provider {prov!r} — expected one of {', '.join(PROVIDERS)}")
+    if not re.match(r"^https?://", base, re.IGNORECASE):
+        return _fail(f"base URL is missing or not a valid URL ({base or 'empty'!r})")
+    if not model:
+        return _fail("model ID is empty")
+    if not key:
+        return _fail("no API key to test — paste one into the form (or save first, then retest)")
+    if base.lower().endswith("/v1"):
+        # Tolerate a base pasted WITH the /v1 suffix (common for OpenAI-compatible hosts): the
+        # paths below carry their own /v1, and <host>/v1/v1/… would 404 a perfectly good config.
+        base = base[:-3].rstrip("/")
+    payload = {"model": model, "max_tokens": 1,
+               "messages": [{"role": "user", "content": "ping"}]}
+    if prov == "anthropic":
+        url = f"{base}/v1/messages"
+        headers = {
+            # A real run forwards the key as a bearer (ANTHROPIC_AUTH_TOKEN — see
+            # _registry_backend_env), while api.anthropic.com proper authenticates via x-api-key.
+            # Send BOTH so the probe matches whichever shape the endpoint expects — same key
+            # either way, and neither header ever leaves this request.
+            "authorization": f"Bearer {key}",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+    else:
+        url = f"{base}/v1/chat/completions"
+        headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
+    try:
+        import requests
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    except requests.exceptions.ConnectionError:
+        return _fail(f"cannot reach {base} — check the base URL and your network")
+    except requests.exceptions.Timeout:
+        return _fail(f"{base} timed out after {timeout:.0f}s — check the base URL")
+    except Exception as exc:  # noqa: BLE001 — a cockpit probe must never raise into the route
+        return _fail(f"connection test failed ({type(exc).__name__})")
+    code = resp.status_code
+    if 200 <= code < 300:
+        return {"success": True, "message": f"OK — {model} answered at {base}"}
+    if code in (401, 403):
+        return _fail(f"API key rejected (HTTP {code}) — check the key (incorrect or expired)")
+    if code == 404:
+        return _fail(f"endpoint not found (HTTP 404) — check the base URL ({base})")
+    if code == 400:
+        return _fail(f"request rejected (HTTP 400) — the endpoint is reachable; "
+                     f"check the model ID ({model})")
+    return _fail(f"endpoint returned HTTP {code}")
