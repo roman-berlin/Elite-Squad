@@ -21,6 +21,7 @@ from . import dashboard as D
 from . import health
 from . import intake
 from . import memory
+from . import models_views
 from . import warroom
 from .audit import AuditLog
 from .config import Config, normalize_effort
@@ -511,9 +512,13 @@ def create_app(cfg: Config, port: int = 8787):
         # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
         # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
         import platform as _platform
+        # EU-235: splice the '/models' nav link into the rendered bar. The link is owned by
+        # models_views (see add_models_nav_link's docstring for why it's injected here rather
+        # than edited into _control_bar) — the EU-293 nav-link finding, landed with the page.
         bar = (_result_banner(_state)
-               + _control_bar(cfg, appq, h["healthy"],
-                              is_mac=_platform.system() == "Darwin"))
+               + models_views.add_models_nav_link(
+                   _control_bar(cfg, appq, h["healthy"],
+                                is_mac=_platform.system() == "Darwin")))
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
         # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
         # unit-level actions, not per-project runs.)
@@ -1365,6 +1370,107 @@ def create_app(cfg: Config, port: int = 8787):
                 msg = f"Switched to {bk.upper()}, but auto-resume failed: {exc}"
         get_state(None)["last_msg"] = msg
         return redirect("/")
+
+    # ── EU-235: /models — cockpit CRUD for user-defined model backends ──────────────────────────
+    # The management UI over the EU-233 registry + EU-234 secrets store. EU-236 already consumes
+    # registry entries in the Model selector (backend_control), so until this page the operator
+    # could SELECT a custom backend but only create one by hand-editing state/model_registry.json.
+    # Views live in models_views.py (string builders — no templates/ dir in this repo). Every POST
+    # below is automatically covered by the EU-254 _csrf_origin_guard before_request hook (it
+    # guards ALL state-changing methods), which is where the abandoned WIP branch's EU-292 CSRF
+    # finding lands; the EU-293 nav-link finding lands via add_models_nav_link in index(). That
+    # WIP branch (7d448e5) predates the landed secrets layer and is deliberately not merged.
+    from .model_registry import ModelRegistry
+    from .model_registry import _validate as _mr_validate
+    from .secrets import Secrets as _Secrets
+
+    # Placeholder credential_ref used only to satisfy the registry's required-field schema during
+    # the dry-run validation + the initial add(); set_credential immediately rewrites it to the
+    # real derived ``secret://<id>`` (model_registry.py:204-212).
+    _PENDING_REF = "secret://pending"
+
+    def _model_form_fields() -> tuple[dict, str]:
+        """The form's registry fields (whitespace-stripped) + the api_key, SEPARATED: the raw key
+        is never part of the record dict — it goes to the Secrets store via set_credential, which
+        persists only the derived credential_ref (the registry's _ALLOWED_FIELDS whitelist would
+        strip a smuggled key anyway; keeping it out entirely means it can't even transit)."""
+        fields = {k: (request.form.get(k) or "").strip()
+                  for k in ("display_name", "provider", "base_url", "model_id",
+                            "small_fast_model_id")}
+        return fields, (request.form.get("api_key") or "").strip()
+
+    @app.get("/models")
+    def models_page():
+        return models_views.render_models_list(cfg)
+
+    @app.get("/models/add")
+    def models_add_form():
+        return models_views.render_model_form(cfg)
+
+    @app.post("/models/add")
+    def models_add_api():
+        fields, api_key = _model_form_fields()
+        errors = []
+        try:
+            # Dry-run the registry's OWN schema (single source of truth — no duplicated rules
+            # here) BEFORE writing anything: a bad form never leaves a half-added record behind,
+            # and "missing display_name + missing api_key" reports both at once.
+            _mr_validate({**fields, "credential_ref": _PENDING_REF}, partial=False)
+        except ValueError as exc:
+            errors.append(str(exc))
+        if not api_key:
+            errors.append("missing required field(s): api_key")
+        if errors:
+            return models_views.render_model_form(cfg, values=fields, errors=errors)
+        registry = ModelRegistry(cfg)
+        record = registry.add({**fields, "credential_ref": _PENDING_REF})
+        # Stores the raw key in the Secrets store and rewrites credential_ref to the real
+        # secret://<id> — the key never touches the registry file (the EU-234 boundary).
+        registry.set_credential(record["id"], api_key)
+        return redirect("/models")
+
+    @app.get("/models/edit/<model_id>")
+    def models_edit_form(model_id):
+        record = ModelRegistry(cfg).get(model_id)
+        if record is None:
+            return Response("Unknown model backend.", status=404, mimetype="text/plain")
+        return models_views.render_model_form(cfg, record=record)
+
+    @app.post("/models/edit/<model_id>")
+    def models_edit_api(model_id):
+        registry = ModelRegistry(cfg)
+        record = registry.get(model_id)
+        if record is None:
+            return Response("Unknown model backend.", status=404, mimetype="text/plain")
+        fields, api_key = _model_form_fields()
+        try:
+            # Full-form validation (the form always submits every field); the record's existing
+            # credential_ref stands in because the form never carries one. A blank api_key is
+            # VALID on edit — it means "keep the stored key" (the form renders only the mask).
+            _mr_validate({**fields, "credential_ref": record.get("credential_ref") or _PENDING_REF},
+                         partial=False)
+        except ValueError as exc:
+            return models_views.render_model_form(cfg, record=record, values=fields,
+                                                  errors=[str(exc)])
+        registry.update(model_id, fields)
+        if api_key:
+            registry.set_credential(model_id, api_key)
+        return redirect("/models")
+
+    @app.post("/models/delete/<model_id>")
+    def models_delete_api(model_id):
+        registry = ModelRegistry(cfg)
+        record = registry.get(model_id)
+        if record is not None:
+            ref = record.get("credential_ref")
+            if ref:
+                # Secrets(cfg) anchors to the same cfg state dir set_credential wrote
+                # (secrets.py:59-64), so this removes exactly the record's own stored key —
+                # record AND secret go together, nothing orphans in secrets.json.
+                _Secrets(cfg).delete(ref)
+            registry.delete(model_id)
+        # Unknown/already-deleted id: nothing to remove — land back on the list either way.
+        return redirect("/models")
 
     @app.post("/api/run-selected")
     def run_selected_api():
