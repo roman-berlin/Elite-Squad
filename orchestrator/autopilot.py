@@ -54,6 +54,70 @@ _USAGE_HOLD_COOLDOWN_S = 1800.0
 _MERGED_COOLDOWN_S = 600.0
 
 
+# ── EU-386 (EU-224b): dirty-tree respawn forensics ────────────────────────────────────────────
+# A crash/KeepAlive respawn onto uncommitted changes used to be silent — process_start recorded
+# sha+pid only, so nothing distinguished a clean-tree boot from one running stray, unreviewed
+# code (the accidental-restart blind spot EU-224's forensics called out). The probe is read-only
+# and fail-soft: forensics must never block a boot.
+
+_DIRTY_PATHS_CAP = 50   # bound the audit line — one giant tree must not balloon audit.jsonl
+
+
+def tree_forensics() -> tuple[bool, list[str]]:
+    """Whether the working tree is dirty, and which paths — from ``git status --porcelain``.
+
+    Returns ``(False, [])`` on any probe failure (no git, timeout, not a repo): an unknowable
+    tree state must never block or spam a boot. The path list is capped at ``_DIRTY_PATHS_CAP``
+    entries; ``dirty`` stays truthful regardless of the cap."""
+    import subprocess
+
+    try:
+        r = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, []
+    if r.returncode != 0:
+        return False, []
+    paths: list[str] = []
+    for ln in r.stdout.splitlines():
+        ln = ln.rstrip()
+        if not ln:
+            continue
+        # porcelain v1: two status chars + a space + the path ("R  old -> new" kept whole)
+        paths.append(ln[3:].strip() if len(ln) > 3 else ln.strip())
+    return bool(paths), paths[:_DIRTY_PATHS_CAP]
+
+
+def warn_dirty_tree(cfg: Config, role: str, forensics: tuple[bool, list[str]] | None = None,
+                    audit: AuditLog | None = None) -> tuple[bool, list[str]]:
+    """EU-386: LOUD dirty-tree boot warning — console + Telegram + one ``dirty_tree_start``
+    audit line. A clean tree returns quietly with no output at all (the AC's negative half).
+
+    ``forensics`` lets the drain reuse the probe it already ran for its ``process_start``
+    fields instead of forking git twice; serve's boot (main.py) calls with no args — its own
+    ``process_start`` line lives in server.serve(), a separate surface. The Telegram text is
+    deliberately distinct from every routine notify so "restarted onto stray changes" reads
+    differently from a normal boot at a glance. Never raises."""
+    try:
+        dirty, paths = forensics if forensics is not None else tree_forensics()
+        if not dirty:
+            return False, []
+        shown = ", ".join(paths[:5]) + (" …" if len(paths) > 5 else "")
+        print(f"⚠️  DIRTY working tree at {role} start — {len(paths)} uncommitted path(s): "
+              f"{shown}", flush=True)
+        try:
+            (audit or AuditLog(cfg.audit_path)).record(
+                "dirty_tree_start", role=role, modified_paths=paths)
+        except Exception:  # noqa: BLE001 — the warning must still reach the Commander
+            pass
+        notify.send(f"⚠️ General {role} started on a DIRTY working tree — {len(paths)} "
+                    f"uncommitted path(s): {shown}. An accidental respawn may be running "
+                    "stray, unreviewed changes.")
+        return True, paths
+    except Exception:  # noqa: BLE001 — forensics must never block a boot
+        return False, []
+
+
 def _proc_start(pid: int) -> str | None:
     """The OS-reported start time of ``pid``, or None when it can't be determined.
 
@@ -402,6 +466,215 @@ def save_blocked(cfg: Config, blocked: set[str]) -> None:
         locking.locked_rmw(_blocked_file(cfg), lambda _current: snapshot, default=[])
     except (OSError, ValueError):
         pass
+
+
+# ── EU-385 (EU-224a): persisted drain-arm intent → serve-boot auto-resume ────────────────────
+# The live gap (2026-07-17): a 13:11 crash-respawn left a drain dead for 66+ minutes because
+# nothing remembered it was RUNNING. A continuous LIVE drain persists its arm here
+# (state=RUNNING); the drain's finally retires it (state=STOPPED + the EU-232 stop reason) on
+# EVERY clean stand-down, so only an abrupt process death — the finally never ran — leaves
+# RUNNING behind. That is the exact signal resume_armed_drains() (called from main.py's serve
+# boot) keys on. Conservative by design: a Commander-ordered stop must never be resurrected, so
+# resume also honours the EU-356 autopilot_stop_requested audit trail, which survives a crash
+# that beat the finally to this file.
+
+_RESUME_AUDIT_TAIL_BYTES = 2_000_000   # the stop-request scan reads only the audit's recent tail
+
+
+def _intent_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("autopilot_intent.json")
+
+
+def load_drain_intent(cfg: Config) -> dict:
+    """The persisted per-app arm map ({app_or_"": {state, armed_ts, …}}); {} when absent."""
+    try:
+        data = json.loads(_intent_file(cfg).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def record_drain_intent(cfg: Config, app_name: str | None) -> None:
+    """Arm: persist that this drain (``""`` = unit-wide) is RUNNING. Best-effort, never raises."""
+    key = app_name or ""
+
+    def _set(cur):
+        cur = cur if isinstance(cur, dict) else {}
+        cur[key] = {"state": "RUNNING", "armed_ts": time.time(), "pid": os.getpid()}
+        return cur
+
+    try:
+        locking.locked_rmw(_intent_file(cfg), _set, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
+        pass
+
+
+def clear_drain_intent(cfg: Config, app_name: str | None, reason: str) -> None:
+    """Retire the arm with WHY (kept, not deleted — armed_ts/reason are boot forensics)."""
+    key = app_name or ""
+
+    def _set(cur):
+        cur = cur if isinstance(cur, dict) else {}
+        rec = cur.get(key) if isinstance(cur.get(key), dict) else {}
+        rec.update({"state": "STOPPED", "stopped_ts": time.time(), "reason": reason})
+        cur[key] = rec
+        return cur
+
+    try:
+        locking.locked_rmw(_intent_file(cfg), _set, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _parse_audit_ts(ts) -> float | None:
+    """audit.py's local-time ``%Y-%m-%dT%H:%M:%S%z`` stamp → epoch seconds; None if unreadable."""
+    from datetime import datetime
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(str(ts), fmt).timestamp()
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _commander_stopped_since(cfg: Config, app_key: str, armed_ts: float) -> bool:
+    """True when the audit shows a Commander stop order for this app at/after the arm.
+
+    The intent file alone has a race: Stop clicked → the process dies BEFORE the drain's finally
+    retires the arm → the file still says RUNNING. The EU-356 ``autopilot_stop_requested`` event
+    is recorded by the cockpit route on the click itself, so it survives that crash — it is the
+    discriminator that keeps auto-resume from resurrecting an explicitly-stopped drain. Reads
+    only the audit tail (boot-time, once; EU-363 owns whole-history hygiene). Conservative on
+    doubt: an unparseable stop-request timestamp BLOCKS the resume."""
+    p = Path(cfg.audit_path)
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > _RESUME_AUDIT_TAIL_BYTES:
+                f.seek(size - _RESUME_AUDIT_TAIL_BYTES)
+                f.readline()          # drop the partial line the seek landed in
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return False                  # no audit at all → nothing ever ordered a stop
+    for ln in raw.splitlines():
+        if '"autopilot_stop_requested"' not in ln:
+            continue
+        try:
+            row = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if row.get("event") != "autopilot_stop_requested":
+            continue
+        if (row.get("app") or "") != app_key:
+            continue
+        ts = _parse_audit_ts(row.get("ts"))
+        # ≥ armed_ts - 1.0: the audit stamp has 1s resolution — a same-second Stop still blocks.
+        if ts is None or ts >= armed_ts - 1.0:
+            return True
+    return False
+
+
+def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str]:
+    """EU-385: serve-boot auto-resume of drains persisted as RUNNING by a previous process.
+
+    Called from main.py's serve path — the one line every cockpit boot (CLI and launchd daemon
+    alike) takes — because server.serve() is a separate surface. Mirrors the cockpit Start
+    route's shape (claim_run → daemon _bg thread → release_run in its finally) so a resumed
+    drain is indistinguishable from a manually-started one, including its own process_start +
+    autopilot_start audit pair and its cockpit Stop button. Skips, in order: an external daemon
+    owning the queue, an unhealthy unit (intent kept for the next boot), a Commander stop order
+    in the audit (intent retired — never resurrect), a vanished app, an unrunnable GLM pick
+    (EU-190: no silent fallback), a held run slot. ``wait_s`` joins the spawned threads (tests).
+    Never raises: the boot must proceed no matter what."""
+    import asyncio
+    import copy
+
+    from . import backend_pref, backends, cockpit_state, health
+
+    resumed: list[str] = []
+    threads: list[threading.Thread] = []
+    try:
+        armed = sorted((k, r) for k, r in load_drain_intent(cfg).items()
+                       if isinstance(r, dict) and r.get("state") == "RUNNING")
+        if not armed:
+            return []
+        if daemon_is_external():
+            print("↻ auto-resume skipped — an external autopilot daemon already owns the queue",
+                  flush=True)
+            return []
+        try:
+            healthy = bool(health.summary(cfg).get("healthy"))
+        except Exception:  # noqa: BLE001 — a broken health probe must not veto crash recovery
+            healthy = True
+        if not healthy:
+            print("↻ auto-resume skipped — health problems; armed intent kept for the next boot",
+                  flush=True)
+            return []
+        audit = AuditLog(cfg.audit_path)
+        for key, rec in armed:
+            try:
+                # "" sorts first: a resumed unit-wide drain already covers every app, and the
+                # cockpit refuses a per-app Start while a unit-wide run is active — mirror it.
+                if "" in resumed:
+                    break
+                app_name = key or None
+                armed_ts = float(rec.get("armed_ts") or 0.0)
+                if _commander_stopped_since(cfg, key, armed_ts):
+                    clear_drain_intent(cfg, app_name, "commander-stop-honoured-at-boot")
+                    audit.record("autopilot_resume_skipped", app=key, reason="commander-stop")
+                    print(f"↻ auto-resume: NOT resuming {key or 'unit-wide'} — the Commander "
+                          "ordered a stop after it armed", flush=True)
+                    continue
+                if app_name is not None:
+                    try:
+                        cfg.app(app_name)
+                    except (KeyError, AttributeError):
+                        clear_drain_intent(cfg, app_name, "app-gone")
+                        audit.record("autopilot_resume_skipped", app=key, reason="app-gone")
+                        continue
+                ap_cfg = copy.copy(cfg)
+                ap_cfg.dry_run = False   # a resumed drain is live by definition (mirrors Start)
+                bk = backend_pref.active(ap_cfg, app_name)   # EU-190/EU-223 sticky pick
+                ap_cfg.model_backend = bk
+                if bk == backends.GLM and not backends.available("glm"):
+                    audit.record("autopilot_resume_skipped", app=key, reason="glm-unconfigured")
+                    print(f"↻ auto-resume: NOT resuming {key or 'unit-wide'} — GLM selected but "
+                          "unconfigured (intent kept)", flush=True)
+                    continue
+                ev = threading.Event()
+                if not cockpit_state.claim_run(app_name, dry_run=False, stop_event=ev):
+                    audit.record("autopilot_resume_skipped", app=key, reason="slot-held")
+                    continue
+                st = cockpit_state.get_state(app_name)
+                st["autopilot_on"] = True
+
+                def _bg(ap_cfg=ap_cfg, app_name=app_name, ev=ev, st=st):
+                    try:
+                        asyncio.run(autopilot(ap_cfg, app_name, once=False, stop_event=ev))
+                    except Exception as exc:  # noqa: BLE001 — mirror server.py's _bg
+                        st["last_msg"] = f"autopilot error: {exc}"
+                    finally:
+                        st["autopilot_on"] = False
+                        cockpit_state.release_run(app_name)
+
+                t = threading.Thread(target=_bg, daemon=True)
+                t.start()
+                threads.append(t)
+                audit.record("autopilot_resume", app=key, armed_ts=armed_ts)
+                print(f"🔁 auto-resumed drain: {key or 'all backlog apps'} — it was RUNNING when "
+                      "the previous process died", flush=True)
+                notify.send(f"🔁 Auto-resumed the {key or 'unit-wide'} drain after a restart — "
+                            "it was RUNNING when the previous process died (EU-385).")
+                resumed.append(key)
+            except Exception:  # noqa: BLE001 — one bad entry must not strand its siblings
+                continue
+        if wait_s is not None:
+            for t in threads:
+                t.join(timeout=wait_s)
+        return resumed
+    except Exception:  # noqa: BLE001 — boot must proceed no matter what
+        return resumed
 
 
 def _error_counts_file(cfg: Config) -> Path:
@@ -1019,7 +1292,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         import subprocess as _sp
         _sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                        text=True, timeout=5).stdout.strip()
-        audit.record("process_start", role="autopilot", app=app_name or "", sha=_sha, pid=os.getpid())
+        # EU-386: additive dirty-tree fields on the same forensic line — a respawn onto
+        # uncommitted changes must be visible in the audit, and LOUD (console + Telegram)
+        # when it happens; a clean tree stays silent.
+        _dirty, _paths = tree_forensics()
+        audit.record("process_start", role="autopilot", app=app_name or "", sha=_sha,
+                     pid=os.getpid(), dirty=_dirty, modified_paths=_paths)
+        warn_dirty_tree(cfg, "autopilot", forensics=(_dirty, _paths), audit=audit)
     except Exception:  # noqa: BLE001 — forensics must never block the drain
         pass
     from . import cockpit_state
@@ -1041,6 +1320,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     wrote_pid = False         # gates the finally's _remove_pid(): every _write_pid() must be paired with
                               # exactly ONE _remove_pid() (the holder refcount), so a raise BEFORE the
                               # write must not decrement a sibling drain's hold on the shared file.
+    armed_intent = False      # EU-385: True once this drain persisted its RUNNING arm (continuous
+                              # live only) — gates the finally's clear_drain_intent, mirroring wrote_pid.
     try:
         # Write the PID file FIRST, inside the try, so the finally's _remove_pid() always runs — even
         # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
@@ -1097,6 +1378,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
 
         audit.record("autopilot_start", mode=mode, app=app_name, once=once)
         started = True   # EU-175: from here on, every stand-down MUST record the paired autopilot_stop
+        # EU-385: persist this drain's arm so a crash/KeepAlive respawn can auto-resume it at the
+        # next serve boot (resume_armed_drains). Only a CONTINUOUS LIVE drain arms — a --once
+        # cycle or a dry-run preview is not a standing intent. The finally retires the arm with
+        # the stop reason on every clean stand-down; only an abrupt process death (no finally)
+        # leaves state=RUNNING behind, which is exactly the signal the boot-resume keys on.
+        if not once and not cfg.dry_run:
+            record_drain_intent(cfg, app_name)
+            armed_intent = True
         budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
         budget_alerted = False
         # EU-118: plan-limit pause flag
@@ -1714,5 +2003,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # plan-limit / budget / keyboard-interrupt / exception:<type> — set at the exit path above.
         # Falls back to "once-complete" for the handful of other `if once: break` holds (git/pre-flight/
         # graceful-stop/idle-queue) that don't set their own reason — still a genuine --once completion.
+        # EU-385: ANY reasoned stand-down that reaches this finally — cockpit-stop, sigterm,
+        # budget, plan-limit, an exception — retires the persisted arm, so the next serve boot
+        # does not resurrect a drain that deliberately stood down. Only a process death that
+        # skipped this finally leaves the RUNNING intent for resume_armed_drains to honour.
+        if armed_intent:
+            clear_drain_intent(cfg, app_name, stop_reason or "stand-down")
         if started:
             audit.record("autopilot_stop", reason=stop_reason or "once-complete")

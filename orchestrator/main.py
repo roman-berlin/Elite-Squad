@@ -446,6 +446,18 @@ async def _main(argv: list[str]) -> int:
     if args.command == "serve":
         from . import server
         cfg._source_path = args.config   # so the cockpit's onboard form knows which config.yaml to edit
+        # EU-386: dirty-tree respawn forensics — an accidental (crash / KeepAlive) respawn onto
+        # uncommitted changes must be loud, not silent. Wired here rather than in server.serve()
+        # because this is the one line every cockpit boot takes (CLI and launchd daemon alike);
+        # serve's own process_start audit line stays in server.py. Warn FIRST so the dirty-tree
+        # message precedes any auto-resumed drain's output.
+        from . import autopilot as _ap
+        _ap.warn_dirty_tree(cfg, "serve")
+        # EU-385 (EU-224a): auto-resume drains persisted as RUNNING when the previous process
+        # died — the crash-respawn recovery that closed the 66-minute dead-drain gap. A drain the
+        # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and
+        # the EU-356 autopilot_stop_requested audit trail are the discriminators). Never raises.
+        _ap.resume_armed_drains(cfg)
         server.serve(cfg, port=args.port)
         return 0
 
