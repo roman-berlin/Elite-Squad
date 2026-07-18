@@ -137,7 +137,7 @@ def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]
 
 def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | None = None,
                 ) -> tuple[str, str]:
-    """A non-Builder officer's model (scout, council chair, drillmaster, PM, QM, security review…).
+    """A non-Builder officer's model (scout, council chair, PM, QM, security review…).
 
     Off: the configured ceiling, unchanged. On (economical): size the task down a tier when it's
     light and conserve harder when the day's budget is tight — but never drop below Sonnet (floor),

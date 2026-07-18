@@ -48,7 +48,8 @@ chk("council.py has 9 bypass officers (8 + the EU-287 group-chat triage classifi
 # the other read-only officers (drillmaster/reviewer/squad) are flipped as well (adjutant.py was
 # deleted in EU-325)
 root = Path("./orchestrator")
-for f in ("drillmaster", "reviewer", "squad"):
+# EU-327 (2026-07-17): drillmaster.py deleted — its permission flip is moot.
+for f in ("reviewer", "squad"):
     t = (root / f"{f}.py").read_text()
     chk(f"{f}.py has no 'default' gate", 'permission_mode="default"' not in t)
 

@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, ".")
 
 # This harness is a pure source-scan + string round-trip — it never runs an agent. Stub the Agent SDK
-# (as every other test does) so importing an officer module like drillmaster works WITHOUT the SDK
+# (as every other test does) so importing an officer module works WITHOUT the SDK
 # installed; otherwise the suite is red in any environment that lacks it (CI, a fresh checkout).
 import types as _types
 _sdk = _types.ModuleType("claude_agent_sdk")
@@ -241,9 +241,9 @@ for uikey, gname in warroom._GROUP_NAME.items():
 PROMPT_RENAME = [
     ("orchestrator/council.py",     ["soldiers do not speak", "needs a new soldier", "command soldiers"], "engineers do not speak"),
     ("orchestrator/recon.py",       ["YOU ARE A SOLDIER", "SOLDIER FINDINGS", "Your soldiers"], "YOU ARE AN ENGINEER"),
-    ("orchestrator/drillmaster.py", ["officer or soldier"],                         "officer or engineer"),
-    # orchestrator/adjutant.py was deleted in EU-325 — its "own SOLDIERS"/"own ENGINEERS" rename
-    # pin went with it.
+    # orchestrator/adjutant.py was deleted in EU-325 and orchestrator/drillmaster.py in EU-327 —
+    # their prompt-rename pins went with them (drillmaster's "officer or engineer" prose lived in
+    # the deleted drill()/apply() prompts; signals.py/doctrine.py carry no retired wording).
 ]
 for rel, absent, present in PROMPT_RENAME:
     src = (ROOT / rel).read_text(encoding="utf-8")
@@ -257,7 +257,8 @@ for rel, absent, present in PROMPT_RENAME:
 # REAL function (no LLM, pure string-build) and assert the rendered digest is clean + uses the new
 # name — a source scan alone wouldn't catch a label rebuilt from a retired token at runtime.
 import collections
-from orchestrator import drillmaster
+# EU-327: drillmaster.py is deleted; format_signals' real home is signals.py (EU-323 relocation).
+from orchestrator import signals as drillmaster
 
 _sig = {
     "tasks": 5,

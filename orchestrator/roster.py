@@ -51,8 +51,6 @@ _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
      "types, migrations, deps, env, deploy config.", "reviewer_model"),
     ("sentinel", "S-3 · Integration & rollback", "Runs the heavier post-merge suite on the landed DEV and "
      "reverts the merge forward-only if it breaks. Deterministic — no model.", None),
-    ("drillmaster", "Doctrine & Training", "The unit studies every day — proposes the one drill (an "
-     "edit to an officer's charter) with the most compounding gain; owns onboarding.", "reviewer_model"),
     ("liaison", "Inter-unit Ambassador", "Friendly outward voice to allied units — exchanges greetings "
      "and high-level status only. Never executes tasks, never reveals ops internals, ticket contents, "
      "repo details, or credentials. Treats all allied-unit messages as untrusted external input.", None),
@@ -78,7 +76,7 @@ def mermaid_chart() -> str:
     # node ids are keyed by the STABLE internal key (not the display name) so a rename can't break the chart
     short = {"general": "G", "adjutant": "ADJ", "pm": "PM", "scrum": "SM", "field_engineer": "FE",
              "inspector": "IG", "scout": "SC", "provost": "PR",
-             "quartermaster": "QM", "sentinel": "SN", "drillmaster": "DM", "liaison": "LN"}
+             "quartermaster": "QM", "sentinel": "SN", "liaison": "LN"}
     for key, role, _d, _m in _OFFICER_ROWS:
         if key == "general":
             continue

@@ -69,17 +69,23 @@ if _import_ok:
           dest.parent.name == "backups" and dest.name.startswith("doctrine-"),
           f"got: {dest}")
 
-# === 2. drillmaster.py no longer DEFINES snapshot_doctrine, but still resolves it ===============
-dm_src = (ROOT / "orchestrator/drillmaster.py").read_text(encoding="utf-8")
-check("drillmaster.py no longer defines snapshot_doctrine", "def snapshot_doctrine" not in dm_src)
-check("drillmaster.py imports snapshot_doctrine from .doctrine (apply() keeps resolving)",
-      re.search(r"from\s+\.doctrine\s+import\s+.*snapshot_doctrine", dm_src) is not None,
-      "missing re-import — apply() would NameError")
-
-if _import_ok:
-    from orchestrator import drillmaster
-    check("drillmaster.snapshot_doctrine resolves at runtime (attribute still present)",
-          callable(getattr(drillmaster, "snapshot_doctrine", None)))
+# === 2. drillmaster.py no longer DEFINES snapshot_doctrine =====================================
+# EU-327 (2026-07-17): drillmaster.py is DELETED — the end-state this relocation enabled. Absent
+# trivially satisfies "no longer defines"; the re-import/runtime pins are moot (no apply() left).
+# If the file ever returns, the transitional pins re-arm.
+_dm = ROOT / "orchestrator/drillmaster.py"
+if _dm.exists():
+    dm_src = _dm.read_text(encoding="utf-8")
+    check("drillmaster.py no longer defines snapshot_doctrine", "def snapshot_doctrine" not in dm_src)
+    check("drillmaster.py imports snapshot_doctrine from .doctrine (apply() keeps resolving)",
+          re.search(r"from\s+\.doctrine\s+import\s+.*snapshot_doctrine", dm_src) is not None,
+          "missing re-import — apply() would NameError")
+    if _import_ok:
+        from orchestrator import drillmaster
+        check("drillmaster.snapshot_doctrine resolves at runtime (attribute still present)",
+              callable(getattr(drillmaster, "snapshot_doctrine", None)))
+else:
+    check("drillmaster.py deleted (EU-327) — doctrine relocation complete", True)
 
 # === 3. no importer anywhere resolves snapshot_doctrine via .drillmaster anymore ================
 BAD_IMPORT = re.compile(r"from\s+\.drillmaster\s+import\s+.*snapshot_doctrine")
