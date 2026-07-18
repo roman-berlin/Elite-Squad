@@ -918,6 +918,72 @@ _NEEDS_YOU_MAX = 10   # bound the digest; anything past this collapses into an "
 _SHIPPED_WINDOW_HOURS = 24
 _DECISION_MAX = 120   # one capped line per decision in the brief; the full text lives in the cockpit
 
+# EU-382: the daily's base-state signal is RECENCY-BOUNDED. The 2026-07-17 brief's FOCUS read
+# "Break the 'base dev RED' logjam (24+ tickets stuck on it)" while dev was GREEN (tip 74678bb,
+# 382/382, 9/10 consecutive green runs that day) — the last red_base_block was 2026-07-16 10:26,
+# 30+ hours stale, with merges landed since. The fuel was the loop's red-base pending decisions
+# (loop.py:1430 "Base branch '…' is RED before any build …") rendered into the brief with no
+# "is this still true" check — the same unbounded-history class EU-358 bounded to 48h for
+# _recent_no_changes_ticket_ids and EU-336 bounded for the shipped window. A red_base_block
+# headlines ONLY while it is the LATEST base signal: any later green proof (a `merged` land, or a
+# `dev_gate` with passed=true — the same proof EU-376 publishes into the base-gate cache) resolves
+# it, and a red older than 48h never headlines at all (the audit never rotates; one ancient red
+# must not dominate forever). A false "everything's blocked" headline is worse than silence.
+_BASE_RED_WINDOW_H = 48.0
+# The stable lead of the red-base decision question loop.py writes — the render-side filter key for
+# stale entries. tests/eu382_daily_base_recency_test.py pins it against loop.py's actual text.
+_RED_BASE_MARKER = "is RED before any build"
+
+
+def _event_dt(e: dict[str, Any]) -> Optional[datetime]:
+    """An audit event's ``ts`` as an AWARE local datetime (audit.py:33 writes %z offsets; a naive
+    peer ts is taken as local — the same EU-181 .astimezone() normalization the shipped window uses)."""
+    dt = _parse_ts(str(e.get("ts") or ""))
+    return dt.astimezone() if dt is not None else None
+
+
+def _active_base_red(cfg) -> Optional[dict[str, Any]]:
+    """The CURRENT red-base signal for the daily, or None when the base is (or must be presumed)
+    green. Returns {'ticket_id': latest blocked ticket, 'tickets': distinct tickets blocked in the
+    current red episode, 'age_s': seconds since the latest red_base_block} — see the EU-382 note on
+    _BASE_RED_WINDOW_H for why every bound errs toward silence, not alarm."""
+    from datetime import timedelta
+    latest_red: Optional[dict[str, Any]] = None
+    latest_red_dt: Optional[datetime] = None
+    latest_green_dt: Optional[datetime] = None
+    reds: list[tuple[datetime, str]] = []
+    for line in audit_lines(cfg.audit_path):
+        try:
+            e = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        ev = e.get("event")
+        if ev == "red_base_block":
+            d = _event_dt(e)
+            if d is None:
+                continue        # undateable red → too old to trust as "current" (EU-358 lineage)
+            reds.append((d, str(e.get("ticket_id") or "")))
+            if latest_red_dt is None or d > latest_red_dt:
+                latest_red, latest_red_dt = e, d
+        elif ev == "merged" or (ev == "dev_gate" and e.get("passed") is True):
+            # Green proofs only: a real land or a green dev-gate suite run. dryrun_land/ship_dryrun
+            # never ran the gate on the base, and dev_gate passed=false proves nothing green.
+            d = _event_dt(e)
+            if d is not None and (latest_green_dt is None or d > latest_green_dt):
+                latest_green_dt = d
+    if latest_red is None or latest_red_dt is None:
+        return None
+    if latest_green_dt is not None and latest_green_dt >= latest_red_dt:
+        return None             # base has since PROVEN green — the red is resolved, not a blocker
+    now = datetime.now().astimezone()
+    if latest_red_dt < now - timedelta(hours=_BASE_RED_WINDOW_H):
+        return None             # EU-358 precedent: unbounded history must not headline the daily
+    episode = {tid for d, tid in reds
+               if tid and (latest_green_dt is None or d > latest_green_dt)}
+    return {"ticket_id": str(latest_red.get("ticket_id") or "?"),
+            "tickets": max(len(episode), 1),
+            "age_s": max((now - latest_red_dt).total_seconds(), 0.0)}
+
 
 def _one_line(text: str, limit: int = _DECISION_MAX) -> str:
     """Collapse an officer's (often multi-paragraph) decision text to ONE capped line for the brief.
@@ -985,7 +1051,19 @@ def standup(cfg) -> str:
         return d is not None and d > cutoff   # undateable run → not counted; the count stays exact
     shipped = [t for t in tasks if t["outcome"] == "merged→dev" and _in_window(t)]
     needs_rows = _needs_you_rows(cfg)
+    base_red = _active_base_red(cfg)
     pending = decisions.load(cfg)
+    stale_base_red: list[dict[str, Any]] = []
+    if base_red is None:
+        # EU-382: the base is not currently red, so the loop's red-base pending decisions ("Base
+        # branch '…' is RED before any build …", loop.py:1430) are STALE — they fueled the
+        # 2026-07-17 false "24+ tickets stuck" FOCUS headline a day after dev went green. Hold them
+        # out of the BRIEF only (render-side, the EU-336/337 split): the stored decisions survive
+        # untouched for the cockpit's /needs inbox, and the ♻️ note below keeps them discoverable.
+        kept: list[dict[str, Any]] = []
+        for p in pending:
+            (stale_base_red if _RED_BASE_MARKER in str(p.get("question") or "") else kept).append(p)
+        pending = kept
 
     lines = [f"🫡 Daily stand-up — {today}", ""]
     lines.append(f"✅ Shipped to DEV (last 24h) ({len(shipped)}): "
@@ -996,6 +1074,13 @@ def standup(cfg) -> str:
     if overflow > 0:
         needs_line += f" …and {overflow} more (cockpit → /needs)"
     lines.append(f"🟡 Needs you ({len(needs_rows)}): " + needs_line)
+    if base_red is not None:
+        # EU-382: the base state is now an EXPLICIT deterministic fact — the CTO synthesis reads it
+        # from here instead of inferring "everything's blocked" from however many decision rows the
+        # red episode left behind. Appears ONLY while the red is the latest base signal (≤48h).
+        lines.append(f"⛔ Base RED: gate fails on the clean base — {base_red['tickets']} ticket(s) "
+                     f"blocked, latest {base_red['ticket_id']} "
+                     f"{_human_dur(base_red['age_s'])} ago")
     if pending:
         # EU-336: one capped line per item — never the officer's raw multi-paragraph text. The
         # "(cockpit → /needs)" pointer rides the header only when something was actually clipped,
@@ -1007,6 +1092,11 @@ def standup(cfg) -> str:
         lines += [f"   • {pid}: {q}" for pid, q in rendered]
     else:
         lines.append("❓ Awaiting your decision: —")
+    if stale_base_red:
+        # EU-382: the held-out red-base decisions must not become invisible — one muted line says
+        # the base recovered and where the tickets wait, without re-arming the blocker headline.
+        lines.append(f"♻️ Base went green again — {len(stale_base_red)} stale base-red decision(s) "
+                     "left out of this brief; re-queue those tickets from cockpit → /needs")
     return "\n".join(lines)
 
 
