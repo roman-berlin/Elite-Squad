@@ -207,7 +207,7 @@ worklist = [
 ]
 
 _orig_which = infra_classify.shutil.which
-def _fake_which(binary):
+def _fake_which(binary, path=None):   # EU-322: the probe now passes path= (the gate's effective PATH)
     if binary == "totally-not-a-real-binary":
         return None
     return _orig_which(binary) or "/usr/bin/" + binary   # 'bun' need not really exist for this test
@@ -233,7 +233,7 @@ chk("no error_counts / park state touched by a toolchain hold", error_counts == 
 sent.clear()
 infra_classify.shutil.which = _orig_which  # 'totally-not-a-real-binary' still missing on the real
                                             # machine too, so simulate recovery explicitly instead:
-_fixed_which = lambda binary: "/usr/bin/" + binary
+_fixed_which = lambda binary, path=None: "/usr/bin/" + binary   # EU-322: path= kwarg tolerated
 infra_classify.shutil.which = _fixed_which
 try:
     filtered2, held2 = autopilot._apply_toolchain_holds(cfg, audit, worklist, held)

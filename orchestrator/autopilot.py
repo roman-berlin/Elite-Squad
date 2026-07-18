@@ -940,7 +940,7 @@ def _apply_toolchain_holds(cfg: Config, audit: "AuditLog", worklist, held: froze
     apps_in_play = {a.name: a for a, _ in worklist}
     currently: set[str] = set()
     for name, app in apps_in_play.items():
-        missing = infra_classify.missing_toolchain(app)
+        missing = infra_classify.missing_toolchain(app, cfg)   # EU-322: cfg = unit-wide worktree_setup_cmd fallback
         if not missing:
             continue
         currently.add(name)
