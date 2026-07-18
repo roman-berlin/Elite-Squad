@@ -10,9 +10,15 @@ Turns the "errored / escalated" pile into something actionable. Two deterministi
    unit writes a short post-mortem to ``postmortems/<TICKET>.md``: the pattern, a timeline of attempts,
    the dominant cause, and what would change the outcome. No model call — it reads the audit log it
    already keeps, so it's free and runs unattended.
+3. **Self-healing consumption (EU-231)** — forensics output is CONSUMED, not shelved: every written
+   post-mortem files ONE deduped backlog ticket (+ a one-line Telegram note), and a cross-ticket
+   crash-signature aggregator (``signature_sweep``) auto-files ONE infra ticket when the same
+   normalized failure text recurs across tickets. Before this, 9 postmortems were written and zero
+   consumed, and Roman filed EU-221 by hand from a pattern the audit already contained.
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -170,8 +176,10 @@ def write_postmortem(cfg, ticket_id: str) -> Path | None:
 
 
 def maybe_postmortem(cfg, report, audit=None) -> Path | None:
-    """Called after a failed ticket report: if this ticket has now failed >= postmortem_after times, write
-    (or refresh) its post-mortem and audit it. Best-effort — never raises into the run loop."""
+    """Called after a failed ticket report: run the cross-ticket signature sweep, and if this ticket
+    has now failed >= postmortem_after times, write (or refresh) its post-mortem, audit it, and file
+    it as a deduped backlog ticket (EU-231). Best-effort — never raises into the run loop.
+    ``postmortem_after=0`` disables ALL of it, including auto-filing (the kill switch)."""
     try:
         after = int(getattr(cfg, "postmortem_after", 3) or 0)
         if after <= 0:
@@ -179,15 +187,189 @@ def maybe_postmortem(cfg, report, audit=None) -> Path | None:
         out_val = getattr(report.outcome, "value", report.outcome)
         if out_val not in _REPORT_FAIL_VALUES:   # the CURRENT run succeeded — don't post-mortem
             return None
+        # EU-231b: every failed report re-checks the cross-ticket crash signatures. Runs BEFORE the
+        # per-ticket threshold gate — a signature can trip on a ticket's FIRST failure (it needs
+        # >=2 tickets, not one ticket failing repeatedly). Deduped by stable title, so at most one
+        # open ticket per signature ever files.
+        signature_sweep(cfg, audit)
         n = fail_count(cfg, report.ticket_id)
         if n < after:
             return None
         path = write_postmortem(cfg, report.ticket_id)
         if path and audit is not None:
             audit.record("postmortem", ticket_id=report.ticket_id, attempts=n, path=str(path))
+        if path:
+            # EU-231a: the postmortem's "likely cause & recommended fix" must not die on disk.
+            _file_postmortem_ticket(cfg, report.ticket_id, audit)
         return path
     except Exception:  # noqa: BLE001 - forensics must never break a run
         return None
+
+
+# --------------------------------------------------------------------------- #
+# EU-231 — close the self-healing loop. Two deterministic filers (no model call), both best-effort
+# and deduped by their STABLE TITLE through filing.file_findings -> backlog.find_open_by_summary
+# (the existing EU-42 dedupe — no new store). postmortem_after=0 kill-switches both via
+# maybe_postmortem, their only loop-side trigger.
+
+# What varies per run but not per CAUSE: Jira keys, timestamps, filesystem paths, git shas/hex ids,
+# line numbers, counts. Strip those and the SAME crash shape from different tickets folds into one
+# bucket. Order matters: ticket keys before paths (keys appear inside worktree paths), timestamps
+# before the generic number scrub. The number scrub anchors only its LEFT edge so "32s"/"8s"
+# both fold to "<N>s" (a right \b would skip digits glued to a unit).
+_SIG_SCRUB: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b"), "<TICKET>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?\b"), "<TS>"),
+    (re.compile(r"(?:/[\w.@+-]+){2,}"), "<PATH>"),
+    (re.compile(r"\b[0-9a-f]{7,64}\b"), "<HASH>"),
+    (re.compile(r"\bline \d+\b"), "line <N>"),
+    (re.compile(r"\b\d+(?:\.\d+)?"), "<N>"),
+]
+
+_SIG_WINDOW_DAYS = 7      # only recent recurrence is a live pattern (mirrors EU-358's window doctrine)
+_SIG_MIN_OCCURRENCES = 3  # per the EU-231 spec: >=3 occurrences ...
+_SIG_MIN_TICKETS = 2      # ... across >=2 distinct tickets
+# worktree_busy is an EXPECTED transient (another run held the tree, auto-retried) — aggregating it
+# would file an "infra" ticket for normal contention.
+_SIG_SKIP_CATEGORIES = {"worktree_busy"}
+
+
+def signature_key(text: str) -> str:
+    """Normalize a failure's reason text into a stable cross-ticket signature. Deterministic —
+    no model call (EU-231b)."""
+    s = str(text or "")
+    for pat, repl in _SIG_SCRUB:
+        s = pat.sub(repl, s)
+    return " ".join(s.lower().split())[:160]
+
+
+def _resolve_app(cfg, rows) -> object | None:
+    """The first row whose app name resolves to a configured app (rows given newest-first), or None.
+    An unresolvable app (renamed/removed from config) skips filing rather than raising."""
+    for r in rows:
+        name = r.get("app")
+        if not name:
+            continue
+        try:
+            return cfg.app(name)
+        except Exception:  # noqa: BLE001 - cfg.app raises KeyError for unknown names
+            continue
+    return None
+
+
+def _file_one(app_cfg, label: str, proposal: dict) -> str | None:
+    """File ONE synthesized finding through filing.file_findings, whose title-dedupe
+    (backlog.find_open_by_summary) is the EU-231 dedupe. Returns the key only when NEWLY filed
+    (deduped / failed / unsupported backend -> None, so callers notify+audit only on new tickets).
+    Imports stay local: filing pulls in the backlog adapters, which the cockpit's thin read paths
+    (taxonomy/scan renders) never need."""
+    from . import filing
+    try:
+        res = filing.file_findings(app_cfg, label, filing.make_block([proposal]))
+        return res.filed[0] if res.filed else None
+    except Exception:  # noqa: BLE001 - a backlog hiccup must never sink forensics
+        return None
+
+
+def _notify_line(text: str) -> None:
+    """One-line Telegram note. notify.send never raises; guard the import anyway — forensics must
+    never break a run (EU-231)."""
+    try:
+        from . import notify
+        notify.send(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _file_postmortem_ticket(cfg, ticket_id: str, audit=None) -> str | None:
+    """EU-231a: file a written postmortem's "likely cause & recommended fix" as one backlog ticket
+    + a one-line Telegram note. The title carries ticket_id + dominant category, so the title
+    dedupe IS the ticket_id+category dedupe key the spec asks for — and a genuinely SHIFTED
+    dominant cause files a new ticket instead of hiding behind the old one."""
+    att = attempts(cfg, ticket_id)
+    if not att:
+        return None
+    app_cfg = _resolve_app(cfg, list(reversed(att)))   # newest attempt's app wins
+    if app_cfg is None:
+        return None
+    n = len(att)
+    cats = Counter(a["category"] for a in att)
+    dom, dom_n = cats.most_common(1)[0]
+    timeline = "\n".join(
+        f"- {_fmt_when(a.get('started'))} · {a['label']} · {(a.get('note') or '').strip()[:160] or '(no note)'}"
+        for a in att)
+    title = f"[postmortem] {ticket_id} — {_LABELS.get(dom, dom)}"
+    body = (f"Auto-filed by forensics (EU-231) from the post-mortem at "
+            f"{postmortem_path(cfg, ticket_id)}.\n\n"
+            f"{n} failed attempts; dominant cause: {_LABELS.get(dom, dom)} ({dom_n}/{n}).\n\n"
+            f"Recommended fix:\n\n{_ACTIONS.get(dom, '')}\n\n"
+            f"Timeline:\n\n{timeline}\n")
+    key = _file_one(app_cfg, "postmortem",
+                    {"title": title, "type": "Task", "severity": "MEDIUM", "body": body})
+    if key:
+        if audit is not None:
+            audit.record("postmortem_filed", ticket_id=ticket_id, filed=key,
+                         attempts=n, category=dom)
+        _notify_line(f"📋 Post-mortem filed: {key} — {ticket_id} failed {n}× "
+                     f"({_LABELS.get(dom, dom)})")
+    return key
+
+
+def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
+    """EU-231b — cross-ticket crash-signature aggregator: scan the last 7 days of failed runs and,
+    when the SAME normalized signature appears >= 3 times across >= 2 distinct tickets, auto-file
+    ONE deduped infra ticket carrying the raw evidence lines. Deterministic + best-effort; never
+    raises into the run loop. Triggered from maybe_postmortem on every failed report; public so a
+    cycle hook (autopilot._learn_from_cycle) can also run it. Returns NEWLY-filed keys."""
+    try:
+        cutoff = float(now if now is not None else time.time()) - _SIG_WINDOW_DAYS * 86400
+        groups: dict[str, list[dict]] = {}
+        for r in scan(cfg):
+            if r.get("category") in _SIG_SKIP_CATEGORIES:
+                continue
+            started = r.get("started")
+            try:
+                if started is None or started.timestamp() < cutoff:
+                    continue   # undatable rows can't prove recency — leave them out of the window
+            except (OSError, OverflowError, ValueError):
+                continue
+            raw = _reason(r).strip()
+            if not raw:
+                continue   # nothing to fingerprint
+            sig = signature_key(raw)
+            if sig:
+                groups.setdefault(sig, []).append(r)
+        filed: list[str] = []
+        for sig, rows in groups.items():
+            tickets = {r.get("ticket_id") or "?" for r in rows}
+            if len(rows) < _SIG_MIN_OCCURRENCES or len(tickets) < _SIG_MIN_TICKETS:
+                continue
+            app_cfg = _resolve_app(cfg, rows)
+            if app_cfg is None:
+                continue
+            evidence = "\n".join(
+                f"- {r.get('ticket_id') or '?'} · {_fmt_when(r.get('started'))} · {_reason(r).strip()[:200]}"
+                for r in reversed(rows))   # scan() is newest-first; evidence reads oldest-first
+            title = f"[infra-signature] {sig[:110]}"
+            body = (f"Auto-filed by forensics.signature_sweep (EU-231): the same normalized failure "
+                    f"signature hit {len(rows)}× across {len(tickets)} tickets "
+                    f"({', '.join(sorted(tickets))}) within {_SIG_WINDOW_DAYS} days.\n\n"
+                    f"Normalized signature:\n\n    {sig}\n\n"
+                    f"Raw evidence lines:\n\n{evidence}\n\n"
+                    f"This is a cross-ticket pattern — fix the shared cause, not the individual "
+                    f"tickets.")
+            key = _file_one(app_cfg, "infra-signature",
+                            {"title": title, "type": "Bug", "severity": "HIGH", "body": body})
+            if key:
+                filed.append(key)
+                if audit is not None:
+                    audit.record("crash_signature_filed", filed=key, occurrences=len(rows),
+                                 tickets=sorted(tickets), signature=sig[:160])
+                _notify_line(f"📋 Crash signature filed: {key} — {len(rows)}× across "
+                             f"{len(tickets)} tickets in {_SIG_WINDOW_DAYS}d")
+        return filed
+    except Exception:  # noqa: BLE001 - forensics must never break a run
+        return []
 
 
 def latest_postmortems(cfg, limit: int = 20) -> list[dict]:

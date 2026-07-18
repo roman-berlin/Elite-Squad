@@ -63,6 +63,14 @@ minor notes. If nothing warrants a ticket, emit an empty list:
 
 _BLOCK = re.compile(r"===TICKETS===\s*(.*?)\s*===END===", re.DOTALL)
 
+
+def make_block(proposals: list[dict]) -> str:
+    """Serialize proposals into the ===TICKETS=== block `parse_tickets` reads — the ONE wire format
+    for machine-raised findings. EU-231: lets deterministic callers (forensics' postmortem and
+    crash-signature filers) reuse `file_findings`' dedupe + labels + severity→priority mapping
+    instead of hand-building the block next to the parser and drifting from it."""
+    return "===TICKETS===\n" + json.dumps(list(proposals or []), ensure_ascii=False) + "\n===END==="
+
 # EU-284: an officer's declared severity maps to a Jira-native priority so a CRITICAL finding
 # doesn't rot at the project's default (Medium) priority. Absent/unknown severity -> None, which
 # leaves the backend's own default untouched (see JiraAdapter.create_task).
