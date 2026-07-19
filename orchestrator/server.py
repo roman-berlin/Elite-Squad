@@ -1914,6 +1914,22 @@ def create_app(cfg: Config, port: int = 8787):
                 _state["last_msg"] = "Proposal batch denied — nothing filed."
         return redirect("/needs")
 
+    @app.post("/api/needs-sync")
+    def needs_sync_api():
+        """2026-07-19 (Commander order): reconcile Needs-you against live Jira NOW — clears
+        parked/decision/errored entries whose tickets the Commander already moved (Done/QA) or
+        re-queued (To Do) in Jira. Synchronous: the click waits for the truth."""
+        from . import needs_sync
+        r = needs_sync.reconcile(cfg, audit, force=True)
+        n = len(r.get("cleared", []))
+        get_state(None)["last_msg"] = (
+            f"✓ Synced with Jira — cleared {n} item(s): "
+            + ", ".join(t for t, _ in r.get("cleared", [])[:8])
+            + ("…" if n > 8 else "") if n else
+            f"✓ Synced with Jira — everything in Needs-you is still genuinely waiting "
+            f"({r.get('checked', 0)} checked).")
+        return redirect("/needs")
+
     @app.get("/needs")
     def needs_page():
         """Unified Commander inbox — decisions, errored runs, parked tickets, open PRs.
@@ -1928,6 +1944,15 @@ def create_app(cfg: Config, port: int = 8787):
         """
         from . import needs as _needs
         appq = _board_project(request.args.get("app"))   # EU-129: scope to active project
+        # 2026-07-19: throttled background Jira reconcile on every load — answers/status changes
+        # made IN JIRA clear their Needs-you entries without waiting for a drain (5-min TTL; the
+        # ↻ button below forces it synchronously).
+        try:
+            from . import needs_sync as _nsync
+            threading.Thread(target=_nsync.reconcile, args=(cfg, audit),
+                             kwargs={"ttl_s": 300.0}, daemon=True).start()
+        except Exception:  # noqa: BLE001
+            pass
         s = _needs.summary(cfg, appq)
         style = (
             "<style>"
@@ -1972,10 +1997,14 @@ def create_app(cfg: Config, port: int = 8787):
         # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
         _m = _state.pop("last_msg", "") or ""
         banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if _m else ""
+        sync_btn = ("<form method=post action=/api/needs-sync style='margin:0 0 14px'>"
+                    "<button class='nbtn x' title='Check every item against live Jira NOW — items "
+                    "whose ticket you already moved (Done/QA) or re-queued (To Do) in Jira are "
+                    "cleared'>&#8635; Sync with Jira</button></form>")
         if not s.get("total"):
-            return _wrap("Needs you", style + banner
+            return _wrap("Needs you", style + banner + sync_btn
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
-        out = [style, banner]
+        out = [style, banner, sync_btn]
 
         # ── Unified inbox rows — grouped by category (EU-102) ────────────────
         from urllib.parse import quote
