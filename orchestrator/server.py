@@ -952,16 +952,22 @@ def create_app(cfg: Config, port: int = 8787):
         # this page always lists exactly one app's backlog. ``_scope`` resolves (and focuses) that tab.
         appq = _scope(request.args.get("app"))
         name = appq or None
-        style = ("<style>.tlist{margin:10px 0;border:1px solid #232936;border-radius:10px;overflow:hidden}"
-                 ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid #1a1f29;cursor:pointer}"
-                 ".trow:first-child{border-top:0}.trow:hover{background:#151a23}"
-                 ".trow input{margin-top:3px}.tkey{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6aa9ff;white-space:nowrap}"
-                 ".tsum{color:#e8eaed}.trun{display:flex;gap:14px;align-items:center;margin-top:14px;flex-wrap:wrap}"
-                 ".trun button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 18px;font-weight:650;cursor:pointer}"
-                 ".hint{color:#8a909c;font-size:13px}"
-                 ".tapp{margin-left:auto;font-size:11px;color:#8a909c;background:#161b24;border:1px solid #232936;border-radius:999px;padding:1px 9px;white-space:nowrap}"
-                 ".tgrp{font-size:12px;color:#c4c9d2;font-weight:700;margin:16px 0 6px}"
-                 ".tall{background:#10141b;font-weight:650}</style>")
+        # 2026-07-19 (Commander order): the run bar is STICKY — pick tickets anywhere in a 40-row
+        # list and "Develop selected" stays in view, with a live (N) count and disabled-at-zero.
+        style = ("<style>.tlist{margin:10px 0;border:1px solid var(--line2);border-radius:10px;overflow:hidden}"
+                 ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid var(--line);cursor:pointer}"
+                 ".trow:first-child{border-top:0}.trow:hover{background:var(--panel2)}"
+                 ".trow input{margin-top:3px}.tkey{font-family:var(--mono);font-size:12px;color:var(--info);white-space:nowrap}"
+                 ".tsum{color:var(--ink)}"
+                 ".trun{position:sticky;bottom:0;z-index:20;display:flex;gap:14px;align-items:center;flex-wrap:wrap;"
+                 "background:var(--panel);border:1px solid var(--line);border-radius:12px;"
+                 "padding:12px 16px;margin:14px 0 4px;box-shadow:var(--shadow-2)}"
+                 ".trun button{background:var(--accent);border:0;color:#fff;border-radius:8px;padding:10px 18px;font-weight:650;cursor:pointer}"
+                 ".trun button:disabled{background:var(--line);color:var(--faint);cursor:not-allowed}"
+                 ".hint{color:var(--dim);font-size:13px}"
+                 ".tapp{margin-left:auto;font-size:11px;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:1px 9px;white-space:nowrap}"
+                 ".tgrp{font-size:12px;color:var(--ink);font-weight:700;margin:16px 0 6px}"
+                 ".tall{background:var(--well);font-weight:650}</style>")
         try:
             items = intake.from_drain(cfg, name, 40)
         except Exception as exc:  # noqa: BLE001
@@ -998,9 +1004,15 @@ def create_app(cfg: Config, port: int = 8787):
                     '<div class=trun>'
                     '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
                     f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
-                    f'<button>&#9654; {html.escape(btn_label)}</button>'
+                    f'<button id=devbtn disabled>&#9654; {html.escape(btn_label)} <span id=devcount></span></button>'
                     '<span class=hint>default builds + merges to DEV — tick "dry run" to build only</span>'
-                    '</div></form>')
+                    '</div></form>'
+                    # live count + disabled-at-zero: updates on every checkbox flip (incl. Select all)
+                    '<script>(function(){var f=document.querySelector("form[action=\'/api/run-selected\']")'
+                    '||document.forms[0];if(!f)return;var b=f.querySelector("#devbtn"),'
+                    'c=f.querySelector("#devcount");function upd(){var n=f.querySelectorAll('
+                    '"input[name=ticket]:checked").length;if(b)b.disabled=n===0;'
+                    'if(c)c.textContent=n?"("+n+")":"";}f.addEventListener("change",upd);upd();})();</script>')
 
         body = (style
                 + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
