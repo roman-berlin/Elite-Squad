@@ -1866,9 +1866,9 @@ a{color:var(--info);text-decoration:none}
 button{font:inherit}
 /* header */
 header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--line);
-background:linear-gradient(180deg,#11151e,#0a0c11);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+background:linear-gradient(180deg,var(--panel),var(--bg));position:sticky;top:0;z-index:5;flex-wrap:wrap}
 .brand{font-size:15px;font-weight:750;letter-spacing:.4px;white-space:nowrap;text-transform:uppercase}
-.hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:var(--dim);background:#1a2333;border:1px solid #2a3850;border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
+.hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
 .brand b{color:var(--accent)}
 header select{background:var(--well);border:1px solid var(--line2);color:var(--ink);border-radius:9px;
 padding:8px 12px;font:inherit;cursor:pointer}
@@ -1897,12 +1897,12 @@ border-radius:99px;background:var(--well)}
 .aplabel{font-size:12px;color:var(--ink)}
 .apbtn{border:0;border-radius:99px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
 .apbtn.start{background:var(--accent);color:#fff}
-.apbtn.start:disabled{background:#222a37;color:var(--faint);cursor:not-allowed}
+.apbtn.start:disabled{background:var(--line);color:var(--faint);cursor:not-allowed}
 .apbtn.stop{background:var(--bad);color:#fff}
 .apbtn.drain{background:var(--warn);color:#1a1205;margin-right:7px}
 /* health banner */
 .healthbar{padding:13px 26px}
-.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid #15351f}
+.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid var(--okline)}
 .healthbar.bad{background:linear-gradient(180deg,rgba(42,20,22,.6),transparent);border-bottom:1px solid #3a1a1c}
 .hbrow{display:flex;align-items:center;gap:14px}
 .hbtitle{display:flex;align-items:center;gap:11px;font-weight:650;font-size:14px;flex:1}
@@ -1974,7 +1974,7 @@ padding:13px 18px;border-bottom:1px solid var(--line);display:flex;align-items:c
 .runhead .mono{font-size:15px;color:var(--ink);font-weight:600}
 .b{font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;text-transform:uppercase;letter-spacing:.06em}
 .b.live{color:var(--warn);background:var(--warnbg)}.b.muted{color:var(--dim);background:var(--panel2)}
-.b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px #1c4d39 inset}
+.b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px var(--okline) inset}
 .b.dry{color:var(--info);background:var(--accentbg);box-shadow:0 0 0 1px var(--accentline) inset}
 .b.ok{color:var(--ok);background:var(--okbg)}.b.bad{color:var(--bad);background:var(--badbg)}.b.warn{color:var(--warn);background:var(--warnbg)}
 .phasebar{display:flex;gap:0;position:relative}
@@ -1990,7 +1990,7 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 /* idle = a finished 'last run', not live -> grey the bar so it never reads as in-progress */
 .phasebar.idle .ph.done{color:var(--dim)}
 .phasebar.idle .ph.done span{background:var(--line2);border-color:var(--line2);box-shadow:none}
-.phasebar.idle .ph.done::after{background:#2b3543}
+.phasebar.idle .ph.done::after{background:var(--line2)}
 .phasebar .ph.now{color:var(--warn)}
 .phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
 /* failed = the run terminated at this phase -> red stopping node, never reads as cleanly-done */
@@ -2046,7 +2046,7 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .blsum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .blapp{font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-pill);padding:1px 8px;white-space:nowrap}
 .blempty{padding:14px 16px;color:var(--dim);font-size:13px}
-.fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid #161b24}
+.fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid var(--line)}
 .fitem:first-child{border-top:0}
 .fd{width:7px;height:7px;border-radius:99px;margin-top:6px;flex:none;background:var(--faint)}
 .fd.ok{background:var(--ok)}.fd.warn{background:var(--warn)}.fd.bad{background:var(--bad)}
