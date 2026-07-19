@@ -343,9 +343,21 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     # opens the forensics view scoped to the security-block findings that produced the number.
     # EU-150: "Merged total" card is retired — use "Merged → DEV today". EU-159: it now links to the
     # dedicated /merge-stats page (today's aggregated numbers) instead of the flat /tasks?filter=merged log.
+    # 2026-07-19 (Commander order): the "Needs you" KPI card RETURNS — it was removed in 5a882a6
+    # (2026-07-01) in favour of the side panel, but the Commander wants the number in the big KPI
+    # row. Clicking opens /needs, where answering a decision comments the Jira ticket and sends it
+    # back to To Do (the EU-337 structured-decision flow).
+    try:
+        from . import needs as _needs
+        _needs_n = _needs.count(cfg, app)
+    except Exception:  # noqa: BLE001
+        _needs_n = 0
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
          "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
+        {"label": "Needs you", "value": _needs_n, "hint": "decisions · errored · parked",
+         "tone": "warn" if _needs_n else None,
+         "href": f"/needs?app={app}" if app else "/needs"},
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
          # EU-145 passes the findings themselves so the card can render an interactive response

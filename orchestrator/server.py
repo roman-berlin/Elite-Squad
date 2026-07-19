@@ -853,10 +853,14 @@ def create_app(cfg: Config, port: int = 8787):
             _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
-        page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
+        # 2026-07-19 (Commander order): Today / This week / This month / Total scoping — the
+        # period filters the run set BEFORE rendering, so the KPI cards and the rows agree.
+        _since = (request.args.get("since") or "all").strip().lower()
+        _all_tasks = D.load_tasks(cfg.audit_path)
+        page = D.render_html(D.filter_tasks_since(_all_tasks, _since), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
                              active_filter=flt, blocked=blocked, needs_count=_needs_cnt,
-                             cfg=cfg, app_name=_appq)
+                             cfg=cfg, app_name=_appq, period=_since)
         # Header injected after the template's </header>: a back button + a per-project chip row.
         # 2026-07-19: this used to append the FULL cockpit control bar (model selector, autopilot,
         # resume buttons) — none of which belongs on a log page — and its back-button CSS was
@@ -2455,10 +2459,18 @@ def create_app(cfg: Config, port: int = 8787):
         # of a permanent wall of boxes. Saved connections render only when there ARE any; a
         # not-connected project keeps the form open (there is nothing to hide behind).
         _connected = "jactive off" not in active_html
+        # 2026-07-19 (Commander order): MULTI-JIRA is first-class — one project on Jira X,
+        # another on Jira Y. The same form both edits and ADDS (a new name + site = a new saved
+        # connection; the checkbox binds it to the project selected above), and every saved
+        # connection card carries a "Use for <project>" button.
         edit_box = ("<details class=jeditbox" + ("" if _connected else " open") + ">"
                     "<summary><span class=jbtn>&#9998; "
-                    + ("Edit connection" if _connected else "Connect a Jira")
-                    + "</span></summary>" + form + "</details>")
+                    + ("Edit &middot; &#65291; Add another Jira" if _connected else "Connect a Jira")
+                    + "</span></summary>"
+                    "<p class=jhint style='margin:10px 0 8px'>Each project can use its OWN Jira — "
+                    "pick the project above, then connect (or assign a saved connection). A new "
+                    "name + site here saves as an additional connection.</p>"
+                    + form + "</details>")
         body = (style + "<div class=jbar>" + switcher + "</div>" + active_html
                 + (("<h3>Saved Jira connections</h3>" + conns_html) if conns else "")
                 + edit_box)

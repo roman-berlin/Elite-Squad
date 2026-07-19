@@ -627,9 +627,39 @@ def _jira_link(base: str, ticket_id: Any, *, stop_prop: bool = False) -> str:
             f'rel=noopener{onclick} title="Open {html.escape(tid)} in Jira">Jira &#8599;</a>')
 
 
+_PERIOD_LABEL = {"today": "Today", "week": "This week", "month": "This month", "all": "Total"}
+
+
+def filter_tasks_since(tasks: list, period: str) -> list:
+    """2026-07-19 (Commander order): scope the task log to Today / This week / This month / Total.
+    'week' = the last 7 days, 'month' = the last 30 — rolling windows, deterministic, no TZ
+    gymnastics. Unknown/blank periods return the list untouched (Total)."""
+    period = (period or "all").strip().lower()
+    if period not in ("today", "week", "month"):
+        return tasks
+    from datetime import timedelta
+    now = datetime.now()
+    if period == "today":
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "week":
+        cutoff = now - timedelta(days=7)
+    else:
+        cutoff = now - timedelta(days=30)
+    out = []
+    for t in tasks:
+        ts = t.get("ended") or t.get("started")
+        try:
+            if ts is not None and ts.replace(tzinfo=None) >= cutoff:
+                out.append(t)
+        except (TypeError, AttributeError):
+            continue
+    return out
+
+
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
-                needs_count: int | None = None, cfg=None, app_name: str | None = None) -> str:
+                needs_count: int | None = None, cfg=None, app_name: str | None = None,
+                period: str = "all") -> str:
     # 2026-07-19 (Commander order): the task log is PER-PROJECT — everything on the page (cards,
     # filters, table) is scoped to the chosen project. Rows with no app stamp (e.g. ghost-parked
     # stubs) are kept so their Unblock action never disappears behind a scope.
@@ -744,6 +774,16 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
         (f'<div class="card clk" onclick="kfilter(\'{kind}\')">' if kind else '<div class=card>')
         + f'<div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
         for l, v, kind in cards)
+    # 2026-07-19: the Today / This week / This month / Total segmented control — scopes the cards
+    # AND the rows (tasks arrive pre-filtered from tasks_page; the chips just re-request).
+    _p = (period or "all").strip().lower()
+    if _p not in _PERIOD_LABEL:
+        _p = "all"
+    _appq = f"&app={html.escape(app_name)}" if app_name else ""
+    chips = "".join(
+        f'<a class="pseg{" on" if key == _p else ""}" href="/tasks?since={key}{_appq}">{label}</a>'
+        for key, label in _PERIOD_LABEL.items())
+    cards_html = f'<div class=psegs>{chips}</div>' + cards_html
     banner = ""
     _appq = f"&app={html.escape(app_name)}" if app_name else ""
     if flt:
@@ -779,7 +819,12 @@ _TEMPLATE = """<!doctype html><html><head><meta charset=utf-8>
 body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
 header{padding:22px 30px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel),var(--bg))}
 h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:var(--dim);font-size:12px;margin-top:5px}
-.cards{display:flex;gap:14px;padding:20px 30px 6px;flex-wrap:wrap}
+.cards{display:flex;gap:14px;padding:12px 30px 6px;flex-wrap:wrap;align-items:center}
+.psegs{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+padding:3px;gap:2px;flex-basis:100%;width:max-content;margin-bottom:4px}
+.pseg{padding:7px 16px;border-radius:8px;font-size:13px;font-weight:600;color:var(--dim);text-decoration:none}
+.pseg:hover{color:var(--ink)}
+.pseg.on{background:var(--accent);color:#fff}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 20px;min-width:120px}
 .card .k{font-size:24px;font-weight:650}.card .l{color:var(--dim);font-size:12px;margin-top:2px}
 .card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:var(--accent)}
@@ -790,13 +835,15 @@ h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:var(--dim);font-size:1
 .dismiss{margin:0}.x{background:none;border:1px solid var(--warnline);color:var(--dim);border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:var(--badbg);color:var(--bad)}
 .wrap{padding:8px 30px 50px}
 input{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line)}
-th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
-.row{cursor:pointer}.row:hover{background:var(--panel2)}.tw{color:var(--faint);width:14px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13.5px;background:var(--panel);
+border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--line)}
+tbody tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;background:var(--panel2)}
+.row{cursor:pointer;transition:background .12s}.row:hover{background:var(--panel2)}.tw{color:var(--faint);width:14px}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
-.b{padding:2px 9px;border-radius:99px;font-size:11px;font-weight:650;white-space:nowrap}
+.b{display:inline-block;padding:3px 11px;border-radius:99px;font-size:11px;font-weight:700;white-space:nowrap;letter-spacing:.02em}
 .ok{background:var(--okbg);color:var(--ok)}.warn{background:var(--warnbg);color:var(--warn)}
 .bad{background:var(--badbg);color:var(--bad)}.muted{background:var(--line);color:var(--dim)}
 .dry{color:var(--dim);font-size:11px}a{color:var(--info);text-decoration:none}
