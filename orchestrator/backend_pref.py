@@ -173,6 +173,28 @@ def set_secondary(bk: str | None, cfg=None) -> None:
         pass
 
 
+def get_hybrid(cfg=None) -> bool:
+    """Whether HYBRID MODE is on (heavy roles on Main, building on Secondary). Meaningful only
+    when a secondary is configured; the loop treats hybrid-without-secondary as single mode."""
+    return bool(_load(cfg).get("hybrid"))
+
+
+def set_hybrid_mode(on: bool, cfg=None) -> None:
+    """Persist the hybrid-mode flag. Best-effort."""
+    def _mutate(current: dict) -> dict:
+        data = dict(current) if isinstance(current, dict) else {}
+        if on:
+            data["hybrid"] = True
+        else:
+            data.pop("hybrid", None)
+        return data
+
+    try:
+        locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
+        pass
+
+
 def active(cfg=None, app_name: str | None = None) -> str:
     """The effective active backend for ``app_name`` (global when omitted): the app's own override,
     else the persisted GLOBAL preference, else the ``config.yaml`` default, else Opus. Returns a

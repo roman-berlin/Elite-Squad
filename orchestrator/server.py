@@ -1016,12 +1016,26 @@ def create_app(cfg: Config, port: int = 8787):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
+        # 2026-07-19: the Mode selector posts mode=single|hybrid.
+        mode_raw = (request.form.get("mode") or "").strip().lower()
+        if mode_raw in ("single", "hybrid"):
+            _want = mode_raw == "hybrid"
+            if _want and not backend_pref.get_secondary(cfg):
+                get_state(None)["last_msg"] = "Hybrid mode needs a Secondary model — set one first."
+            else:
+                backend_pref.set_hybrid_mode(_want, cfg)
+                get_state(None)["last_msg"] = (
+                    "Hybrid mode ON — heavy roles (plan/PRD, review) on the Main model; the "
+                    "Builder on the Secondary." if _want else
+                    "Single mode — everything on the Main model (Secondary stays the emergency stand-in).")
+            return redirect("/")
         # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
         sec_raw = (request.form.get("secondary") or "").strip()
         if sec_raw:
             if sec_raw.lower() == "none":
                 backend_pref.set_secondary(None, cfg)
-                get_state(None)["last_msg"] = "Secondary model cleared — no fallback configured."
+                backend_pref.set_hybrid_mode(False, cfg)   # hybrid can't run without a secondary
+                get_state(None)["last_msg"] = "Secondary model cleared — no fallback configured (hybrid off)."
             else:
                 from .model_registry import ModelRegistry as _MR
                 _sbk = backends.resolve_selection(sec_raw, _MR(cfg))

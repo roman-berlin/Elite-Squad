@@ -505,6 +505,7 @@ def backend_control(cfg, app_name: str | None = None) -> str:
     #                     (Claude plan limit, GLM token missing). None = pause instead (old world).
     #   ＋ Add model    — the /models registry page (add a backend + API key, test connection).
     secondary = backend_pref.get_secondary(cfg)
+    hybrid_on = backend_pref.get_hybrid(cfg) and bool(secondary)
     sec_opts = f"<option value='none' {'selected' if not secondary else ''}>None</option>"
     for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
         _bid = _entry["id"]
@@ -537,7 +538,20 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         '<span class=tbsel-label>Secondary</span>'
         f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
         f'</form>{fb_note}'
-        '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
+        '<form method=post action=/api/model class=tbf '
+        'title="Single: everything runs on the Main model (Secondary is the emergency stand-in). '
+        'Hybrid: the Main model does the heavy thinking (plan/PRD, review, debug judgment) and '
+        'the Secondary does the regular building against that plan. Needs a Secondary.">'
+        '<span class=tbsel-label>Mode</span>'
+        f'<select name=mode onchange="this.form.submit()" style="font-size:13px" '
+        f'{"disabled title=\"Set a Secondary model first\"" if not secondary else ""}>'
+        f"<option value='single' {'selected' if not hybrid_on else ''}>Single</option>"
+        f"<option value='hybrid' {'selected' if hybrid_on else ''}>Hybrid</option>"
+        '</select></form>'
+        + ('<span class="tbnote dim" title="Heavy roles (plan/review) on the Main model; the '
+           'Builder on the Secondary.">&#9878; plan on main &middot; build on secondary</span>'
+           if hybrid_on and secondary else "")
+        + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
         'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>')
 
 

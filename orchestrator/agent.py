@@ -243,7 +243,7 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     # mutually exclusive with EU-174 tier routing (which mutates process-global env). When GLM is
     # the run's backend, bypass routing entirely and go straight to the single seam.
     from . import backends as _backends
-    if _backends.current() == _backends.GLM:
+    if _backends.current_for_tag(tag) == _backends.GLM:
         return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
                                          pass_number=pass_number)
 
@@ -333,7 +333,9 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     # (per-subprocess only — zero process-global mutation) and overrides options.model. Returns the
     # backend actually applied (fail-closed to Opus if GLM is unconfigured).
     from . import backends as _backends
-    effective_backend = _backends.apply(options)
+    # 2026-07-19 hybrid mode: resolve per officer tag — a build-role call may route to the
+    # SECONDARY backend while planner/reviewer calls in the same run stay on the Main model.
+    effective_backend = _backends.apply(options, backend=_backends.current_for_tag(tag))
     # EU-255: credential-minimize THIS officer subprocess (it builds/tests injection-prone,
     # untrusted product code). The SDK builds the child env as {**os.environ, **options.env}
     # (subprocess_cli.py), so blank the orchestrator-only Jira/Telegram creds in options.env — a

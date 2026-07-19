@@ -135,6 +135,39 @@ def _pin_value(value: str | None) -> str:
     return v
 
 
+# 2026-07-19 (Commander order): HYBRID MODE — the Main model does the heavy thinking
+# (Planner/Architect PRD, Reviewer judgment, PM/debug investigation), the Secondary does the
+# regular building against that plan. Run-scoped like the backend pin: loop.run sets the
+# secondary here when hybrid is on, and the SDK seam resolves per-CALL by officer tag.
+_HYBRID_SECONDARY = contextvars.ContextVar("model_hybrid_secondary", default=None)
+
+# The officer tags that count as "regular developing" — everything else stays on the Main model.
+_HYBRID_BUILD_TAGS = frozenset({"builder"})
+
+
+def set_hybrid(secondary: str | None):
+    """Pin the hybrid-mode secondary backend for this run context (None = hybrid off)."""
+    return _HYBRID_SECONDARY.set(_pin_value(secondary) if secondary else None)
+
+
+def reset_hybrid(token) -> None:
+    try:
+        _HYBRID_SECONDARY.reset(token)
+    except (LookupError, ValueError, TypeError):
+        pass
+
+
+def current_for_tag(tag: str | None) -> str:
+    """The EFFECTIVE backend for one officer call: in hybrid mode a build-role tag routes to the
+    pinned secondary; every other tag (planner/architect/reviewer/pm/council/…) — and every call
+    outside hybrid mode — uses the run's main backend. apply() keeps its fail-closed behaviour,
+    so an unusable secondary still degrades to NATIVE rather than a broken endpoint."""
+    sec = _HYBRID_SECONDARY.get(None)
+    if sec and (tag or "").strip().lower() in _HYBRID_BUILD_TAGS:
+        return sec
+    return current()
+
+
 def set_backend(value: str | None, registry=None):
     """Pin the backend for the current run context. Returns a token for :func:`reset_backend`.
 

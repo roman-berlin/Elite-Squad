@@ -722,9 +722,24 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     from .model_registry import ModelRegistry
     _bk_token = backends.set_backend(getattr(cfg, "model_backend", backends.NATIVE),
                                      registry=ModelRegistry(cfg))
+    # 2026-07-19 hybrid mode: when armed AND a secondary exists (and differs from the main),
+    # pin it run-scoped — the SDK seam then routes build-tag calls to the secondary while the
+    # planner/architect/reviewer stay on the main model. Best-effort: never blocks a run.
+    _hy_token = None
+    try:
+        from . import backend_pref as _bp
+        _hy_sec = _bp.get_secondary(cfg) if _bp.get_hybrid(cfg) else None
+        if _hy_sec and _hy_sec != getattr(cfg, "model_backend", None):
+            _hy_token = backends.set_hybrid(_hy_sec)
+            audit.record("hybrid_mode", builder_backend=_hy_sec,
+                         main_backend=getattr(cfg, "model_backend", backends.NATIVE))
+    except Exception:  # noqa: BLE001
+        _hy_token = None
     try:
         return await _run_inner(cfg, worklist, audit, stop_event, stop_between_tickets)
     finally:
+        if _hy_token is not None:
+            backends.reset_hybrid(_hy_token)
         backends.reset_backend(_bk_token)
 
 
