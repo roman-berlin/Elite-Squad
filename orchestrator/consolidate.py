@@ -6,8 +6,8 @@ Two deterministic, zero-cost passes that compound the unit's learning over time:
    prune to the newest ``max_bullets`` so ``UNIT.live.md`` stays tight instead of growing forever.
 2. **Learn from rejections** — scan the Reviewer's FAIL verdicts in the audit log; when the same *kind*
    of change is demanded across >= ``min_count`` distinct tickets, fold a one-line lesson into the log
-   ("Reviewer repeatedly required X — do Y") and surface a drill proposal. So the unit stops repeating
-   the mistakes its own Reviewer keeps catching.
+   ("Reviewer repeatedly required X — do Y"). So the unit stops repeating the mistakes its own
+   Reviewer keeps catching. (The old "drill proposal" surfacing left with the drillmaster, EU-327.)
 
 No model call — it reads the audit log and the log file it already keeps, so it runs unattended and free.
 The Technical Writer calls ``run()`` after it writes, and ``general consolidate`` / the cockpit expose it directly.
@@ -61,7 +61,7 @@ def _theme_of(text: str) -> str | None:
 
 def rejection_patterns(cfg, *, min_count: int = 2) -> list[dict]:
     """Recurring Reviewer-rejection themes: a theme demanded across >= min_count DISTINCT tickets.
-    Returns [{theme, label, count, tickets, action, drill}] sorted by count desc."""
+    Returns [{theme, label, count, tickets, action}] sorted by count desc."""
     by_theme: dict[str, set[str]] = {}
     for line in D.audit_lines(cfg.audit_path):
         try:
@@ -85,8 +85,7 @@ def rejection_patterns(cfg, *, min_count: int = 2) -> list[dict]:
     for theme, tickets in by_theme.items():
         if len(tickets) >= min_count:
             out.append({"theme": theme, "label": _LABELS[theme], "count": len(tickets),
-                        "tickets": sorted(tickets), "action": _ACTIONS[theme],
-                        "drill": f"Drill the Dev Team Lead on {_LABELS[theme]}: {_ACTIONS[theme]}"})
+                        "tickets": sorted(tickets), "action": _ACTIONS[theme]})
     out.sort(key=lambda p: -p["count"])
     return out
 

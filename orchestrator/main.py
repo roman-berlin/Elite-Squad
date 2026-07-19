@@ -278,7 +278,6 @@ def _consolidate(args) -> int:
         for p in pats:
             print(f"  ×{p['count']:<3} {p['label']}  ({', '.join(p['tickets'][:5])})")
             print(f"        → {p['action']}")
-            print(f"        drill: {p['drill']}")
         print("")
     else:
         print("No recurring rejection pattern (need a theme across 2+ tickets).\n")

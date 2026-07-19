@@ -317,7 +317,10 @@ marker-bounded write (deterministic, safe).
 (`consolidate.py:139-167`): it dedups/prunes the log, and scans the Reviewer's `FAIL` verdicts in the
 audit; when the same *theme* (tenant isolation, missing tests, typing, error handling, validation,
 security, naming/lint, docs — `consolidate.py:24-49`) recurs across ≥ `min_count` tickets, it folds a
-one-line lesson into the log and surfaces a drill candidate. Shown on `/memory` (`server.py:850-870`).
+one-line lesson into the log. Runs automatically after every productive autopilot cycle and after
+every scribe run; `./general consolidate` is the manual entry point. (The `/memory` rejection panel
+and Consolidate button were removed 2026-07-19 — the panel was an all-time aggregate no click could
+clear, and its "drill candidate" framing referred to the drillmaster deleted in EU-327.)
 
 **Failure forensics** (`orchestrator/forensics.py`) — deterministic taxonomy of failure causes
 (`_RULES`, `forensics.py:29-55`), repeat offenders (`forensics.py:104-116`), and **auto post-mortems**:

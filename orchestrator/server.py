@@ -1483,48 +1483,20 @@ def create_app(cfg: Config, port: int = 8787):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/memory")
 
-    @app.post("/api/consolidate")
-    def consolidate_api():
-        from . import consolidate
-        try:
-            r = consolidate.run(cfg)
-            _state["last_msg"] = "✓ " + (str(r).strip() if r else "Consolidated Unit Memory — deduped/pruned the log and folded in recurring lessons.")
-        except Exception as exc:  # noqa: BLE001
-            _state["last_msg"] = f"consolidate failed: {exc}"
-        return redirect("/memory")
-
     @app.get("/memory")
     def memory_page():
         memory.ensure()
-        from . import consolidate
         top = (_working("The Technical Writer is folding recent lessons into Unit Memory…")
                if _state.get("scribing") else "")
+        # 2026-07-19 (Commander order): ONE manual action — "Update memory". The old Consolidate
+        # button and the "Reviewer keeps rejecting these" panel were removed: consolidation (log
+        # dedup/prune + folding recurring Reviewer-rejection lessons) runs AUTOMATICALLY after
+        # every productive autopilot cycle and after every scribe run, and the panel was an
+        # all-time aggregate that no click could ever clear (plus "drill candidate" framing for
+        # the drill feature deleted in EU-327). The lessons the engine learns land in the living
+        # log below — which the officers actually read.
         act = ("" if _state.get("scribing")
-               else _actbar(_actbtn("/api/scribe", "&#128221; Update memory"),
-                            _actbtn("/api/consolidate", "&#129529; Consolidate",
-                                    confirm="Dedup/prune the Lessons log and fold in any recurring "
-                                            "Reviewer-rejection lessons?")))
-        # Surface what the Reviewer keeps rejecting — the unit's own recurring mistakes.
-        pat_html = ""
-        try:
-            pats = consolidate.rejection_patterns(cfg, min_count=2)
-        except Exception:  # noqa: BLE001
-            pats = []
-        if pats:
-            rows = "".join(
-                f"<div class=lrow><div class=lhead><b>{html.escape(p['label'])}</b>"
-                f"<span class=ln>×{p['count']} · {html.escape(', '.join(p['tickets'][:5]))}</span></div>"
-                f"<div class=lact>&#8594; {html.escape(p['action'])}</div></div>" for p in pats)
-            pat_html = (
-                "<style>.lrej{margin:4px 0 18px}.lrow{background:#161122;border:1px solid #3a2b4a;"
-                "border-radius:10px;padding:11px 14px;margin-bottom:9px}.lhead{display:flex;"
-                "justify-content:space-between;gap:10px;align-items:baseline}.lhead b{color:#e9ecf1;font-size:13.5px}"
-                ".ln{color:#b59ad6;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
-                ".lact{color:#9aa3b2;font-size:12.5px;margin-top:5px}</style>"
-                "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>&#9888; Reviewer keeps "
-                "rejecting these</h3><p style='color:#8a929f;font-size:12.5px;margin:0 0 10px'>Folded "
-                "into the log on Consolidate. Each is a drill candidate.</p>"
-                f"<div class=lrej>{rows}</div>")
+               else _actbar(_actbtn("/api/scribe", "&#128221; Update memory")))
         # One-shot confirmation banner ("✓ Technical Writer folded … into Unit Memory") — shown once the Technical Writer
         # finishes (not mid-fold), so the action visibly "took" instead of silently returning here.
         _m = "" if _state.get("scribing") else (_state.pop("last_msg", "") or "")
@@ -1539,7 +1511,7 @@ def create_app(cfg: Config, port: int = 8787):
             f"<span style='color:#8a929f;font-weight:400;font-size:12px'>· officers see the newest "
             f"{memory.PREAMBLE_LESSONS} in every prompt; the full log lives here</span></h3>"
             "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
-        body = (banner + act + top + pat_html
+        body = (banner + act + top
                 + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>Doctrine</h3>"
                 + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
                 + live_html)

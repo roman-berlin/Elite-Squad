@@ -1,5 +1,5 @@
-"""Unit Memory UI QA: the Update-memory (Scribe) and Consolidate actions show a one-shot confirmation
-banner when they finish — instead of silently returning to the same page with no sign it worked — and
+"""Unit Memory UI QA: the Update-memory (Scribe) action shows a one-shot confirmation
+banner when it finishes — instead of silently returning to the same page with no sign it worked — and
 the banner clears after a single view. While the Scribe is mid-fold the page shows the working
 indicator and must NOT pop the pending message early (so the confirmation survives to the next refresh)."""
 import sys, types, tempfile
@@ -16,7 +16,7 @@ req.Session = lambda: types.SimpleNamespace(auth=None, headers=types.SimpleNames
 sys.modules["requests"] = req
 sys.path.insert(0, ".")
 
-from orchestrator import server, memory, consolidate
+from orchestrator import server, memory
 from orchestrator.config import Config, AppConfig
 
 results = []
@@ -33,7 +33,6 @@ cfg.detected_auth = lambda: "test"
 memory.ensure = lambda *a, **k: None
 memory.load = lambda *a, **k: "(stub memory)"
 memory._live_log = lambda *a, **k: "(stub lessons log)"
-consolidate.rejection_patterns = lambda *a, **k: []
 
 client = server.create_app(cfg).test_client()
 
@@ -61,6 +60,13 @@ server._state.pop("last_msg", None)
 server._state["last_msg"] = "scribe failed: boom"
 he = client.get("/memory").get_data(as_text=True)
 chk("scribe failure is surfaced, not swallowed", "scribe failed: boom" in he)
+
+# --- 2026-07-19: one manual action only — the Consolidate button and the never-clearing
+# "Reviewer keeps rejecting these" panel were removed (consolidation is automatic) ---
+hp = client.get("/memory").get_data(as_text=True)
+chk("no Consolidate button on the page", "/api/consolidate" not in hp)
+chk("no 'Reviewer keeps rejecting' panel on the page", "keeps rejecting" not in hp)
+chk("the removed /api/consolidate route 404s", client.post("/api/consolidate").status_code == 404)
 
 # --- no message -> no banner, page still renders fine ---
 server._state.pop("last_msg", None)
