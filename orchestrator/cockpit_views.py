@@ -11,7 +11,6 @@ from __future__ import annotations
 import html
 import os
 from pathlib import Path
-from urllib.parse import quote
 
 from . import dashboard as D
 from .cockpit_state import _state, get_autopilot_status
@@ -724,15 +723,15 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # Calls /api/open-logs with the configured log folder so a single click reveals ALL run logs.
     open_logs_html = ""
     if is_mac:
-        log_folder = str(getattr(cfg, "log_folder", None) or "logs/")
-        # 2026-07-19: fetch() instead of navigating — as a plain link the click replaced the
-        # cockpit tab with the endpoint's raw JSON ("open logs closed the cockpit"); the endpoint
-        # only needs to be CALLED (it opens Finder server-side), the browser needs no page.
+        # 2026-07-19: fetch() instead of navigating (a plain link replaced the cockpit tab with
+        # the endpoint's raw JSON), and NO path param — the endpoint derives the log root itself
+        # (the button used to pass the raw "logs/" string, which the audit-anchored guard
+        # rejected with a 403: the button was 403-ing its own endpoint).
         open_logs_html = _btn(
             "&#128194; Open logs", tag="a",
-            attrs=(f' href="/api/open-logs?path={html.escape(quote(log_folder))}" '
-                   f'onclick="fetch(this.href);return false" '
-                   f'title="Open the run-logs folder in Finder"'))
+            attrs=(' href="/api/open-logs" '
+                   'onclick="fetch(this.href);return false" '
+                   'title="Open the run-logs folder in Finder"'))
 
     # Render plan-limit banner BEFORE the control bar (if active)
     plan_banner = _plan_limit_banner(_state, cfg)

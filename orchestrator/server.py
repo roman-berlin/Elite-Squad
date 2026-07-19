@@ -493,16 +493,23 @@ def create_app(cfg: Config, port: int = 8787):
         if platform.system() != "Darwin":
             return Response("This endpoint is only available on macOS.", status=403,
                             mimetype="text/plain")
-        path_param = (request.args.get("path") or "").strip()
-        if not path_param:
-            return Response("'path' query parameter is required.", status=400,
-                            mimetype="text/plain")
+        # 2026-07-19: ``path`` is OPTIONAL — no param opens the log root itself. The button used
+        # to pass the raw cfg.log_folder string ("logs/"), which resolves against the CWD while
+        # the guard's root is audit-path-anchored (state/logs) — so the button 403'd its own
+        # endpoint forever. One derivation now: the endpoint anchors, callers don't.
         from . import run_logger as _rl
         root = _rl.log_root(cfg)
-        try:
-            requested = Path(path_param).resolve()
-        except Exception:
-            return Response("Invalid path.", status=400, mimetype="text/plain")
+        path_param = (request.args.get("path") or "").strip()
+        if not path_param:
+            requested = root
+        else:
+            try:
+                # a RELATIVE path is resolved under the log root (never the CWD); absolute paths
+                # keep the strict under-root check below.
+                requested = (Path(path_param) if Path(path_param).is_absolute()
+                             else root / path_param).resolve()
+            except Exception:
+                return Response("Invalid path.", status=400, mimetype="text/plain")
         # Path traversal guard: the resolved path must sit under the log root.
         try:
             requested.relative_to(root)
