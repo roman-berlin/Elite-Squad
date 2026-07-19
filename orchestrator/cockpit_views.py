@@ -504,6 +504,7 @@ def backend_control(cfg, app_name: str | None = None) -> str:
     #                     (Claude plan limit, GLM token missing). None = pause instead (old world).
     #   ＋ Add model    — the /models registry page (add a backend + API key, test connection).
     secondary = backend_pref.get_secondary(cfg)
+    mode = backend_pref.get_mode(cfg)   # 'hybrid' | 'backup' — only shown when a Secondary is set
     sec_opts = f"<option value='none' {'selected' if not secondary else ''}>None</option>"
     for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
         _bid = _entry["id"]
@@ -536,12 +537,26 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         '<span class=tbsel-label>Secondary</span>'
         f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
         f'</form>{fb_note}'
-        # 2026-07-19 (Commander order): NO Mode select — two models configured = hybrid,
-        # automatically (heavy thinking on Main, building on Secondary); one model = single.
-        + ('<span class="tbnote dim" title="Two models configured → hybrid automatically: the '
-           'Main model does the heavy thinking (plan/PRD, review, debug judgment); the Secondary '
-           'does the regular building. Clear the Secondary to go back to one model.">'
-           '&#9878; hybrid: plan on main &middot; build on secondary</span>'
+        # 2026-07-19 (Commander order): with TWO models, choose HOW they work — Hybrid (both,
+        # per task: heavy thinking on Main, building on Secondary) or Backup (everything on the
+        # Main; the Secondary wakes only when the Main hits its limit / breaks). The selector
+        # appears only when a Secondary exists; one model = nothing to choose.
+        + (('<form method=post action=/api/model class=tbf '
+            'title="Hybrid — both models work per task: plan/PRD, review and debug judgment on '
+            'the Main; regular building on the Secondary. '
+            'Backup — everything runs on the Main; the Secondary takes over only when the Main '
+            'can&#39;t run (plan limit hit, key broken).">'
+            '<span class=tbsel-label>Mode</span>'
+            '<select name=mode onchange="this.form.submit()" style="font-size:13px">'
+            f"<option value='hybrid' {'selected' if mode == 'hybrid' else ''}>Hybrid — both, per task</option>"
+            f"<option value='backup' {'selected' if mode == 'backup' else ''}>Backup — if main runs out</option>"
+            '</select></form>'
+            + ('<span class="tbnote dim" title="Plan/PRD, review and judgment on the Main model; '
+               'regular building on the Secondary.">&#9878; plan on main &middot; build on secondary</span>'
+               if mode == 'hybrid' else
+               '<span class="tbnote dim" title="Everything runs on the Main model; the Secondary '
+               'only takes over when the Main hits its limit or breaks.">'
+               '&#128737; standby: takes over at the limit</span>'))
            if secondary else "")
         + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
         'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>')

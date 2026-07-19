@@ -1039,6 +1039,19 @@ def create_app(cfg: Config, port: int = 8787):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
+        # 2026-07-19: the Mode selector posts mode=hybrid|backup (only meaningful with a Secondary).
+        mode_raw = (request.form.get("mode") or "").strip().lower()
+        if mode_raw in ("hybrid", "backup"):
+            if not backend_pref.get_secondary(cfg):
+                get_state(None)["last_msg"] = "Set a Secondary model first, then pick Hybrid or Backup."
+            else:
+                backend_pref.set_mode(mode_raw, cfg)
+                get_state(None)["last_msg"] = (
+                    "Hybrid — both models work per task: plan/review on the Main, building on the "
+                    "Secondary." if mode_raw == "hybrid" else
+                    "Backup — everything runs on the Main; the Secondary only takes over if the "
+                    "Main hits its limit.")
+            return redirect("/")
         # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
         sec_raw = (request.form.get("secondary") or "").strip()
         if sec_raw:
@@ -1049,9 +1062,9 @@ def create_app(cfg: Config, port: int = 8787):
                 from .model_registry import ModelRegistry as _MR
                 _sbk = backends.resolve_selection(sec_raw, _MR(cfg))
                 backend_pref.set_secondary(_sbk, cfg)
-                get_state(None)["last_msg"] = (f"Secondary model set to {_sbk} — hybrid is on: "
-                                               "plan/review on the Main model, building on the "
-                                               "Secondary (and it covers the Main as fallback).")
+                get_state(None)["last_msg"] = (
+                    f"Secondary model set to {_sbk}. Pick how they work: Hybrid (both, per task) "
+                    "or Backup (Secondary only if the Main hits its limit).")
             return redirect("/")
         raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
