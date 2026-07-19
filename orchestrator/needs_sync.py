@@ -8,8 +8,10 @@ Jira"). This module reconciles the cockpit's needs stores against the CURRENT Ji
   · status is DONE-like (Done/Closed/Resolved/QA…)     → the work is over: unpark, drop the
     pending decision, dismiss the errored/PR row.
   · status is ACTIVE-like (To Do/In Progress/Backlog…) → the Commander re-queued it himself:
-    unpark (a lingering park makes the drain SKIP a ticket he wants built) and drop the
-    pending decision (he took the call in Jira).
+    unpark (a lingering park makes the drain SKIP a ticket he wants built), drop the pending
+    decision (he took the call in Jira) and dismiss the errored/PR card — it describes a DEAD
+    run of a ticket that is back in the queue. dismiss() is timestamped, so a NEW failing run
+    after the sync surfaces again (dashboard._is_dismissed only hides runs at/before it).
   · status is BLOCKED-like                             → genuinely waiting: keep everything.
     (A NEW Jira comment on a blocked ticket is the answer path — consumed by the autopilot's
     _resumable_answered scan, which re-runs the ticket; this module never starts builds.)
@@ -120,7 +122,11 @@ def reconcile(cfg, audit=None, *, ttl_s: float = 300.0, force: bool = False) -> 
                 except Exception:  # noqa: BLE001
                     pass
                 touched = True
-        if cls == "done" and tid in task_ids:
+        # done OR re-queued: either way the errored/awaiting card describes a run that is over
+        # for a ticket Jira says is finished or back in the queue — not "needs you" anymore.
+        # (First live sync 2026-07-19 proved the done-only version wrong: 12 To-Do tickets kept
+        # their dead cards while Jira showed ZERO blocked.)
+        if tid in task_ids:
             try:
                 D.dismiss(cfg.audit_path, tid)
             except Exception:  # noqa: BLE001

@@ -60,6 +60,12 @@ import orchestrator.backlog.base as _bb
 _orig_make = _bb.make_backlog
 _bb.make_backlog = lambda app: _FakeBL()
 
+# errored/awaiting cards for every ticket — reconcile must dismiss them for done AND active
+import orchestrator.needs as _needs_mod
+_orig_summary = _needs_mod.summary
+_needs_mod.summary = lambda cfg, app_name=None: {
+    "tasks": [{"ticket_id": t} for t in ("AUTO-1", "AUTO-2", "AUTO-3", "AUTO-4", "AUTO-5")]}
+
 # seed: all five parked; decisions for 1, 2, 3
 autopilot.save_blocked(cfg, {"AUTO-1", "AUTO-2", "AUTO-3", "AUTO-4", "AUTO-5", "ZZZ-9"})
 for tid in ("AUTO-1", "AUTO-2", "AUTO-3"):
@@ -72,6 +78,7 @@ try:
     r = needs_sync.reconcile(cfg, None, force=True)
 finally:
     _bb.make_backlog = _orig_make
+    _needs_mod.summary = _orig_summary
 
 parked_after = autopilot.load_blocked(cfg)
 pending_after = {p["id"] for p in decisions.load(cfg)}
@@ -84,6 +91,13 @@ chk("(1d) QA counts as done-like", "AUTO-5" not in parked_after and cleared.get(
 chk("(2a) To Do → unparked (drain must not skip it)", "AUTO-2" not in parked_after)
 chk("(2b) To Do → decision dropped", "AUTO-2" not in pending_after)
 chk("(2c) reason is 're-queued in Jira'", cleared.get("AUTO-2") == "re-queued in Jira")
+
+import json as _json
+_dismissed = _json.loads((tmp / "dismissed.json").read_text(encoding="utf-8"))
+chk("(2d) dead cards dismissed for done AND re-queued tickets",
+    {"AUTO-1", "AUTO-2", "AUTO-5"} <= set(_dismissed))
+chk("(2e) blocked/unknown cards NOT dismissed",
+    "AUTO-3" not in _dismissed and "AUTO-4" not in _dismissed)
 chk("(3) Blocked → kept parked + decision kept",
     "AUTO-3" in parked_after and "AUTO-3" in pending_after)
 chk("(4) unreachable status → kept (never clears on doubt)", "AUTO-4" in parked_after)
