@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -591,6 +592,41 @@ def needs_chat_summary(t: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+_JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
+
+def _jira_base_for(cfg, app_name: str) -> str:
+    """Resolve an app's Jira browse base URL — from `backlog.base_url` in config, else the cockpit
+    connection store (`connections.for_app`). '' when the app isn't Jira-backed or has no URL.
+    Never raises: a link is a nice-to-have, never worth a 500 on the log page."""
+    if not cfg or not app_name:
+        return ""
+    try:
+        app = next((a for a in getattr(cfg, "apps", []) if a.name == app_name), None)
+        if app is None or getattr(app, "backlog_backend", "") != "jira":
+            return ""
+        base = str((getattr(app, "backlog", None) or {}).get("base_url") or "").rstrip("/")
+        if not base:
+            from . import connections
+            conn = connections.for_app(app_name, cfg)
+            base = str((conn or {}).get("base_url") or "").rstrip("/")
+        return base
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _jira_link(base: str, ticket_id: Any, *, stop_prop: bool = False) -> str:
+    """A compact 'Jira ↗' anchor to {base}/browse/{KEY}, or '' when there's no base URL or the id
+    isn't a Jira key (e.g. an ephemeral run). ``stop_prop`` guards it inside a row whose own click
+    toggles the detail drawer — the link must open Jira without also expanding the row."""
+    tid = str(ticket_id or "").strip()
+    if not base or not _JIRA_KEY_RE.match(tid):
+        return ""
+    onclick = ' onclick="event.stopPropagation()"' if stop_prop else ""
+    return (f' <a class=jira href="{html.escape(base)}/browse/{html.escape(tid)}" target=_blank '
+            f'rel=noopener{onclick} title="Open {html.escape(tid)} in Jira">Jira &#8599;</a>')
+
+
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
                 needs_count: int | None = None, cfg=None, app_name: str | None = None) -> str:
@@ -634,16 +670,25 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     head += ["<th>Verdict</th>", "<th>PR</th>"]
     ncols = len(head)
 
+    # Resolve each app's Jira base URL once per render (rows share an app on the scoped log page).
+    _jira_bases: dict[str, str] = {}
+
+    def _jira_for(app: str) -> str:
+        if app not in _jira_bases:
+            _jira_bases[app] = _jira_base_for(cfg, app)
+        return _jira_bases[app]
+
     rows = []
     for i, t in enumerate(tasks):
         pr = (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR ↗</a>' if t.get("pr_url") else "")
         started = t["started"].strftime("%b %d %H:%M") if t["started"] else "—"
         cost_cell = f'<td class=num>${t["cost"]:.2f}</td>' if show_cost else ""
+        _jl = _jira_link(_jira_for(str(t.get("app") or app_name or "")), t["ticket_id"], stop_prop=True)
         rows.append(
             f'<tr class=row onclick="tog({i})">'
             f'<td class=tw>▸</td>'
             f'<td>{_badge(t["outcome"])}{" <span class=dry>dry</span>" if t.get("dry_run") else ""}</td>'
-            f'<td class=mono>{html.escape(str(t["ticket_id"]))}</td>'
+            f'<td class=mono>{html.escape(str(t["ticket_id"]))}{_jl}</td>'
             f'<td>{html.escape(str(t.get("app") or ""))}</td>'
             f'<td class=mono>{html.escape(str(t.get("branch") or ""))}</td>'
             f'<td>{started}</td><td>{_human_dur(t["duration"])}</td>'
@@ -663,6 +708,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
                 f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
                 f'<span class=mono>{html.escape(str(t["ticket_id"]))}</span> {_badge(t["outcome"])} '
                 f'<span class=muted>{html.escape(_short(str(t.get("note") or ""), 80))}</span></span>'
+                + _jira_link(_jira_for(str(t.get("app") or app_name or "")), t["ticket_id"])
                 + (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR &#8599;</a>'
                    if t.get("pr_url") else "")
                 + ('<a class=x style="text-decoration:none" href="/needs" '
@@ -685,6 +731,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
             f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
             f'<span class=mono>{html.escape(str(t["ticket_id"]))}</span> {_badge(t["outcome"])} '
             f'<span class=muted>{html.escape(t.get("note") or "")}</span></span>'
+            + _jira_link(_jira_for(str(t.get("app") or app_name or "")), t["ticket_id"])
             + (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR ↗</a>' if t.get("pr_url") else "")
             + '<form method=post action=/api/dismiss class=dismiss>'
             f'<input type=hidden name=ticket value="{html.escape(str(t["ticket_id"]))}">'
@@ -745,6 +792,8 @@ th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-
 .ok{background:#10371f;color:#56d98a}.warn{background:#3a2f10;color:#fbbf24}
 .bad{background:#3a1414;color:#f97a7a}.muted{background:#191d26;color:#8a909c}
 .dry{color:#8a909c;font-size:11px}a{color:#6aa9ff;text-decoration:none}
+a.jira{display:inline-flex;align-items:center;gap:3px;margin-left:8px;padding:1px 7px;border:1px solid #232936;border-radius:6px;font-size:11px;font-weight:600;color:#8a909c;vertical-align:middle}
+a.jira:hover{border-color:#3b6cff;color:#8ab6ff;background:#131a2a}
 .detrow{display:none}.detrow>td{background:#0a0c10;padding:0}
 .det{padding:14px 22px}.pass{border-left:2px solid #2a3140;padding:6px 0 12px 14px;margin:4px 0}
 .passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:#8a909c;font-weight:400;font-size:12px;margin-left:6px}
