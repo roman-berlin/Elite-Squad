@@ -725,9 +725,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     open_logs_html = ""
     if is_mac:
         log_folder = str(getattr(cfg, "log_folder", None) or "logs/")
+        # 2026-07-19: fetch() instead of navigating — as a plain link the click replaced the
+        # cockpit tab with the endpoint's raw JSON ("open logs closed the cockpit"); the endpoint
+        # only needs to be CALLED (it opens Finder server-side), the browser needs no page.
         open_logs_html = _btn(
             "&#128194; Open logs", tag="a",
             attrs=(f' href="/api/open-logs?path={html.escape(quote(log_folder))}" '
+                   f'onclick="fetch(this.href);return false" '
                    f'title="Open the run-logs folder in Finder"'))
 
     # Render plan-limit banner BEFORE the control bar (if active)
