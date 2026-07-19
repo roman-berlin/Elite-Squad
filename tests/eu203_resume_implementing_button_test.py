@@ -151,12 +151,12 @@ def _test_button_starts_drain_mode() -> None:
                     }):
                         from orchestrator import server
 
-                        # The server.py code calls ap.autopilot(ap_cfg, key, once=False, ...)
-                        # We can't easily test the full flow without a running server,
-                        # but we verified the button has the correct parameters
-
+                        # Source pin (2026-07-19: this was a hardcoded-True check): the
+                        # server's drain worker must start the CONTINUOUS autopilot.
+                        _ssrc = (Path(__file__).resolve().parent.parent
+                                 / "orchestrator" / "server.py").read_text(encoding="utf-8")
                         chk("drain mode uses once=False",
-                            True,  # Already verified by button having mode=drain
+                            "ap.autopilot(ap_cfg, key, once=False" in _ssrc,
                             "Drain mode must use once=False for continuous operation")
 
 

@@ -103,7 +103,8 @@ chk("other tickets are untouched after single unblock",
     set(remaining) == {"AUTO-33", "EU-17"}, remaining)
 
 AP.unblock(cfg, "MISSING-99")   # not in file — must not raise
-chk("unblock of absent ticket is a no-op (no crash)", True)
+chk("unblock of absent ticket is a no-op (state unchanged, no crash)",
+    set(json.loads(blocked_file.read_text())) == {"AUTO-33", "EU-17"})
 
 AP.unblock(cfg)                 # clear all
 remaining_all = json.loads(blocked_file.read_text())

@@ -42,7 +42,9 @@ Approach, in order:
    test cannot be made to fail without your change, fix the test until it can. When a test is
    genuinely test-after — you changed the code before writing it, or you are adjusting an existing
    test — MUTATION-CHECK it instead: revert your change (or move the asserted line), confirm the
-   test goes RED, then restore. Add or adjust ONLY the tests for what you changed.
+   test goes RED, then restore. Add or adjust ONLY the tests for what you changed. A new test
+   FILE must exit non-zero on any failed check — verify by forcing one check red and running the
+   file standalone (a harness that prints FAIL but exits 0 hides every regression it ever finds).
 
 PRE-SUBMIT GATES (mandatory — run these BEFORE you write your summary / hand off to Reviewer).
 These checks are the unit's biggest Reviewer friction sources; the Reviewer will bounce the diff if

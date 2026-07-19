@@ -79,7 +79,7 @@ chk("the worsened outage names the newly-dark board (Automatixy)", "Automatixy" 
 chk("recovery (dark → reachable) re-announces an honest 'queue clear' exactly once", n_clear == 1,
     f"queue clear count={n_clear}")
 chk("recovery printed AFTER the outage (clear follows the last UNREACHABLE, not before)",
-    out.rfind("UNREACHABLE") < out.find("queue clear"),
+    out.find("queue clear") != -1 and out.rfind("UNREACHABLE") < out.find("queue clear"),
     f"last_unreach@{out.rfind('UNREACHABLE')} clear@{out.find('queue clear')}")
 chk("each distinct dark set pinged Telegram (2 unreachable alerts)",
     sum(1 for s in sent if "unreachable" in s.lower()) == 2, str(sent)[:300])
