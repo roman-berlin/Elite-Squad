@@ -1924,7 +1924,7 @@ font-size:12px;font-weight:600;cursor:pointer}
 .tag{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
 .tag.bad{background:var(--badbg);color:var(--bad)}.tag.warn{background:var(--warnbg);color:var(--warn)}
 /* kpis */
-.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:22px 24px 8px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;padding:22px 24px 8px}
 .kpi{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:16px 17px;
 overflow:hidden;box-shadow:var(--shadow-1);transition:border-color var(--t-fast),transform var(--t-fast),box-shadow var(--t-fast)}
 .kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--line2)}
@@ -2120,8 +2120,8 @@ font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);bor
 .talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
 .tkarrow{color:var(--faint);font-size:18px;flex:none;transition:color var(--t-fast)}
 .talkbtn:hover .tkarrow{color:var(--accent)}
-@media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
-@media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
+@media(max-width:1080px){.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
+@media(max-width:680px){.kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.hbactions .models{display:none}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
 </style></head><body>

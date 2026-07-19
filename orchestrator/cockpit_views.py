@@ -725,7 +725,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
-.tbar{{display:flex;gap:var(--s-3);align-items:stretch;flex-wrap:wrap;padding:var(--s-3) 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
+.tbar{{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:var(--s-3);align-items:stretch;padding:var(--s-3) 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
+/* the status note spans the full row under the clusters; the old flex spacer is inert in grid */
+.tbar>.tbnote{{grid-column:1 / -1}}
+.tbar>.grow{{display:none}}
 /* 2026-07-19 redesign: each cluster is a quiet card — label as an overline INSIDE the group —
    so the bar reads as run · build · QA · nav sections instead of scattered buttons. */
 .tbar .tclu{{display:flex;flex-direction:column;gap:var(--s-1);justify-content:center;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--s-2) var(--s-3)}}
@@ -793,8 +796,11 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,var(--accent),var(--info));border-radius:var(--r-pill);animation:dsl 1.4s ease-in-out infinite}}
 @keyframes dsp{{to{{transform:rotate(360deg)}}}}
 @keyframes dsl{{0%{{margin-left:-38%}}100%{{margin-left:100%}}}}
+@media(max-width:1150px){{
+.tbar{{grid-template-columns:1fr 1fr}}
+}}
 @media(max-width:820px){{
-.tbar{{gap:7px;padding:10px 14px}}
+.tbar{{grid-template-columns:1fr;gap:7px;padding:10px 14px}}
 .tbar .btn{{padding:8px 10px;font-size:12px}}
 .tbar .tbnote{{order:99;flex-basis:100%;margin:4px 0 0}}
 .tbar .panel.form{{min-width:0;width:min(320px,92vw)}}
