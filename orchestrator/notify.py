@@ -165,7 +165,27 @@ def send(text: str, chat_id: str | int | None = None) -> bool:
             ok = ok and r.status_code == 200
         except requests.RequestException:
             ok = False
+    if not ok:
+        _note_send_failure()
     return ok
+
+
+# 2026-07-19 stabilization: send() never raises and 112 of 113 call sites discard its boolean, so
+# a revoked bot token / wrong chat id / outage silently blinded the Commander's primary alert
+# channel. One throttled console line per window makes a dead Telegram visible in the run log and
+# the cockpit feed without spamming either.
+_SEND_FAILURE_LOG_INTERVAL_S = 600.0
+_last_send_failure_log = 0.0
+
+
+def _note_send_failure() -> None:
+    global _last_send_failure_log
+    now = time.time()
+    if now - _last_send_failure_log >= _SEND_FAILURE_LOG_INTERVAL_S:
+        _last_send_failure_log = now
+        print("  ⚠ Telegram send FAILED (bad token / chat id / network?) — the Commander is not "
+              "receiving alerts. Check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID with ./general ping.",
+              flush=True)
 
 
 def get_updates(offset: int | None = None, timeout: int = 0) -> list:

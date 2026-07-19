@@ -117,7 +117,8 @@ ok("(5) _land publishes AFTER land_trial confirms the fast-forward",
    land_at != -1 and pub_at != -1 and pub_at > land_at,
    "publishing before the push would cache a sha that may never become the base tip")
 ok("(5b) the publish is inside the green/live path (after the LandRaceError requeue return)",
-   seg.find("land_race_requeue") < pub_at,
-   "a LandRaceError means the trial never became dev's head — its sha must not be cached")
+   seg.find("land_race_requeue") != -1 and seg.find("land_race_requeue") < pub_at,
+   "a LandRaceError means the trial never became dev's head — its sha must not be cached "
+   "(a missing requeue token would make find() return -1 and pass vacuously)")
 
 print(f"\n{checks}/{checks} passed")

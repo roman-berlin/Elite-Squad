@@ -69,21 +69,38 @@ _DIRTY_PATHS_CAP = 50   # bound the audit line — one giant tree must not ballo
 # taken: the AUTO-128 sentinel revert branch.)
 SELF_RESTART_EXIT_CODE = 75
 
+# When THIS process booted — the reference point for the stale-flag crash-loop guard in
+# _maybe_self_restart (a restart flag older than the boot has already been honoured).
+_PROCESS_START_TS = time.time()
+
 
 def _self_restart_flag(cfg: Config) -> Path:
     return Path(cfg.audit_path).with_name("self_restart_pending.json")
 
 
-def flag_self_update(cfg: Config, ticket_id: str, sha: str = "") -> None:
+def flag_self_update(cfg: Config, ticket_id: str, sha: str = "", audit=None) -> bool:
     """EU-387: called by loop._land when a live land changed the unit's OWN repo. Writes the
     pending-restart flag the drain's cycle boundary consumes — the land site itself is MID-RUN
-    (its worklist may hold more tickets), so the exit decision can't be made there."""
+    (its worklist may hold more tickets), so the exit decision can't be made there.
+
+    Returns True when the flag persisted. A False return means NO automatic restart will happen
+    (2026-07-19 stabilization: the old silent swallow let the land site announce "restarting
+    automatically" while the unit kept running stale code — the announce-lie variant of the very
+    incident this feature exists to end), so the caller must word its notify accordingly."""
     import json as _json
     try:
         _self_restart_flag(cfg).write_text(_json.dumps(
             {"ticket": ticket_id, "sha": sha, "ts": time.time()}), encoding="utf-8")
-    except OSError:
-        pass                                # best-effort: the notify still fired
+        return True
+    except OSError as exc:
+        if audit is not None:
+            try:
+                audit.record("self_restart_flag_write_failed", ticket_id=ticket_id,
+                             error=str(exc)[:200])
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"  ⚠ self-restart flag write failed ({exc}) — manual restart needed", flush=True)
+        return False
 
 
 def consume_self_restart_flag(cfg: Config, audit=None) -> dict | None:
@@ -120,6 +137,27 @@ def _maybe_self_restart(cfg: Config, audit) -> None:
     notify-only (flag cleared so it can't ping-pong)."""
     p = _self_restart_flag(cfg)
     if not p.exists():
+        return
+    # Crash-loop guard (2026-07-19 stabilization): a flag whose ts predates THIS process's start
+    # requested a restart that has, by definition, already happened — it survives only when boot's
+    # consume could not unlink it (read-only state dir, permissions). Exiting on it again would
+    # restart forever. Ignore it loudly instead; cap = one wasted restart, never a loop.
+    try:
+        import json as _json
+        _ts = float(_json.loads(p.read_text(encoding="utf-8")).get("ts", 0) or 0)
+    except (OSError, ValueError):
+        _ts = 0.0
+    if _ts and _ts < _PROCESS_START_TS:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        try:
+            audit.record("self_restart_stale_flag", flag_ts=_ts)
+        except Exception:  # noqa: BLE001
+            pass
+        print("  ⚠ stale self-restart flag (predates this boot) ignored — check state/ "
+              "permissions if this repeats", flush=True)
         return
     if not getattr(cfg, "self_update_auto_restart", True):
         try:
@@ -542,18 +580,33 @@ def load_blocked(cfg: Config) -> set[str]:
     p = _blocked_file(cfg)
     try:
         return set(json.loads(p.read_text()))
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        # A corrupt park file maps to "nothing parked" — every parked ticket silently un-parks.
+        # Keep the fail-open direction (a stuck park set is worse) but say it happened
+        # (2026-07-19 stabilization: this was a silent swallow).
+        print(f"  ⚠ blocked_tickets.json is corrupt — treating as no parked tickets ({p})",
+              flush=True)
+        return set()
+    except OSError:
         return set()
 
 
 def save_blocked(cfg: Config, blocked: set[str]) -> None:
     # Authoritative overwrite, but taken under the shared cross-thread + cross-process lock so it can't
     # interleave with a concurrent write (the Telegram poller's /unblock) and lose one side's update.
+    # EU-381 pattern (2026-07-19 stabilization): one bounded retry before the best-effort swallow — a
+    # silently dropped write here un-parks every parked ticket with zero operator signal.
     snapshot = sorted(blocked)
-    try:
-        locking.locked_rmw(_blocked_file(cfg), lambda _current: snapshot, default=[])
-    except (OSError, ValueError):
-        pass
+    for attempt in (0, 1):
+        try:
+            locking.locked_rmw(_blocked_file(cfg), lambda _current: snapshot, default=[])
+            return
+        except (OSError, ValueError) as exc:
+            if attempt:
+                print(f"  ⚠ blocked_tickets.json write failed twice ({exc}) — park set may be "
+                      "stale", flush=True)
+                return
+            time.sleep(0.05)
 
 
 # ── EU-385 (EU-224a): persisted drain-arm intent → serve-boot auto-resume ────────────────────
@@ -593,8 +646,11 @@ def record_drain_intent(cfg: Config, app_name: str | None) -> None:
 
     try:
         locking.locked_rmw(_intent_file(cfg), _set, default={}, corrupt_to_default=True)
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as exc:
+        # A dropped arm-write silently disarms EU-385 crash-resume — the exact 66-minute
+        # dead-drain gap the feature exists to close. Say so (2026-07-19 stabilization).
+        print(f"  ⚠ drain-intent arm write failed ({exc}) — crash auto-resume is DISARMED for "
+              f"'{key or 'unit-wide'}' until the next arm", flush=True)
 
 
 def clear_drain_intent(cfg: Config, app_name: str | None, reason: str) -> None:
@@ -610,8 +666,11 @@ def clear_drain_intent(cfg: Config, app_name: str | None, reason: str) -> None:
 
     try:
         locking.locked_rmw(_intent_file(cfg), _set, default={}, corrupt_to_default=True)
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as exc:
+        # A dropped retire-write leaves RUNNING behind — the next boot would resurrect a drain
+        # the Commander stopped. Say so (2026-07-19 stabilization).
+        print(f"  ⚠ drain-intent retire write failed ({exc}) — '{key or 'unit-wide'}' may "
+              "auto-resume on the next boot despite this stop", flush=True)
 
 
 def _parse_audit_ts(ts) -> float | None:

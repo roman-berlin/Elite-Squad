@@ -3367,8 +3367,18 @@ def create_app(cfg: Config, port: int = 8787):
                     try:
                         from . import autopilot as _ap
                         _ap.unblock(cfg, tid)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        # 2026-07-19 stabilization: this swallow let the banner claim "the unit
+                        # is re-running it" while the ticket stayed parked — the answer was
+                        # silently lost. Surface it so the Commander can act.
+                        _state["last_msg"] = (f"⚠ answer to {tid} was saved as a comment but the "
+                                              f"unblock FAILED ({exc}) — the ticket is still "
+                                              "parked; /unblock it by hand.")
+                        try:
+                            audit.record("clarify_unblock_failed", ticket_id=tid,
+                                         error=str(exc)[:200])
+                        except Exception:  # noqa: BLE001
+                            pass
                 else:
                     # handle_reply succeeded - ticket is being re-run, transition to To Do
                     try:

@@ -786,8 +786,10 @@ def publish_base_green(app: AppConfig, cfg, sha: str) -> None:
                     data.pop(old, None)
             return data
         locking.locked_rmw(cache_path, _put, default={}, corrupt_to_default=True)
-    except Exception:  # noqa: BLE001 — cache write failure must never block the land
-        pass
+    except Exception as exc:  # noqa: BLE001 — cache write failure must never block the land
+        # 2026-07-19 stabilization: keep the fail-open contract, but a permanently dead cache
+        # costs ~178s of duplicate gate work per ticket — make it visible in the run log.
+        print(f"  · base-gate cache write failed ({exc}) — gate will re-run next time", flush=True)
 
 
 def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, str]:
@@ -858,8 +860,8 @@ def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, s
                         data.pop(old, None)
                 return data
             locking.locked_rmw(cache_path, _put, default={}, corrupt_to_default=True)
-        except Exception:  # noqa: BLE001 — cache write failure must never block the pipeline
-            pass
+        except Exception as exc:  # noqa: BLE001 — cache write failure must never block the pipeline
+            print(f"  · base-gate cache write failed ({exc}) — gate will re-run next time", flush=True)
     return res.passed, fp, report
 
 

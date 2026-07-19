@@ -116,8 +116,10 @@ ok("(2f) sanitising keeps the substance (the commit sha survives)", "0474c1c" in
 src = Path("orchestrator/loop.py").read_text()
 seg = src[src.find("planner_nonbuild_verdict"):src.find("# 0b) ARCHITECT")]
 ok("(5) EU-225's evidence-keyed auto-close still takes precedence over the park",
-   seg.find("already_landed_autoclose") < seg.find("planner_verdict_park"),
-   "the park must be the fallback for NO evidence, not a replacement for the close")
+   seg.find("already_landed_autoclose") != -1
+   and seg.find("already_landed_autoclose") < seg.find("planner_verdict_park"),
+   "the park must be the fallback for NO evidence, not a replacement for the close "
+   "(a missing autoclose token would make find() return -1 and pass vacuously)")
 ok("(6) the park is behind a config knob", "planner_verdict_park" in src and
    'getattr(cfg, "planner_verdict_park", True)' in seg)
 # The guard is useless unless the BRANCH consults it. Pinning only the helper (4a-4e) let a mutation

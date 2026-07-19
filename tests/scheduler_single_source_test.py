@@ -59,8 +59,11 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    daemon (Finish & stop graceful shutdown). server.py has a comment about launchctl failure.
 #    2026-07-09: install-mac-cockpit-daemon.sh is the CURRENT cockpit keepalive installer (the serve
 #    counterpart of the autopilot daemon), not a retired scheduler — allow-listed for the same reason.
+#    2026-07-19: general-autopull.sh is the CURRENT EU-335 autopull agent script (brought under
+#    version control by the stabilization sweep; its header cites its launchd plist) — same class.
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
+             "scripts/general-autopull.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):

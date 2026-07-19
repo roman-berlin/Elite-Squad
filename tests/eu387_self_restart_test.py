@@ -138,6 +138,29 @@ ok("(6) consume returns the payload + audits completion",
 ok("(6b) a second consume is a no-op (one-shot)",
    autopilot.consume_self_restart_flag(cfg, _Audit()) is None)
 
+# (8) 2026-07-19 stabilization: a failed flag write returns False + audits — the land site must
+# never announce "restarting automatically" for a flag that didn't persist (the announce-lie).
+au8 = _Audit()
+with patch.object(autopilot, "_self_restart_flag",
+                  lambda cfg: Path("/nonexistent-dir-xyz/flag.json")):
+    ok("(8) flag write failure returns False",
+       autopilot.flag_self_update(cfg, "EU-999", audit=au8) is False)
+ok("(8b) the failure is audited (self_restart_flag_write_failed)",
+   any(e == "self_restart_flag_write_failed" for e, _ in au8.events), str(au8.events))
+ok("(8c) a successful write returns True", autopilot.flag_self_update(cfg, "EU-999") is True)
+autopilot._self_restart_flag(cfg).unlink()
+
+# (9) 2026-07-19 stabilization: a flag whose ts predates THIS process's boot has already been
+# honoured — it survives only when boot's consume couldn't unlink it. Exiting on it again would
+# crash-loop; it must be ignored, cleared, and audited instead.
+flag.write_text(json.dumps({"ticket": "EU-999", "ts": autopilot._PROCESS_START_TS - 3600}),
+                encoding="utf-8")
+au = drive(cfg, active=0)
+ok("(9) a stale (pre-boot) flag never exits — crash-loop capped", exits == [], str(exits))
+ok("(9b) the stale flag is cleared + audited",
+   not flag.exists() and any(e == "self_restart_stale_flag" for e, _ in au.events),
+   str(au.events))
+
 # source pins: the land site flags; the drain cycle checks; serve boot consumes
 lsrc = Path("orchestrator/loop.py").read_text()
 ok("(1b) loop._land flags at the self-repo detection point",

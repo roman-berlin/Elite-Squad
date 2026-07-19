@@ -126,6 +126,9 @@ with patch("orchestrator.backlog.base.make_backlog", return_value=fake):
 # right before its write-back (the park path lower in the loop already does — same rule).
 src = (Path(__file__).resolve().parent.parent / "orchestrator" / "autopilot.py").read_text()
 resume_at = src.find("Resuming (answered on Jira)")
+ok("(5-pre) the resume log anchor still exists in autopilot.py", resume_at != -1,
+   "the anchor string was reworded — without this guard the window silently widened to the "
+   "whole file and check (5) could false-pass")
 window = src[max(0, resume_at - 600):resume_at]
 ok("(5) resume write-back re-reads load_blocked() instead of saving the stale snapshot",
    "load_blocked(cfg) - set(resumed)" in window,

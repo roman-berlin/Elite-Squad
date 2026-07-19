@@ -1270,7 +1270,12 @@ async def _pm_decide_before_park(cfg, ticket, app, audit, backlog, question: str
 
 def _already_pm_triaged(cfg, ticket_id: str) -> bool:
     """True if this ticket already got its ONE PM triage — so a genuinely-stuck ticket escalates for
-    real next time instead of looping triage -> re-queue forever."""
+    real next time instead of looping triage -> re-queue forever.
+
+    Fail direction (2026-07-19 stabilization, documented on purpose): an UNREADABLE audit log
+    returns False — i.e. fails toward "triage again", trading a possible duplicate triage for
+    never silently skipping the escalation a stuck ticket needs. The failed scan is printed so
+    the direction is visible in the run log instead of indistinguishable from "never triaged"."""
     try:
         import json
         from . import dashboard as _D
@@ -1281,8 +1286,9 @@ def _already_pm_triaged(cfg, ticket_id: str) -> bool:
                 continue
             if e.get("event") == "pm_triage" and e.get("ticket_id") == ticket_id:
                 return True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"  · pm-triage audit scan failed ({exc}) — assuming never triaged (may repeat "
+              "one triage)", flush=True)
     return False
 
 
@@ -2621,9 +2627,14 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # self_update_auto_restart on (default), the process exits cleanly once idle and
                 # the keepalive respawns it on this landed code; EU-385 re-arms the drains on boot.
                 from . import autopilot as _ap
-                _ap.flag_self_update(cfg, ticket.id, sha=merge_sha)
-                _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restarting automatically "
-                             "once idle (self_update_auto_restart); drains re-arm on the new sha.")
+                if _ap.flag_self_update(cfg, ticket.id, sha=merge_sha, audit=audit):
+                    _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restarting automatically "
+                                 "once idle (self_update_auto_restart); drains re-arm on the new sha.")
+                else:
+                    # The flag did NOT persist — no automatic restart will happen. Never announce one.
+                    _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code but the restart flag "
+                                 "could not be written — RESTART THE COCKPIT BY HAND or it keeps "
+                                 "running the old code.")
         except Exception:  # noqa: BLE001 — the signal is best-effort
             pass
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).
