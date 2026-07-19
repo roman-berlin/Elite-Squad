@@ -1072,11 +1072,15 @@ def standup(cfg) -> str:
         # EU-336: one capped line per item — never the officer's raw multi-paragraph text. The
         # "(cockpit → /needs)" pointer rides the header only when something was actually clipped,
         # mirroring the "…and N more (cockpit → /needs)" overflow idiom on the Needs-you line above.
-        rendered = [(p["id"], _one_line(p.get("question", ""))) for p in pending]
-        clipped = any(q.endswith("…") for _, q in rendered)
-        lines.append("❓ Awaiting your decision:"
-                     + (" (full text: cockpit → /needs)" if clipped else ""))
+        # 2026-07-19 (Commander order): PRACTICAL, not a wall — top 5 one-liners, the rest is a
+        # count + the /needs pointer (the inbox is where answering actually happens).
+        rendered = [(p["id"], _one_line(p.get("question", ""))) for p in pending[:5]]
+        more = len(pending) - len(rendered)
+        lines.append("❓ Awaiting your decision" + (f" ({len(pending)})" if more > 0 else "")
+                     + ": (answer: cockpit → /needs)")
         lines += [f"   • {pid}: {q}" for pid, q in rendered]
+        if more > 0:
+            lines.append(f"   …and {more} more (cockpit → /needs)")
     else:
         lines.append("❓ Awaiting your decision: —")
     if stale_base_red:
@@ -1084,6 +1088,31 @@ def standup(cfg) -> str:
         # the base recovered and where the tickets wait, without re-arming the blocker headline.
         lines.append(f"♻️ Base went green again — {len(stale_base_red)} stale base-red decision(s) "
                      "left out of this brief; re-queue those tickets from cockpit → /needs")
+    # 2026-07-19 (Commander order): the daily answers DONE / TO DO / NEXT. "Next up" peeks at the
+    # top of each board queue (best-effort — an unreachable Jira just drops the line), and the
+    # failure-cause summary moves INTO the daily (the forensics nav link left the cockpit bar).
+    try:
+        from . import intake as _intake
+        nxt = []
+        for _app in (getattr(cfg, "apps", None) or [])[:3]:
+            try:
+                for _a, _tk in _intake.from_drain(cfg, _app.name, 3):
+                    nxt.append(f"{_tk.id}")
+            except Exception:  # noqa: BLE001 - one unreachable board must not kill the daily
+                continue
+        if nxt:
+            lines.append("🔜 Next up (top of the queue): " + ", ".join(nxt[:6]))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import forensics as _fx
+        _tax = _fx.taxonomy(cfg)[:3]
+        if _tax:
+            lines.append("🧩 Failure causes (top): "
+                         + " · ".join(f"{r['label']} ×{r['count']}" for r in _tax)
+                         + " (details: cockpit → /forensics)")
+    except Exception:  # noqa: BLE001
+        pass
     return "\n".join(lines)
 
 

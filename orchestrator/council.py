@@ -241,6 +241,47 @@ def chat_transcript(cfg: Config, lines: int = 400) -> str:
     return "\n".join(p.read_text(encoding="utf-8").splitlines()[-lines:]).strip()
 
 
+def _honest_commander_section(cfg: Config, text: str) -> str:
+    """2026-07-19 (Commander order): '**FOR THE COMMANDER** — None' while decisions sit in /needs
+    is a lie the model kept telling. Deterministic truth: when the briefing says None/— but
+    pending decisions exist, splice in the top 3 (one line each) + the count pointer."""
+    import re as _re
+    m = _re.search(r"\*\*FOR THE COMMANDER\*\*\s*[—:-]\s*(None|—|-|\(none\))\.?", text, _re.I)
+    if not m:
+        return text
+    try:
+        from . import decisions as _dec
+        pending = _dec.load(cfg)
+    except Exception:  # noqa: BLE001
+        pending = []
+    if not pending:
+        return text
+    def _one(q: str) -> str:
+        q = " ".join(str(q or "").split())
+        return (q[:110] + "…") if len(q) > 110 else q
+    top = "\n".join(f"  • {p['id']}: {_one(p.get('question', ''))}" for p in pending[:3])
+    more = len(pending) - min(3, len(pending))
+    tail = f"\n  …and {more} more — answer in cockpit → /needs" if more > 0 else \
+           "\n  Answer in cockpit → /needs"
+    return text[:m.start()] + (f"**FOR THE COMMANDER** — {len(pending)} decision(s) waiting:\n"
+                               + top + tail) + text[m.end():]
+
+
+def latest_focus(cfg: Config) -> str:
+    """The FOCUS line of the most recent council/daily — grounds the group room in today's
+    priority. '' when no transcript or no FOCUS line exists."""
+    import re as _re
+    try:
+        for rec in history(cfg, limit=3):
+            body = transcript_text(cfg, rec.get("file", ""))
+            m = _re.search(r"\*\*FOCUS\*\*\s*[—:-]\s*(.+)", body)
+            if m:
+                return " ".join(m.group(1).split())[:200]
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def history(cfg: Config, limit: int = 20) -> list[dict]:
     """Recent councils (newest first) for the cockpit: {ts, title, file, summary}."""
     idx = _council_dir(cfg) / "index.jsonl"
@@ -389,7 +430,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
     briefing, spawn_note = _autospawn_tickets(cfg, briefing_raw, audit,
                                               source=("muster: " + topic) if topic else "council/daily",
                                               officer_label="council")
-    briefing = (briefing + spawn_note).strip()
+    briefing = _honest_commander_section(cfg, (briefing + spawn_note).strip())
 
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
@@ -1002,7 +1043,9 @@ def _match_officers(picks: list[str]) -> list[tuple[str, str, str]]:
 def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         model=cfg.discussion_model,           # Sonnet — a group brainstorm is many cheap turns
-        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
+        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}"
+        + ((f"\n\nToday's daily FOCUS (ground your takes in it): {latest_focus(cfg)}")
+           if latest_focus(cfg) else ""),
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
@@ -1212,7 +1255,7 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
-    synth = (run.final or run.text or "").strip()
+    synth = _honest_commander_section(cfg, (run.final or run.text or "").strip())
     questions = _commander_questions(synth)
 
     # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine

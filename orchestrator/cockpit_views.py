@@ -615,18 +615,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
     except Exception:  # noqa: BLE001
         fr_mem = ""
-    try:
-        from . import usage as _usg
-        _u = _usg.today_tokens(cfg)
-        fr_usage = f" · {_u // 1000}k today" if _u >= 1000 else (f" · {_u} today" if _u else "")
-    except Exception:  # noqa: BLE001
-        fr_usage = ""
-    try:
-        from . import forensics as _fx
-        _nf = sum(t["count"] for t in _fx.taxonomy(cfg))
-        fr_fx = f" · {_nf}" if _nf else ""
-    except Exception:  # noqa: BLE001
-        fr_fx = ""
 
     # Deploy progress: while a unit-promote or app-ship runs in the background, show a live bar that
     # polls /api/deploy-status and reloads when it finishes — so the button never looks dead (the push
@@ -876,16 +864,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
       <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
       {open_logs_html}
-      <details class=menu>
-        {_btn("&#128202; Reports", tag="summary")}
-        <div class="panel right">
-          <a href="/tasks">&#128203; Task log{fr_tasks}</a>
-          <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
-          <a href="/memory">&#128221; Unit memory{fr_mem}</a>
-          <a href="/usage">&#128202; Usage &amp; budget{fr_usage}</a>
-          <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
-        </div>
-      </details>
+      {_btn(f"&#128203; Task log{fr_tasks}", tag="a", attrs=' href="/tasks" title="Every run — Today / week / month scoping, transcripts, Jira links"')}
+      {_btn(f"&#128172; Daily{fr_council}", tag="a", attrs=' href="/council" title="The daily muster — DONE / NEXT / NEEDS YOU + failure causes"')}
+      {_btn(f"&#128221; Memory{fr_mem}", tag="a", attrs=' href="/memory" title="Unit memory — doctrine + the living lessons log"')}
     </div>
   </div>
 
