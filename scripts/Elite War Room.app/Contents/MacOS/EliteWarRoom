@@ -21,20 +21,42 @@ cd "$REPO" 2>/dev/null || { osascript -e 'display alert "Elite War Room" message
 PIDS=$(lsof -ti tcp:$PORT 2>/dev/null)
 [[ -n "$PIDS" ]] && { kill $PIDS 2>/dev/null; sleep 1; PIDS=$(lsof -ti tcp:$PORT 2>/dev/null); [[ -n "$PIDS" ]] && kill -9 $PIDS 2>/dev/null; }
 
-# Sweep up any leftover War Room *terminal* windows from the .command launcher — the server was just
-# stopped, so they're idle and close without a prompt. The app runs the cockpit in the background (no
-# terminal of its own), so it just clears the strays. Matched by the cockpit URL/banner in scrollback.
-/usr/bin/osascript >/dev/null 2>&1 <<'OSA'
-tell application "Terminal"
-  repeat with w in windows
-    try
-      set htxt to (history of selected tab of w)
-      if (htxt contains "localhost:8787") or (htxt contains "War Room") or (htxt contains "general serve") then
-        close w saving no
-      end if
-    end try
-  end repeat
-end tell
+# Sweep up any leftover War Room *terminal* windows from the .command launcher. First kill what those
+# windows are running — old `caffeinate -i ./general serve` awake-holds and older .command runs — so they
+# go idle ([Process completed]) and close without a "terminate process?" prompt; then tell Terminal to
+# close the now-idle windows, recognised by the cockpit banner in their scrollback. This app has no
+# terminal of its own, so nothing here is "ours" (the tty sentinel matches no window); the busy guard
+# still protects any window with a live process. Warnings go to the log rather than vanishing.
+MY_TTY=$(tty 2>/dev/null)
+[[ "$MY_TTY" == /dev/* ]] || MY_TTY="/dev/$(ps -o tty= -p $$ | tr -d ' ')"
+old_pids=()
+for pid in \
+    $(pgrep -fx "caffeinate -i" 2>/dev/null) \
+    $(pgrep -f "caffeinate -i .*general serve" 2>/dev/null) \
+    $(pgrep -f "zsh .*War.Room\.command" 2>/dev/null); do
+  [[ "$pid" == "$$" ]] && continue
+  old_pids+=("$pid")
+done
+(( ${#old_pids[@]} )) && { kill "${old_pids[@]}" 2>/dev/null; sleep 1; }
+/usr/bin/osascript - "$MY_TTY" >/dev/null 2>&1 <<OSA || echo "  ⚠ couldn't close old Terminal windows (allow Automation for Terminal)" >> "$LOG"
+on run argv
+  set myTTY to item 1 of argv
+  tell application "Terminal"
+    set wids to id of every window
+    repeat with wid in wids
+      try
+        set w to first window whose id is (contents of wid)
+        set t to selected tab of w
+        if (tty of t) is not myTTY and (busy of t) is false then
+          set htxt to history of t
+          if (htxt contains "localhost:$PORT") or (htxt contains "War Room") or (htxt contains "general serve") then
+            close w saving no
+          end if
+        end if
+      end try
+    end repeat
+  end tell
+end run
 OSA
 
 # Start the cockpit in the background, logging everything
@@ -52,37 +74,46 @@ for i in {1..60}; do
   sleep 0.5
 done
 
-# Open the cockpit (always produces a tab), THEN keep exactly one: close any duplicate localhost:8787
-# tabs. The dedupe needs Chrome/Safari Automation permission (granted once: System Settings > Privacy &
-# Security > Automation > "Elite War Room" > the browser). Without it you still get a working tab — it
-# just won't auto-dedupe.
+# Open the cockpit (always produces a tab), THEN keep exactly one per browser: close any duplicate
+# localhost:8787 tabs. Per-browser LITERAL app names — the old dedupe() used `tell application
+# <variable>`, which compiles but mis-resolves the tab/URL terminology at runtime, so with stderr
+# silenced it never actually deduped. Only installed AND running browsers are touched (the install check
+# also keeps AppleScript from failing to compile against an absent app's dictionary). Warnings go to the
+# log rather than vanishing. Needs Automation permission per browser (granted once: System Settings >
+# Privacy & Security > Automation > "Elite War Room" > the browser). Without it you still get a working tab.
 open "$URL"
 sleep 1
-/usr/bin/osascript >/dev/null 2>&1 <<'OSA'
-on dedupe(appName)
-  tell application "System Events"
-    if not (exists (processes whose name is appName)) then return
-  end tell
-  tell application appName
-    set kept to false
-    repeat with w in windows
-      try
-        repeat with i from (count of tabs of w) to 1 by -1
-          if (URL of tab i of w) contains "localhost:8787" then
+dedupe_cockpit_tabs() {
+  local app
+  for app in "Safari" "Google Chrome" "Brave Browser" "Microsoft Edge" "Arc"; do
+    [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]] || continue
+    /usr/bin/osascript >/dev/null 2>&1 <<OSA || echo "  ⚠ couldn't dedupe $app tabs (allow Automation for $app)" >> "$LOG"
+tell application "System Events"
+  if not (exists process "$app") then return
+end tell
+tell application "$app"
+  set kept to false
+  repeat with w in windows
+    try
+      repeat with i from (count of tabs of w) to 1 by -1
+        try
+          set u to URL of tab i of w
+          if (u contains "localhost:$PORT") or (u contains "127.0.0.1:$PORT") then
             if kept then
               close tab i of w
             else
               set kept to true
             end if
           end if
-        end repeat
-      end try
-    end repeat
-  end tell
-end dedupe
-dedupe("Google Chrome")
-dedupe("Safari")
+        end try
+      end repeat
+    end try
+  end repeat
+end tell
 OSA
+  done
+}
+dedupe_cockpit_tabs
 
 # Keep the app alive while the cockpit runs (Quit the app = stop the cockpit)
 wait "$SERVE_PID"
