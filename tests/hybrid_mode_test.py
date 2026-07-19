@@ -2,8 +2,9 @@
 Planner/Architect PRD, Reviewer judgment, PM/debug investigation — and the Secondary model does
 the regular building against that plan.
 
-Pins:
-  (1) backend_pref.set_hybrid_mode/get_hybrid persist + clear the flag;
+Pins (2026-07-19b: hybrid is DERIVED — two models configured = hybrid, one = single; the
+Mode select was removed by Commander order the same day):
+  (1) backend_pref.get_hybrid derives from the secondary's presence — nothing stored to toggle;
   (2) backends.current_for_tag: hybrid pinned → the 'builder' tag routes to the secondary while
       planner/reviewer/pm/blank tags stay on the run's main backend;
   (3) hybrid NOT pinned → every tag uses the main backend (single mode, byte-identical);
@@ -44,12 +45,14 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp), base_branch=
                              protected_branch="main", backlog_backend="none")],
              audit_path=str(tmp / "audit.jsonl"), use_worktree=False)
 
-# ── (1) pref round-trip ──
-chk("(1a) hybrid off by default", backend_pref.get_hybrid(cfg) is False)
-backend_pref.set_hybrid_mode(True, cfg)
-chk("(1b) hybrid persists", backend_pref.get_hybrid(cfg) is True)
-backend_pref.set_hybrid_mode(False, cfg)
-chk("(1c) hybrid clears", backend_pref.get_hybrid(cfg) is False)
+# ── (1) derived flag ──
+chk("(1a) no secondary → hybrid off", backend_pref.get_hybrid(cfg) is False)
+backend_pref.set_secondary("glm", cfg)
+chk("(1b) secondary configured → hybrid ON automatically", backend_pref.get_hybrid(cfg) is True)
+backend_pref.set_secondary(None, cfg)
+chk("(1c) secondary cleared → hybrid off", backend_pref.get_hybrid(cfg) is False)
+chk("(1d) the stored-mode API is gone (nothing to toggle)",
+    not hasattr(backend_pref, "set_hybrid_mode"))
 
 # ── (2)+(3) per-tag routing ──
 bk_tok = backends.set_backend("opus")
@@ -80,33 +83,32 @@ chk("(5c) …resets in finally", "backends.reset_hybrid(_hy_token)" in loop_src)
 chk("(5d) …skips the pin when secondary == main",
     '_hy_sec != getattr(cfg, "model_backend"' in loop_src)
 
-# ── (6) /api/model mode= ──
+# ── (6) /api/model — the secondary IS the mode switch now ──
 from orchestrator import server
 cfg.detected_auth = lambda: "test"
 client = server.create_app(cfg).test_client()
 backend_pref.set_secondary(None, cfg)
-client.post("/api/model", data={"mode": "hybrid"})
-chk("(6a) hybrid refused without a secondary", backend_pref.get_hybrid(cfg) is False)
-backend_pref.set_secondary("glm", cfg)
-client.post("/api/model", data={"mode": "hybrid"})
-chk("(6b) hybrid arms with a secondary", backend_pref.get_hybrid(cfg) is True)
-client.post("/api/model", data={"mode": "single"})
-chk("(6c) single disarms", backend_pref.get_hybrid(cfg) is False)
-client.post("/api/model", data={"mode": "hybrid"})
+client.post("/api/model", data={"secondary": "glm"})
+chk("(6a) setting a secondary arms hybrid", backend_pref.get_hybrid(cfg) is True)
 client.post("/api/model", data={"secondary": "none"})
-chk("(6d) clearing the secondary drops hybrid too",
+chk("(6b) clearing the secondary disarms hybrid (single-model mode)",
     backend_pref.get_hybrid(cfg) is False and backend_pref.get_secondary(cfg) is None)
+client.post("/api/model", data={"mode": "hybrid"})
+chk("(6c) the retired mode= field is inert (no crash, nothing stored)",
+    backend_pref.get_hybrid(cfg) is False)
 
-# ── (7) toolbar ──
+# ── (7) toolbar — no Mode select; the hybrid note follows the secondary ──
 from orchestrator import cockpit_views
 bar_no_sec = cockpit_views.backend_control(cfg, "automatixy")
-chk("(7a) Mode select renders, disabled without a Secondary",
-    "name=mode" in bar_no_sec and "disabled" in bar_no_sec.split("name=mode")[1][:200])
+chk("(7a) no Mode select anywhere (Single disappeared with two models, by design)",
+    "name=mode" not in bar_no_sec)
 backend_pref.set_secondary("glm", cfg)
-backend_pref.set_hybrid_mode(True, cfg)
 bar_hy = cockpit_views.backend_control(cfg, "automatixy")
-chk("(7b) armed hybrid shows the plan-on-main note",
-    "plan on main" in bar_hy and "value='hybrid' selected" in bar_hy)
+chk("(7b) a configured secondary shows the hybrid note automatically",
+    "plan on main" in bar_hy and "build on secondary" in bar_hy)
+backend_pref.set_secondary(None, cfg)
+chk("(7c) no secondary → no hybrid note",
+    "plan on main" not in cockpit_views.backend_control(cfg, "automatixy"))
 
 print("\n========== HYBRID MODE QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)

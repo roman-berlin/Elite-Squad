@@ -202,9 +202,16 @@ def render_model_form(cfg, record: dict | None = None, values: dict | None = Non
            f'value="{_val("base_url")}" placeholder="https://api.anthropic.com" required></label>')
         + ('<label>Model ID<input type=text name=model_id '
            f'value="{_val("model_id")}" placeholder="claude-opus-4-6" required></label>')
-        + ('<label>Small/fast model ID <span class=mopt>(optional)</span>'
-           '<input type=text name=small_fast_model_id '
+        + ('<label>Small/fast model ID <span class=mopt>(optional — Sonnet-class calls run on '
+           'it when set)</span><input type=text name=small_fast_model_id '
            f'value="{_val("small_fast_model_id")}"></label>')
+        + ('<label>Capability tier <span class=mopt>(auto-detected on save)</span>'
+           '<select name=tier>'
+           f'<option value="" {"selected" if not _val("tier") else ""}>Auto-detect</option>'
+           f'<option value="top" {"selected" if _val("tier") == "top" else ""}>top — Opus-class+</option>'
+           f'<option value="mid" {"selected" if _val("tier") == "mid" else ""}>mid — Sonnet-class</option>'
+           f'<option value="light" {"selected" if _val("tier") == "light" else ""}>light — Haiku-class</option>'
+           '</select></label>')
         + f'<label>API key{key_input}</label>'
         + '<div class=mactions>'
         + f'<button type=submit>{"Save changes" if editing else "Add backend"}</button>'

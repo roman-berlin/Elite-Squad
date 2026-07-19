@@ -37,7 +37,12 @@ _REQUIRED_FIELDS = ("display_name", "provider", "base_url", "model_id", "credent
 
 # Every field a record may carry. add()/update() drop anything outside this set so a caller can
 # never smuggle a raw secret (or any other stray key) into the persisted store.
-_ALLOWED_FIELDS = _REQUIRED_FIELDS + ("small_fast_model_id",)
+_ALLOWED_FIELDS = _REQUIRED_FIELDS + ("small_fast_model_id", "tier")
+
+# 2026-07-19 (Commander order): the capability CLASS of a custom backend's model, relative to
+# the Claude ladder — top (Opus-class+), mid (Sonnet-class), light (Haiku-class). Auto-detected
+# at add time (one cheap LLM call, editable in the form); "" is treated as mid.
+TIERS = ("top", "mid", "light", "")
 
 _EMPTY_STORE = {"models": {}}
 
@@ -73,6 +78,8 @@ def _validate(fields: dict, *, partial: bool) -> dict:
             continue
         if key == "provider" and value not in PROVIDERS:
             raise ValueError(f"provider must be one of {PROVIDERS}, got {value!r}")
+        if key == "tier" and str(value or "") not in TIERS:
+            raise ValueError(f"tier must be one of top|mid|light (or blank), got {value!r}")
         if partial and key in _REQUIRED_FIELDS and not str(value or "").strip():
             raise ValueError(f"{key} cannot be blanked out")
         clean[key] = value

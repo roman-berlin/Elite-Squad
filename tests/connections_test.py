@@ -119,7 +119,10 @@ chk("/jira returns 200", r.status_code == 200, str(r.status_code))
 chk("/jira shows the project switcher", "automatixy" in body and "Project" in body)
 chk("/jira shows the saved Robot connection", "Robot Jira" in body)
 chk("/jira masks the token (no raw token in HTML)", "zzzz9999TOKEN" not in body and "••••" in body)
-chk("/jira has a quick-connect form", "Quick connect" in body and "API token" in body)
+# 2026-07-19 redesign: the form lives behind the Edit/Connect button (a collapsed <details>);
+# the old always-open "Quick connect" heading is gone by design.
+chk("/jira has the connect form (behind the Edit control)",
+    "jeditbox" in body and "API token" in body and "action=/api/jira-connect" in body)
 chk("/jira token input is a password field", 'name=token type=password' in body)
 
 # quick-connect a new Jira via the endpoint
@@ -148,7 +151,9 @@ jcfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(repo), base_branc
               audit_path=str(tmp / "a2.jsonl"), use_worktree=False)
 jcfg.detected_auth = lambda: "test"
 jb = server.create_app(jcfg).test_client().get("/jira?app=automatixy").get_data(as_text=True)
-chk("/jira recognizes the config+env Jira (not 'no Jira')", "Connected via config + env" in jb and "No Jira for" not in jb)
+# 2026-07-19 redesign: the healthy card leads with the plain-language success line.
+chk("/jira recognizes the config+env Jira (not 'no Jira')",
+    "Connected to Jira" in jb and "config.yaml + .env" in jb and "No Jira for" not in jb)
 chk("/jira shows the Jira site", "toibis.atlassian.net" in jb)
 chk("/jira shows the project key", "AUTO" in jb)
 chk("/jira shows the user from JIRA_EMAIL", "roman@toibis.com" in jb)

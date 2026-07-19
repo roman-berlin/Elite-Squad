@@ -305,6 +305,39 @@ def alternates(current: str) -> list[str]:
     return [bk for bk in (GLM, NATIVE) if bk != cur and available(bk)]
 
 
+def classify_model_tier(display_name: str, model_id: str, cfg=None) -> str:
+    """2026-07-19: one cheap LLM call to classify a NEWLY ADDED backend's model — top
+    (Opus-class+), mid (Sonnet-class), or light (Haiku-class) — so the unit knows what it just
+    got (the Commander's "the system needs to know about models I add"). Uses the unit's own
+    discussion model (no external search dependency); ANY failure → "mid" (the safe middle).
+    Synchronous + bounded — called once per add, never on a hot path."""
+    import asyncio
+
+    async def _ask() -> str:
+        from .agent import run_agent
+        from claude_agent_sdk import ClaudeAgentOptions
+        prompt = (f"A model backend was added: display name {display_name!r}, model id "
+                  f"{model_id!r}. Classify its general capability class relative to Anthropic's "
+                  "lineup. Answer with EXACTLY one word:\n"
+                  "top   — frontier/Opus-class or stronger (e.g. GPT-5-class, Gemini Ultra-class)\n"
+                  "mid   — strong mid-tier / Sonnet-class (e.g. GLM-4.x, Kimi, DeepSeek-V3-class)\n"
+                  "light — small/fast / Haiku-class (e.g. 7-9B local models, Gemma-class)")
+        run = await run_agent(prompt, ClaudeAgentOptions(
+            model=None, permission_mode="bypassPermissions", allowed_tools=[],
+            disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent", "Read", "Grep", "Glob"],
+            max_turns=1, effort="low"), tag="model-classify")
+        word = (run.final or run.text or "").strip().lower()
+        for tier in ("top", "mid", "light"):
+            if tier in word.split() or word.startswith(tier):
+                return tier
+        return "mid"
+
+    try:
+        return asyncio.run(asyncio.wait_for(_ask(), timeout=45))
+    except Exception:  # noqa: BLE001
+        return "mid"
+
+
 def glm_model() -> str:
     """The GLM model id to send (env-overridable, defaults to ``glm-4.6``)."""
     return (os.environ.get("GLM_MODEL") or _GLM_MODEL_DEFAULT).strip()
@@ -382,6 +415,19 @@ def _apply_registry(options, model_id: str, registry=None) -> str:
     merged = dict(getattr(options, "env", None) or {})
     merged.update(_registry_backend_env(cfg))
     options.env = merged
+    # 2026-07-19 tier parallelism, registry edition (mirrors glm_model_for): a Sonnet/Haiku-class
+    # request runs on the record's small/fast model when one is configured; an Opus/deep-class
+    # request — or a record with no small model — keeps the main model_id.
+    _requested = getattr(options, "model", None)
+    _small = str(cfg.get("small_fast_model_id") or "").strip()
+    if _small:
+        try:
+            from . import models as _models
+            if _models.tier_of(_requested or "") <= 1:
+                options.model = _small
+                return model_id
+        except Exception:  # noqa: BLE001
+            pass
     options.model = cfg["model_id"]
     return model_id
 

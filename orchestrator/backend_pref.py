@@ -174,25 +174,10 @@ def set_secondary(bk: str | None, cfg=None) -> None:
 
 
 def get_hybrid(cfg=None) -> bool:
-    """Whether HYBRID MODE is on (heavy roles on Main, building on Secondary). Meaningful only
-    when a secondary is configured; the loop treats hybrid-without-secondary as single mode."""
-    return bool(_load(cfg).get("hybrid"))
-
-
-def set_hybrid_mode(on: bool, cfg=None) -> None:
-    """Persist the hybrid-mode flag. Best-effort."""
-    def _mutate(current: dict) -> dict:
-        data = dict(current) if isinstance(current, dict) else {}
-        if on:
-            data["hybrid"] = True
-        else:
-            data.pop("hybrid", None)
-        return data
-
-    try:
-        locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
-    except (OSError, ValueError):
-        pass
+    """2026-07-19 (Commander order): hybrid is DERIVED, not a stored mode — two models
+    configured means hybrid (heavy thinking on Main, building on Secondary), one model means
+    single. There is nothing to toggle: clear the Secondary to go back to single."""
+    return bool(get_secondary(cfg))
 
 
 def active(cfg=None, app_name: str | None = None) -> str:

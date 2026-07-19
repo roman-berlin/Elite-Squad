@@ -1016,32 +1016,19 @@ def create_app(cfg: Config, port: int = 8787):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
-        # 2026-07-19: the Mode selector posts mode=single|hybrid.
-        mode_raw = (request.form.get("mode") or "").strip().lower()
-        if mode_raw in ("single", "hybrid"):
-            _want = mode_raw == "hybrid"
-            if _want and not backend_pref.get_secondary(cfg):
-                get_state(None)["last_msg"] = "Hybrid mode needs a Secondary model — set one first."
-            else:
-                backend_pref.set_hybrid_mode(_want, cfg)
-                get_state(None)["last_msg"] = (
-                    "Hybrid mode ON — heavy roles (plan/PRD, review) on the Main model; the "
-                    "Builder on the Secondary." if _want else
-                    "Single mode — everything on the Main model (Secondary stays the emergency stand-in).")
-            return redirect("/")
         # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
         sec_raw = (request.form.get("secondary") or "").strip()
         if sec_raw:
             if sec_raw.lower() == "none":
                 backend_pref.set_secondary(None, cfg)
-                backend_pref.set_hybrid_mode(False, cfg)   # hybrid can't run without a secondary
-                get_state(None)["last_msg"] = "Secondary model cleared — no fallback configured (hybrid off)."
+                get_state(None)["last_msg"] = "Secondary model cleared — single-model mode."
             else:
                 from .model_registry import ModelRegistry as _MR
                 _sbk = backends.resolve_selection(sec_raw, _MR(cfg))
                 backend_pref.set_secondary(_sbk, cfg)
-                get_state(None)["last_msg"] = (f"Secondary model set to {_sbk} — the unit switches "
-                                               "to it when the main model can't run.")
+                get_state(None)["last_msg"] = (f"Secondary model set to {_sbk} — hybrid is on: "
+                                               "plan/review on the Main model, building on the "
+                                               "Secondary (and it covers the Main as fallback).")
             return redirect("/")
         raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
@@ -1159,7 +1146,7 @@ def create_app(cfg: Config, port: int = 8787):
         strip a smuggled key anyway; keeping it out entirely means it can't even transit)."""
         fields = {k: (request.form.get(k) or "").strip()
                   for k in ("display_name", "provider", "base_url", "model_id",
-                            "small_fast_model_id")}
+                            "small_fast_model_id", "tier")}
         return fields, (request.form.get("api_key") or "").strip()
 
     @app.get("/models")
@@ -1185,6 +1172,15 @@ def create_app(cfg: Config, port: int = 8787):
             errors.append("missing required field(s): api_key")
         if errors:
             return models_views.render_model_form(cfg, values=fields, errors=errors)
+        # 2026-07-19: tier auto-detect — when the Commander left the tier on Auto, one cheap
+        # LLM call classifies the new model (top/mid/light) so the unit knows what it just got.
+        # Best-effort with a hard fallback to "mid"; never blocks the add.
+        if not str(fields.get("tier") or "").strip():
+            fields["tier"] = backends.classify_model_tier(
+                fields.get("display_name", ""), fields.get("model_id", ""), cfg)
+            get_state(None)["last_msg"] = (
+                f"Model backend saved — auto-classified as {fields['tier']}-tier "
+                "(editable on the backend's Edit form).")
         registry = ModelRegistry(cfg)
         record = registry.add({**fields, "credential_ref": _PENDING_REF})
         # Stores the raw key in the Secrets store and rewrites credential_ref to the real
@@ -2313,10 +2309,11 @@ def create_app(cfg: Config, port: int = 8787):
                     f"onchange=\"location.href='/jira?app='+encodeURIComponent(this.value)\">{proj_opts}</select>")
         if active:
             active_html = (f"<div class=jactive><span class=jdot></span>"
-                           f"<div><b>{esc(active['name'])}</b> &middot; <span class=jmono>{esc(active['base_url'])}</span>"
+                           f"<div><div class=jbig>&#9989; Connected to Jira &middot; <b>{esc(active['name'])}</b> "
+                           f"&middot; <span class=jmono>{esc(active['base_url'])}</span></div>"
                            f"<div class=jsub>{esc(active['email'])} &middot; token {esc(active['token_hint'])}"
                            + (f" &middot; project {esc(active['project_key'])}" if active['project_key'] else "")
-                           + f"</div></div></div>")
+                           + " &middot; use Edit below to change</div></div></div>")
         else:
             # No cockpit quick-connect assigned — but the app may ALREADY use Jira via its config.yaml
             # `backlog:` + env-var creds (this is how automatixy pulls AUTO-* today). Show THAT as the
@@ -2337,10 +2334,10 @@ def create_app(cfg: Config, port: int = 8787):
                 _proj = _b.get("project_key", "")
                 active_html = (
                     "<div class=jactive><span class=jdot></span><div>"
-                    f"<b>Connected via config + env</b> &middot; <span class=jmono>{esc(_b['base_url'])}</span>"
-                    f"<div class=jsub>project <b>{esc(_proj) or '&mdash;'}</b> &middot; user {_who} &middot; {_tok}</div>"
-                    f"<div class=jsub>From config.yaml under <span class=jmono>{esc(appq)}</span>, creds from "
-                    "the cockpit&#39;s <span class=jmono>.env</span>. Quick-connect below only to override it.</div>"
+                    f"<div class=jbig>&#9989; Connected to Jira &middot; project <b>{esc(_proj) or '&mdash;'}</b> "
+                    f"&middot; <span class=jmono>{esc(_b['base_url'])}</span></div>"
+                    f"<div class=jsub>user {_who} &middot; {_tok} &middot; from config.yaml + .env "
+                    "&middot; use Edit below to override</div>"
                     "</div></div>")
             else:
                 active_html = ("<div class=jactive off><span class=jdot off></span><div>No Jira for "
@@ -2395,44 +2392,57 @@ def create_app(cfg: Config, port: int = 8787):
         style = (
             "<style>"
             ".jbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 16px}"
-            ".jlbl{color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.06em;font-weight:700}"
+            ".jlbl{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;font-weight:700}"
             ".jsel{min-width:190px}"
-            ".jactive{display:flex;gap:11px;align-items:flex-start;background:#101620;border:1px solid #1f6f43;"
-            "border-radius:12px;padding:13px 16px;margin:0 0 22px}"
-            ".jactive.off{border-color:#3a2a18}"
-            ".jdot{width:9px;height:9px;border-radius:50%;background:#3fb961;margin-top:6px;flex:none;"
-            "box-shadow:0 0 0 4px rgba(63,185,97,.16)}.jdot.off{background:#d99a2b;box-shadow:0 0 0 4px rgba(217,154,43,.16)}"
-            ".jsub{color:#8a929f;font-size:12px;margin-top:3px}"
-            ".jmono{font-family:ui-monospace,Menlo,monospace;color:#9aa3b2}"
+            ".jactive{display:flex;gap:11px;align-items:center;background:var(--okbg);border:1px solid var(--okline);"
+            "border-radius:12px;padding:14px 16px;margin:0 0 22px}"
+            ".jactive.off{background:var(--warnbg);border-color:var(--warnline)}"
+            ".jactive .jbig{font-size:15px;font-weight:700;color:var(--ink)}"
+            ".jdot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}"
+            ".jdot.off{background:var(--warn)}"
+            ".jsub{color:var(--dim);font-size:12.5px;margin-top:3px}"
+            ".jmono{font-family:var(--mono);color:var(--dim)}"
             ".jcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:13px;margin:6px 0 26px}"
-            ".jcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 16px}"
-            ".jcard.act{border-color:#1f6f43}"
-            ".jname{font-size:15px;font-weight:700;color:#e9ecf1;margin-bottom:7px}"
-            ".jtag{font-size:10px;font-weight:800;color:#3fb961;border:1px solid #1f6f43;border-radius:99px;"
+            ".jcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}"
+            ".jcard.act{border-color:var(--okline)}"
+            ".jname{font-size:15px;font-weight:700;color:var(--ink);margin-bottom:7px}"
+            ".jtag{font-size:10px;font-weight:800;color:var(--ok);border:1px solid var(--okline);border-radius:99px;"
             "padding:1px 7px;margin-left:6px;vertical-align:middle;text-transform:uppercase}"
-            ".jmeta{color:#aab2c0;font-size:12.5px;margin-top:3px}"
+            ".jmeta{color:var(--dim);font-size:12.5px;margin-top:3px}"
             ".jrow{display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap}"
             ".jf{margin:0}"
-            ".jbtn{background:#1b2230;border:1px solid #2a3343;color:#e9ecf1;border-radius:8px;padding:8px 13px;"
-            "font:inherit;font-size:13px;font-weight:600;cursor:pointer}.jbtn:hover{background:#222b3b}"
-            ".jbtn.primary{background:#2b5cff;border-color:#2b5cff;color:#fff}.jbtn.primary:hover{background:#2350e6}"
-            ".jbtn.ghost{background:none;color:#9aa3b2}.jbtn.ghost:hover{color:#f0676b;border-color:#5a2a2e}"
-            ".jbtn.on{background:none;border:1px solid #1f6f43;color:#3fb961;padding:8px 13px;border-radius:8px;"
+            ".jbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:8px 13px;"
+            "font:inherit;font-size:13px;font-weight:600;cursor:pointer}.jbtn:hover{border-color:var(--accent)}"
+            ".jbtn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.jbtn.primary:hover{background:var(--accent-hover)}"
+            ".jbtn.ghost{background:none;color:var(--dim)}.jbtn.ghost:hover{color:var(--bad);border-color:var(--badline)}"
+            ".jbtn.on{background:none;border:1px solid var(--okline);color:var(--ok);padding:8px 13px;border-radius:8px;"
             "font-size:13px;font-weight:700}"
-            ".jempty,.jconnect{background:#12161f;border:1px solid #232936;border-radius:12px;padding:16px 18px}"
-            ".jempty{color:#8a929f}"
+            ".jconnect{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}"
             ".jgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}"
-            ".jconnect label{display:block;color:#c4c9d2;font-size:12.5px;font-weight:600}"
+            ".jconnect label{display:block;color:var(--ink);font-size:12.5px;font-weight:600}"
             ".jconnect .jgrid input{width:100%;margin-top:5px;box-sizing:border-box}"
-            ".jopt{color:#5c6573;font-weight:400}"
-            ".jassign{display:flex;align-items:center;gap:8px;margin:14px 0 4px;color:#c4c9d2;font-weight:500!important}"
-            ".jhint{color:#6b7480;font-size:12px}"
-            "h3{margin:24px 0 8px;font-size:14px;color:#c4c9d2}"
+            ".jopt{color:var(--faint);font-weight:400}"
+            ".jassign{display:flex;align-items:center;gap:8px;margin:14px 0 4px;color:var(--ink);font-weight:500!important}"
+            ".jhint{color:var(--faint);font-size:12px}"
+            "details.jeditbox>summary{list-style:none;display:inline-block;cursor:pointer}"
+            "details.jeditbox>summary::-webkit-details-marker{display:none}"
+            "details.jeditbox[open]>summary .jbtn{border-color:var(--accent);color:var(--accent)}"
+            "details.jeditbox>.jconnect{margin-top:12px}"
+            "h3{margin:24px 0 8px;font-size:14px;color:var(--dim)}"
             "</style>")
 
+        # 2026-07-19 (Commander order): a healthy connection reads as ONE line — "Connected to
+        # Jira ✅" with the essentials — and the connect form hides behind an Edit button instead
+        # of a permanent wall of boxes. Saved connections render only when there ARE any; a
+        # not-connected project keeps the form open (there is nothing to hide behind).
+        _connected = "jactive off" not in active_html
+        edit_box = ("<details class=jeditbox" + ("" if _connected else " open") + ">"
+                    "<summary><span class=jbtn>&#9998; "
+                    + ("Edit connection" if _connected else "Connect a Jira")
+                    + "</span></summary>" + form + "</details>")
         body = (style + "<div class=jbar>" + switcher + "</div>" + active_html
-                + "<h3>Saved Jira connections</h3>" + conns_html
-                + "<h3>Quick connect a Jira</h3>" + form)
+                + (("<h3>Saved Jira connections</h3>" + conns_html) if conns else "")
+                + edit_box)
         return _wrap("Jira connections", body)
 
     @app.post("/api/jira-connect")
