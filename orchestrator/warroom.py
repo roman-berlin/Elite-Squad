@@ -750,8 +750,16 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     reached = 0
     if has_build:          # build done → the Gate runs next
         reached = GATE
-    if has_review:         # reviewed → Build, Gate and Review are all behind it; Land runs next
-        reached = LAND
+    if has_review:
+        # 2026-07-19 (Commander order — "show me the EXACT status always"): only a PASSING
+        # review advances to Land. A live run whose latest verdict is FAIL is REBUILDING
+        # (pass N+1) — the old `reached = LAND` showed "Working · Land" next to "verdict FAIL",
+        # a display lie (AUTO-198). FAIL → the bar goes back to Build for the retry pass.
+        _v = (t.get("verdict") or "").upper()
+        if "FAIL" in _v or "REJECT" in _v:
+            reached = BUILD if live else REVIEW
+        else:
+            reached = LAND     # passing review → Land runs next
     if merged:             # reviewed and landed → every phase complete
         reached = len(PHASES)
     # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
@@ -1088,8 +1096,18 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             'no merge, nothing left half-applied.\')">'
             '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
             '</form>') if (run["live"] and manual) else ""
-    verdict = (f'<span class=meta>verdict <b>{_esc(run["verdict"])}</b></span>'
-               if run["verdict"] else "")
+    # 2026-07-19 (Commander order): the verdict must tell the CURRENT story, not a stale fact —
+    # a live run whose latest review FAILED is rebuilding with the feedback, so say exactly that.
+    _v = str(run.get("verdict") or "")
+    if _v and run.get("live") and ("FAIL" in _v.upper() or "REJECT" in _v.upper()):
+        try:
+            _next_pass = int(run.get("passes") or 1) + 1
+        except (TypeError, ValueError):
+            _next_pass = 2
+        verdict = (f'<span class=meta>review pass {_esc(run["passes"])} <b>FAIL</b> '
+                   f'&#8594; rebuilding with the feedback (pass {_next_pass})</span>')
+    else:
+        verdict = (f'<span class=meta>verdict <b>{_esc(_v)}</b></span>' if _v else "")
     extra = ""
     if run["live"] and elapsed:
         extra += f'<span class=meta>elapsed <b>{_esc(elapsed)}</b></span>'
