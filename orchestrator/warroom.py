@@ -1214,11 +1214,14 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     # Rendered as a small anchor right after the phase bar so it's near the run context.
     log_link = ""
     if log_path:
+        # 2026-07-19: fetch(), never navigate — the same fix as the toolbar Open-logs button;
+        # as a plain link this replaced the cockpit tab with the endpoint's raw JSON.
         log_link = (
             f'<div style="margin-top:9px;padding-bottom:2px">'
             f'<a href="/api/open-logs?path={quote(str(log_path))}" '
+            f'onclick="fetch(this.href);return false" '
             f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
-            f'title="Open run log in Finder">&#128194; open log</a></div>'
+            f'title="Open this run log in Finder">&#128194; open log</a></div>'
         )
 
     # Build the phase bar and metadata based on whether we're in triage or normal run
