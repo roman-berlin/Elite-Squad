@@ -70,8 +70,9 @@ for tok in NEW_TOKENS:
 # ── 3) the :root{…} regex still extracts ONE valid, non-nested block ────────────
 chk("warroom._PAGE :root block still scrapes cleanly (no nested braces)",
     m_page is not None and "{" not in m_page.group(0)[len(":root{"):-1])
-chk("_token_css() returns a single <style>:root{...}</style> block",
-    V._token_css().startswith("<style>:root{") and V._token_css().endswith("</style>"))
+chk("_token_css() returns the token style block (+ light override + boot, 2026-07-19)",
+    V._token_css().startswith("<style>:root{") and "data-theme=light" in V._token_css()
+    and "</style>" in V._token_css())
 
 # ── 4) semantic-role tokens resolve to EXISTING palette vars, not new raw hex ────
 SEMANTIC_TARGETS = {

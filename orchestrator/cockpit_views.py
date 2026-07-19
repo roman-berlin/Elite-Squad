@@ -44,7 +44,24 @@ _TOKENS_FALLBACK = (
     "--t-xs:11px;--t-sm:12.5px;--t-md:14px;--t-lg:18px;--t-xl:24px;--t-2xl:32px;"
     # semantic color-role aliases (EU-296) — map onto the existing palette above.
     "--surface:var(--panel);--border:var(--line);--text:var(--ink);"
-    "--positive:var(--ok);--critical:var(--bad)}")
+    "--positive:var(--ok);--critical:var(--bad)}"
+    # 2026-07-19 theme pass — mirrors _PAGE's extra tokens + light override (kept in sync by
+    # the live extraction below; this fallback only serves tests / offline previews).
+    ":root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}"
+    ":root[data-theme=light]{color-scheme:light;"
+    "--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;"
+    "--ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;"
+    "--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;"
+    "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
+    "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
+    "--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;"
+    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;"
+    "--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}")
+
+# Applies the saved theme BEFORE first paint on every page that injects the tokens, so
+# sub-pages follow the War Room header's toggle with no flash.
+_THEME_BOOT = ("<script>try{document.documentElement.dataset.theme="
+               "localStorage.getItem('ui.theme')||'dark'}catch(e){}</script>")
 
 
 def _token_css() -> str:
@@ -55,12 +72,17 @@ def _token_css() -> str:
         import re
 
         from . import warroom
-        m = re.search(r":root\{[^}]*\}", warroom._PAGE)
+        # 2026-07-19: grab the WHOLE token region — the dark :root, the extra-token :root, and
+        # the [data-theme=light] override — up to the END THEME TOKENS sentinel, so light mode
+        # flows to every standalone page from the one source in _PAGE.
+        m = re.search(r":root\{.*?/\* END THEME TOKENS \*/", warroom._PAGE, re.S)
+        if not m:
+            m = re.search(r":root\{[^}]*\}", warroom._PAGE)
         if m:
-            return "<style>" + m.group(0) + "</style>"
+            return "<style>" + m.group(0) + "</style>" + _THEME_BOOT
     except Exception:  # noqa: BLE001 - tests / preview render without the War Room module loaded
         pass
-    return "<style>" + _TOKENS_FALLBACK + "</style>"
+    return "<style>" + _TOKENS_FALLBACK + "</style>" + _THEME_BOOT
 
 
 def _back_home() -> str:
@@ -472,7 +494,7 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         note = ("<span class=\"tbnote bad\" title=\"Set GLM_AUTH_TOKEN and restart\">"
                 "&#9888; GLM key missing — runs blocked</span>")
     elif active == _bk.GLM:
-        note = "<span class=tbnote style=\"color:#8a909c\">&#8599; prompts go to Z.ai</span>"
+        note = "<span class=\"tbnote dim\" title=\"GLM is a third-party provider — prompts (code, tickets, diffs) leave Anthropic\">&#8599; prompts go to Z.ai</span>"
     else:
         note = ""
     per_project = ""
@@ -491,12 +513,12 @@ def backend_control(cfg, app_name: str | None = None) -> str:
             f'<form method=post action=/api/model class=tbf '
             f'title="Model for {html.escape(app_name)} only">'
             f'<input type=hidden name="app" value="{html.escape(app_name)}">'
-            '<span style="font-size:12px;color:#8a909c;margin-right:4px">This project</span>'
+            '<span class=tbsel-label>This project</span>'
             f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{popts}</select>'
             '</form>')
     return (
         '<form method=post action=/api/model class=tbf title="Model backend — applies to all runs">'
-        '<span style="font-size:12px;color:#8a909c;margin-right:4px">Model</span>'
+        '<span class=tbsel-label>Model</span>'
         f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
         f'</form>{note}{per_project}')
 
@@ -606,7 +628,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     if ap_stopping:
         # Drain in progress: show a neutral "finishing…" label, no buttons.
         ap_html = (
-            '<span class=tbdiv></span>'
             '<div class="tbap stopping" title="Finishing current ticket, then standing down">'
             '<span class="apdot-sm stop"></span>'
             '<span class=tbaplabel>&#9203;&nbsp;Stopping&hellip;</span>'
@@ -617,7 +638,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         ap_label = f'Autopilot&nbsp;<b>ON</b>&nbsp;<span class=ext>(external)</span>&nbsp;&middot;&nbsp;{ap_appq}' if ap_external else f'Autopilot&nbsp;<b>ON</b>&nbsp;&middot;&nbsp;{ap_appq}'
         ap_class = "tbap on ext" if ap_external else "tbap on"
         ap_html = (
-            '<span class=tbdiv></span>'
             f'<div class="{ap_class}">'
             '<span class="apdot-sm on"></span>'
             f'<span class=tbaplabel>{ap_label}</span>'
@@ -644,7 +664,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                        f"{html.escape(app0 or '')}? "
                        f"The unit will work In-Progress tickets first, then To-Do, until the queue is empty or you press Stop.')")
         ap_html = (
-            '<span class=tbdiv></span>'
             '<div class="tbap off">'
             '<span class="apdot-sm off"></span>'
             '<span class=tbaplabel>Autopilot</span>'
@@ -694,7 +713,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     model_banner = ""
     if _malert:
         model_banner = (
-            '<div role=alert style="background:#3a1113;border:1px solid #7f1d1d;color:#fecaca;'
+            '<div role=alert style="background:var(--badbg);border:1px solid var(--badline);color:var(--bad);'
             'padding:9px 13px;border-radius:8px;margin:0 0 8px;font-size:13px;display:flex;'
             'align-items:center;gap:12px;flex-wrap:wrap">'
             f'<span>&#9888;&#65039; {html.escape(_malert)}</span>'
@@ -706,11 +725,17 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
-.tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
-.tbar .btn{{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:9px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background var(--t-fast),border-color var(--t-fast)}}
-.tbar .btn:hover{{background:var(--line)}}
+.tbar{{display:flex;gap:var(--s-3);align-items:stretch;flex-wrap:wrap;padding:var(--s-3) 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
+/* 2026-07-19 redesign: each cluster is a quiet card — label as an overline INSIDE the group —
+   so the bar reads as run · build · QA · nav sections instead of scattered buttons. */
+.tbar .tclu{{display:flex;flex-direction:column;gap:var(--s-1);justify-content:center;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--s-2) var(--s-3)}}
+.tbar .btn{{display:inline-flex;align-items:center;gap:7px;height:34px;background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:0 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background var(--t-fast),border-color var(--t-fast)}}
+.tbar .btn:hover{{border-color:var(--accent)}}
 .tbar .btn.primary{{background:var(--accent);border-color:var(--accent);color:#fff}}
-.tbar .btn.primary:hover{{background:#2f5ce0}}
+.tbar .btn.primary:hover{{background:var(--accent-hover)}}
+.tbar select{{height:34px;background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:0 8px;font:inherit;font-size:13px;cursor:pointer}}
+.tbar select:hover{{border-color:var(--accent)}}
+.tbar .tbsel-label{{font-size:var(--t-xs);color:var(--faint);margin-right:2px}}
 .tbar .btn:focus-visible,.tbar summary:focus-visible,.tbar .panel a:focus-visible,.tbar .panel button:focus-visible{{outline:none;box-shadow:var(--ring)}}
 .tbar details.menu{{position:relative}}
 .tbar details.menu>summary{{list-style:none}}
@@ -726,10 +751,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .panel.form select,.tbar .panel.form input[type=text]{{background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:8px 10px;font:inherit;width:100%}}
 .tbar .panel.form .row{{display:flex;gap:8px;align-items:center}}
 .tbar .panel.form button{{display:block;width:100%;background:var(--accent);color:#fff;border:0;border-radius:var(--r-md);padding:9px;font-weight:650;cursor:pointer}}
-.tbar .panel.form button:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}
+.tbar .panel.form button:disabled{{background:var(--line);color:var(--faint);cursor:not-allowed}}
 .tbar .panel .sep{{height:1px;background:var(--line);margin:5px 4px}}
 .tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);padding:6px 11px 3px}}
-.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:var(--warn)}}.tbar .tbnote.bad{{color:var(--bad)}}.tbar .tbnote.ok{{color:var(--ok);font-weight:600}}
+.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.dim{{color:var(--faint)}}.tbar .tbnote.run{{color:var(--warn)}}.tbar .tbnote.bad{{color:var(--bad)}}.tbar .tbnote.ok{{color:var(--ok);font-weight:600}}
 .tbar .btn.deploy{{background:#1f7a45;border-color:#2c9a5f;color:#fff}}.tbar .btn.deploy:hover{{background:#1a6b3c}}.tbar .btn.deploy .cbadge{{background:#0c3a22}}
 .tbar .btn.ship{{background:#7c3aed;border-color:#8b5cf6;color:#fff}}.tbar .btn.ship:hover{{background:#6d28d9}}.tbar .btn.ship .cbadge{{background:#3b1d7a}}
 .tbar .tbdiv{{width:1px;height:22px;background:var(--line2);margin:0 7px;align-self:center;display:inline-block}}
@@ -743,11 +768,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 /* EU-299 (EU-285d) — toolbar clusters: group the flat button row into labeled sections
    (build · QA · nav) instead of one flat emoji row. Spacing uses the EU-296 --s-* scale;
    labels use the --t-xs type token — no new ad-hoc px literals. */
-.tbar .tclu{{display:inline-flex;align-items:center;gap:var(--s-2)}}
-.tbar .tclabel{{font-size:var(--t-xs);font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-right:var(--s-1)}}
+.tbar .tclabel{{font-size:var(--t-xs);font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}}
 .tbar .tcrow{{display:inline-flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}}
 /* EU-103 — per-project Autopilot section */
-.tbar .tbap{{display:inline-flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--panel2)}}
+.tbar .tbap{{display:inline-flex;align-items:center;gap:8px;padding:0;border:0;background:none}}
 .tbar .tbap.on{{border-color:var(--okline);background:var(--okbg)}}
 .tbar .tbap.on.ext{{border-color:var(--infoline);background:var(--infobg)}}
 .tbar .tbap.stopping{{border-color:var(--warnline);background:var(--warnbg)}}
@@ -756,9 +780,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .apdot-sm.stop{{background:var(--warn)}}
 .tbar .tbaplabel{{font-size:12px;color:var(--ink);white-space:nowrap}}
 .tbar .tbaplabel .ext{{font-size:10px;color:var(--info);font-weight:600;margin-left:4px}}
-.tbar .aptbtn{{border:0;border-radius:var(--r-md);padding:5px 11px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}}
-.tbar .aptbtn.start{{background:var(--accent);color:#fff}}.tbar .aptbtn.start:hover{{background:#2f5ce0}}
-.tbar .aptbtn.start:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}
+.tbar .aptbtn{{border:0;height:34px;border-radius:var(--r-md);padding:0 14px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}}
+.tbar .aptbtn.start{{background:var(--accent);color:#fff}}.tbar .aptbtn.start:hover{{background:var(--accent-hover)}}
+.tbar .aptbtn.start:disabled{{background:var(--line);color:var(--faint);cursor:not-allowed}}
 .tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
 .tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
@@ -778,11 +802,17 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 </style>
 <div class=tbar>
   <div class=tclu>
+    <span class=tclabel>run</span>
+    <div class=tcrow>
+      {ap_html}
+      {ship_html}
+    </div>
+  </div>
+
+  <div class=tclu>
     <span class=tclabel>build</span>
     <div class=tcrow>
       {backend_control(cfg, app0)}
-      {ap_html}
-      {ship_html}
     </div>
   </div>
 

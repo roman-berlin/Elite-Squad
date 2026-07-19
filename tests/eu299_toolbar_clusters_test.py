@@ -127,7 +127,9 @@ assert style_blocks, "control bar must emit a <style> block"
 style_block = "\n".join(style_blocks)  # tab_bar and the control bar each emit their own <style>
 tclu_rules = "\n".join(l for l in style_block.split("}") if "tclu" in l or "tclabel" in l or "tcrow" in l)
 chk("new cluster CSS rules exist", bool(tclu_rules.strip()), "no .tclu/.tclabel/.tcrow rules found")
-_px_literals = re.findall(r"[:\s](\d+)px", tclu_rules)
+# 2026-07-19 redesign: cluster cards carry a 1px hairline border — a border WIDTH, not spacing;
+# the guard is about spacing staying on the --s-* scale, so hairlines are exempt.
+_px_literals = [n for n in re.findall(r"[:\s](\d+)px", tclu_rules) if n != "1"]
 chk("no new ad-hoc px literals in the cluster grouping CSS (uses var(--s-*) instead)",
     not _px_literals, f"found px literals in cluster CSS: {_px_literals}")
 

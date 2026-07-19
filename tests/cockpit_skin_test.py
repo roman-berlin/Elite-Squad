@@ -38,7 +38,9 @@ def chk(n, c, d=""):
 
 # ── tokens are pulled LIVE from the War Room's :root block (single source of truth) ──
 css = V._token_css()
-chk("token css is a :root{} style block", css.startswith("<style>:root{") and css.endswith("</style>"))
+chk("token css is a :root{} style block + theme boot (2026-07-19)",
+    css.startswith("<style>:root{") and css.endswith("</script>") and "</style>" in css)
+chk("token css carries the light override", "data-theme=light" in css)
 chk("token css carries the palette", "--accent" in css and "--bg" in css and "--ink" in css)
 chk("token css read live from warroom (not just fallback)", "--okline" in css)
 

@@ -755,7 +755,15 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     # (The EU-314 per-project pipeline board was removed 2026-07-19 with the task-log redesign —
     # in-flight state lives on the cockpit board; this page is the per-project run LOG.)
     _title = f"★ Task log — {html.escape(app_name)}" if app_name else "★ CTO — cockpit"
-    return (_TEMPLATE.replace("★ CTO — cockpit", _title, 1)
+    # 2026-07-19 theme pass: prepend the shared design tokens (dark + light + boot script) so this
+    # page follows the War Room's theme toggle. Lazy import — cockpit_views imports this module.
+    try:
+        from .cockpit_views import _token_css
+        _tokens = _token_css()
+    except Exception:  # noqa: BLE001 - the static `general dashboard` render must never break
+        _tokens = ""
+    return (_TEMPLATE.replace("<style>", _tokens + "<style>", 1)
+            .replace("★ CTO — cockpit", _title, 1)
             .replace("{{CARDS}}", cards_html).replace("{{BOARD}}", "")
             .replace("{{PANEL}}", panel)
             .replace("{{FILTER}}", banner)
@@ -768,39 +776,39 @@ _TEMPLATE = """<!doctype html><html><head><meta charset=utf-8>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:#0d0f14;color:#e8eaed}
-header{padding:22px 30px;border-bottom:1px solid #1e222b;background:linear-gradient(180deg,#141821,#0d0f14)}
-h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:#8a909c;font-size:12px;margin-top:5px}
+body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+header{padding:22px 30px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel),var(--bg))}
+h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:var(--dim);font-size:12px;margin-top:5px}
 .cards{display:flex;gap:14px;padding:20px 30px 6px;flex-wrap:wrap}
-.card{background:#151a23;border:1px solid #232936;border-radius:12px;padding:14px 20px;min-width:120px}
-.card .k{font-size:24px;font-weight:650}.card .l{color:#8a909c;font-size:12px;margin-top:2px}
-.card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:#3b6cff}
-.panel{margin:14px 30px;background:#1a160f;border:1px solid #3a2f12;border-radius:12px;padding:14px 18px}
-.ph{color:#fbbf24;font-weight:650;font-size:13px;margin-bottom:8px}
-.need{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid #2a2410;font-size:13px}.need:first-of-type{border-top:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 20px;min-width:120px}
+.card .k{font-size:24px;font-weight:650}.card .l{color:var(--dim);font-size:12px;margin-top:2px}
+.card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:var(--accent)}
+.panel{margin:14px 30px;background:var(--warnbg);border:1px solid var(--warnline);border-radius:12px;padding:14px 18px}
+.ph{color:var(--warn);font-weight:650;font-size:13px;margin-bottom:8px}
+.need{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--warnline);font-size:13px}.need:first-of-type{border-top:0}
 .needmain{flex:1;cursor:pointer}.needmain:hover{text-decoration:underline}
-.dismiss{margin:0}.x{background:none;border:1px solid #3a2f12;color:#8a909c;border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:#2a2410;color:#f97a7a}
+.dismiss{margin:0}.x{background:none;border:1px solid var(--warnline);color:var(--dim);border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:var(--badbg);color:var(--bad)}
 .wrap{padding:8px 30px 50px}
-input{background:#151a23;border:1px solid #232936;color:#e8eaed;border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
+input{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px 11px;border-bottom:1px solid #191d26}
-th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
-.row{cursor:pointer}.row:hover{background:#141821}.tw{color:#5b626f;width:14px}
+th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.row{cursor:pointer}.row:hover{background:var(--panel2)}.tw{color:var(--faint);width:14px}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .b{padding:2px 9px;border-radius:99px;font-size:11px;font-weight:650;white-space:nowrap}
-.ok{background:#10371f;color:#56d98a}.warn{background:#3a2f10;color:#fbbf24}
-.bad{background:#3a1414;color:#f97a7a}.muted{background:#191d26;color:#8a909c}
-.dry{color:#8a909c;font-size:11px}a{color:#6aa9ff;text-decoration:none}
-a.jira{display:inline-flex;align-items:center;gap:3px;margin-left:8px;padding:1px 7px;border:1px solid #232936;border-radius:6px;font-size:11px;font-weight:600;color:#8a909c;vertical-align:middle}
-a.jira:hover{border-color:#3b6cff;color:#8ab6ff;background:#131a2a}
-.detrow{display:none}.detrow>td{background:#0a0c10;padding:0}
-.det{padding:14px 22px}.pass{border-left:2px solid #2a3140;padding:6px 0 12px 14px;margin:4px 0}
-.passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:#8a909c;font-weight:400;font-size:12px;margin-left:6px}
-.sub{font-size:13px;color:#c4c9d2;margin:3px 0}.sub b{color:#e8eaed}
+.ok{background:var(--okbg);color:var(--ok)}.warn{background:var(--warnbg);color:var(--warn)}
+.bad{background:var(--badbg);color:var(--bad)}.muted{background:var(--line);color:var(--dim)}
+.dry{color:var(--dim);font-size:11px}a{color:var(--info);text-decoration:none}
+a.jira{display:inline-flex;align-items:center;gap:3px;margin-left:8px;padding:1px 7px;border:1px solid var(--line2);border-radius:6px;font-size:11px;font-weight:600;color:var(--dim);vertical-align:middle}
+a.jira:hover{border-color:var(--accent);color:var(--info);background:var(--accentbg)}
+.detrow{display:none}.detrow>td{background:var(--console);padding:0}
+.det{padding:14px 22px}.pass{border-left:2px solid var(--line2);padding:6px 0 12px 14px;margin:4px 0}
+.passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:var(--dim);font-weight:400;font-size:12px;margin-left:6px}
+.sub{font-size:13px;color:var(--ink);margin:3px 0}.sub b{color:var(--ink)}
 .sub.pre{white-space:pre-wrap}
-.sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:#fbbf24;font-weight:600;text-transform:uppercase;font-size:11px}
-.fltbar{margin:6px 30px 0;color:#c4c9d2;font-size:13px}
+.sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:var(--warn);font-weight:600;text-transform:uppercase;font-size:11px}
+.fltbar{margin:6px 30px 0;color:var(--ink);font-size:13px}
 </style></head><body>
 <header><h1>★ CTO — cockpit</h1><div class=sub>generated {{GEN}} · re-run <code>./general dashboard</code> (or use <code>./general serve</code>) · click a row for the full transcript</div></header>
 <div class=cards>{{CARDS}}</div>
