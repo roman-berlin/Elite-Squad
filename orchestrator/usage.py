@@ -439,6 +439,7 @@ def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force
             }
 
     over_limits = []
+    blind = False
     try:
         usage_data = plan_usage(cfg, now=t, force=force)
         if usage_data.get("available"):
@@ -446,8 +447,15 @@ def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force
                 util = float(limit.get("utilization", 0.0))
                 if util >= 1.0:
                     over_limits.append(limit)
+        else:
+            # EU-357: the probe returned no usage data (refused / rate-limited / offline). The old
+            # code silently fell through to hit=False — "fails OPEN", so an exhausted window looked
+            # like plenty of headroom and the drain churned. Surface the blindness so the caller can
+            # distinguish "verified under limit" from "couldn't tell" (the drain's barren-cycle
+            # breaker is the actual backstop; this makes the blind window diagnosable).
+            blind = True
     except Exception:  # noqa: BLE001 — plan-limit detection must never break the loop
-        pass
+        blind = True
 
     hit = len(over_limits) > 0
     _plan_limit_hit_cache = {
@@ -460,6 +468,7 @@ def plan_limit_hit(cfg: Config | None = None, *, now: float | None = None, force
     return {
         "hit": hit,
         "over_limits": over_limits,
+        "blind": blind,
         "checked_at": t
     }
 
@@ -470,42 +479,6 @@ def plan_limit_reset_cache() -> None:
     _plan_limit_hit_cache["hit"] = False
     _plan_limit_hit_cache["over_limits"] = []
     _plan_limit_hit_cache["ts"] = 0.0
-
-
-def available_fallback_provider(cfg: Config, current_model: str) -> tuple[str, str] | None:
-    """EU-108/118: Check if multi-provider fallback is configured and any provider has capacity.
-
-    Returns (model, provider_id) of the first available fallback, or None if:
-      - No fallback providers are configured
-      - All fallback providers also have utilization >= 1.0
-      - The current model is already in the fallback list (avoid self-switch)
-
-    The autopilot calls this before halting on plan limits; if a fallback is available,
-    it switches models instead of parking tickets.
-    """
-    if not cfg or not hasattr(cfg, "fallback_providers"):
-        return None
-
-    fallbacks = getattr(cfg, "fallback_providers", None)
-    if not fallbacks or not isinstance(fallbacks, list):
-        return None
-
-    # Normalize the current model name to avoid switching to the same provider
-    current_normalized = current_model.lower().replace("_", "-").replace(" ", "")
-
-    for model, provider_id in fallbacks:
-        # Skip if this is the same provider/model we're already using
-        model_normalized = model.lower().replace("_", "-").replace(" ", "")
-        if model_normalized == current_normalized or str(provider_id or "").lower() in current_normalized:
-            continue
-
-        # Check if this provider has available capacity
-        # For now, we assume fallback providers don't have the same real-time limit info
-        # as the primary Claude Max subscription, so we conservatively assume they're available
-        # unless explicitly blocked. A future enhancement could probe each provider's limits.
-        return (model, provider_id)
-
-    return None
 
 
 def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:

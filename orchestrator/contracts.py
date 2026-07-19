@@ -73,7 +73,10 @@ class BuildResult:
 @dataclass
 class GateResult:
     passed: bool
-    report: str                   # concatenated stdout/stderr of failed commands
+    report: str                   # concatenated stdout/stderr of failed commands (truncated tail)
+    full_report: str = ""         # EU-342: the COMPLETE unfiltered failing output (no -4000 tail),
+    #                               teed to a run-log file so the Builder reads the real failure on
+    #                               retry instead of re-running the suite inside its turns to find it.
 
 
 # --------------------------------------------------------------------------- #

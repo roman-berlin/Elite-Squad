@@ -144,23 +144,23 @@ d5 = Path(tempfile.mkdtemp())
 cfg5 = _cfg(d5, "automatixy", mb="opus")
 backend_pref.set_active("opus", cfg5)
 
+# 2026-07-19 (Commander order): the toolbar now speaks MAIN + SECONDARY — the per-project
+# selector no longer renders there (the EU-223 override MECHANICS above stay fully pinned:
+# backend_pref per-app storage, active() precedence, /api/model app= route all green).
 html_no_override = cockpit_views.backend_control(cfg5, "automatixy")
-chk("backend_control renders a per-project selector for the given app",
-    "This project" in html_no_override and 'name="app" value="automatixy"' in html_no_override)
-chk("per-project selector defaults to Inherit global when no override exists",
-    "Inherit global" in html_no_override and "value='inherit' selected" in html_no_override)
-chk("global selector is unchanged (still present)",
-    "action=/api/model" in html_no_override and "Opus (Claude)" in html_no_override)
+chk("toolbar no longer renders the per-project selector (moved out 2026-07-19)",
+    "This project" not in html_no_override and "Inherit global" not in html_no_override)
+chk("Main model selector present",
+    "Main model" in html_no_override and "action=/api/model" in html_no_override
+    and "Opus (Claude)" in html_no_override)
+chk("Secondary selector present (defaults to None)",
+    "Secondary" in html_no_override and "name=secondary" in html_no_override
+    and "value='none' selected" in html_no_override)
 
+# the per-app override still takes effect for RUNS even though the toolbar hides it
 backend_pref.set_active("glm", cfg5, app_name="automatixy")
-_orig_available = backends.available
-backends.available = lambda b: True   # GLM shown regardless of the real token in this test env
-try:
-    html_with_override = cockpit_views.backend_control(cfg5, "automatixy")
-finally:
-    backends.available = _orig_available
-chk("per-project selector selects the app's own override (glm) once set",
-    "value='glm' selected" in html_with_override)
+chk("per-app override mechanics unchanged — active() still honours it",
+    backend_pref.active(cfg5, "automatixy") == "glm")
 
 
 # ============ tally ==============================================================================

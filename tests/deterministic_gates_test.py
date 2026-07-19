@@ -95,8 +95,17 @@ chk("secrets: raw token never printed (masked)", all(RAW_KEY not in h for h in h
 chk("secrets: removed/context lines ignored, clean diff → []",
     gate_mod.scan_diff_for_secrets("+harmless = 1\n-junk\n") == []
     and gate_mod.scan_diff_for_secrets("") == [])
-chk("secrets: the gate:allow-secret pragma exempts fixture lines",
-    gate_mod.scan_diff_for_secrets(f"+key = \"{RAW_KEY}\"  # gate:allow-secret\n") == [])
+# EU-371(2): the pragma is honored ONLY for lines provably pre-existing in base (also present as
+# a removed/context line of the same diff — a move/reindent). The pre-EU-371 pin here asserted
+# the OPPOSITE (any pragma-carrying added line scanned clean), which was the self-whitelist
+# bypass the 2026-07-16 total audit flagged — untrusted product code exempting its own secret in
+# the very diff under review. Exploit-grade coverage: tests/eu371_gate_hardening_test.py.
+chk("secrets: an ADDED gate:allow-secret line is NOT exempt (self-whitelist closed, EU-371)",
+    gate_mod.scan_diff_for_secrets(f"+key = \"{RAW_KEY}\"  # gate:allow-secret\n") != [])
+chk("secrets: a MOVED pre-existing pragma line stays exempt (the fixture escape hatch survives)",
+    gate_mod.scan_diff_for_secrets(
+        f"-key = \"{RAW_KEY}\"  # gate:allow-secret\n"
+        f"+key = \"{RAW_KEY}\"  # gate:allow-secret\n") == [])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. lockfile_sanity
@@ -357,7 +366,7 @@ class _StubBuilder:
 class _StubReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None,
-                     already_bounced=None):
+                     already_bounced=None, gate_evidence=""):   # EU-265: mirror the real signature
         if store is not None:
             store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))
         return ReviewResult(verdict=Verdict.PASS, spec_met=True, cost_usd=0.1)

@@ -137,7 +137,7 @@ def for_builder(cfg, ticket, effort: str, iteration: int = 1) -> tuple[str, str]
 
 def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | None = None,
                 ) -> tuple[str, str]:
-    """A non-Builder officer's model (scout, council chair, drillmaster, PM, QM, security review…).
+    """A non-Builder officer's model (scout, council chair, PM, QM, security review…).
 
     Off: the configured ceiling, unchanged. On (economical): size the task down a tier when it's
     light and conserve harder when the day's budget is tight — but never drop below Sonnet (floor),
@@ -151,6 +151,49 @@ def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | N
     if not getattr(cfg, "auto_model", False):
         return ceiling, "fixed"
     return optimize(ceiling, size=size, effort=effort, budget_pct=_budget_pct(cfg), floor_tier=1)
+
+
+# 2026-07-19 (Commander order): the DEEP tier above Opus — used ONLY for deep-architecture
+# thinking (Planner/Architect on L/XL or effort-max/ultracode tickets). Deliberately OUTSIDE the
+# LADDER so every existing ceiling/floor rule is untouched: nothing auto-climbs to it except the
+# one explicit deep-architecture pick below, and cfg.deep_model = "" disables it entirely.
+DEEP = "claude-fable-5"
+
+_DEEP_EFFORTS = {"max", "xhigh", "ultra", "ultracode", "maximum"}
+_DEEP_LABELS = {"architecture", "architect", "epic", "deep"}
+
+
+def is_deep_task(ticket, effort: str = "") -> bool:
+    """A deep-architecture task: L/XL size, an effort-max/ultracode override, or an explicit
+    architecture/epic label. Pure heuristic — instant, deterministic."""
+    if (effort or "").strip().lower() in _DEEP_EFFORTS:
+        return True
+    try:
+        labels = {str(l).strip().lower() for l in (getattr(ticket, "labels", None) or [])}
+        if labels & _DEEP_LABELS:
+            return True
+        itype = str(getattr(ticket, "issue_type", "") or "").strip().lower()
+        if itype == "epic":
+            return True
+        from .builder import size_ticket
+        size, _eff, _r = size_ticket(ticket)
+        return size in ("L", "XL")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def for_planner(cfg, ticket=None, effort: str = "high") -> tuple[str, str, str]:
+    """The Planner/Architect pick: DEEP model + max effort for deep-architecture tasks, the
+    normal heavy officer pick (Opus-ceiling ladder) + high effort for a routine PRD.
+
+    Returns (model, effort, reason). The deep pick honours cfg.deep_model ("" = disabled →
+    routine pick even for deep tasks); everything else flows through for_officer so the
+    auto_model ceiling/budget rules stay in charge."""
+    deep_model = str(getattr(cfg, "deep_model", DEEP) or "").strip()
+    if deep_model and ticket is not None and is_deep_task(ticket, effort):
+        return deep_model, "max", f"deep architecture → {_short(deep_model)} @ max"
+    model, reason = for_officer(cfg, effort=effort, ceiling_model=cfg.reviewer_model)
+    return model, effort, reason
 
 
 def for_reviewer(cfg, diff: str = "", iteration: int = 1) -> tuple[str, str]:

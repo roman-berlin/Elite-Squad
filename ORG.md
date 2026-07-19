@@ -5,8 +5,8 @@ verify, train, and manage the corps; and every morning they muster, study their 
 brief the Commander. Officers are text files (`officers/*.md`) in Identity / Knowledge /
 Skills form — sharpen the file, sharpen the officer.
 
-> Legend: **solid = active today**, _dashed = planned_. Army terminology; every officer must
-> earn its post.
+> Legend: **solid = active today** (code fills the post), _dashed = planned_. Army terminology;
+> every officer must earn its post.
 
 ## Chain of command
 
@@ -19,7 +19,6 @@ graph TD
     G --> ADJ["Engineering Manager · S-1 Personnel (HR)<br/>recruits / retires officers · propose-only"]
     G --> ENG["Dev Team Lead · Builder<br/>Sonnet · full tools · builds on a worktree"]
     G --> INS["Code Reviewer · Reviewer<br/>Opus · read-only · independent audit"]
-    G --> DRL["Engineering Coach · Doctrine & Training<br/>improves the officers from the record"]
     G --> SCT["QA Engineer · S-2 Recon (QA)<br/>browser / e2e on DEV"]
     G --> PRV["Security Engineer · Security<br/>secrets · tenant-isolation · CVEs"]
     G --> PE["Performance Engineer · Perf Gate<br/>hot-path benchmark · countersign before Review"]
@@ -31,14 +30,15 @@ graph TD
     classDef active fill:#0b3d2e,stroke:#10b981,color:#d1fae5;
     classDef planned fill:#1f2937,stroke:#6b7280,color:#9ca3af,stroke-dasharray:5 5;
     class C,G command;
-    class ADJ,ENG,INS,DRL,SCT,PRV,PE,QM,SQ active;
+    class ADJ,ENG,INS,SCT,PRV,PE,QM,SQ active;
 ```
 
 **Build vs. check (no one signs off their own bridge):** officers that *build* live inside the
 Dev Team Lead (the FE/BE/DB/AI squad). Officers that *independently verify* — Code
-Reviewer, and the planned QA Engineer & Security Engineer — are separate and read-only. Defense in depth. The
-**Engineering Manager** changes the *composition* of the corps (hire/retire); the **Engineering Coach** sharpens
-the officers already in post.
+Reviewer, QA Engineer & Security Engineer — are separate and read-only. Defense in depth. The
+**Engineering Manager** changes the *composition* of the corps (hire/retire). (The Engineering
+Coach post was retired 2026-07-17, EU-327 — its load-bearing pieces live on in `signals.py` and
+`doctrine.py`; officer-charter upkeep folded into the Engineering Manager's personnel pass.)
 
 **Ranks & chain of recruitment.** Commander → CTO → **major officers** (sit on the council)
 → **junior officers / sub-leads** → **engineers**. A major may recruit its own engineers (its
@@ -52,10 +52,9 @@ council; everyone below reports up the chain.
 ```mermaid
 flowchart LR
     BL["Backlog · Jira<br/>In Progress, then To Do<br/>assignee = you · by Rank"] --> GEN["CTO<br/>takes one → In Progress"]
-    GEN --> BUILD["Dev Team Lead builds<br/>isolated worktree"]
+    GEN --> BUILD["Dev Team Lead builds<br/>isolated worktree · writes the tests"]
     BUILD --> GATE["Gate<br/>tests · lint · types"]
-    GATE --> TE["Test Engineer<br/>coverage gate · happy-path + regression"]
-    TE --> PE2["Performance Engineer<br/>hot-path benchmark · PASS countersign"]
+    GATE --> PE2["Performance Engineer<br/>hot-path benchmark · PASS countersign"]
     PE2 --> REV{"Code Reviewer<br/>pass?"}
     REV -- "fail · up to 4 passes" --> BUILD
     REV -- "pass" --> LAND["Land<br/>ff-push DEV · retire branch<br/>sync your DEV · ticket → QA · Telegram"]
@@ -70,7 +69,7 @@ flowchart LR
 ## Daily council (the unit studies every day)
 
 At **06:30** the officers muster: each gives a short SITREP from its lens on the unit's recent
-record, the Engineering Coach names the one drill worth running, the Engineering Manager covers personnel, and
+record, the Engineering Manager covers personnel, and
 the CTO chairs — producing a briefing, the day's orders, and the questions only you can
 answer. The unit can also call an **ad-hoc muster** to work a specific improvement
 (`general council --topic "…"`).
@@ -99,15 +98,22 @@ Run it: `general council` (now) · scheduled daily 06:30 via the server crontab 
 | Officer | Codename | Role | Status | Defined in |
 |---|---|---|---|---|
 | CTO | — | Orchestrator: git, the loop, the merge | **active** | `orchestrator/` |
-| Engineering Manager | S-1 | Personnel (HR): recruit / retire officers | **active** | `officers/adjutant.md`, `adjutant.py` |
-| Dev Team Lead | Builder | Implements the ticket on a worktree | **active** | `officers/engineer.md`, `builder.py` |
-| Test Engineer | Tests | Coverage gate after build, before review: happy-path + regression tests, owns the PR coverage artifact | **active** | `officers/test-engineer.md`, `test_engineer.py` |
+| Engineering Manager | S-1 | Personnel (HR): recruit / retire officers — propose-only, from its council seat | **active** | `officers/adjutant.md`, `council.py` |
+| Dev Team Lead | Builder | Implements the ticket on a worktree, writing the tests against the plan's acceptance criteria | **active** | `officers/engineer.md`, `builder.py` |
 | Performance Engineer | Perf Gate | Hot-path benchmark gate before Reviewer: profiler trace or before/after wall-clock on hot paths; countersign required | **active** | `officers/performance-engineer.md` |
 | Code Reviewer | Reviewer | Independent read-only spec + quality audit | **active** | `officers/inspector.md`, `reviewer.py` |
-| Engineering Coach | Doctrine | Reviews the record, proposes officer upgrades | **active** | `officers/drillmaster.md`, `drillmaster.py` |
 | QA Engineer | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
 | Security Engineer | — | Security: secrets, tenant-isolation, authz, CVEs | **active** | `officers/provost.md`, `provost.py` |
 | Release Manager | S-4 | CI / deploy readiness (build, migrations, env) | **active** | `officers/quartermaster.md`, `quartermaster.py` |
+
+**Retired posts.** The **Test Engineer** (a separate coverage gate between Gate and Review) was retired
+by `c276155` — the Planner now hands the Dev Team Lead testable acceptance criteria, the Dev Team Lead
+writes the tests, and the deterministic gate runs them. The **Engineering Coach** (daily drill /
+charter upkeep) was retired 2026-07-17 (EU-327): EU-323 moved its signals helpers to `signals.py`,
+EU-331 moved `snapshot_doctrine` to `doctrine.py`, leaving `drill()`/`apply()` with zero callers. An officer is **active** here when *code* fills
+the post, which is not the same as owning a module: EU-325 (`4bf4fe2`) deleted `adjutant.py` (the
+`general adjutant` CLI), but the Engineering Manager still sits on the daily council, so it stays.
+`tests/eu260_org_reality_test.py` fails if this table cites a file that no longer exists.
 
 ## Jira lifecycle (a ticket's path)
 
@@ -126,5 +132,5 @@ board Rank, only tickets **assigned to you**.
 2. Turn it into `Identity / Knowledge / Skills` with `officers/_TEMPLATE.md`.
 3. Drop a build-specialist in your repo's `.claude/agents/<name>.md`; a verifier gets its own
    `officers/<name>.md` and a hook in the loop.
-4. Manage it — review its work; the Engineering Coach refines the file, the Engineering Manager decides whether
+4. Manage it — review its work; the Engineering Manager refines the file and decides whether
    it stays in post.

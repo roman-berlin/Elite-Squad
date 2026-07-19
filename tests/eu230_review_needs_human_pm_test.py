@@ -98,7 +98,10 @@ loop.run_deterministic_checks = lambda app, paths, diff, **_: GateResult(passed=
 
 
 async def _stub_decision_brief(cfg, ticket_id, raw):
-    return ""
+    # EU-337: the reviewer-findings ping now routes through _decision_brief. Echo the raw notes so
+    # this harness (which checks the ping carries the finding detail) still exercises that content;
+    # the real distillation preserves the substance while dropping the code identifiers.
+    return raw
 
 
 loop._decision_brief = _stub_decision_brief
@@ -170,7 +173,7 @@ async def pm_decide(cfg, tkt, app, audit, halt_report):
 
 
 async def _stub_review_needs_human(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                                   already_bounced=None):
+                                   already_bounced=None, gate_evidence=""):   # EU-265: real signature
     return need_human_review
 
 
@@ -282,7 +285,7 @@ fail_no_issues = ReviewResult(
 
 
 async def _stub_review_findings(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                                already_bounced=None):
+                                already_bounced=None, gate_evidence=""):   # EU-265: real signature
     return fail_with_decision_finding if iteration == 1 else fail_no_issues
 
 
@@ -308,7 +311,7 @@ bl3 = Backlog()
 rep3 = asyncio.run(loop._attempt(ticket, app_cfg, cfg3, Git(), bl3, au3, loop.Budget(0), BRANCH))
 
 pmf_dec_calls = [c for c in dec_calls if c.get("entry_id") == f"{ticket.id}#pm-findings-decisions"]
-pmf_notify = [t for t in notify_calls if "reviewer finding(s)" in t]
+pmf_notify = [t for t in notify_calls if "needs YOUR decision" in t]
 
 chk("AC3: pm-findings decisions + PM DECIDE -> decisions.add is NOT called with the pm-findings entry_id",
     pmf_dec_calls == [], f"pmf_dec_calls={pmf_dec_calls}")
@@ -340,7 +343,7 @@ bl4 = Backlog()
 rep4 = asyncio.run(loop._attempt(ticket, app_cfg, cfg4, Git(), bl4, au4, loop.Budget(0), BRANCH))
 
 pmf_dec_calls4 = [c for c in dec_calls if c.get("entry_id") == f"{ticket.id}#pm-findings-decisions"]
-pmf_notify4 = [t for t in notify_calls if "reviewer finding(s)" in t]
+pmf_notify4 = [t for t in notify_calls if "needs YOUR decision" in t]
 
 chk("AC4: pm-findings decisions + PM ESCALATE -> decisions.add IS called with the pm-findings entry_id",
     len(pmf_dec_calls4) == 1, f"pmf_dec_calls4={pmf_dec_calls4}")

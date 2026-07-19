@@ -15,6 +15,7 @@ would be re-picked every cycle. Use --once for dry-run checks.
 """
 from __future__ import annotations
 
+import contextvars
 import inspect
 import json
 import os
@@ -34,7 +35,281 @@ from .loop import run as run_loop
 # PID file — single source of truth for "is the daemon actually running?"
 # Written at startup and removed on clean exit or SIGTERM. The Mac launchd keepalive daemon
 # (scripts/install-mac-autopilot-daemon.sh) relies on this file for external status checks.
-_PID_FILE = Path("/tmp/general-autopilot.pid")
+# EU-355: GENERAL_PID_FILE overrides the machine-global default. tests/run_all.py sets it to a
+# per-run temp path in every harness's env, so no harness can read a LIVE drain's PID (false
+# "autopilot ON" → drain-halting red base — the 2026-07-16 eu203 incident) or clobber it. One
+# central seam closes the whole class, not a per-harness house rule each new test must remember.
+_PID_FILE = Path(os.environ.get("GENERAL_PID_FILE") or "/tmp/general-autopilot.pid")
+
+# EU-357: usage-exhaustion circuit breaker tunables. After this many consecutive "barren" cycles
+# (non-empty worklist, only unexplained ERRORED reports) the drain pauses for the cooldown rather
+# than churning the backlog on an exhausted 5-hour usage window. The cooldown is long enough to
+# outlast a transient storm and let a rolling window recover; it auto-resumes with no /unblock.
+_MAX_BARREN_CYCLES = 3
+_USAGE_HOLD_COOLDOWN_S = 1800.0
+
+# EU-310: exclude a just-merged ticket from re-selection for this long, so a lost or lagging
+# post-merge Jira transition can't make the drain rebuild already-merged code. Long enough for board
+# propagation + a self-update restart; short enough that a genuinely re-opened ticket isn't stuck.
+_MERGED_COOLDOWN_S = 600.0
+
+
+# ── EU-386 (EU-224b): dirty-tree respawn forensics ────────────────────────────────────────────
+# A crash/KeepAlive respawn onto uncommitted changes used to be silent — process_start recorded
+# sha+pid only, so nothing distinguished a clean-tree boot from one running stray, unreviewed
+# code (the accidental-restart blind spot EU-224's forensics called out). The probe is read-only
+# and fail-soft: forensics must never block a boot.
+
+_DIRTY_PATHS_CAP = 50   # bound the audit line — one giant tree must not balloon audit.jsonl
+
+
+# EU-387: the distinctive exit code for a deliberate self-update restart. EX_TEMPFAIL (75) —
+# launchd KeepAlive / systemd Restart=always respawn on any exit, but 75 in the log tells the
+# forensic reader "this was the unit restarting itself onto new code", never a crash. (78 is
+# taken: the AUTO-128 sentinel revert branch.)
+SELF_RESTART_EXIT_CODE = 75
+
+# When THIS process booted — the reference point for the stale-flag crash-loop guard in
+# _maybe_self_restart (a restart flag older than the boot has already been honoured).
+_PROCESS_START_TS = time.time()
+
+
+def _self_restart_flag(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("self_restart_pending.json")
+
+
+def flag_self_update(cfg: Config, ticket_id: str, sha: str = "", audit=None) -> bool:
+    """EU-387: called by loop._land when a live land changed the unit's OWN repo. Writes the
+    pending-restart flag the drain's cycle boundary consumes — the land site itself is MID-RUN
+    (its worklist may hold more tickets), so the exit decision can't be made there.
+
+    Returns True when the flag persisted. A False return means NO automatic restart will happen
+    (2026-07-19 stabilization: the old silent swallow let the land site announce "restarting
+    automatically" while the unit kept running stale code — the announce-lie variant of the very
+    incident this feature exists to end), so the caller must word its notify accordingly."""
+    import json as _json
+    try:
+        _self_restart_flag(cfg).write_text(_json.dumps(
+            {"ticket": ticket_id, "sha": sha, "ts": time.time()}), encoding="utf-8")
+        return True
+    except OSError as exc:
+        if audit is not None:
+            try:
+                audit.record("self_restart_flag_write_failed", ticket_id=ticket_id,
+                             error=str(exc)[:200])
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"  ⚠ self-restart flag write failed ({exc}) — manual restart needed", flush=True)
+        return False
+
+
+def consume_self_restart_flag(cfg: Config, audit=None) -> dict | None:
+    """EU-387 boot half: one-shot consume. Called from serve boot — a present flag means THIS
+    process is the respawn the exit asked for; record it and clear so a second boot is a no-op."""
+    import json as _json
+    p = _self_restart_flag(cfg)
+    if not p.exists():
+        return None
+    try:
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    if audit is not None:
+        try:
+            audit.record("self_restart_completed", ticket_id=data.get("ticket"),
+                         old_sha=data.get("sha"))
+        except Exception:  # noqa: BLE001
+            pass
+    return data
+
+
+def _maybe_self_restart(cfg: Config, audit) -> None:
+    """EU-387: at a drain cycle boundary, exit the process onto the new code — but ONLY when it is
+    safe: the flag is set, the knob is on, NO run is in flight for ANY app (never a mid-build
+    kill), and the tree is clean (EU-386: a dirty respawn would silently activate un-gated WIP —
+    the mirror image of the stale-process incident this feature exists to end). The keepalive
+    (launchd com.roman.general.cockpit / the VPS systemd unit) respawns within ~5s; EU-385's boot
+    resume then re-arms the drains whose intent files say RUNNING. Knob off or dirty tree →
+    notify-only (flag cleared so it can't ping-pong)."""
+    p = _self_restart_flag(cfg)
+    if not p.exists():
+        return
+    # Crash-loop guard (2026-07-19 stabilization): a flag whose ts predates THIS process's start
+    # requested a restart that has, by definition, already happened — it survives only when boot's
+    # consume could not unlink it (read-only state dir, permissions). Exiting on it again would
+    # restart forever. Ignore it loudly instead; cap = one wasted restart, never a loop.
+    try:
+        import json as _json
+        _ts = float(_json.loads(p.read_text(encoding="utf-8")).get("ts", 0) or 0)
+    except (OSError, ValueError):
+        _ts = 0.0
+    if _ts and _ts < _PROCESS_START_TS:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        try:
+            audit.record("self_restart_stale_flag", flag_ts=_ts)
+        except Exception:  # noqa: BLE001
+            pass
+        print("  ⚠ stale self-restart flag (predates this boot) ignored — check state/ "
+              "permissions if this repeats", flush=True)
+        return
+    if not getattr(cfg, "self_update_auto_restart", True):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return                              # notify-only mode: today's exact behaviour
+    from . import cockpit_state as _cs
+    if _cs.active_run_count() > 0:
+        return                              # something is mid-build somewhere — defer, re-check next cycle
+    dirty, paths = tree_forensics()
+    if dirty:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        notify.send("⚠️ Self-update restart REFUSED — the working tree is dirty "
+                    f"({', '.join(paths[:5])}{'…' if len(paths) > 5 else ''}). A respawn would "
+                    "activate un-gated WIP (EU-386). Falling back to notify-only; restart by hand "
+                    "after committing/stashing.")
+        audit.record("self_restart_refused", reason="dirty tree", paths=paths[:10])
+        return
+    audit.record("self_restart_exit", exit_code=SELF_RESTART_EXIT_CODE)
+    notify.send("♻️ Self-update restart: the unit is exiting cleanly onto its own landed code — "
+                "the keepalive respawns it in seconds and armed drains auto-resume (EU-385).")
+    print(f"  ♻️ SELF-UPDATE RESTART — clean exit {SELF_RESTART_EXIT_CODE}; keepalive respawns "
+          "on the new sha.", flush=True)
+    _remove_pid()
+    os._exit(SELF_RESTART_EXIT_CODE)
+
+
+def tree_forensics() -> tuple[bool, list[str]]:
+    """Whether the working tree is dirty, and which paths — from ``git status --porcelain``.
+
+    Returns ``(False, [])`` on any probe failure (no git, timeout, not a repo): an unknowable
+    tree state must never block or spam a boot. The path list is capped at ``_DIRTY_PATHS_CAP``
+    entries; ``dirty`` stays truthful regardless of the cap."""
+    import subprocess
+
+    try:
+        r = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, []
+    if r.returncode != 0:
+        return False, []
+    paths: list[str] = []
+    for ln in r.stdout.splitlines():
+        ln = ln.rstrip()
+        if not ln:
+            continue
+        # porcelain v1: two status chars + a space + the path ("R  old -> new" kept whole)
+        paths.append(ln[3:].strip() if len(ln) > 3 else ln.strip())
+    return bool(paths), paths[:_DIRTY_PATHS_CAP]
+
+
+def warn_dirty_tree(cfg: Config, role: str, forensics: tuple[bool, list[str]] | None = None,
+                    audit: AuditLog | None = None) -> tuple[bool, list[str]]:
+    """EU-386: LOUD dirty-tree boot warning — console + Telegram + one ``dirty_tree_start``
+    audit line. A clean tree returns quietly with no output at all (the AC's negative half).
+
+    ``forensics`` lets the drain reuse the probe it already ran for its ``process_start``
+    fields instead of forking git twice; serve's boot (main.py) calls with no args — its own
+    ``process_start`` line lives in server.serve(), a separate surface. The Telegram text is
+    deliberately distinct from every routine notify so "restarted onto stray changes" reads
+    differently from a normal boot at a glance. Never raises."""
+    try:
+        dirty, paths = forensics if forensics is not None else tree_forensics()
+        if not dirty:
+            return False, []
+        shown = ", ".join(paths[:5]) + (" …" if len(paths) > 5 else "")
+        print(f"⚠️  DIRTY working tree at {role} start — {len(paths)} uncommitted path(s): "
+              f"{shown}", flush=True)
+        try:
+            (audit or AuditLog(cfg.audit_path)).record(
+                "dirty_tree_start", role=role, modified_paths=paths)
+        except Exception:  # noqa: BLE001 — the warning must still reach the Commander
+            pass
+        notify.send(f"⚠️ General {role} started on a DIRTY working tree — {len(paths)} "
+                    f"uncommitted path(s): {shown}. An accidental respawn may be running "
+                    "stray, unreviewed changes.")
+        return True, paths
+    except Exception:  # noqa: BLE001 — forensics must never block a boot
+        return False, []
+
+
+def _proc_start(pid: int) -> str | None:
+    """The OS-reported start time of ``pid``, or None when it can't be determined.
+
+    EU-368: a pid is NOT an identity — it's a slot number the kernel reuses. Pairing it with the
+    process's start time is: the kernel will not hand out the same pid twice within the same second
+    (recycling requires wrapping through the whole pid space), so (pid, start) names exactly one
+    process for as long as it lives. ``ps -o lstart=`` is the only stdlib-free source that works on
+    BOTH darwin (no /proc) and the linux VPS, which is why this shells out rather than adding psutil.
+    Timeout-bound per EU-366's hang-proofed subprocess seams — a wedged ps must never freeze the
+    cockpit badge, which calls this on the status path."""
+    import subprocess
+
+    try:
+        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart="],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None                       # no such process
+    return r.stdout.strip() or None
+
+
+# Our OWN start time never changes, so probe once and keep it: _pid_file_holds_our_pid() sits behind
+# daemon_is_external(), which the cockpit calls on every status render — a `ps` fork per page render
+# would be a needless regression of the EU-345 dashboard-latency work. A FOREIGN pid is deliberately
+# NOT cached: a stale cache entry is exactly the recycled-pid lie this ticket exists to kill.
+_our_start: str | None = None
+_our_start_probed = False
+
+
+def _our_proc_start() -> str | None:
+    global _our_start, _our_start_probed
+    if not _our_start_probed:
+        _our_start = _proc_start(os.getpid())
+        _our_start_probed = True
+    return _our_start
+
+
+def _read_pid_record() -> tuple[int, str | None] | None:
+    """Parse the PID file into ``(pid, start)``, or None when there's nothing usable there.
+
+    ``start`` is None for a LEGACY bare-int file (written by a pre-EU-368 daemon) or when the writing
+    process couldn't probe its own start time — callers must then fall back to a bare liveness probe.
+    Never raises: a missing, unreadable or garbled file simply has no record."""
+    try:
+        raw = _PID_FILE.read_text().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        doc = None
+    if isinstance(doc, dict):
+        try:
+            pid = int(doc["pid"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        start = doc.get("start")
+        return pid, (str(start) if start else None)
+    try:
+        return int(raw), None             # legacy bare-int format
+    except ValueError:
+        return None                       # garbage
+
 
 # Refcount of live in-process autopilot() runs holding the (process-wide) PID file. The cockpit
 # runs each per-app drain as a thread of the ONE serve process, so every drain writes the SAME
@@ -57,7 +332,9 @@ def _write_pid() -> None:
     with _pid_lock:
         _pid_holders += 1
         try:
-            _PID_FILE.write_text(str(os.getpid()))
+            # EU-368: pid + start time, not a bare pid — see _proc_start for why the pair is what
+            # makes "is that still OUR daemon?" answerable at all.
+            _PID_FILE.write_text(json.dumps({"pid": os.getpid(), "start": _our_proc_start()}))
         except OSError:
             pass
 
@@ -80,30 +357,48 @@ def _remove_pid() -> None:
             _pid_holders -= 1
         if _pid_holders > 0:
             return   # a sibling in-process drain still runs — the file must outlive THIS exit
-        try:
-            if _PID_FILE.read_text().strip() == str(os.getpid()):
+        if _pid_file_holds_our_pid():
+            try:
                 _PID_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
+            except OSError:
+                pass
 
 
 def daemon_running() -> bool:
-    """Return True when the autopilot daemon process is alive.
+    """Return True when THIS unit's autopilot daemon process is alive.
 
-    Reads _PID_FILE and probes the recorded PID with ``os.kill(pid, 0)`` (signal 0 = existence
-    check, no signal delivered). Returns False if the file is missing, unreadable, non-numeric,
-    or the process is no longer alive — i.e. any I/O or permission error means "not running".
+    Liveness = the recorded pid answers ``os.kill(pid, 0)`` (signal 0 = existence check, no signal
+    delivered) AND the process now sitting on that pid is the same one the record describes. Returns
+    False if the file is missing, unreadable, garbled, or the process is gone — i.e. any I/O or
+    permission error means "not running".
+
+    EU-368 (2026-07-16 total audit): the identity half is the point. A bare kill(0) asks "is SOME
+    process alive at this number?", and after a crash the answer drifts to yes as soon as the kernel
+    recycles the dead daemon's pid to something unrelated — a long-dead daemon then reads as alive
+    forever, autostart (EU-224) refuses to relaunch it, and the cockpit badge lies. Comparing the
+    recorded start time against the live pid's start time asks the question we actually mean.
+
+    A LEGACY bare-int record (no identity, written by a pre-EU-368 daemon) deliberately falls back to
+    the old kill(0)-only answer rather than reading as stale: during an upgrade the cockpit runs new
+    code while the launchd daemon may still be old, and answering "gone" for a daemon that is very
+    much alive would open the second-daemon hole this same ticket closes. The window is one daemon
+    lifetime — the next _write_pid() re-records it in the identified format.
 
     This is the single source of truth for the cockpit ON/OFF badge (EU-73): it reflects reality
     even when autopilot was launched outside the cockpit process (terminal that was later closed,
     launchd keepalive daemon) where the in-memory ``_state['autopilot']['on']`` flag is stale.
     """
+    rec = _read_pid_record()
+    if rec is None:
+        return False
+    pid, start = rec
     try:
-        pid = int(_PID_FILE.read_text().strip())
         os.kill(pid, 0)  # probe only — raises OSError(ESRCH) if gone, OSError(EPERM) if alive but not ours
-        return True
     except (OSError, ValueError):
         return False
+    if start is None:
+        return True                       # legacy record — no identity to check against
+    return _proc_start(pid) == start
 
 
 def _alert_unclean_restart(audit) -> bool:
@@ -114,15 +409,15 @@ def _alert_unclean_restart(audit) -> bool:
     Under the launchd keepalive daemon this fires on every auto-restart after a crash, so a
     restart is never silent: one audit event + one Telegram alert. Returns True when it fired.
     Best-effort — never raises, never blocks startup."""
-    try:
-        stale = _PID_FILE.read_text().strip()
-        if stale and stale != str(os.getpid()) and not daemon_running():
-            audit.record("autopilot_unclean_restart", stale_pid=stale)
-            notify.send(f"⚠️ Autopilot restarted after an unclean shutdown "
-                        f"(previous PID {stale} died without cleanup).")
-            return True
-    except OSError:
-        pass
+    rec = _read_pid_record()
+    if rec is None:
+        return False
+    stale = str(rec[0])
+    if stale != str(os.getpid()) and not daemon_running():
+        audit.record("autopilot_unclean_restart", stale_pid=stale)
+        notify.send(f"⚠️ Autopilot restarted after an unclean shutdown "
+                    f"(previous PID {stale} died without cleanup).")
+        return True
     return False
 
 
@@ -131,11 +426,15 @@ def _pid_file_holds_our_pid() -> bool:
 
     A cockpit Start runs autopilot in a background thread of the cockpit process, which writes this
     process's PID via ``_write_pid()``. This lets the per-app Start guard tell its OWN in-process
-    autopilot apart from a detached daemon living in a DIFFERENT process."""
-    try:
-        return _PID_FILE.read_text().strip() == str(os.getpid())
-    except OSError:
+    autopilot apart from a detached daemon living in a DIFFERENT process.
+
+    EU-368: the identity is checked too, so a record left by a DEAD predecessor whose pid the kernel
+    has since handed to us doesn't read as ours — _remove_pid() sits on this, and deleting on a
+    number-only match is how a foreign record gets clobbered in the first place."""
+    rec = _read_pid_record()
+    if rec is None or rec[0] != os.getpid():
         return False
+    return rec[1] is None or rec[1] == _our_proc_start()
 
 
 def daemon_is_external() -> bool:
@@ -281,18 +580,252 @@ def load_blocked(cfg: Config) -> set[str]:
     p = _blocked_file(cfg)
     try:
         return set(json.loads(p.read_text()))
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        # A corrupt park file maps to "nothing parked" — every parked ticket silently un-parks.
+        # Keep the fail-open direction (a stuck park set is worse) but say it happened
+        # (2026-07-19 stabilization: this was a silent swallow).
+        print(f"  ⚠ blocked_tickets.json is corrupt — treating as no parked tickets ({p})",
+              flush=True)
+        return set()
+    except OSError:
         return set()
 
 
 def save_blocked(cfg: Config, blocked: set[str]) -> None:
     # Authoritative overwrite, but taken under the shared cross-thread + cross-process lock so it can't
     # interleave with a concurrent write (the Telegram poller's /unblock) and lose one side's update.
+    # EU-381 pattern (2026-07-19 stabilization): one bounded retry before the best-effort swallow — a
+    # silently dropped write here un-parks every parked ticket with zero operator signal.
     snapshot = sorted(blocked)
+    for attempt in (0, 1):
+        try:
+            locking.locked_rmw(_blocked_file(cfg), lambda _current: snapshot, default=[])
+            return
+        except (OSError, ValueError) as exc:
+            if attempt:
+                print(f"  ⚠ blocked_tickets.json write failed twice ({exc}) — park set may be "
+                      "stale", flush=True)
+                return
+            time.sleep(0.05)
+
+
+# ── EU-385 (EU-224a): persisted drain-arm intent → serve-boot auto-resume ────────────────────
+# The live gap (2026-07-17): a 13:11 crash-respawn left a drain dead for 66+ minutes because
+# nothing remembered it was RUNNING. A continuous LIVE drain persists its arm here
+# (state=RUNNING); the drain's finally retires it (state=STOPPED + the EU-232 stop reason) on
+# EVERY clean stand-down, so only an abrupt process death — the finally never ran — leaves
+# RUNNING behind. That is the exact signal resume_armed_drains() (called from main.py's serve
+# boot) keys on. Conservative by design: a Commander-ordered stop must never be resurrected, so
+# resume also honours the EU-356 autopilot_stop_requested audit trail, which survives a crash
+# that beat the finally to this file.
+
+_RESUME_AUDIT_TAIL_BYTES = 2_000_000   # the stop-request scan reads only the audit's recent tail
+
+
+def _intent_file(cfg: Config) -> Path:
+    return Path(cfg.audit_path).with_name("autopilot_intent.json")
+
+
+def load_drain_intent(cfg: Config) -> dict:
+    """The persisted per-app arm map ({app_or_"": {state, armed_ts, …}}); {} when absent."""
     try:
-        locking.locked_rmw(_blocked_file(cfg), lambda _current: snapshot, default=[])
-    except (OSError, ValueError):
-        pass
+        data = json.loads(_intent_file(cfg).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def record_drain_intent(cfg: Config, app_name: str | None) -> None:
+    """Arm: persist that this drain (``""`` = unit-wide) is RUNNING. Best-effort, never raises."""
+    key = app_name or ""
+
+    def _set(cur):
+        cur = cur if isinstance(cur, dict) else {}
+        cur[key] = {"state": "RUNNING", "armed_ts": time.time(), "pid": os.getpid()}
+        return cur
+
+    try:
+        locking.locked_rmw(_intent_file(cfg), _set, default={}, corrupt_to_default=True)
+    except (OSError, ValueError) as exc:
+        # A dropped arm-write silently disarms EU-385 crash-resume — the exact 66-minute
+        # dead-drain gap the feature exists to close. Say so (2026-07-19 stabilization).
+        print(f"  ⚠ drain-intent arm write failed ({exc}) — crash auto-resume is DISARMED for "
+              f"'{key or 'unit-wide'}' until the next arm", flush=True)
+
+
+def clear_drain_intent(cfg: Config, app_name: str | None, reason: str) -> None:
+    """Retire the arm with WHY (kept, not deleted — armed_ts/reason are boot forensics)."""
+    key = app_name or ""
+
+    def _set(cur):
+        cur = cur if isinstance(cur, dict) else {}
+        rec = cur.get(key) if isinstance(cur.get(key), dict) else {}
+        rec.update({"state": "STOPPED", "stopped_ts": time.time(), "reason": reason})
+        cur[key] = rec
+        return cur
+
+    try:
+        locking.locked_rmw(_intent_file(cfg), _set, default={}, corrupt_to_default=True)
+    except (OSError, ValueError) as exc:
+        # A dropped retire-write leaves RUNNING behind — the next boot would resurrect a drain
+        # the Commander stopped. Say so (2026-07-19 stabilization).
+        print(f"  ⚠ drain-intent retire write failed ({exc}) — '{key or 'unit-wide'}' may "
+              "auto-resume on the next boot despite this stop", flush=True)
+
+
+def _parse_audit_ts(ts) -> float | None:
+    """audit.py's local-time ``%Y-%m-%dT%H:%M:%S%z`` stamp → epoch seconds; None if unreadable."""
+    from datetime import datetime
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(str(ts), fmt).timestamp()
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _commander_stopped_since(cfg: Config, app_key: str, armed_ts: float) -> bool:
+    """True when the audit shows a Commander stop order for this app at/after the arm.
+
+    The intent file alone has a race: Stop clicked → the process dies BEFORE the drain's finally
+    retires the arm → the file still says RUNNING. The EU-356 ``autopilot_stop_requested`` event
+    is recorded by the cockpit route on the click itself, so it survives that crash — it is the
+    discriminator that keeps auto-resume from resurrecting an explicitly-stopped drain. Reads
+    only the audit tail (boot-time, once; EU-363 owns whole-history hygiene). Conservative on
+    doubt: an unparseable stop-request timestamp BLOCKS the resume."""
+    p = Path(cfg.audit_path)
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > _RESUME_AUDIT_TAIL_BYTES:
+                f.seek(size - _RESUME_AUDIT_TAIL_BYTES)
+                f.readline()          # drop the partial line the seek landed in
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return False                  # no audit at all → nothing ever ordered a stop
+    for ln in raw.splitlines():
+        if '"autopilot_stop_requested"' not in ln:
+            continue
+        try:
+            row = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if row.get("event") != "autopilot_stop_requested":
+            continue
+        if (row.get("app") or "") != app_key:
+            continue
+        ts = _parse_audit_ts(row.get("ts"))
+        # ≥ armed_ts - 1.0: the audit stamp has 1s resolution — a same-second Stop still blocks.
+        if ts is None or ts >= armed_ts - 1.0:
+            return True
+    return False
+
+
+def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str]:
+    """EU-385: serve-boot auto-resume of drains persisted as RUNNING by a previous process.
+
+    Called from main.py's serve path — the one line every cockpit boot (CLI and launchd daemon
+    alike) takes — because server.serve() is a separate surface. Mirrors the cockpit Start
+    route's shape (claim_run → daemon _bg thread → release_run in its finally) so a resumed
+    drain is indistinguishable from a manually-started one, including its own process_start +
+    autopilot_start audit pair and its cockpit Stop button. Skips, in order: an external daemon
+    owning the queue, an unhealthy unit (intent kept for the next boot), a Commander stop order
+    in the audit (intent retired — never resurrect), a vanished app, an unrunnable GLM pick
+    (EU-190: no silent fallback), a held run slot. ``wait_s`` joins the spawned threads (tests).
+    Never raises: the boot must proceed no matter what."""
+    import asyncio
+    import copy
+
+    from . import backend_pref, backends, cockpit_state, health
+
+    resumed: list[str] = []
+    threads: list[threading.Thread] = []
+    try:
+        armed = sorted((k, r) for k, r in load_drain_intent(cfg).items()
+                       if isinstance(r, dict) and r.get("state") == "RUNNING")
+        if not armed:
+            return []
+        if daemon_is_external():
+            print("↻ auto-resume skipped — an external autopilot daemon already owns the queue",
+                  flush=True)
+            return []
+        try:
+            healthy = bool(health.summary(cfg).get("healthy"))
+        except Exception:  # noqa: BLE001 — a broken health probe must not veto crash recovery
+            healthy = True
+        if not healthy:
+            print("↻ auto-resume skipped — health problems; armed intent kept for the next boot",
+                  flush=True)
+            return []
+        audit = AuditLog(cfg.audit_path)
+        for key, rec in armed:
+            try:
+                # "" sorts first: a resumed unit-wide drain already covers every app, and the
+                # cockpit refuses a per-app Start while a unit-wide run is active — mirror it.
+                if "" in resumed:
+                    break
+                app_name = key or None
+                armed_ts = float(rec.get("armed_ts") or 0.0)
+                if _commander_stopped_since(cfg, key, armed_ts):
+                    clear_drain_intent(cfg, app_name, "commander-stop-honoured-at-boot")
+                    audit.record("autopilot_resume_skipped", app=key, reason="commander-stop")
+                    print(f"↻ auto-resume: NOT resuming {key or 'unit-wide'} — the Commander "
+                          "ordered a stop after it armed", flush=True)
+                    continue
+                if app_name is not None:
+                    try:
+                        cfg.app(app_name)
+                    except (KeyError, AttributeError):
+                        clear_drain_intent(cfg, app_name, "app-gone")
+                        audit.record("autopilot_resume_skipped", app=key, reason="app-gone")
+                        continue
+                ap_cfg = copy.copy(cfg)
+                ap_cfg.dry_run = False   # a resumed drain is live by definition (mirrors Start)
+                # EU-190/EU-223 sticky pick + 2026-07-19 MAIN/SECONDARY resolution
+                bk, _fb_why = backends.resolve_for_run(ap_cfg, app_name)
+                ap_cfg.model_backend = bk
+                if _fb_why:
+                    audit.record("model_fallback", app=key, backend=bk, reason=_fb_why)
+                    print(f"↻ auto-resume: {_fb_why}", flush=True)
+                if bk == backends.GLM and not backends.available("glm"):
+                    audit.record("autopilot_resume_skipped", app=key, reason="glm-unconfigured")
+                    print(f"↻ auto-resume: NOT resuming {key or 'unit-wide'} — GLM selected but "
+                          "unconfigured (intent kept)", flush=True)
+                    continue
+                ev = threading.Event()
+                if not cockpit_state.claim_run(app_name, dry_run=False, stop_event=ev):
+                    audit.record("autopilot_resume_skipped", app=key, reason="slot-held")
+                    continue
+                st = cockpit_state.get_state(app_name)
+                st["autopilot_on"] = True
+
+                def _bg(ap_cfg=ap_cfg, app_name=app_name, ev=ev, st=st):
+                    try:
+                        asyncio.run(autopilot(ap_cfg, app_name, once=False, stop_event=ev))
+                    except Exception as exc:  # noqa: BLE001 — mirror server.py's _bg
+                        st["last_msg"] = f"autopilot error: {exc}"
+                    finally:
+                        st["autopilot_on"] = False
+                        cockpit_state.release_run(app_name)
+
+                t = threading.Thread(target=_bg, daemon=True)
+                t.start()
+                threads.append(t)
+                audit.record("autopilot_resume", app=key, armed_ts=armed_ts)
+                print(f"🔁 auto-resumed drain: {key or 'all backlog apps'} — it was RUNNING when "
+                      "the previous process died", flush=True)
+                notify.send(f"🔁 Auto-resumed the {key or 'unit-wide'} drain after a restart — "
+                            "it was RUNNING when the previous process died (EU-385).")
+                resumed.append(key)
+            except Exception:  # noqa: BLE001 — one bad entry must not strand its siblings
+                continue
+        if wait_s is not None:
+            for t in threads:
+                t.join(timeout=wait_s)
+        return resumed
+    except Exception:  # noqa: BLE001 — boot must proceed no matter what
+        return resumed
 
 
 def _error_counts_file(cfg: Config) -> Path:
@@ -320,23 +853,48 @@ def _ticket_project(ticket_id: str) -> str:
     return ticket_id.split("-", 1)[0]
 
 
-# EU-274: per-(file, thread) memory of the last `counts` snapshot THIS drain wrote. It is a SECONDARY
+# EU-278: the identity of the drain running on this thread/task — the app it was started for, and the
+# Jira projects that app owns. Stamped ONCE by autopilot() at drain start (_enter_drain_scope) and
+# read back by save_error_counts, whose (cfg, counts) signature deliberately carries no owner: cfg is
+# NOT a usable source of scope, because server.py hands each per-app drain a `copy.copy(cfg)` that
+# still lists EVERY app — trusting it would make each drain claim every project and clobber its
+# neighbours' keys, which is precisely the EU-274 defect.
+#
+# A ContextVar rather than a thread-local so it survives both shapes the drain runs in: a cockpit
+# thread per app, and an asyncio task inside that thread. Threads and tasks each start from an empty
+# context, so an unstamped caller reads None and claims nothing.
+_drain_scope: contextvars.ContextVar[tuple[str, frozenset[str]] | None] = contextvars.ContextVar(
+    "general_drain_scope", default=None)
+
+
+def _enter_drain_scope(cfg: Config, app_name: str | None) -> None:
+    """Stamp THIS drain's identity for the rest of its life. Best-effort: an unresolvable app leaves
+    the scope unstamped, which only costs the empty-counts reset below (safe direction)."""
+    apps = []
+    try:
+        apps = [cfg.app(app_name)] if app_name else list(getattr(cfg, "apps", None) or [])
+    except (KeyError, AttributeError):
+        apps = []
+    projects = frozenset(
+        p for p in ((getattr(a, "backlog", None) or {}).get("project_key") for a in apps) if p)
+    _drain_scope.set((app_name or "*", projects))
+
+
+# EU-274: per-(file, drain) memory of the last `counts` snapshot THIS drain wrote. It is a SECONDARY
 # delete signal, only needed for the one case the primary (project-prefix) signal can't cover: a save
 # whose `counts` is EMPTY because the drain's last tracked ticket just parked/succeeded (its key
-# popped) — an empty dict carries no prefix to reveal which project it owns, so without this the drop
-# wouldn't propagate and the park-after-3 counter would never reset. Bounded by pruning rows of dead
-# threads on every save (see _prune_dead_error_counts_seen), so it can't grow with run-thread churn and
-# a recycled OS-thread ident can't inherit a dead predecessor's baseline; the value-match guard in the
-# merge is a second belt on ident reuse (a key is dropped via this path only if disk still holds the
-# exact value this thread last wrote).
-_error_counts_seen: dict[tuple[str, int], dict[str, int]] = {}
+# popped) — an empty dict carries no prefix to reveal which project it owns.
+#
+# EU-278: keyed on the DRAIN's identity (its app name), not `threading.get_ident()`. The old key was
+# the OS thread's number, which the kernel recycles: _prune_dead_error_counts_seen dropped only rows
+# whose ident was NOT live, so a recycled-but-live ident kept its dead predecessor's row and a new
+# drain could inherit a baseline that was never its own — the one path left that could reintroduce
+# the foreign-key clobber EU-274 fixed. (The old comment here claimed the prune prevented exactly
+# that; it did not.) An app name is stable for the drain's whole life and unique across concurrent
+# drains — EU-64 gives each project a single writer — so ident reuse is no longer representable, and
+# the cache is bounded by app count instead of run-thread churn, which is why the prune is gone.
+_error_counts_seen: dict[tuple[str, str], dict[str, int]] = {}
 _error_counts_seen_lock = threading.Lock()
-
-
-def _prune_dead_error_counts_seen(live_idents: set[int]) -> None:
-    """Drop _error_counts_seen rows for threads that have exited. Call under _error_counts_seen_lock."""
-    for key in [k for k in _error_counts_seen if k[1] not in live_idents]:
-        _error_counts_seen.pop(key, None)
 
 
 def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
@@ -351,18 +909,24 @@ def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
     #   (a) its project is one this drain is writing right now — call-time context from `counts`, so it
     #       needs no warm cache and already deletes a stale same-project key on a drain's very FIRST
     #       save after a restart (this closes the cold-cache resurrection gap the earlier attempt had); or
-    #   (b) this same thread wrote the key last save at the value still on disk — the only extra case,
+    #   (b) this same drain wrote the key last save at the value still on disk — the only extra case,
     #       for when (a) has no signal because `counts` emptied as the last tracked ticket parked.
     #
     # A key whose project no other-writer touches and that neither signal claims stays put, so a
     # concurrent foreign increment is never clobbered.
+    #
+    # EU-278: when `counts` is EMPTY it carries no prefix, so (a) is silent and (b) is the only signal
+    # left — and (b) is cold on a drain's first save after a restart. That combination (fresh process,
+    # last tracked ticket parks) left the parked key on disk at the threshold, so the next /unblock
+    # bought it ~1 retry instead of 3. Falling back to the drain's OWN declared projects gives (a) the
+    # call-time signal it's missing. Scope comes from the stamped drain identity, never from cfg.apps
+    # — see _drain_scope for why cfg would over-claim. Unstamped => empty => claims nothing.
     path = _error_counts_file(cfg)
-    cache_key = (str(path), threading.get_ident())
-    live = {t.ident for t in threading.enumerate()}
+    scope = _drain_scope.get()
+    cache_key = (str(path), scope[0] if scope else "")
     with _error_counts_seen_lock:
-        _prune_dead_error_counts_seen(live)
         baseline = _error_counts_seen.get(cache_key, {})
-    owned = {_ticket_project(k) for k in counts}
+    owned = {_ticket_project(k) for k in counts} or set(scope[1] if scope else ())
 
     def _merge(current):
         current = current if isinstance(current, dict) else {}
@@ -377,12 +941,25 @@ def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
         merged.update(counts)
         return merged
 
-    try:
-        locking.locked_rmw(path, _merge, default={})
+    # EU-381: ONE bounded retry before the best-effort swallow. Evidence (2026-07-17, EU-218's
+    # 10-consecutive-runs AC): eu256's AC3 union went red once in 10 full suites (~5% under maximal
+    # box load) with no locking defect — locked_rmw serialises correctly by construction — so the
+    # lost increment came from a single transient flock/open OSError being swallowed here, silently
+    # dropping the write and resetting park-after-3 progress. A transient clears in milliseconds,
+    # so one short-paused retry recovers it; a deterministic failure (e.g. corrupt JSON ->
+    # ValueError) just fails the retry too and falls back to the original best-effort contract —
+    # never an exception out of a save, so the drain can't break on bookkeeping.
+    for attempt in (0, 1):
+        try:
+            locking.locked_rmw(path, _merge, default={})
+        except (OSError, ValueError):
+            if attempt:
+                return           # both tries failed -> keep the best-effort swallow (drop the write)
+            time.sleep(0.05)     # brief pause for the transient to clear, then the one retry
+            continue
         with _error_counts_seen_lock:
             _error_counts_seen[cache_key] = dict(counts)
-    except (OSError, ValueError):
-        pass
+        return
 
 
 def _auto_clear_merged_ghosts(cfg: Config, blocked: set[str], audit: "AuditLog") -> set[str]:
@@ -556,6 +1133,45 @@ def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) ->
                 # differs from the new baseline and resumes again.
                 decisions.consume_answer(cfg, tid, answer)
     return out
+
+
+def _is_barren_cycle(reports: list, explained_ids: set) -> bool:
+    """EU-357: True when this cycle produced ONLY unexplained instant failures — every report
+    ERRORED and none was classified infra/auth/base (those have their own dedicated holds). That
+    is the fingerprint of the 5-hour-window refusal storm (calls fail as 'transient', nothing
+    lands, nothing is infra). N of these in a row arm the usage-exhaustion breaker. Pure so the
+    predicate is unit-testable without driving the whole autopilot loop."""
+    if not reports:
+        return False
+    if not all(r.outcome is Outcome.ERRORED for r in reports):
+        return False
+    return not any(r.ticket_id in explained_ids for r in reports)
+
+
+def _assemble_worklist(raw: list, blocked: set, resumed: dict, cap: int) -> list:
+    """Three-tier pick order (EU-87 / EU-252 / EU-344), pure so the picker layer is testable.
+
+    Input ``raw`` is ``[(app, ticket)]`` in the adapter's board order (priority DESC, Rank ASC —
+    the drain-HIGHEST-first lever). Output preserves that order WITHIN each tier:
+
+      Tier-1  In Progress — resume already-started work first; NEVER capped (an in-flight ticket
+              must never be starved by fresh To Do, EU-252).
+      Tier-2  answered/resumed — parked tickets the Commander replied to on Jira; additive/uncapped,
+              de-duped against anything already surfacing In Progress via the drain.
+      Tier-3  To Do — the fresh backlog in board-Rank (priority) order; ``cap`` bounds ONLY this
+              slice, applied AFTER the priority sort so a low-cap cycle still takes the HIGHEST
+              To Do tickets, never an ascending-key prefix (the EU-344 symptom).
+
+    The blocked filter runs over the FULL drawn window first so a jql-override that ranks an In
+    Progress fragment low can't be clipped before Tier-1 rescues it (EU-252)."""
+    raw = [(a, t) for (a, t) in raw if t.id not in blocked]
+    in_progress = [(a, t) for (a, t) in raw
+                   if (s := getattr(t, "status", None)) and "progress" in s.lower()]
+    to_do = [(a, t) for (a, t) in raw
+             if not ((s := getattr(t, "status", None)) and "progress" in s.lower())][:cap]
+    in_drain = {t.id for _, t in raw}
+    answered_items = [v for k, v in (resumed or {}).items() if k not in in_drain]
+    return in_progress + answered_items + to_do
 
 
 def _park_errored_on_tracker(cfg: Config, by_id: dict, newly: list, errored: set) -> None:
@@ -748,7 +1364,7 @@ def _apply_toolchain_holds(cfg: Config, audit: "AuditLog", worklist, held: froze
     apps_in_play = {a.name: a for a, _ in worklist}
     currently: set[str] = set()
     for name, app in apps_in_play.items():
-        missing = infra_classify.missing_toolchain(app)
+        missing = infra_classify.missing_toolchain(app, cfg)   # EU-322: cfg = unit-wide worktree_setup_cmd fallback
         if not missing:
             continue
         currently.add(name)
@@ -827,7 +1443,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         import subprocess as _sp
         _sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                        text=True, timeout=5).stdout.strip()
-        audit.record("process_start", role="autopilot", app=app_name or "", sha=_sha, pid=os.getpid())
+        # EU-386: additive dirty-tree fields on the same forensic line — a respawn onto
+        # uncommitted changes must be visible in the audit, and LOUD (console + Telegram)
+        # when it happens; a clean tree stays silent.
+        _dirty, _paths = tree_forensics()
+        audit.record("process_start", role="autopilot", app=app_name or "", sha=_sha,
+                     pid=os.getpid(), dirty=_dirty, modified_paths=_paths)
+        warn_dirty_tree(cfg, "autopilot", forensics=(_dirty, _paths), audit=audit)
     except Exception:  # noqa: BLE001 — forensics must never block the drain
         pass
     from . import cockpit_state
@@ -849,6 +1471,8 @@ async def autopilot(cfg: Config, app_name: str | None = None,
     wrote_pid = False         # gates the finally's _remove_pid(): every _write_pid() must be paired with
                               # exactly ONE _remove_pid() (the holder refcount), so a raise BEFORE the
                               # write must not decrement a sibling drain's hold on the shared file.
+    armed_intent = False      # EU-385: True once this drain persisted its RUNNING arm (continuous
+                              # live only) — gates the finally's clear_drain_intent, mirroring wrote_pid.
     try:
         # Write the PID file FIRST, inside the try, so the finally's _remove_pid() always runs — even
         # if any setup below (the signal registration, claim_run, a Telegram send) raises. Otherwise an
@@ -857,6 +1481,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         _alert_unclean_restart(audit)   # QW5: a restart after a crash is never silent
         _write_pid()
         wrote_pid = True
+        # EU-278: stamp WHO this drain is before any save_error_counts can fire, so an empty-counts
+        # park can tell its own parked key from a concurrent drain's without guessing from cfg.
+        _enter_drain_scope(cfg, app_name)
         if _on_main_thread:
             _orig_sigterm = signal.getsignal(signal.SIGTERM)
             signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -902,6 +1529,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
 
         audit.record("autopilot_start", mode=mode, app=app_name, once=once)
         started = True   # EU-175: from here on, every stand-down MUST record the paired autopilot_stop
+        # EU-385: persist this drain's arm so a crash/KeepAlive respawn can auto-resume it at the
+        # next serve boot (resume_armed_drains). Only a CONTINUOUS LIVE drain arms — a --once
+        # cycle or a dry-run preview is not a standing intent. The finally retires the arm with
+        # the stop reason on every clean stand-down; only an abrupt process death (no finally)
+        # leaves state=RUNNING behind, which is exactly the signal the boot-resume keys on.
+        if not once and not cfg.dry_run:
+            record_drain_intent(cfg, app_name)
+            armed_intent = True
         budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
         budget_alerted = False
         # EU-118: plan-limit pause flag
@@ -965,6 +1600,21 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # a misleading "connectivity restored" while the login is still dead — the same lesson as
         # the base-gate-timeout exclusion above. See _enter_auth_hold / _auth_hold_recheck.
         auth_hold = False
+        # EU-357: usage-exhaustion circuit breaker. The 5-hour Max window running out surfaces as a
+        # per-call REFUSAL classified "transient" (agent.py) — NOT a plan-limit hit (the probe goes
+        # blind, plan_limit_hit fails open) and NOT infra (so no offline-hold). So the drain churned
+        # 41 instant-failing picks in 38 min (2026-07-16 12:20 flood). This breaker is provider- and
+        # cause-agnostic: N consecutive cycles where a non-empty worklist produced ONLY unexplained
+        # ERRORED reports (none infra/auth/base-classified — those have their own holds) → pause for
+        # a cooldown, one alert, one audit event; auto-resume when the cooldown expires.
+        usage_hold_until = 0.0
+        consecutive_barren = 0
+        # EU-310: a ticket that modifies the unit's OWN code merges but its post-merge Jira transition
+        # can be lost or lag propagation, so the board still shows In Progress and the drain re-picks
+        # and rebuilds already-merged code (EU-307, 2026-07-14 — re-picked 19s after merge). Track the
+        # ids merged this process and exclude them from the worklist for a short cooldown, regardless
+        # of what the board says — the durable prevention that doesn't depend on the transition landing.
+        recently_merged: dict[str, float] = {}
         # 2026-07-15: base-level hold, PER APP. A red or timed-out BASE gate applies to the whole
         # app — picking it again before the red-base cache would re-verify (gate._RED_BASE_RED_TTL_S)
         # just parks one more ticket per cycle (the needs_human massacre: ~60 tickets in the 04:20
@@ -1005,6 +1655,22 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 _sleep(max(10, interval), stop_event)
                 continue
 
+            # EU-357: usage-exhaustion hold — while the cooldown is active, hold ALL new work. The
+            # breaker below arms it after N barren cycles; it auto-clears when the cooldown expires
+            # (the 5h window will have rolled by then, or the transient storm passed).
+            if time.time() < usage_hold_until:
+                if once:
+                    stop_reason = "usage-exhaustion"
+                    break
+                _sleep(max(30, interval), stop_event)
+                continue
+            if usage_hold_until and time.time() >= usage_hold_until:
+                usage_hold_until = 0.0
+                consecutive_barren = 0
+                audit.record("usage_exhaustion_resume")
+                notify.send("✅ Usage-exhaustion hold cleared — autopilot resuming.")
+                print("  ✅ usage-exhaustion cooldown elapsed — resuming.", flush=True)
+
 
             # Cost governor: never let a runaway loop eat the day's token budget. Pause new tickets
             # once today's burn hits the ceiling (resumes after midnight / when the ceiling is raised).
@@ -1035,46 +1701,74 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # are hit. This prevents silent churn where the autopilot spins on rate-limit errors.
             plan_check = usage.plan_limit_hit(cfg)
             if plan_check.get("hit"):
-                over_limits = plan_check.get("over_limits", [])
+                # 2026-07-19 (Commander order): the SECONDARY model absorbs a plan-limit hit —
+                # resolve_for_run returns the usable secondary when one is configured, so the
+                # drain keeps working on it (loudly) instead of pausing. No secondary → the
+                # pause below fires exactly as before.
+                from . import backends as _bks
+                _fb_bk, _fb_why = _bks.resolve_for_run(cfg, app_name)
+                if _fb_why:
+                    if getattr(cfg, "model_backend", None) != _fb_bk:
+                        cfg.model_backend = _fb_bk
+                        audit.record("model_fallback", app=app_name or "", backend=_fb_bk,
+                                     reason=_fb_why)
+                        notify.send(f"⇄ Plan limit hit — autopilot continues on the secondary "
+                                    f"model ({_fb_bk}). It switches back when the limit resets.")
+                        print(f"  ⇄ {_fb_why} — drain continues on {_fb_bk}", flush=True)
+                    plan_limit_paused = False
+                    # fall through to normal work — the secondary carries the drain
+                else:
+                    over_limits = plan_check.get("over_limits", [])
 
-                # Halt autopilot when plan limits are hit (no fallback switch implemented yet)
-                if not plan_limit_paused:
-                    limit_names = [limit.get("label", limit.get("key", "unknown")) for limit in over_limits]
-                    reset_times = list(set(limit.get("resets_in", "unknown") for limit in over_limits))
+                    # Halt autopilot when plan limits are hit (no usable secondary configured)
+                    if not plan_limit_paused:
+                        limit_names = [limit.get("label", limit.get("key", "unknown")) for limit in over_limits]
+                        reset_times = list(set(limit.get("resets_in", "unknown") for limit in over_limits))
 
-                    # Send severe Telegram alert (one-shot per session)
-                    notify.plan_limit_alert(over_limits, reset_times)
+                        # Send severe Telegram alert (one-shot per session)
+                        notify.plan_limit_alert(over_limits, reset_times)
 
-                    # Also send regular notification for logs
-                    notify.send(f"⛔ Autopilot paused — Claude plan limit(s) reached: {', '.join(limit_names)}. "
-                                f"Resets at: {', '.join(reset_times)}. "
-                                f"Resuming could cause API errors and silent churn.")
+                        # Also send regular notification for logs
+                        notify.send(f"⛔ Autopilot paused — Claude plan limit(s) reached: {', '.join(limit_names)}. "
+                                    f"Resets at: {', '.join(reset_times)}. "
+                                    f"Resuming could cause API errors and silent churn.")
 
-                    # Set cockpit state so the banner appears
-                    try:
-                        from . import cockpit_state as _cs
-                        # Find the earliest reset timestamp
-                        reset_at = None
-                        for limit in over_limits:
-                            ts = limit.get("resets_at")
-                            if ts:
-                                epoch = ts if isinstance(ts, (int, float)) else 0
-                                if reset_at is None or epoch < reset_at:
-                                    reset_at = epoch
-                        _cs.set_plan_limit_hit(app_name, hit=True, reset_at=reset_at)
-                    except Exception:  # noqa: BLE001 - state update must never break autopilot
-                        pass
+                        # Set cockpit state so the banner appears
+                        try:
+                            from . import cockpit_state as _cs
+                            # Find the earliest reset timestamp
+                            reset_at = None
+                            for limit in over_limits:
+                                ts = limit.get("resets_at")
+                                if ts:
+                                    epoch = ts if isinstance(ts, (int, float)) else 0
+                                    if reset_at is None or epoch < reset_at:
+                                        reset_at = epoch
+                            _cs.set_plan_limit_hit(app_name, hit=True, reset_at=reset_at)
+                        except Exception:  # noqa: BLE001 - state update must never break autopilot
+                            pass
 
-                    audit.record("plan_limit_pause", over_limits=over_limits)
-                    print(f"  · Claude plan limit(s) reached: {', '.join(limit_names)} — holding new tickets "
-                          f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
-                    plan_limit_paused = True
-                if once:
-                    stop_reason = "plan-limit"   # EU-232
-                    break
-                _sleep(max(30, interval), stop_event)
-                continue
-            # Clear plan-limit state when no longer hit
+                        audit.record("plan_limit_pause", over_limits=over_limits)
+                        print(f"  · Claude plan limit(s) reached: {', '.join(limit_names)} — holding new tickets "
+                              f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
+                        plan_limit_paused = True
+                    if once:
+                        stop_reason = "plan-limit"   # EU-232
+                        break
+                    _sleep(max(30, interval), stop_event)
+                    continue
+            # Clear plan-limit state when no longer hit; also switch back to the MAIN model if
+            # the fallback had engaged (the pref didn't change — only this drain's working copy).
+            # Best-effort: minimal test cfgs may lack the attrs — never break the drain loop.
+            try:
+                from . import backend_pref as _bp
+                _main_bk = _bp.active(cfg, app_name)
+                if not plan_check.get("hit") and getattr(cfg, "model_backend", _main_bk) != _main_bk:
+                    cfg.model_backend = _main_bk
+                    audit.record("model_fallback_cleared", app=app_name or "", backend=_main_bk)
+                    notify.send(f"⇄ Plan limit cleared — autopilot is back on the main model ({_main_bk}).")
+            except Exception:  # noqa: BLE001
+                pass
             if plan_limit_paused:
                 try:
                     from . import cockpit_state as _cs
@@ -1161,6 +1855,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     repos_announced = frozenset(set(repos_announced) | set(repos))
 
 
+            # EU-387: a self-land earlier flagged a pending restart — this cycle boundary is where
+            # "nothing is mid-build anywhere" is knowable, so the graceful exit decision lives
+            # here (never at the land site, which is mid-run by definition). No-op without a flag.
+            _maybe_self_restart(cfg, audit)
+
             blocked = load_blocked(cfg)   # re-read so /unblock takes effect live
             # EU-78: auto-clear ghost-parked tickets whose latest audit run already succeeded
             # (e.g. parked in a previous session, then ran manually and merged).
@@ -1193,32 +1892,16 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # the pre-EU-87 contract eu61_autopilot_resume_queue_test.py pins (capping the *combined*
             # list instead silently truncated the To Do tail when cap was small).
             raw = intake.from_drain(cfg, app_name, cap + len(blocked) + len(resumed) + 5)
-            raw = [(a, t) for (a, t) in raw if t.id not in blocked]
-
-            # Tier-1: tickets the board already shows as In Progress — always run these first so
-            # a ticket we started in a previous cycle is never delayed by new To Do items. Never
-            # bounded by `cap` (EU-252) — an In Progress resume must never be starved by fresh work.
-            # Use getattr for robustness in tests / adapters that return plain namespaces.
-            in_progress = [(a, t) for (a, t) in raw
-                           if (s := getattr(t, "status", None)) and "progress" in s.lower()]
-            # Tier-3: ready (To Do) tickets waiting to be picked up, in board-Rank order. `cap` bounds
-            # only this fresh-backlog slice (EU-252) — In Progress and answered resumes are additive.
-            to_do = [(a, t) for (a, t) in raw
-                     if not ((s := getattr(t, "status", None)) and "progress" in s.lower())][:cap]
-
-            # Tier-2: parked tickets the Commander answered directly on Jira. They sit between
-            # In Progress and To Do so a replied-to ticket is never left behind a fresh To Do.
-            # Unanswered blocked tickets stay in `blocked` and are excluded by the raw filter
-            # above — only tickets lifted by _resumable_answered() enter this tier.
-            # De-dup against the drain: an answered ticket that is still In Progress on the board
-            # comes through tier-1 via the drain and must not appear in tier-2 as well.
-            in_drain = {t.id for _, t in raw}
-            answered_items = [v for k, v in resumed.items() if k not in in_drain]
-
-            # Final ordering: In Progress → answered → To Do. The cap was already applied to the
-            # To Do slice above (EU-252); In Progress and answered resumes are intentionally
-            # additive/uncapped (see notes above).
-            worklist = in_progress + answered_items + to_do
+            # EU-310: drop keys merged in the last _MERGED_COOLDOWN_S — the board may still show them
+            # In Progress (lost/lagging transition), and re-picking rebuilds already-merged code.
+            _now_m = time.time()
+            recently_merged = {k: ts for k, ts in recently_merged.items()
+                               if _now_m - ts < _MERGED_COOLDOWN_S}
+            _pick_exclude = blocked | set(recently_merged)
+            # EU-344: the tier split is a pure helper so the picker layer is unit-testable — the
+            # ticket's core finding was "priority doesn't steer" with the bug living HERE, yet no
+            # regression pinned that To Do is picked in adapter (priority DESC, Rank ASC) order.
+            worklist = _assemble_worklist(raw, _pick_exclude, resumed, cap)
 
             # EU-228: hold any app whose gate/worktree-setup toolchain is missing a binary on this
             # machine — one alert for the WHOLE app, its tickets simply don't run this cycle (no
@@ -1236,6 +1919,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                 print(f"  ⛔ base-hold active for {', '.join(sorted(red_base_hold))} — "
                       f"{len(_dropped_held)} ticket(s) stay queued until the base re-check.",
                       flush=True)
+                # EU-344: no silent pick-time skips — every exclusion emits an audit event naming
+                # the tickets + reason, so "priority isn't steering" is diagnosable from the log
+                # instead of inferred. (The base-hold is the picker layer's one uncaptured drop.)
+                audit.record("pick_skip", reason="base-hold",
+                             apps=sorted(red_base_hold), tickets=_dropped_held)
 
             # EU-128: In continuous+dry-run mode, filter out tickets that were already previewed
             # to prevent re-picking the same ticket forever. Track previewed tickets so they're
@@ -1323,6 +2011,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # auto-resume does NOT fire. The cycle is Blocked→(Commander answers again)→resume,
             # not Blocked→retry→Blocked. No extra gate needed here; this property holds as long as
             # decisions.add() always snapshots the baseline at park time (verified in _park_on_tracker).
+            # EU-310: remember what merged this cycle so the next pick can't re-select it while the
+            # board catches up to the Done/QA transition (or if that transition was lost).
+            for r in reports:
+                if r.outcome is Outcome.MERGED:
+                    recently_merged[r.ticket_id] = time.time()
+
             park_now = [r.ticket_id for r in reports if r.outcome in PARKED]
             # EU-228: infra-classified ERRORED reports (network/DNS/timeout/5xx — a turn-limit is
             # NEVER infra, see infra_classify.classify) contribute no strike at all.
@@ -1360,6 +2054,28 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # 2026-07-15: expired-login hold — ONE "re-login needed" alert, no strikes, and the
             # drain pauses until _auth_hold_recheck (top of the loop) verifies the login again.
             auth_hold = _enter_auth_hold(cfg, audit, _auth_ids, auth_hold)
+
+            # EU-357: usage-exhaustion breaker. A "barren" cycle is one where a non-empty worklist
+            # produced ONLY ERRORED reports AND none were classified infra/auth/base (those have
+            # their own holds above). That's the fingerprint of the 5h-window refusal storm — calls
+            # instant-fail as "transient", nothing lands, nothing is infra. N barren cycles in a row
+            # → pause for a cooldown so the drain stops churning the whole backlog to no effect.
+            _explained = infra_errored | _auth_ids | _base_ids
+            _unexplained = _is_barren_cycle(reports, _explained)
+            if worklist and _unexplained:
+                consecutive_barren += 1
+            elif any(r.outcome not in (Outcome.ERRORED,) for r in reports):
+                consecutive_barren = 0
+            if consecutive_barren >= _MAX_BARREN_CYCLES and not usage_hold_until:
+                usage_hold_until = time.time() + _USAGE_HOLD_COOLDOWN_S
+                mins = int(_USAGE_HOLD_COOLDOWN_S // 60)
+                audit.record("usage_exhaustion_hold", barren_cycles=consecutive_barren,
+                             cooldown_s=_USAGE_HOLD_COOLDOWN_S)
+                notify.send(f"⛔ Autopilot paused — {consecutive_barren} cycles in a row produced only "
+                            f"instant failures with no landed work (usage window likely exhausted). "
+                            f"Holding {mins} min to stop churn; auto-resumes after the cooldown.")
+                print(f"  ⛔ usage-exhaustion breaker — {consecutive_barren} barren cycles; holding "
+                      f"{mins} min to stop churn.", flush=True)
 
             # 2026-07-15: base-level outcome — the app can't build ANYTHING right now. Hold ITS
             # picking until the red-base cache would re-verify, instead of re-parking one more
@@ -1471,5 +2187,11 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # plan-limit / budget / keyboard-interrupt / exception:<type> — set at the exit path above.
         # Falls back to "once-complete" for the handful of other `if once: break` holds (git/pre-flight/
         # graceful-stop/idle-queue) that don't set their own reason — still a genuine --once completion.
+        # EU-385: ANY reasoned stand-down that reaches this finally — cockpit-stop, sigterm,
+        # budget, plan-limit, an exception — retires the persisted arm, so the next serve boot
+        # does not resurrect a drain that deliberately stood down. Only a process death that
+        # skipped this finally leaves the RUNNING intent for resume_armed_drains to honour.
+        if armed_intent:
+            clear_drain_intent(cfg, app_name, stop_reason or "stand-down")
         if started:
             audit.record("autopilot_stop", reason=stop_reason or "once-complete")

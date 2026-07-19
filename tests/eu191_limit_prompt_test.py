@@ -42,8 +42,11 @@ chk("alternates(native) is empty when glm is NOT configured (fail-closed)",
 
 # ============ _plan_limit_banner: the Continue-on-GLM button ============ #
 # Force the active backend to native so the offer branch is exercised.
+# The stub mirrors the REAL active(cfg=None, app_name=None) signature: EU-242 made the banner resolve
+# the affected app's backend, and a one-arg stub raises TypeError inside the banner's `except
+# Exception`, which blanks the button and fails these pins for a reason that isn't the one they test.
 _orig_active = backend_pref.active
-backend_pref.active = lambda cfg=None: backends.NATIVE
+backend_pref.active = lambda cfg=None, app_name=None: backends.NATIVE
 state = {"plan_limit_hit": True, "plan_limit_reset_at": 1_780_000_000,  # non-zero -> skips a live usage fetch
          "last_run": {"app": "automatixy", "tickets": ["AUTO-99"]}}
 

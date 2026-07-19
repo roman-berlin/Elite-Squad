@@ -21,26 +21,96 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent          # the General repo root
 TESTS = sorted(p for p in (ROOT / "tests").glob("*_test.py"))
 
+# EU-360: reuse the orchestrator's own credential predicate so the suite's env strip can never drift
+# from the officer/gate subprocess boundary. Fallback keeps run_all import-robust (it is the
+# guard-of-guards — an import error here would take the whole suite down).
+sys.path.insert(0, str(ROOT))
+try:
+    from orchestrator.backends import is_sensitive_key as _is_sensitive_key
+except Exception:  # noqa: BLE001
+    def _is_sensitive_key(key: str) -> bool:
+        return key.startswith(("JIRA_", "TELEGRAM_")) or key == "GENERAL_COCKPIT_PROMOTE"
+
 # EU-139 gate incident (2026-07-05 22:24): a ticket run's gate executes this suite as a child of the
 # orchestrator, so harnesses inherit its live credentials — and a harness that stubbed the SDK but not
 # `orchestrator.notify` (eu108_sonnet_fallback_test) sent a REAL "Sonnet weekly cap hit" Telegram alert
-# to the ops chat mid-gate. The suite's contract is "no network, no real models": strip outbound
-# messaging credentials from every harness's environment so no test can page the Commander, no matter
-# which process spawns the suite. A harness that tests notify sets its own fake env in-process.
-_CHILD_ENV = {k: v for k, v in os.environ.items()
-              if k not in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
+# to the ops chat mid-gate. The suite's contract is "no network, no real models": strip EVERY sensitive
+# credential (EU-360 widened this from just TELEGRAM_* to the full is_sensitive_key set — JIRA_*, the
+# messaging tokens, GENERAL_COCKPIT_PROMOTE) from every harness's environment so no test can page the
+# Commander OR reach a real Jira, no matter which process spawns the suite. A harness that tests one of
+# these sets its own fake env in-process.
+_CHILD_ENV = {k: v for k, v in os.environ.items() if not _is_sensitive_key(k)}
 # 2026-07-15 (auth liveness): health.checks() now probes credential VALIDITY with a real
 # `claude -p` round-trip (network + a real model) unless GENERAL_AUTH_PROBE=0 — force it off for
 # every harness, same contract as the Telegram strip above. A harness that tests the probe stubs
 # auth_probe._run_probe / clears this var in-process (auth_liveness_test.py).
 _CHILD_ENV["GENERAL_AUTH_PROBE"] = "0"
+
+# EU-355: point every harness's autopilot PID file at a per-run temp path, NOT the machine-global
+# /tmp/general-autopilot.pid. A harness that reads get_autopilot_status()/daemon_is_external() (e.g.
+# eu203) would otherwise see a LIVE drain's PID and conclude "autopilot is ON" — reddening the base
+# gate mid-drain (2026-07-16 incident) — and a harness that runs the real autopilot() would OVERWRITE
+# then DELETE the live daemon's PID file. Isolating the path in the child env closes both directions
+# of the leak for the WHOLE suite, so no future harness has to remember the per-test _PID_FILE pin.
+_PID_FILE_DIR = tempfile.mkdtemp(prefix="general-test-pid-")
+_CHILD_ENV["GENERAL_PID_FILE"] = str(Path(_PID_FILE_DIR) / "autopilot.pid")
+
+# EU-360: a per-harness wall-clock ceiling so one hung harness can no longer stall the whole suite
+# (subprocess.run had NO timeout — a wedged harness froze run_all, and with it any gate that shells
+# out to it). Generous: the known-heavy harnesses top out ~19s. Override with GENERAL_TEST_TIMEOUT.
+_HARNESS_TIMEOUT_S = int(os.environ.get("GENERAL_TEST_TIMEOUT", "300") or 300)
+
+# EU-218: the gate that runs this suite (config.example.yaml's per-app `gate_commands`, default
+# `AppConfig.gate_timeout_sec`) has a 1800s hard cap — locking_test's 12 heavy child processes were
+# the dominant wall-clock contributor pushing full-suite runtime toward it (EU-201 hit it twice).
+# Measured 2026-07-17 on this repo's suite (382 harnesses): ~214s real, an ~8.4x margin under 1800s.
+# `_GATE_TIMEOUT_SEC` documents the timeout the suite is budgeted against; override with
+# GENERAL_GATE_TIMEOUT_SEC to match a raised per-app gate_timeout_sec. `_WALLCLOCK_MARGIN` is the
+# fraction of that budget the suite must stay under — crossing it is a signal to trim a harness (or
+# raise gate_timeout_sec deliberately) BEFORE the suite actually times out in CI.
+_GATE_TIMEOUT_SEC = int(os.environ.get("GENERAL_GATE_TIMEOUT_SEC", "1800") or 1800)
+_WALLCLOCK_MARGIN = 0.5
+
+
+def _run_harness(path: Path) -> tuple[str, str, int, bool]:
+    """Run one harness, bounded by _HARNESS_TIMEOUT_S. Returns (stdout, stderr, returncode, timed_out).
+
+    Uses a new session + killpg so a harness that spawned its own grandchild (e.g. the gate tests'
+    `sleep`) can't outlive the timeout. Decoding is error-tolerant (EU-360): a single invalid byte in
+    a harness's output used to crash the runner mid-suite with strict UTF-8 decoding."""
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(path)], cwd=str(ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace", env=_CHILD_ENV,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return "", f"(could not launch harness: {exc!r})", 1, False
+    try:
+        stdout, stderr = proc.communicate(timeout=_HARNESS_TIMEOUT_S)
+        return stdout or "", stderr or "", proc.returncode, False
+    except subprocess.TimeoutExpired as texc:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except Exception:  # noqa: BLE001 — reap raced or a grandchild still holds the pipe
+            stdout = texc.stdout if isinstance(texc.stdout, str) else ""
+            stderr = texc.stderr if isinstance(texc.stderr, str) else ""
+        return stdout or "", stderr or "", proc.returncode or -1, True
 
 
 def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
@@ -52,11 +122,12 @@ def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
     * a tally line present and ``k < n`` → FAIL, even if the harness exited 0 (the soft-tally bug:
       ~28 harnesses print ``RESULT: … FAIL`` but never ``sys.exit(1)``);
     * a tally line present and ``k == n`` → pass iff the exit code is also 0;
-    * no tally line at all, but a pytest ``N failed`` summary line is present → FAIL regardless of
-      exit code (EU-244: the pytest-style harnesses' ``__main__`` blocks now do
-      ``sys.exit(pytest.main(...))``, but this is defense-in-depth for the whole class — a harness
-      that regresses back to a bare ``pytest.main(...)`` call, or any future pytest harness that
-      forgets ``sys.exit``, still can't sail through on the always-0 exit code);
+    * no tally line at all, but a pytest ``N failed`` **or** ``N error(s) in <float>s`` summary line
+      is present → FAIL regardless of exit code (EU-244: the pytest-style harnesses' ``__main__``
+      blocks now do ``sys.exit(pytest.main(...))``, but this is defense-in-depth for the whole class
+      — a harness that regresses back to a bare ``pytest.main(...)`` call, or any future pytest
+      harness that forgets ``sys.exit``, still can't sail through on the always-0 exit code; EU-373
+      added the error term, which is what a collection/import failure reports *instead of* "failed");
     * no tally line and no pytest failure summary → trust the exit code unchanged (the assert-based
       harnesses raise on failure, so a 0 exit is an honest pass — failing them on "no count" would
       be a false positive).
@@ -73,9 +144,19 @@ def _verdict(stdout: str, returncode: int) -> tuple[bool, int, str, str]:
         # A pytest summary line reads "1 failed, 7 passed in 0.42s"; only a NON-ZERO failed count
         # is a red run. Requiring >0 is what keeps a benign "0 failed" tally (e.g. eu195's custom
         # "Results: 4 passed, 0 failed") from being misread as a failure.
+        #
+        # EU-373: "failed" alone misses half the class. A pytest COLLECTION/import error never
+        # prints "failed" — verified 2026-07-17 against this repo's venv, a bad import prints only
+        # "=== 1 error in 0.03s ===" — so a harness that lost its sys.exit would sail through GREEN
+        # on the very error that means none of its checks ran at all. The error term is ANCHORED to
+        # pytest's summary shape ("N error(s) in <float>s") rather than a bare "(\d+) error": the
+        # failed probe is unanchored and only survives on its >0 guard, while harness prose about
+        # error handling ("3 error responses") would false-red an unanchored error term.
         pf = re.search(r"(\d+) failed", stdout)
-        if pf and int(pf.group(1)) > 0:
-            reason = f"pytest FAIL: {pf.group(0)} (harness exited {returncode})"
+        pe = re.search(r"(\d+) errors? in [\d.]+s", stdout)
+        hit = pf if (pf and int(pf.group(1)) > 0) else (pe if (pe and int(pe.group(1)) > 0) else None)
+        if hit:
+            reason = f"pytest FAIL: {hit.group(0)} (harness exited {returncode})"
             return False, 0, line, reason
         return returncode == 0, 0, line, ""          # no self-tally → judge on the exit code alone
     k, n = count
@@ -89,10 +170,16 @@ def main() -> int:
     passed = failed = total_checks = 0
     red: list[str] = []
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    _t0 = time.monotonic()
     for t in TESTS:
-        r = subprocess.run([sys.executable, str(t)], cwd=str(ROOT), capture_output=True, text=True,
-                           env=_CHILD_ENV)
-        ok, checks, line, reason = _verdict(r.stdout, r.returncode)
+        stdout, stderr, returncode, timed_out = _run_harness(t)
+        if timed_out:
+            # A timeout is an unconditional FAIL regardless of any partial tally the harness printed
+            # before it wedged (EU-360) — the suite must never green a harness it had to kill.
+            ok, checks, line, reason = False, 0, "", (
+                f"TIMED OUT after {_HARNESS_TIMEOUT_S}s (killed — raise GENERAL_TEST_TIMEOUT if legit)")
+        else:
+            ok, checks, line, reason = _verdict(stdout, returncode)
         total_checks += checks
         if ok:
             passed += 1
@@ -105,11 +192,22 @@ def main() -> int:
             # from the run log (2026-07-05: four harnesses failed only in CI and the email showed
             # nothing but names). --verbose widens the tail.
             tail = 25 if verbose else 12
-            print("\n".join(("      " + x) for x in (r.stdout + r.stderr).strip().splitlines()[-tail:]))
+            print("\n".join(("      " + x) for x in (stdout + stderr).strip().splitlines()[-tail:]))
+    elapsed = time.monotonic() - _t0
+    budget = _GATE_TIMEOUT_SEC * _WALLCLOCK_MARGIN
     print("=" * 64)
     print(f"  HARNESSES: {passed} passed / {passed + failed}     TOTAL CHECKS: {total_checks}")
+    print(f"  WALL-CLOCK: {elapsed:.1f}s  (gate timeout {_GATE_TIMEOUT_SEC}s, "
+          f"{_WALLCLOCK_MARGIN:.0%} margin budget {budget:.0f}s)")
     if red:
         print("  FAILED:", " ".join(red))
+    elif elapsed > budget:
+        # EU-218: still ALL GREEN, but flag the creeping wall-clock loudly — this is the early-warning
+        # signal for the EU-201 class (the gate itself timing out mid-run) before it recurs.
+        print(f"  ⚠ WALL-CLOCK WARNING: {elapsed:.1f}s exceeds the {_WALLCLOCK_MARGIN:.0%} safety "
+              f"margin of the {_GATE_TIMEOUT_SEC}s gate timeout — trim a harness or raise "
+              f"gate_timeout_sec deliberately (GENERAL_GATE_TIMEOUT_SEC/config.example.yaml).")
+        print("  ALL GREEN")
     else:
         print("  ALL GREEN")
     print("=" * 64)

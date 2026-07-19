@@ -46,6 +46,7 @@ blocked_tickets.json
 # Unit Memory — versioned DOCTRINE (memory/UNIT.md) is tracked; the officer-maintained LIVING LOG is
 # runtime + server-canonical, so it survives the server's `git reset --hard` self-update (see memory.py).
 memory/UNIT.live.md
+memory/DEV_STATE.md
 memory/backups/
 # runtime state — regenerated as the unit runs; never version it (avoids churn + Mac/server pull conflicts)
 usage.jsonl
@@ -78,6 +79,13 @@ state/
 *.jsonl.tmp
 *.txt.lock
 *.txt.tmp
+# EU-335: the Technical Writer's changelog append + the ELITE cycle state dir left *.md.lock and
+# .elite/ untracked in the PRIMARY checkout after a land, dirtying the tree so autopull's ff was
+# blocked and the cockpit silently ran stale code (the "0 shipped" incident). These were only in a
+# machine-local .git/info/exclude; commit them so a fresh checkout and the VPS main tree stay clean.
+*.md.lock
+*.md.tmp
+.elite/
 # Remaining runtime state files that were never ignored (and were mistakenly committed).
 pending_specialist_approvals.json
 sonnet_fallback_state.json

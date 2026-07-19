@@ -49,6 +49,9 @@ isn't listed above because it won't exist in a fresh checkout.
 Everything under `Documentation/` (these are the only files there — keep this list honest):
 
 - `Documentation/SYSTEM_OVERVIEW.md` — the unit's end-to-end system map.
+- `Documentation/BUILD_DOCTRINE.md` — the fast-but-stable build doctrine: the 7 mechanisms
+  distilled from the 2026-07 direct-build sprint, with the failure ledger and the standing
+  guard tests (vacuous-assertion, stub-signature, retired-subsystems) that enforce them.
 - `Documentation/REVIEW_BACKLOG.md` — deferred review findings / tech-debt queue.
 - `Documentation/Development_Status.md` — the **feature changelog**: one line per successful
   live land, newest first, written automatically by the Technical Writer (EU-41). Created on the

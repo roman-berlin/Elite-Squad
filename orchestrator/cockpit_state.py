@@ -9,6 +9,7 @@ stay valid for callers and tests, and every importer shares the SAME mutable obj
 from __future__ import annotations
 
 import collections as _collections
+import contextvars
 import os
 import threading
 import time
@@ -30,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 # --------------------------------------------------------------------------------------------------
 
 _STATE_KEYS = ("active", "last_msg", "last_result", "dry_run",
-               "last_activity", "run_started", "stop_event", "log_seq", "approving",
+               "last_activity", "run_started", "stop_event", "log_seq",
                "autopilot_mode", "autopilot_on", "log_path",
                "plan_limit_hit", "plan_limit_reset_at")
 
@@ -39,7 +40,7 @@ def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
     return {"active": False, "last_msg": "", "last_result": "", "dry_run": None,
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
-            "approving": None, "autopilot_mode": None, "autopilot_on": False, "log_path": None,
+            "autopilot_mode": None, "autopilot_on": False, "log_path": None,
             "plan_limit_hit": False, "plan_limit_reset_at": None}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
@@ -365,6 +366,25 @@ def _sse(event: str, data: str) -> str:
     return f"event: {event}\n{body}\n"
 
 
+# EU-272: run-scoped stdout attribution. The global len(active_runs)==1 heuristic below collapses
+# to None the moment two runs are in flight — under a concurrent drain (EU-380) that is 100% of
+# lines. A ContextVar set by the run wrapper (same pattern as backends._BACKEND, EU-189) flows
+# through asyncio tasks, so each slot's prints attribute to ITS app with no global state.
+_RUN_APP: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("run_app", default=None)
+
+
+def set_run_app(app_key: str | None):
+    """Bind this (async) context's stdout attribution to ``app_key``; returns the reset token."""
+    return _RUN_APP.set(app_key)
+
+
+def reset_run_app(token) -> None:
+    try:
+        _RUN_APP.reset(token)
+    except Exception:  # noqa: BLE001 — a cross-context reset must never crash a run teardown
+        pass
+
+
 class _Tee:
     """Mirror stdout to the real terminal AND the ring buffer (skips the noisy poll line)."""
     def __init__(self, real):
@@ -373,11 +393,13 @@ class _Tee:
     def write(self, s: str):
         self._real.write(s)
         # EU-104: tag each captured line with the currently-active project so per-tab live-feed
-        # panels can filter to their own project's output.  When exactly one project is active we
-        # attribute the line to it; when zero or multiple are active we fall back to None (the
-        # line is unattributed and appears only in the global / unfiltered view).
-        runs = active_runs()
-        app_key = runs[0] if len(runs) == 1 else None
+        # panels can filter to their own project's output. EU-272: the run-scoped ContextVar wins
+        # when set (correct under concurrency); otherwise the old single-active-run heuristic —
+        # exactly today's behaviour for threads and paths that never bound a context.
+        app_key = _RUN_APP.get()
+        if app_key is None:
+            runs = active_runs()
+            app_key = runs[0] if len(runs) == 1 else None
         for line in s.splitlines():
             t = line.rstrip()
             if t and "/api/board" not in t and "GET /api/" not in t:
@@ -568,22 +590,59 @@ class Workspace:
 
 # Server-side per-session workspace store. Keyed by an opaque session id supplied by the routes
 # (cookie / header). Guarded so concurrent requests for the same session can't corrupt the tab list.
+#
+# EU-362 — the store is BOUNDED. ``server._session_id()`` mints a fresh ``token_hex`` for any
+# request that arrives without the session cookie, so every curl / health probe / uptime monitor
+# hit of ``/`` used to add a Workspace here permanently — a slow-motion leak in a cockpit that
+# runs for days (2026-07-16 total audit, item 1). Two bounds, both enforced on every store access:
+#   TTL  — a session untouched for ``_WORKSPACE_TTL_S`` is dead (a real browser re-sends its
+#          cookie on every poll, so live sessions are re-stamped constantly);
+#   LRU  — ``_WORKSPACE_MAX`` hard-caps the dict however fast one-shot probes mint fresh ids,
+#          evicting the least-recently-touched sessions first. 256 concurrent cockpit sessions is
+#          far beyond a single-operator unit; an evicted-but-alive browser degrades gracefully —
+#          its next request rebuilds an empty workspace (or rehydrates from localStorage).
+_WORKSPACE_TTL_S = 24 * 3600
+_WORKSPACE_MAX = 256
 _workspaces: "dict[str, Workspace]" = {}
+_workspace_touch: "dict[str, float]" = {}   # session id -> last-access ts (the LRU/TTL ledger)
 _workspace_lock = threading.Lock()
+
+
+def _evict_workspaces(now: float, keep: str) -> None:
+    """Enforce the TTL + LRU bounds. Caller holds ``_workspace_lock``; ``keep`` (the session being
+    served right now) is never evicted."""
+    for sid, ts in list(_workspace_touch.items()):
+        if sid != keep and now - ts > _WORKSPACE_TTL_S:
+            _workspaces.pop(sid, None)
+            _workspace_touch.pop(sid, None)
+    if len(_workspaces) > _WORKSPACE_MAX:
+        for sid, _ts in sorted(_workspace_touch.items(), key=lambda kv: kv[1]):
+            if sid == keep:
+                continue
+            _workspaces.pop(sid, None)
+            _workspace_touch.pop(sid, None)
+            if len(_workspaces) <= _WORKSPACE_MAX:
+                break
 
 
 def workspace_for(session_id: str) -> Workspace:
     """The (lazily created) server-side workspace for ``session_id``. Same object on every call, so
-    routes mutate the live tab set in place; persists for the process lifetime of the session.
+    routes mutate the live tab set in place; persists while the session stays live (EU-362: idle
+    sessions expire after ``_WORKSPACE_TTL_S`` and the store is LRU-capped at ``_WORKSPACE_MAX``).
 
-    Thread-safety: ``_workspace_lock`` guards only this dict (the lazy-create step below); each
-    ``Workspace`` carries its own ``_lock`` for concurrent tab mutations (``add_tab``,
+    Thread-safety: ``_workspace_lock`` guards only this dict (the lazy-create/evict steps below);
+    each ``Workspace`` carries its own ``_lock`` for concurrent tab mutations (``add_tab``,
     ``remove_tab``, ``set_active``). The two locks are independent and never nested."""
     with _workspace_lock:
+        now = time.time()
+        _workspace_touch[session_id] = now
         ws = _workspaces.get(session_id)
         if ws is None:
             ws = Workspace()
             _workspaces[session_id] = ws
+        # Sweep AFTER the insert so the cap counts the incoming session too (evicting before it
+        # lands would let the store settle at cap+1); ``keep`` shields the session being served.
+        _evict_workspaces(now, keep=session_id)
         return ws
 
 
@@ -593,7 +652,10 @@ def rehydrate_workspace(session_id: str, data: dict | None) -> Workspace:
     fresh server session; the rebuilt workspace re-enforces mutual exclusion via ``from_dict``."""
     ws = Workspace.from_dict(data)
     with _workspace_lock:
+        now = time.time()
+        _workspace_touch[session_id] = now       # EU-362: the other store writer stamps too
         _workspaces[session_id] = ws
+        _evict_workspaces(now, keep=session_id)  # sweep after the insert — see workspace_for
     return ws
 
 
@@ -601,6 +663,7 @@ def reset_workspaces() -> None:
     """Drop every stored workspace — test seam / session-clear hook."""
     with _workspace_lock:
         _workspaces.clear()
+        _workspace_touch.clear()
 
 
 # --------------------------------------------------------------------------------------------------

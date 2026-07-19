@@ -1,6 +1,6 @@
 """EU-146 regression suite — vitest orphaned-process prevention.
 
-Four layers of defence must ALL stay wired:
+Three layers of defence must ALL stay wired:
 
   1. Guard denylist (guard.py): `vitest` without --run is BLOCKED at the PreToolUse
      hook level before an agent can even launch the process.
@@ -14,12 +14,11 @@ Four layers of defence must ALL stay wired:
      system prompts mandate `vitest run` / `--run` and bound workers — the agent is
      told the correct incantation before it types a single command.
 
-  4. Cockpit terminal endpoint (server.py `/api/terminal`): a command typed directly
-     into the cockpit's terminal panel is ALSO run in its own process group and the
-     whole group is SIGKILL-ed on timeout, so a backgrounded/forked child (e.g. a
-     bare `vitest` typed by hand) can't survive as an orphan either.
+(A fourth layer — the cockpit terminal endpoint `/api/terminal`, its own process
+group + killpg — was removed 2026-07-19 together with the terminal panel: no
+endpoint, no orphan surface at all, which is a strict superset of killing them.)
 
-This file pins all four so a future edit that undoes any part flips a test FAIL
+This file pins all three so a future edit that undoes any part flips a test FAIL
 instead of silently re-opening the memory leak.
 """
 import sys
@@ -41,14 +40,6 @@ sdk.HookMatcher = _HookMatcher
 sdk.ClaudeAgentOptions = _GenericStub
 sdk.__getattr__ = lambda n: _GenericStub
 sys.modules.setdefault("claude_agent_sdk", sdk)
-
-# ── stub requests so orchestrator.server imports cleanly without the real dep ──
-req = types.ModuleType("requests")
-req.Session = lambda: types.SimpleNamespace(
-    auth=None,
-    headers=types.SimpleNamespace(update=lambda *a, **k: None),
-)
-sys.modules.setdefault("requests", req)
 
 sys.path.insert(0, ".")
 
@@ -231,112 +222,6 @@ chk(
     "--pool=forks" in builder_src or "maxForks" in builder_src,
     "--pool=forks / maxForks not found in builder.py",
 )
-
-# ════════════════════════════════════════════════════════════
-# 5. Cockpit terminal endpoint (/api/terminal) — process-group cleanup
-# ════════════════════════════════════════════════════════════
-
-from orchestrator import server  # noqa: E402
-from orchestrator.config import AppConfig, Config  # noqa: E402
-
-_TMP = Path(tempfile.mkdtemp())
-_AUDIT = _TMP / "audit.jsonl"
-_TCFG = Config(
-    apps=[AppConfig(name="automatixy", repo_path=str(_TMP), base_branch="DEV",
-                     protected_branch="MAIN", backlog_backend="none")],
-    audit_path=str(_AUDIT),
-    use_worktree=False,
-)
-_TCFG.detected_auth = lambda: "test"
-_TCLIENT = server.create_app(_TCFG).test_client()
-
-# Source-level check: terminal_api must use the same process-group pattern as gate.py
-# (Popen + start_new_session=True + os.killpg on timeout + a finally-block sweep).
-server_src = Path("./orchestrator/server.py").read_text()
-
-chk(
-    "terminal_api uses subprocess.Popen with start_new_session=True (EU-146)",
-    "start_new_session=True" in server_src,
-    "start_new_session=True not found in server.py",
-)
-chk(
-    "terminal_api calls os.killpg on timeout (EU-146)",
-    "os.killpg" in server_src,
-    "os.killpg not found in server.py",
-)
-chk(
-    "terminal_api has a finally cleanup block killing the group (EU-146)",
-    "finally:" in server_src and "os.killpg(os.getpgid(proc.pid), 9)" in server_src,
-    "finally + killpg(getpgid) not found in server.py",
-)
-
-# Fast command: 200 + exact JSON shape.
-resp = _TCLIENT.post("/api/terminal", data={"cmd": "echo hi"})
-chk("fast command: HTTP 200", resp.status_code == 200, f"status={resp.status_code}")
-j = resp.get_json()
-chk("fast command: output == 'hi\\n'", j.get("output") == "hi\n", str(j))
-chk("fast command: error is null", j.get("error") is None, str(j))
-
-# Existing guards preserved.
-resp = _TCLIENT.post("/api/terminal", data={"cmd": ""})
-chk("empty cmd: HTTP 400", resp.status_code == 400, f"status={resp.status_code}")
-chk("empty cmd: error message", resp.get_json().get("error") == "No command provided",
-    str(resp.get_json()))
-
-resp = _TCLIENT.post("/api/terminal", data={"cmd": "echo bad\nrm -rf /"})
-chk("newline in cmd: HTTP 400", resp.status_code == 400, f"status={resp.status_code}")
-chk("newline in cmd: error message",
-    resp.get_json().get("error") == "Invalid characters in command", str(resp.get_json()))
-
-resp = _TCLIENT.post("/api/terminal", data={"cmd": f"python3 -c \"print('A' * 70000)\""})
-chk("large output: HTTP 200", resp.status_code == 200, f"status={resp.status_code}")
-j = resp.get_json()
-chk("large output: truncated to <= 65536 + marker", len(j.get("output", "")) <= 65536 + len(
-    "\n... (output truncated)"), f"len={len(j.get('output', ''))}")
-chk("large output: truncation marker present",
-    "... (output truncated)" in j.get("output", ""), str(j)[:200])
-
-# AC-1/AC-2: a backgrounded child that outlives the 10s timeout must NOT survive as an
-# orphan — the whole process group (shell + backgrounded child) must be SIGKILL-ed, not
-# just the top shell PID. Uses a real 10s wait against the endpoint's hardcoded timeout.
-_pidfile = _TMP / "child.pid"
-if _pidfile.exists():
-    _pidfile.unlink()
-_cmd = f"sleep 30 & echo $! > {_pidfile}; sleep 20"
-_t0 = time.time()
-resp = _TCLIENT.post("/api/terminal", data={"cmd": _cmd})
-_elapsed = time.time() - _t0
-chk("timeout command: HTTP 408", resp.status_code == 408, f"status={resp.status_code}")
-chk("timeout command: error message",
-    resp.get_json().get("error") == "Command timed out (10s limit)", str(resp.get_json()))
-chk("timeout command: returns close to the 10s limit (not the shell's full 20s)",
-    _elapsed < 15, f"elapsed={_elapsed:.1f}s")
-
-_child_pid = None
-for _ in range(20):
-    if _pidfile.exists():
-        try:
-            _child_pid = int(_pidfile.read_text().strip())
-        except ValueError:
-            pass
-        if _child_pid:
-            break
-    time.sleep(0.1)
-
-if _child_pid is None:
-    chk("orphan check: backgrounded child pid captured", False, "pidfile never appeared")
-else:
-    _alive = True
-    try:
-        os.kill(_child_pid, 0)
-    except ProcessLookupError:
-        _alive = False
-    chk(
-        "orphan check: backgrounded 'sleep 30' child is DEAD after the request returns (EU-146)",
-        not _alive,
-        f"pid {_child_pid} still alive — orphaned process leaked",
-    )
-
 
 # ════════════════════════════════════════════════════════════
 # Report

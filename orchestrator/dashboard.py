@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -113,6 +114,83 @@ def _audit_sig(paths: list[Path]) -> tuple:
     return tuple(sig)
 
 
+# EU-345: incremental per-file line cache. The audit is APPEND-ONLY (a jsonl event log), so on the
+# common case — the drain just appended a few events to the local audit.jsonl — we seek to the last
+# consumed byte offset and parse ONLY the new bytes, instead of re-reading + splitting the whole 7 MB
+# file. Before this, the (size, mtime_ns) sig changed on every append, so the cache missed and the
+# dashboard re-parsed the entire history every ~5s auto-refresh while Roman watched a live build
+# (measured ~13s/request, "no warm-cache effect"). The offset is always kept at a newline boundary so
+# a partial trailing line waits for its newline; a size DECREASE (truncation / rotation, EU-363) falls
+# back to a full re-read. keyed by absolute path.
+_file_line_cache: dict[str, tuple[int, list[str], bytes]] = {}   # path -> (offset, lines, anchor)
+_ANCHOR_N = 64   # bytes ending at the committed offset, re-verified to prove append (not rewrite)
+
+
+def _read_file_lines(fp: Path) -> list[str]:
+    try:
+        size = fp.stat().st_size
+    except OSError:
+        return []
+    cached = _file_line_cache.get(str(fp))
+    start, prior = 0, []
+    if cached is not None and size >= cached[0]:
+        # The incremental delta-read is only valid if the file was APPENDED to — a same-path REWRITE
+        # (test write_text, or sync overwriting a peer shared/<host>.jsonl via scp) can grow the file
+        # with entirely different bytes, which would splice garbage onto the cached lines. Re-verify
+        # the bytes ending at the committed offset still match the stored anchor; if not, it's a
+        # rewrite → fall through to a full re-read. (A size DECREASE already falls through below.)
+        off, plines, anchor = cached
+        if size == off and _anchor_ok(fp, off, anchor):
+            return plines                 # unchanged since last read
+        if size > off and _anchor_ok(fp, off, anchor):
+            start, prior = off, plines    # genuine append — read only the delta
+    try:
+        with fp.open("rb") as fh:
+            fh.seek(start)
+            chunk = fh.read()
+    except OSError:
+        return prior
+    # Only COMMIT (advance the offset + cache) lines up to the last newline, so a half-written
+    # trailing line is re-read next call rather than cached mid-write. But still SURFACE that trailing
+    # line in the return, matching splitlines()'s handling of a newline-less final line (backward-
+    # compat: the live audit's final event is a complete line, sometimes without a trailing newline).
+    nl = chunk.rfind(b"\n")
+    if nl == -1:
+        trailing = chunk
+        committed_lines = []
+        commit_len = 0
+    else:
+        trailing = chunk[nl + 1:]
+        committed = chunk[:nl + 1]
+        committed_lines = [ln.strip() for ln in committed.decode("utf-8", errors="replace").splitlines()
+                           if ln.strip()]
+        commit_len = len(committed)
+    if commit_len:
+        prior = prior + committed_lines
+        new_off = start + commit_len
+        _file_line_cache[str(fp)] = (new_off, prior, _anchor_at(fp, new_off))
+    tail = trailing.decode("utf-8", errors="replace").strip()
+    return (prior + [tail]) if tail else prior
+
+
+def _anchor_at(fp: Path, offset: int) -> bytes:
+    """The up-to-_ANCHOR_N bytes ending at ``offset`` — a cheap fingerprint of the committed prefix's
+    tail, re-checked before an incremental delta-read to prove the file was appended-to, not rewritten."""
+    n = min(_ANCHOR_N, offset)
+    if n <= 0:
+        return b""
+    try:
+        with fp.open("rb") as fh:
+            fh.seek(offset - n)
+            return fh.read(n)
+    except OSError:
+        return b""
+
+
+def _anchor_ok(fp: Path, offset: int, anchor: bytes) -> bool:
+    return _anchor_at(fp, offset) == anchor
+
+
 def audit_lines(audit_path: str | Path) -> list[str]:
     """Every audit line for the unified view: this machine's live ``audit.jsonl`` PLUS each synced
     ``shared/<host>.jsonl`` published by the other machines (see orchestrator/sync.py). Exact-duplicate
@@ -120,7 +198,9 @@ def audit_lines(audit_path: str | Path) -> list[str]:
     they are counted once. Order is local-first then shared; callers that care sort by ts.
 
     TTL/mtime-cached so a burst of SSE board frames (and K open tabs) share a single read+merge instead
-    of re-parsing the whole history several times a second."""
+    of re-parsing the whole history several times a second. On a cache miss the per-file reader
+    (``_read_file_lines``) reads only newly-appended bytes (EU-345), so an active drain no longer forces
+    a full-history re-read every request."""
     global audit_lines_calls, audit_lines_reads
     audit_lines_calls += 1
     key = str(audit_path)
@@ -134,13 +214,8 @@ def audit_lines(audit_path: str | Path) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for fp in paths:
-        try:
-            text = fp.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            s = line.strip()
-            if s and s not in seen:
+        for s in _read_file_lines(fp):
+            if s not in seen:
                 seen.add(s)
                 out.append(s)
     _audit_cache[key] = (sig, now, out)
@@ -220,9 +295,9 @@ def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
             d["tools"] = ev.get("tools", []) or []
             d["build_summary"] = ev.get("summary", "")
         elif kind == "gate":
-            # EU-136: record the gate's phase + result only — never map straight to a "Gate" stage
-            # label. derive_pipeline_stage() below decides what to show, and a subsequent "build"
-            # event (the normal retry-after-fail path) always wins over a stale gate phase.
+            # EU-136: record the gate's phase + result only — consumers decide what to show,
+            # and a subsequent "build" event (the normal retry-after-fail path) always wins
+            # over a stale gate phase.
             t["phase"] = "gate"
             t["gate_passed"] = ev.get("passed")
         elif kind == "review":
@@ -367,110 +442,6 @@ def _badge(outcome: Optional[str]) -> str:
     cls = {"merged→dev": "ok", "dry-run": "muted", "PR / needs you": "warn",
            "escalated": "warn", "errored": "bad"}.get(outcome or "", "muted")
     return f'<span class="b {cls}">{html.escape(outcome or "running…")}</span>'
-
-
-# ── EU-314: pipeline-stage helper ──────────────────────────────────────────────
-# Sub-ticket 1 of the EU-288 split was meant to land a canonical `derive_pipeline_stage()` (a
-# fuller stage machine) BEFORE this ticket needed it — but a repo-wide grep finds no such helper
-# anywhere yet. To keep THIS ticket independently-shippable (the split's stated intent), a small
-# local stand-in lives here: it derives a stage label purely from the fields already on a run row
-# (`outcome`, `verdict`, `passes`). `cockpit_views._pipeline_board()` calls this one. The moment
-# Sub-ticket 1's real helper exists, swap the caller over and delete this stand-in.
-_OUTCOME_STAGE = {
-    "merged→dev": "Merged → dev",
-    "PR / needs you": "PR opened — needs review",
-    "escalated": "Escalated — needs you",
-    "dry-run": "Dry run complete",
-    "errored": "Errored — needs you",
-    "awaiting decision": "Awaiting your decision",
-    "re-queued": "Re-queued",
-    "split": "Split into sub-tickets",
-}
-
-
-def derive_pipeline_stage(task: dict[str, Any], is_blocked: bool = False) -> str:
-    """Best-effort pipeline-stage label for one run row — see the module note above (TEMPORARY
-    stand-in for Sub-ticket 1's canonical helper). Never raises; always returns a non-empty label.
-
-    ``is_blocked`` (EU-315): the ticket is a member of the parked set (blocked_tickets.json). That
-    membership is the SINGLE source of the Blocked state — a parked ticket is labelled "Blocked"
-    regardless of the terminal outcome its last run happens to carry (usually escalated / PR). It
-    wins over every other label so the Commander sees WHY the ticket is stuck.
-
-    Otherwise: a finished run (``outcome`` set) maps straight through ``_OUTCOME_STAGE``. A still-
-    running run (no ``outcome`` yet) is inferred from the latest Reviewer ``verdict``, the latest
-    gate result, and how many Builder ``passes`` it has been through.
-
-    EU-136 hardening: a ``build`` event that follows a FAILED ``gate`` always wins over the gate's
-    own phase — the stage keeps reading "Building" (with a retry marker), never a bare "Gate"
-    label the run could get stuck showing. Only when the run is CURRENTLY sitting at a just-failed
-    gate (no rebuild recorded yet) does the label mention verification is pending — and even then
-    it never uses the literal word "Gate".
-    """
-    if is_blocked:
-        return "Blocked"
-    outcome = task.get("outcome")
-    if outcome:
-        return _OUTCOME_STAGE.get(outcome, str(outcome))
-    verdict = str(task.get("verdict") or "").strip().upper()
-    if verdict == "FAIL":
-        return "Revising (Reviewer requested changes)"
-    if verdict == "PASS":
-        return "Reviewed — landing"
-    passes = task.get("passes") or 0
-    if task.get("phase") == "gate" and task.get("gate_passed") is False:
-        label = "Verifying — retry pending"
-        return f"{label} (pass {passes})" if passes else label
-    if passes:
-        label = f"Building (pass {passes})"
-        return f"{label} · retry" if task.get("gate_retry") else label
-    return "Building"
-
-
-def pipeline_stage_tone(task: dict[str, Any], is_blocked: bool = False) -> str:
-    """EU-315: the pipeline board's per-row colour TONE — so ``Blocked`` / ``Needs-you`` /
-    ``Errored`` rows each render visually distinct instead of identical grey text. Reuses the same
-    tone vocabulary ``_kpi_metric(..., tone=...)`` already uses (``ok``/``warn``/``bad``), plus a
-    board-specific ``blocked`` tone.
-
-    ``is_blocked`` (membership in blocked_tickets.json) is the SINGLE source of the Blocked tone —
-    it is derived from the real parked set the caller passes in, NOT from ``outcome`` (there is no
-    ``blocked`` outcome; see the note by ``_OUTCOME``). It wins over the outcome-based tones below
-    so a parked ticket reads Blocked even though its last run's outcome was escalated / PR.
-
-    ``errored`` gets its OWN tone ('bad'), split out from the rest of ``_NEEDS_YOU`` ('warn') — the
-    ticket calls for Errored to be distinct from generic Needs-you, even though both are members of
-    ``_NEEDS_YOU`` for the digest/needs-panel purpose. Returns "" (no special tone) for an
-    in-flight/building/dry-run/etc. row."""
-    if is_blocked:
-        return "blocked"
-    outcome = task.get("outcome")
-    if outcome == "errored":
-        return "bad"
-    if outcome in _NEEDS_YOU:
-        return "warn"
-    if outcome == "merged→dev":
-        return "ok"
-    return ""
-
-
-def is_blocked_stale(task: dict[str, Any], is_blocked: bool = False,
-                     now: Optional[datetime] = None) -> bool:
-    """EU-315: true when a PARKED (blocked) row's latest event is older than the freshness cutoff,
-    so a block from days ago never renders forever as a plain ACTIVE Blocked row. ``is_blocked`` is
-    the ticket's membership in blocked_tickets.json (the real parked set) — the same signal that
-    drives ``pipeline_stage_tone``; a non-parked row is never flagged stale by this Blocked-specific
-    check (each outcome has its own lifecycle). Reuses ``warroom.STALE_BLOCK_CUTOFF_S`` (EU-313's
-    24h window) rather than duplicating the constant — imported lazily to avoid the warroom ->
-    cockpit_views/dashboard import cycle (same pattern as ``cockpit_views._token_css``)."""
-    if not is_blocked:
-        return False
-    ref = task.get("ended") or task.get("started")
-    if ref is None:
-        return False  # no timestamp at all — can't judge age, fail open (never falsely stale)
-    from . import warroom
-    now = now or (datetime.now(ref.tzinfo) if getattr(ref, "tzinfo", None) else datetime.now())
-    return (now - ref).total_seconds() >= warroom.STALE_BLOCK_CUTOFF_S
 
 
 def _detail_html(t: dict[str, Any]) -> str:
@@ -621,13 +592,50 @@ def needs_chat_summary(t: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+_JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
+
+def _jira_base_for(cfg, app_name: str) -> str:
+    """Resolve an app's Jira browse base URL — from `backlog.base_url` in config, else the cockpit
+    connection store (`connections.for_app`). '' when the app isn't Jira-backed or has no URL.
+    Never raises: a link is a nice-to-have, never worth a 500 on the log page."""
+    if not cfg or not app_name:
+        return ""
+    try:
+        app = next((a for a in getattr(cfg, "apps", []) if a.name == app_name), None)
+        if app is None or getattr(app, "backlog_backend", "") != "jira":
+            return ""
+        base = str((getattr(app, "backlog", None) or {}).get("base_url") or "").rstrip("/")
+        if not base:
+            from . import connections
+            conn = connections.for_app(app_name, cfg)
+            base = str((conn or {}).get("base_url") or "").rstrip("/")
+        return base
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _jira_link(base: str, ticket_id: Any, *, stop_prop: bool = False) -> str:
+    """A compact 'Jira ↗' anchor to {base}/browse/{KEY}, or '' when there's no base URL or the id
+    isn't a Jira key (e.g. an ephemeral run). ``stop_prop`` guards it inside a row whose own click
+    toggles the detail drawer — the link must open Jira without also expanding the row."""
+    tid = str(ticket_id or "").strip()
+    if not base or not _JIRA_KEY_RE.match(tid):
+        return ""
+    onclick = ' onclick="event.stopPropagation()"' if stop_prop else ""
+    return (f' <a class=jira href="{html.escape(base)}/browse/{html.escape(tid)}" target=_blank '
+            f'rel=noopener{onclick} title="Open {html.escape(tid)} in Jira">Jira &#8599;</a>')
+
+
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
                 needs_count: int | None = None, cfg=None, app_name: str | None = None) -> str:
-    # EU-314: the pipeline board renders from the FULL run set for the active tab, same as the KPI
-    # cards below — never the ?filter= narrowed `tasks` local gets reassigned to further down.
-    _all_tasks = tasks
-    # Cards summarize the FULL run set, regardless of any active scope filter.
+    # 2026-07-19 (Commander order): the task log is PER-PROJECT — everything on the page (cards,
+    # filters, table) is scoped to the chosen project. Rows with no app stamp (e.g. ghost-parked
+    # stubs) are kept so their Unblock action never disappears behind a scope.
+    if app_name:
+        tasks = [t for t in tasks if not t.get("app") or str(t.get("app")) == app_name]
+    # Cards summarize the FULL scoped run set, regardless of any active ?filter= narrowing.
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
     needs = latest_needs_you(tasks, dismissed)   # one row per ticket (latest run), not every old run
@@ -662,16 +670,25 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
     head += ["<th>Verdict</th>", "<th>PR</th>"]
     ncols = len(head)
 
+    # Resolve each app's Jira base URL once per render (rows share an app on the scoped log page).
+    _jira_bases: dict[str, str] = {}
+
+    def _jira_for(app: str) -> str:
+        if app not in _jira_bases:
+            _jira_bases[app] = _jira_base_for(cfg, app)
+        return _jira_bases[app]
+
     rows = []
     for i, t in enumerate(tasks):
         pr = (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR ↗</a>' if t.get("pr_url") else "")
         started = t["started"].strftime("%b %d %H:%M") if t["started"] else "—"
         cost_cell = f'<td class=num>${t["cost"]:.2f}</td>' if show_cost else ""
+        _jl = _jira_link(_jira_for(str(t.get("app") or app_name or "")), t["ticket_id"], stop_prop=True)
         rows.append(
             f'<tr class=row onclick="tog({i})">'
             f'<td class=tw>▸</td>'
             f'<td>{_badge(t["outcome"])}{" <span class=dry>dry</span>" if t.get("dry_run") else ""}</td>'
-            f'<td class=mono>{html.escape(str(t["ticket_id"]))}</td>'
+            f'<td class=mono>{html.escape(str(t["ticket_id"]))}{_jl}</td>'
             f'<td>{html.escape(str(t.get("app") or ""))}</td>'
             f'<td class=mono>{html.escape(str(t.get("branch") or ""))}</td>'
             f'<td>{started}</td><td>{_human_dur(t["duration"])}</td>'
@@ -691,6 +708,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
                 f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
                 f'<span class=mono>{html.escape(str(t["ticket_id"]))}</span> {_badge(t["outcome"])} '
                 f'<span class=muted>{html.escape(_short(str(t.get("note") or ""), 80))}</span></span>'
+                + _jira_link(_jira_for(str(t.get("app") or app_name or "")), t["ticket_id"])
                 + (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR &#8599;</a>'
                    if t.get("pr_url") else "")
                 + ('<a class=x style="text-decoration:none" href="/needs" '
@@ -713,6 +731,7 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
             f'<span class=needmain onclick="kpick(\'{html.escape(str(t["ticket_id"]))}\')">'
             f'<span class=mono>{html.escape(str(t["ticket_id"]))}</span> {_badge(t["outcome"])} '
             f'<span class=muted>{html.escape(t.get("note") or "")}</span></span>'
+            + _jira_link(_jira_for(str(t.get("app") or app_name or "")), t["ticket_id"])
             + (f'<a href="{html.escape(t["pr_url"])}" target=_blank>PR ↗</a>' if t.get("pr_url") else "")
             + '<form method=post action=/api/dismiss class=dismiss>'
             f'<input type=hidden name=ticket value="{html.escape(str(t["ticket_id"]))}">'
@@ -726,33 +745,26 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
         + f'<div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
         for l, v, kind in cards)
     banner = ""
+    _appq = f"&app={html.escape(app_name)}" if app_name else ""
     if flt:
         banner = (f'<div class=fltbar>Showing <b>{html.escape(_FILTER_LABEL.get(flt, flt))}</b> only '
-                  f'· <a href="/tasks">show all</a></div>')
+                  f'· <a href="/tasks?filter=all{_appq}">show all runs</a></div>')
     empty = "No tasks match this filter." if flt else "No tasks yet — run the CTO."
     rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>{empty}</td></tr>'
 
-    # EU-314: the per-project pipeline board — the DEFAULT-view overview of the active tab. Rendered
-    # only when the caller identifies an active project tab (``app_name``); a page with no scoped
-    # project (e.g. the static `general dashboard` command, or an unscoped call) gets no board, same
-    # as before this ticket. It is ALSO suppressed while a KPI deep-link filter (``?filter=``) is
-    # active: those views are focused drill-downs ("show me only the merged/parked rows"), so an
-    # unfiltered board beside them would contradict the filter and re-surface rows the filter hides.
-    board_html = ""
-    if app_name and not flt:
-        try:
-            from . import cockpit_views as _cv
-            # EU-315: the Blocked state is membership in the parked set (blocked_tickets.json), NOT
-            # a run outcome. The default board view carries no ``blocked`` (server.py only loads it
-            # for the ?filter=parked drill-down), so load the real parked set here and pass it in so
-            # parked tickets render with the distinct Blocked class + freshness handling.
-            from . import warroom as _wr
-            _board_blocked = {str(b) for b in (_wr._load_blocked(cfg) if cfg is not None else [])}
-            board_html = _cv._pipeline_board(cfg, _all_tasks, app_name, _board_blocked)
-        except Exception:  # noqa: BLE001 - the board must never break the whole /tasks page render
-            board_html = ""
-
-    return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{BOARD}}", board_html)
+    # (The EU-314 per-project pipeline board was removed 2026-07-19 with the task-log redesign —
+    # in-flight state lives on the cockpit board; this page is the per-project run LOG.)
+    _title = f"★ Task log — {html.escape(app_name)}" if app_name else "★ CTO — cockpit"
+    # 2026-07-19 theme pass: prepend the shared design tokens (dark + light + boot script) so this
+    # page follows the War Room's theme toggle. Lazy import — cockpit_views imports this module.
+    try:
+        from .cockpit_views import _token_css
+        _tokens = _token_css()
+    except Exception:  # noqa: BLE001 - the static `general dashboard` render must never break
+        _tokens = ""
+    return (_TEMPLATE.replace("<style>", _tokens + "<style>", 1)
+            .replace("★ CTO — cockpit", _title, 1)
+            .replace("{{CARDS}}", cards_html).replace("{{BOARD}}", "")
             .replace("{{PANEL}}", panel)
             .replace("{{FILTER}}", banner)
             .replace("{{HEAD}}", "".join(head)).replace("{{ROWS}}", rows_html)
@@ -764,37 +776,39 @@ _TEMPLATE = """<!doctype html><html><head><meta charset=utf-8>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:#0d0f14;color:#e8eaed}
-header{padding:22px 30px;border-bottom:1px solid #1e222b;background:linear-gradient(180deg,#141821,#0d0f14)}
-h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:#8a909c;font-size:12px;margin-top:5px}
+body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+header{padding:22px 30px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel),var(--bg))}
+h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:var(--dim);font-size:12px;margin-top:5px}
 .cards{display:flex;gap:14px;padding:20px 30px 6px;flex-wrap:wrap}
-.card{background:#151a23;border:1px solid #232936;border-radius:12px;padding:14px 20px;min-width:120px}
-.card .k{font-size:24px;font-weight:650}.card .l{color:#8a909c;font-size:12px;margin-top:2px}
-.card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:#3b6cff}
-.panel{margin:14px 30px;background:#1a160f;border:1px solid #3a2f12;border-radius:12px;padding:14px 18px}
-.ph{color:#fbbf24;font-weight:650;font-size:13px;margin-bottom:8px}
-.need{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid #2a2410;font-size:13px}.need:first-of-type{border-top:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 20px;min-width:120px}
+.card .k{font-size:24px;font-weight:650}.card .l{color:var(--dim);font-size:12px;margin-top:2px}
+.card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:var(--accent)}
+.panel{margin:14px 30px;background:var(--warnbg);border:1px solid var(--warnline);border-radius:12px;padding:14px 18px}
+.ph{color:var(--warn);font-weight:650;font-size:13px;margin-bottom:8px}
+.need{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--warnline);font-size:13px}.need:first-of-type{border-top:0}
 .needmain{flex:1;cursor:pointer}.needmain:hover{text-decoration:underline}
-.dismiss{margin:0}.x{background:none;border:1px solid #3a2f12;color:#8a909c;border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:#2a2410;color:#f97a7a}
+.dismiss{margin:0}.x{background:none;border:1px solid var(--warnline);color:var(--dim);border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:var(--badbg);color:var(--bad)}
 .wrap{padding:8px 30px 50px}
-input{background:#151a23;border:1px solid #232936;color:#e8eaed;border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
+input{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px 11px;border-bottom:1px solid #191d26}
-th{color:#8a909c;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
-.row{cursor:pointer}.row:hover{background:#141821}.tw{color:#5b626f;width:14px}
+th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.row{cursor:pointer}.row:hover{background:var(--panel2)}.tw{color:var(--faint);width:14px}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .b{padding:2px 9px;border-radius:99px;font-size:11px;font-weight:650;white-space:nowrap}
-.ok{background:#10371f;color:#56d98a}.warn{background:#3a2f10;color:#fbbf24}
-.bad{background:#3a1414;color:#f97a7a}.muted{background:#191d26;color:#8a909c}
-.dry{color:#8a909c;font-size:11px}a{color:#6aa9ff;text-decoration:none}
-.detrow{display:none}.detrow>td{background:#0a0c10;padding:0}
-.det{padding:14px 22px}.pass{border-left:2px solid #2a3140;padding:6px 0 12px 14px;margin:4px 0}
-.passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:#8a909c;font-weight:400;font-size:12px;margin-left:6px}
-.sub{font-size:13px;color:#c4c9d2;margin:3px 0}.sub b{color:#e8eaed}
+.ok{background:var(--okbg);color:var(--ok)}.warn{background:var(--warnbg);color:var(--warn)}
+.bad{background:var(--badbg);color:var(--bad)}.muted{background:var(--line);color:var(--dim)}
+.dry{color:var(--dim);font-size:11px}a{color:var(--info);text-decoration:none}
+a.jira{display:inline-flex;align-items:center;gap:3px;margin-left:8px;padding:1px 7px;border:1px solid var(--line2);border-radius:6px;font-size:11px;font-weight:600;color:var(--dim);vertical-align:middle}
+a.jira:hover{border-color:var(--accent);color:var(--info);background:var(--accentbg)}
+.detrow{display:none}.detrow>td{background:var(--console);padding:0}
+.det{padding:14px 22px}.pass{border-left:2px solid var(--line2);padding:6px 0 12px 14px;margin:4px 0}
+.passhead{font-weight:650;font-size:13px;margin-bottom:5px}.eff{color:var(--dim);font-weight:400;font-size:12px;margin-left:6px}
+.sub{font-size:13px;color:var(--ink);margin:3px 0}.sub b{color:var(--ink)}
 .sub.pre{white-space:pre-wrap}
-.sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:#fbbf24;font-weight:600;text-transform:uppercase;font-size:11px}
-.fltbar{margin:6px 30px 0;color:#c4c9d2;font-size:13px}
+.sub ul{margin:4px 0 4px 18px;padding:0}.sev{color:var(--warn);font-weight:600;text-transform:uppercase;font-size:11px}
+.fltbar{margin:6px 30px 0;color:var(--ink);font-size:13px}
 </style></head><body>
 <header><h1>★ CTO — cockpit</h1><div class=sub>generated {{GEN}} · re-run <code>./general dashboard</code> (or use <code>./general serve</code>) · click a row for the full transcript</div></header>
 <div class=cards>{{CARDS}}</div>
@@ -836,6 +850,97 @@ function kpick(id){var f=document.getElementById('f');f.value=id;flt();f.scrollI
 _NEEDS_YOU_CATEGORIES = {"errored", "parked", "pr"}
 _NEEDS_YOU_MAX = 10   # bound the digest; anything past this collapses into an "…and N more" tail
 
+# EU-336: the shipped headline is a ROLLING window, not a calendar day. A 24/7 unattended unit does
+# most of its work overnight, which lands after midnight — under the old yesterday/today split the
+# freshest merges (the EU-294 collapse landed 01:00–04:00 on 2026-07-15) fell into a conditional
+# "…and today so far" afterthought while the headline reported yesterday. The daily fires ~08:30, so
+# a 24h window is also gap-free and dupe-free brief-to-brief.
+_SHIPPED_WINDOW_HOURS = 24
+_DECISION_MAX = 120   # one capped line per decision in the brief; the full text lives in the cockpit
+
+# EU-382: the daily's base-state signal is RECENCY-BOUNDED. The 2026-07-17 brief's FOCUS read
+# "Break the 'base dev RED' logjam (24+ tickets stuck on it)" while dev was GREEN (tip 74678bb,
+# 382/382, 9/10 consecutive green runs that day) — the last red_base_block was 2026-07-16 10:26,
+# 30+ hours stale, with merges landed since. The fuel was the loop's red-base pending decisions
+# (loop.py:1430 "Base branch '…' is RED before any build …") rendered into the brief with no
+# "is this still true" check — the same unbounded-history class EU-358 bounded to 48h for
+# _recent_no_changes_ticket_ids and EU-336 bounded for the shipped window. A red_base_block
+# headlines ONLY while it is the LATEST base signal: any later green proof (a `merged` land, or a
+# `dev_gate` with passed=true — the same proof EU-376 publishes into the base-gate cache) resolves
+# it, and a red older than 48h never headlines at all (the audit never rotates; one ancient red
+# must not dominate forever). A false "everything's blocked" headline is worse than silence.
+_BASE_RED_WINDOW_H = 48.0
+# The stable lead of the red-base decision question loop.py writes — the render-side filter key for
+# stale entries. tests/eu382_daily_base_recency_test.py pins it against loop.py's actual text.
+_RED_BASE_MARKER = "is RED before any build"
+
+
+def _event_dt(e: dict[str, Any]) -> Optional[datetime]:
+    """An audit event's ``ts`` as an AWARE local datetime (audit.py:33 writes %z offsets; a naive
+    peer ts is taken as local — the same EU-181 .astimezone() normalization the shipped window uses)."""
+    dt = _parse_ts(str(e.get("ts") or ""))
+    return dt.astimezone() if dt is not None else None
+
+
+def _active_base_red(cfg) -> Optional[dict[str, Any]]:
+    """The CURRENT red-base signal for the daily, or None when the base is (or must be presumed)
+    green. Returns {'ticket_id': latest blocked ticket, 'tickets': distinct tickets blocked in the
+    current red episode, 'age_s': seconds since the latest red_base_block} — see the EU-382 note on
+    _BASE_RED_WINDOW_H for why every bound errs toward silence, not alarm."""
+    from datetime import timedelta
+    latest_red: Optional[dict[str, Any]] = None
+    latest_red_dt: Optional[datetime] = None
+    latest_green_dt: Optional[datetime] = None
+    reds: list[tuple[datetime, str]] = []
+    for line in audit_lines(cfg.audit_path):
+        try:
+            e = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        ev = e.get("event")
+        if ev == "red_base_block":
+            d = _event_dt(e)
+            if d is None:
+                continue        # undateable red → too old to trust as "current" (EU-358 lineage)
+            reds.append((d, str(e.get("ticket_id") or "")))
+            if latest_red_dt is None or d > latest_red_dt:
+                latest_red, latest_red_dt = e, d
+        elif ev == "merged" or (ev == "dev_gate" and e.get("passed") is True):
+            # Green proofs only: a real land or a green dev-gate suite run. dryrun_land/ship_dryrun
+            # never ran the gate on the base, and dev_gate passed=false proves nothing green.
+            d = _event_dt(e)
+            if d is not None and (latest_green_dt is None or d > latest_green_dt):
+                latest_green_dt = d
+    if latest_red is None or latest_red_dt is None:
+        return None
+    if latest_green_dt is not None and latest_green_dt >= latest_red_dt:
+        return None             # base has since PROVEN green — the red is resolved, not a blocker
+    now = datetime.now().astimezone()
+    if latest_red_dt < now - timedelta(hours=_BASE_RED_WINDOW_H):
+        return None             # EU-358 precedent: unbounded history must not headline the daily
+    episode = {tid for d, tid in reds
+               if tid and (latest_green_dt is None or d > latest_green_dt)}
+    return {"ticket_id": str(latest_red.get("ticket_id") or "?"),
+            "tickets": max(len(episode), 1),
+            "age_s": max((now - latest_red_dt).total_seconds(), 0.0)}
+
+
+def _one_line(text: str, limit: int = _DECISION_MAX) -> str:
+    """Collapse an officer's (often multi-paragraph) decision text to ONE capped line for the brief.
+    Ends with '…' iff anything was dropped, so the caller can tell a clipped item from a short one.
+
+    EU-336: the stored decision keeps the FULL question — this is render-side only, the same split
+    EU-337 (77c2216) drew for the reviewer-findings phone ping. Before this, the 2026-07-15 brief
+    rendered EU-139's entry as a wall of reviewer analysis ("Looking at the evidence: 1. EU-139's
+    actual fix works: … 2. The two 'failing' tests pass in isolation…") — unreadable on a phone."""
+    rows = [s for s in (l.strip().lstrip("*# ").strip() for l in str(text or "").splitlines()) if s]
+    if not rows:
+        return "(no question text)"
+    first, dropped = rows[0], len(rows) > 1
+    if len(first) > limit:
+        first, dropped = first[:limit - 1].rstrip(), True
+    return first + ("…" if dropped else "")
+
 
 def _needs_you_label(row: dict[str, Any]) -> str:
     """The bracketed tag for one Needs-you row, e.g. 'AUTO-14 [errored]' / 'AUTO-9 [blocked]'."""
@@ -865,43 +970,73 @@ def _needs_you_rows(cfg) -> list[dict[str, Any]]:
 
 
 def standup(cfg) -> str:
-    """The deterministic core of the morning daily: what shipped YESTERDAY, what needs you now, and
-    what awaits a decision. The daily fires ~08:30, so 'yesterday' is the completed work the Commander
-    wants to see; 'today so far' is added only once same-day merges exist. No cumulative/all-time
-    history — that is deliberately out (the Commander does not want it in the daily)."""
+    """The deterministic core of the morning daily: what shipped in the LAST 24H, what needs you now,
+    and what awaits a decision. The shipped window is deliberately rolling rather than a
+    yesterday/today calendar split (EU-336) — the unit works overnight, so its freshest merges land
+    after midnight and a calendar split demoted exactly the work the Commander most wants to see. No
+    cumulative/all-time history — that is deliberately out (the Commander does not want it in the daily)."""
     from . import decisions
     from datetime import timedelta
     tasks = load_tasks(cfg.audit_path)
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
-    yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    cutoff = now.astimezone() - timedelta(hours=_SHIPPED_WINDOW_HOURS)
 
-    def _day(t) -> str | None:                              # when it landed (merge time), else run start —
+    def _landed(t) -> datetime | None:                      # when it landed (merge time), else run start —
         d = t.get("ended") or t.get("started")              # .astimezone() normalizes an audit ts written on
-        return d.astimezone().strftime("%Y-%m-%d") if d else None  # another host (EU-181) to the reader's local
-        #                                                     day, so today/yday boundaries agree cross-host
-    shipped_y = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == yday]
-    shipped_t = [t for t in tasks if t["outcome"] == "merged→dev" and _day(t) == today]
+        return d.astimezone() if d else None                # another host (EU-181) to the reader's clock, so
+        #                                                     the window's edge agrees cross-host
+    def _in_window(t) -> bool:
+        d = _landed(t)
+        return d is not None and d > cutoff   # undateable run → not counted; the count stays exact
+    shipped = [t for t in tasks if t["outcome"] == "merged→dev" and _in_window(t)]
     needs_rows = _needs_you_rows(cfg)
+    base_red = _active_base_red(cfg)
     pending = decisions.load(cfg)
+    stale_base_red: list[dict[str, Any]] = []
+    if base_red is None:
+        # EU-382: the base is not currently red, so the loop's red-base pending decisions ("Base
+        # branch '…' is RED before any build …", loop.py:1430) are STALE — they fueled the
+        # 2026-07-17 false "24+ tickets stuck" FOCUS headline a day after dev went green. Hold them
+        # out of the BRIEF only (render-side, the EU-336/337 split): the stored decisions survive
+        # untouched for the cockpit's /needs inbox, and the ♻️ note below keeps them discoverable.
+        kept: list[dict[str, Any]] = []
+        for p in pending:
+            (stale_base_red if _RED_BASE_MARKER in str(p.get("question") or "") else kept).append(p)
+        pending = kept
 
     lines = [f"🫡 Daily stand-up — {today}", ""]
-    lines.append(f"✅ Shipped to DEV yesterday ({len(shipped_y)}): "
-                 + (", ".join(t["ticket_id"] for t in shipped_y) or "—"))
-    if shipped_t:
-        lines.append(f"✅ …and today so far ({len(shipped_t)}): "
-                     + ", ".join(t["ticket_id"] for t in shipped_t))
+    lines.append(f"✅ Shipped to DEV (last 24h) ({len(shipped)}): "
+                 + (", ".join(t["ticket_id"] for t in shipped) or "—"))
     shown = needs_rows[:_NEEDS_YOU_MAX]
     needs_line = ", ".join(f'{r["ticket_id"]} [{_needs_you_label(r)}]' for r in shown) or "—"
     overflow = len(needs_rows) - len(shown)
     if overflow > 0:
         needs_line += f" …and {overflow} more (cockpit → /needs)"
     lines.append(f"🟡 Needs you ({len(needs_rows)}): " + needs_line)
+    if base_red is not None:
+        # EU-382: the base state is now an EXPLICIT deterministic fact — the CTO synthesis reads it
+        # from here instead of inferring "everything's blocked" from however many decision rows the
+        # red episode left behind. Appears ONLY while the red is the latest base signal (≤48h).
+        lines.append(f"⛔ Base RED: gate fails on the clean base — {base_red['tickets']} ticket(s) "
+                     f"blocked, latest {base_red['ticket_id']} "
+                     f"{_human_dur(base_red['age_s'])} ago")
     if pending:
-        lines.append("❓ Awaiting your decision:")
-        lines += [f'   • {p["id"]}: {p.get("question", "")}' for p in pending]
+        # EU-336: one capped line per item — never the officer's raw multi-paragraph text. The
+        # "(cockpit → /needs)" pointer rides the header only when something was actually clipped,
+        # mirroring the "…and N more (cockpit → /needs)" overflow idiom on the Needs-you line above.
+        rendered = [(p["id"], _one_line(p.get("question", ""))) for p in pending]
+        clipped = any(q.endswith("…") for _, q in rendered)
+        lines.append("❓ Awaiting your decision:"
+                     + (" (full text: cockpit → /needs)" if clipped else ""))
+        lines += [f"   • {pid}: {q}" for pid, q in rendered]
     else:
         lines.append("❓ Awaiting your decision: —")
+    if stale_base_red:
+        # EU-382: the held-out red-base decisions must not become invisible — one muted line says
+        # the base recovered and where the tickets wait, without re-arming the blocker headline.
+        lines.append(f"♻️ Base went green again — {len(stale_base_red)} stale base-red decision(s) "
+                     "left out of this brief; re-queue those tickets from cockpit → /needs")
     return "\n".join(lines)
 
 

@@ -83,12 +83,14 @@ cat > "$PLIST" <<PLIST_EOF
 
     <!-- launchd agents get a MINIMAL Path (no /opt/homebrew/bin, no shell profile) — without this
          the automatixy gate died with "[Errno 2] No such file or directory: 'bun'" on 2026-07-10.
-         Embed the INSTALLING shell's PATH so every toolchain the gates need (bun, node, gh…)
-         resolves exactly as it does when Roman runs serve by hand. -->
+         A CURATED static PATH (2026-07-19 stabilization): the old \${PATH} embed captured the
+         INSTALLING shell's PATH verbatim, and an install run from a Claude/agent session baked
+         ~18 ephemeral session dirs into the plist. This covers every toolchain the gates need
+         (bun, node, gh live under /opt/homebrew/bin; ~/.bun/bin for bun-installed globals). -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>${PATH}</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.bun/bin:${HOME}/bin</string>
     </dict>
 
     <!-- The command; WorkingDirectory makes config.yaml/state/ relative paths resolve. The

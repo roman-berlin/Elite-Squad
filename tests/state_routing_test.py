@@ -152,8 +152,10 @@ fb4 = _FakeBacklog()
 etk = types.SimpleNamespace(id="X#1", key="X#1", ephemeral=True, summary="s")
 asyncio.run(loop._exception_report(lcfg, etk, lapp, RuntimeError("boom"), _Audit(), backlog=fb4))
 chk("ephemeral ticket → no comment", fb4.comments == [], fb4.comments)
-asyncio.run(loop._exception_report(lcfg, ltk, lapp, RuntimeError("boom"), _Audit(), backlog=None))
-chk("backlog=None (pre-bind path) → no crash", True)
+_ret = asyncio.run(loop._exception_report(lcfg, ltk, lapp, RuntimeError("boom"), _Audit(),
+                                          backlog=None))
+chk("backlog=None (pre-bind path) → completes and returns the escalation report",
+    getattr(_ret, "outcome", None) is not None, repr(_ret)[:120])
 
 # ---------- source pins ---------- #
 _loop_src = Path("orchestrator/loop.py").read_text(encoding="utf-8")

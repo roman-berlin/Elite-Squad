@@ -36,7 +36,9 @@ Written fail-first:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -61,7 +63,34 @@ def check(n, c, d=""):
     results.append((n, bool(c), d))
 
 
-# Zero out the transient backoff so the test doesn't actually sleep.
+# EU-247: the three scenario tmpdirs below are created across separate try/finally sections and each
+# must outlive its own section, so cleanup is registered ONCE here via atexit rather than per-block.
+# Before this, the harness leaked all three on every run (verified 2026-07-17: an isolated TMPDIR
+# came back with exactly 3 tmp* dirs after a green run).
+_TMPDIRS: list[Path] = []
+
+
+def _mkdtemp() -> Path:
+    d = Path(tempfile.mkdtemp())
+    _TMPDIRS.append(d)
+    return d
+
+
+atexit.register(lambda: [shutil.rmtree(d, ignore_errors=True) for d in _TMPDIRS])
+
+# Zero out the transient backoff so the test doesn't actually sleep. EU-247: save it so the module
+# body can hand it back (see the restore at the bottom), like this harness already does for
+# run_agent and notify._PLAN_LIMIT_DEDUP_FILE — it was the lone unrestored mutation. Harmless
+# per-run today (run_all.py Popens each harness as its own subprocess), but a bare `pytest tests/`
+# imports every *_test.py into ONE process, where a leaked 0.0 contradicts
+# eu210_transient_retry_test.py's `1.5 <= backoff <= 2.5` assertion — verified 2026-07-17 by
+# executing this module in-process and reading the constant back: 0.0, eu210 would FAIL.
+# Alphabetical collection order (e < s) is all that hides it today.
+#
+# The restore is deliberately NOT atexit (unlike the tmpdirs above): atexit fires at interpreter
+# exit, i.e. AFTER every other in-process harness has already run, so it would restore the value too
+# late to protect the one scenario this guards against. Bounding it to the module body is the point.
+_orig_backoff = agent_mod._TRANSIENT_RETRY_BACKOFF_S
 agent_mod._TRANSIENT_RETRY_BACKOFF_S = 0.0
 
 _orig_run_agent = agent_mod.run_agent
@@ -122,7 +151,7 @@ async def _fake_cap(prompt, options, tag="", ticket_id=None, pass_number=None, r
     return AgentRun(text="ok", final="ok", cost_usd=0.1, num_turns=1, is_error=False)
 
 
-tmpdir = Path(tempfile.mkdtemp())
+tmpdir = _mkdtemp()
 sink2 = _FakeSink()
 agent_mod.configure_audit(sink2)
 agent_mod.run_agent = _fake_cap
@@ -149,7 +178,7 @@ check("no sonnet_fallback_state.json (or any weekly-pin state) written anywhere"
 
 
 # ══════════════════════════════ 3+4. genuine-cap alert + restart dedup (notify.py) ═══════════════ #
-_notify_dedup_dir = Path(tempfile.mkdtemp())
+_notify_dedup_dir = _mkdtemp()
 _orig_dedup_file = notify._PLAN_LIMIT_DEDUP_FILE
 notify._PLAN_LIMIT_DEDUP_FILE = _notify_dedup_dir / "sonnet_alert_dedup.json"
 notify._plan_limit_alert_sent = False
@@ -200,7 +229,7 @@ finally:
 # Regression guard for the iteration-2 rejection: a bare on-disk `plan_limit_alert_sent: true` left
 # over from an earlier (already-resolved) cap must never eat the alert for a genuinely different cap
 # after a restart. Suppression is keyed on the episode signature, so a new episode alerts regardless.
-_ep_dir = Path(tempfile.mkdtemp())
+_ep_dir = _mkdtemp()
 notify._PLAN_LIMIT_DEDUP_FILE = _ep_dir / "sonnet_alert_dedup.json"
 
 prior_over_limits = [{"key": "weekly_sonnet", "label": "Weekly Sonnet tokens"}]
@@ -246,6 +275,10 @@ finally:
     notify._PLAN_LIMIT_DEDUP_FILE = _orig_dedup_file
     notify._plan_limit_alert_sent = False
     notify._plan_limit_alert_episode = None
+
+# EU-247: hand the real backoff back before this module's body ends, so nothing that runs later in
+# the same interpreter (a bare `pytest tests/`) inherits the 0.0 (tmpdirs are cleaned at exit).
+agent_mod._TRANSIENT_RETRY_BACKOFF_S = _orig_backoff
 
 
 print("\n============ EU-213 SONNET CAP DISCRIMINATION QA ============")

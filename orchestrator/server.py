@@ -21,6 +21,7 @@ from . import dashboard as D
 from . import health
 from . import intake
 from . import memory
+from . import models_views
 from . import warroom
 from .audit import AuditLog
 from .config import Config, normalize_effort
@@ -144,6 +145,34 @@ def compute_merge_stats(audit_path: str, time_range: str, now: float | None = No
     }
 
 
+# EU-361: guards the compare-and-set on the one-shot ceremony flags below. Separate from
+# cockpit_state's run locks on purpose — a ceremony is not a run and must not contend with one.
+_flag_lock = threading.Lock()
+
+def _claim_flag(name: str, value=True) -> bool:
+    """Compare-and-set a one-shot ceremony flag. True = the caller now OWNS the ceremony and must
+    clear the flag when done; False = someone else already owns it, do nothing.
+
+    EU-361 (2026-07-16 audit): all seven ceremony routes used to read the flag in the request
+    thread but SET it inside ``_bg()`` —
+
+        if not _state.get("standuping"):
+            def _bg():
+                _state["standuping"] = True     # ...several thread-scheduler ticks later
+
+    Under ``app.run(..., threaded=True)`` two clicks milliseconds apart both passed the ``if`` and
+    both spawned a worker: two concurrent standups / councils / scribes, or two ``group_chat``
+    rounds answering the same message. ``ship_review`` already set its flag before the thread (the
+    in-repo precedent); this closes the window for the other seven with a real lock, so the check
+    and the set can't be split at all.
+    """
+    with _flag_lock:
+        if _state.get(name):
+            return False
+        _state[name] = value
+        return True
+
+
 def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     """EU-190/EU-223: set this run's backend from the persisted sticky preference (cockpit
     /api/model), resolving an optional PER-APP override first, then the global sticky pref, then
@@ -160,15 +189,48 @@ def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     if app_name is None:
         _apps = getattr(rcfg, "apps", None)
         app_name = _apps[0].name if _apps else None
-    bk = backend_pref.active(rcfg, app_name)
+    # 2026-07-19: MAIN/SECONDARY resolution — when the main model can't run and a usable
+    # secondary is configured, the run proceeds on the secondary (loudly); with no secondary the
+    # old hard block fires unchanged (EU-190's no-SILENT-fallback rule — this fallback is loud).
+    bk, why = backends.resolve_for_run(rcfg, app_name)
     rcfg.model_backend = bk
+    if why:
+        _note_model_fallback(why)
     if bk == backends.GLM and not backends.available("glm"):
         return ("GLM is selected but GLM_AUTH_TOKEN is not configured — set it and restart, "
-                "or switch the Model back to Opus.")
+                "or switch the Main model back to Opus (or configure a Secondary).")
     return None
 
 
-def create_app(cfg: Config):
+_MODEL_FALLBACK_LOG_INTERVAL_S = 600.0
+_last_model_fallback_log = 0.0
+
+
+def _note_model_fallback(why: str) -> None:
+    """One throttled console + Telegram line per window when the secondary engages — loud, not spam."""
+    global _last_model_fallback_log
+    import time as _time
+    now = _time.time()
+    if now - _last_model_fallback_log >= _MODEL_FALLBACK_LOG_INTERVAL_S:
+        _last_model_fallback_log = now
+        print(f"  ⇄ model fallback: {why}", flush=True)
+        try:
+            from . import notify as _notify
+            _notify.send(f"⇄ Model fallback engaged — {why}. Runs continue on the secondary; "
+                         "switch back or fix the main model when ready.")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def create_app(cfg: Config, port: int = 8787):
+    """Build the cockpit Flask app. ``port`` is the port ``serve()`` will actually bind.
+
+    EU-361: the port is a parameter (not a constant) because the EU-254 Host guard below has to
+    know the real bind address. ``general serve --port N`` (main.py) is a supported flag, and with
+    the port hardcoded to 8787 every legitimate POST on any other port was rejected as a
+    DNS-rebinding attempt. Defaults to 8787 so the single-operator flow — and every existing
+    ``create_app(cfg)`` caller — is unchanged.
+    """
     from flask import Flask, Response, redirect, request
     app = Flask(__name__)
     audit = AuditLog(cfg.audit_path)
@@ -212,7 +274,8 @@ def create_app(cfg: Config):
     # EU-254 — CSRF/Origin/Host guard on every state-changing route. form-urlencoded/multipart POSTs
     # are CORS "simple requests" (no preflight), so WITHOUT this a page open in Roman's browser — or
     # an attacker domain DNS-rebound to 127.0.0.1:8787 — could drive the unit (run, model switch,
-    # stop, approve) cross-origin. Generalizes EU-187's /api/terminal-only allowlist to all ~30
+    # stop, approve) cross-origin. Generalizes the EU-187-era /api/terminal-only origin allowlist
+    # (that endpoint was removed 2026-07-19 with the cockpit terminal panel) to all ~30
     # state-changing POST routes (this file has no PUT/PATCH/DELETE today; guarded anyway so a future
     # one is covered for free). Same-origin check: if an Origin header is present it must name an
     # allowed cockpit host; else if a Referer is present its host must match; and in ALL cases the
@@ -222,9 +285,20 @@ def create_app(cfg: Config):
     # 127.0.0.1:8787). "localhost" (no port) is allowed alongside the real bind so the Flask test
     # client's default synthetic Host keeps working — the dev server never actually listens on the
     # default HTTP port, so that value can't arise from a real request.
+    #
+    # EU-361: the allowed set is built from the REAL bind port (``create_app``'s ``port`` arg), not
+    # a hardcoded 8787. `general serve --port 9000` used to 403 every legitimate POST, because the
+    # browser's honest `Host: 127.0.0.1:9000` matched nothing in this set.
     # ----------------------------------------------------------------------------------------------
-    _ALLOWED_HOSTS = {"127.0.0.1:8787", "localhost:8787", "localhost"}
+    _ALLOWED_HOSTS = {f"127.0.0.1:{port}", f"localhost:{port}", "localhost"}
     _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+    # EU-361: routes that are state-changing despite being GETs, so the guard below can't be
+    # side-stepped by the verb alone. /api/open-logs spawns `open` via subprocess.Popen — a
+    # side effect on the Commander's desktop — so an attacker page's <img src=…>/link/fetch to it
+    # must be rejected exactly like a POST. Kept as an explicit allowlist rather than "guard every
+    # GET": the dashboard's read-only polls (/api/board every 5s, the SSE streams) must stay
+    # unguarded, which is the EU-254 contract these routes were carved out of.
+    _STATE_CHANGING_GETS = {"/api/open-logs"}
 
     def _origin_host(value: str) -> str:
         from urllib.parse import urlsplit
@@ -235,7 +309,8 @@ def create_app(cfg: Config):
 
     @app.before_request
     def _csrf_origin_guard():
-        if request.method not in _STATE_CHANGING_METHODS:
+        if (request.method not in _STATE_CHANGING_METHODS
+                and request.path not in _STATE_CHANGING_GETS):
             return None
         if (request.host or "").lower() not in _ALLOWED_HOSTS:
             return Response("Forbidden: mismatched Host header.", status=403, mimetype="text/plain")
@@ -331,14 +406,23 @@ def create_app(cfg: Config):
         view["autopilot"] = ap
         return view
 
-    def _claim_cockpit_run(app_name: str):
+    def _claim_cockpit_run(app_name: str, *, stop_event=None):
         """Claim ``app_name``'s run slot for a manual cockpit run (EU-64: per-project).
 
         Honours BOTH guards: the per-project one (a second run on the SAME project is refused, other
         projects unaffected) AND the still-unit-wide one that autopilot / Telegram-resume hold on the
         legacy ``_state`` (until those migrate, a manual project run must not overlap them). Returns
         the per-app run-state dict on success — the caller owns the run and MUST ``release_run`` it —
-        or None when refused, with ``last_msg`` already set on the right state for the banner."""
+        or None when refused, with ``last_msg`` already set on the right state for the banner.
+
+        EU-361: ``stop_event`` is published with the claim, in the REQUEST thread. It used to be
+        minted inside the worker's ``_bg()``, so between "POST /api/run returns the redirect" and
+        "the OS schedules the worker" the run was already ``active`` (the board shows Stop) but
+        ``st['stop_event']`` was still None — a Stop click in that window found no event and
+        silently did nothing. ``claim_run`` has always accepted the event (cockpit_state.claim_run);
+        the autopilot Start path already passed it this way — this brings the three manual run
+        routes onto the same pattern.
+        """
         key = app_name or None
         st = get_state(key)
         busy = "a run is already in progress for this project — wait for it to finish, then start the new one"
@@ -350,7 +434,7 @@ def create_app(cfg: Config):
             _state["last_msg"] = ("a run is already in progress — stop it and wait for it to finish, "
                                   "then start the new one")
             return None
-        if not claim_run(key):
+        if not claim_run(key, stop_event=stop_event):
             # Lost the start race (TOCTOU) or hit the max-parallel-runs cap.
             st["last_msg"] = busy if is_active(key) else (
                 "too many projects are running at once — wait for one to finish, then start this one")
@@ -370,9 +454,13 @@ def create_app(cfg: Config):
         # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
         # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
         import platform as _platform
+        # EU-235: splice the '/models' nav link into the rendered bar. The link is owned by
+        # models_views (see add_models_nav_link's docstring for why it's injected here rather
+        # than edited into _control_bar) — the EU-293 nav-link finding, landed with the page.
         bar = (_result_banner(_state)
-               + _control_bar(cfg, appq, h["healthy"],
-                              is_mac=_platform.system() == "Darwin"))
+               + models_views.add_models_nav_link(
+                   _control_bar(cfg, appq, h["healthy"],
+                                is_mac=_platform.system() == "Darwin")))
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
         # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
         # unit-level actions, not per-project runs.)
@@ -424,89 +512,6 @@ def create_app(cfg: Config):
         # Shell out to `open` — non-blocking; Finder/default app opens in the background.
         subprocess.Popen(["open", str(requested)], close_fds=True)   # noqa: S603,S607
         return jsonify({"ok": True, "path": str(requested)})
-
-    @app.post("/api/terminal")
-    def terminal_api():
-        """Execute a command in the terminal panel and return the output.
-
-        EU-149: Integrated terminal in the cockpit — executes shell commands and returns
-        the combined stdout/stderr. Commands run in the orchestrator's working directory
-        with a 10-second timeout.
-
-        EU-146: Runs via Popen with ``start_new_session=True`` (its own process group,
-        same pattern as gate.py's ``run_commands``) so a backgrounded/forked child (e.g.
-        a bare `vitest` typed into the terminal) can't outlive a timeout. On
-        TimeoutExpired — and in a finally block covering every exit path — the WHOLE
-        process group is SIGKILL-ed via ``os.killpg``, not just the top shell PID.
-
-        Security:
-        * Commands are executed in a subprocess with a timeout.
-        * No interactive shells — each command is a one-shot execution.
-        * Output is capped at 64KB to prevent memory issues.
-
-        Returns JSON ``{"output": "<combined stdout/stderr>", "error": "<error message or null>"}``.
-        """
-        from flask import jsonify
-        import subprocess
-
-        cmd = (request.form.get("cmd") or "").strip()
-        if not cmd:
-            return jsonify({"output": "", "error": "No command provided"}), 400
-
-        # Basic command validation - reject obvious shell escapes
-        if any(c in cmd for c in ["\x00", "\n", "\r"]):
-            return jsonify({"output": "", "error": "Invalid characters in command"}), 400
-
-        proc = None
-        try:
-            # EU-146: Popen (not run) + start_new_session=True so the shell and any child
-            # it forks/backgrounds share one process group we can kill as a unit.
-            proc = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=str(Path(cfg.config_path).parent) if hasattr(cfg, "config_path") else None,
-                env=dict(os.environ),
-                start_new_session=True,
-            )
-            try:
-                stdout, stderr = proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                # EU-146: Kill the entire process group, not just the shell PID.
-                try:
-                    os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
-                except (ProcessLookupError, OSError):
-                    proc.kill()
-                # Reap the zombie so it doesn't linger.
-                try:
-                    proc.communicate(timeout=1)
-                except Exception:
-                    pass
-                return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
-            output = (stdout or "") + (stderr or "")
-            # Cap output at 64KB
-            if len(output) > 65536:
-                output = output[:65536] + "\n... (output truncated)"
-            return jsonify({"output": output, "error": None})
-        except Exception as e:
-            return jsonify({"output": "", "error": str(e)}), 500
-        finally:
-            # EU-146: Final sweep — if anything in the group is still alive (e.g. a
-            # backgrounded grandchild the communicate() reap above didn't catch), kill it.
-            if proc is not None and proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), 9)
-                except (ProcessLookupError, OSError):
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                try:
-                    proc.communicate(timeout=1)
-                except Exception:
-                    pass
 
     @app.get("/api/autopilot")
     def autopilot_status_api():
@@ -757,6 +762,7 @@ def create_app(cfg: Config):
         st = get_state(appq or None)
 
         def gen():
+            appkey = appq or None
             log_path = st.get("log_path")
             if not log_path:
                 yield _sse("log", "No active run log to stream.")
@@ -767,32 +773,47 @@ def create_app(cfg: Config):
                 yield _sse("log", f"Log file not found: {log_path}")
                 return
 
+            def _drain(f: Path, start: int):
+                """SSE frames for everything appended to ``f`` past byte ``start``."""
+                with f.open("r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(start)
+                    for line in fh.readlines():
+                        yield _sse("log", line.rstrip("\n\r"))
+
             # Stream the log file, sending new lines as they're added
             last_size = 0
             last_check = 0.0
 
             while True:
                 try:
+                    current_st = get_state(appkey)   # fresh state EVERY tick — see the roll below
                     current_size = log_file.stat().st_size
                     if current_size > last_size:
-                        with log_file.open("r", encoding="utf-8", errors="replace") as f:
-                            f.seek(last_size)
-                            new_lines = f.readlines()
-                            for line in new_lines:
-                                yield _sse("log", line.rstrip("\n\r"))
+                        yield from _drain(log_file, last_size)
                         last_size = current_size
                         last_check = time.time()
                     else:
-                        # Check if run is still active - get fresh state
-                        current_st = get_state(appq or None)
+                        # EU-361 (2026-07-16 audit): re-read the run's log path on every tick. It
+                        # used to be captured ONCE, above, before the loop — but a drain opens a NEW
+                        # log file per ticket, so from ticket #2 on this stream sat tailing the
+                        # FIRST ticket's finished, never-growing log. The unit was working; the
+                        # cockpit looked frozen. Rolling only from the else-branch is deliberate:
+                        # the finished file is fully drained first, so the tail of ticket N is never
+                        # traded for the head of ticket N+1.
+                        nxt = (current_st.get("log_path") or "").strip()
+                        if nxt and nxt != str(log_file) and Path(nxt).exists():
+                            log_file, last_size = Path(nxt), 0
+                            last_check = time.time()
+                            time.sleep(0.5)
+                            continue
                         if not current_st.get("active") and not current_st.get("autopilot_on"):
-                            # Run ended - send remaining lines and close
-                            if current_size > last_size:
-                                with log_file.open("r", encoding="utf-8", errors="replace") as f:
-                                    f.seek(last_size)
-                                    new_lines = f.readlines()
-                                    for line in new_lines:
-                                        yield _sse("log", line.rstrip("\n\r"))
+                            # Run ended — drain whatever landed since the stat above, then close.
+                            # (The pre-EU-361 code re-tested ``current_size > last_size`` here, which
+                            # is by construction false inside this else-branch: the final lines of
+                            # every run were silently dropped. Re-stat instead.)
+                            final_size = log_file.stat().st_size
+                            if final_size > last_size:
+                                yield from _drain(log_file, last_size)
                             yield _sse("done", "Run ended.")
                             break
                         # No new lines - send keepalive every 2s
@@ -809,65 +830,15 @@ def create_app(cfg: Config):
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/api/terminal/stream")
-    def terminal_stream_api():
-        """Server-Sent Events: live-tail the orchestrator's terminal/log output for the cockpit's
-        interactive terminal panel.
-
-        EU-154: reuses the existing stdout ring buffer (``cockpit_state._LOG``, a
-        ``deque(maxlen=600)`` that already feeds the War Room live-feed panel) instead of a new
-        log source. Live-tails from CONNECT time only — whatever backlog is already in the buffer
-        when the client connects is never replayed, only lines appended afterwards. Polls every
-        0.5s and emits one raw ``data: <line>\n\n`` frame per new line (a bare SSE data frame,
-        not the ``event: <type>`` form ``_sse()`` produces — the terminal panel just wants plain
-        lines). Sends a ``: heartbeat\n\n`` comment roughly every 15s while idle, and resyncs
-        against the ring buffer's current contents if it has wrapped past what this stream last
-        saw (the bookmark fell off the back of the deque).
-        """
-        from flask import Response
-
-        def gen():
-            snapshot = list(_LOG)
-            bookmark = snapshot[-1] if snapshot else None   # last backlog entry — never replayed
-            last_heartbeat = time.time()
-            try:
-                while True:
-                    snapshot = list(_LOG)
-                    if bookmark is None:
-                        new_items = snapshot
-                    else:
-                        idx = None
-                        for i in range(len(snapshot) - 1, -1, -1):
-                            if snapshot[i] is bookmark:
-                                idx = i
-                                break
-                        # idx is None => the bookmark wrapped off the ring buffer since our last
-                        # poll (maxlen exceeded) — resync to whatever it currently holds instead
-                        # of guessing how much was missed.
-                        new_items = snapshot if idx is None else snapshot[idx + 1:]
-                    if new_items:
-                        for line, _key in new_items:
-                            yield f"data: {line}\n\n"
-                        bookmark = new_items[-1]
-                        last_heartbeat = time.time()
-                    else:
-                        now = time.time()
-                        if now - last_heartbeat >= 15:
-                            yield ": heartbeat\n\n"
-                            last_heartbeat = now
-                    time.sleep(0.5)
-            except GeneratorExit:
-                # Client disconnected — unwind quietly, nothing left to clean up.
-                return
-
-        return Response(gen(), mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
     @app.get("/tasks")
     def tasks_page():
         # EU-129: Resolve the active project first so needs.count() can scope to it.
         _appq = _board_project(request.args.get("app"))
-        flt = (request.args.get("filter") or "").strip()
+        # 2026-07-19 (Commander order): the task log's job is "the tickets DONE in the project I
+        # choose" — so with no explicit ?filter= it opens on Merged → dev. ?filter=all shows every
+        # run; the other deep-link filters (needs/parked) keep working.
+        _raw_flt = request.args.get("filter")
+        flt = "merged" if _raw_flt is None else _raw_flt.strip()
         # 'parked' scopes to the auto-skipped blocked set, which lives outside the task log.
         blocked = warroom._load_blocked(cfg) if flt.lower() == "parked" else None
         try:
@@ -875,32 +846,44 @@ def create_app(cfg: Config):
             _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
-        # EU-314: pass cfg + the resolved active project so render_html renders the per-project
-        # pipeline board for THIS tab; switching the ?app= tab (via _tab_bar) changes _appq and
-        # therefore the board's ticket set.
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
                              active_filter=flt, blocked=blocked, needs_count=_needs_cnt,
                              cfg=cfg, app_name=_appq)
-        # This board view is reached from the cockpit's Reports menu, so it needs a way back like
-        # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
-        # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
+        # Header injected after the template's </header>: a back button + a per-project chip row.
+        # 2026-07-19: this used to append the FULL cockpit control bar (model selector, autopilot,
+        # resume buttons) — none of which belongs on a log page — and its back-button CSS was
+        # written as non-f-string pieces with doubled {{ }} braces, i.e. INVALID CSS, which left
+        # the back-arrow SVG unsized (the giant-arrow bug). Plain single-brace CSS now, and the
+        # only control is choosing WHICH project's log to read.
         _home = f"/?app={html.escape(_appq)}" if _appq else "/"
-        back = (f"<style>"
-                ".backbtn{{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
-                "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
-                "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;"
-                "transition:all var(--t-fast);margin:14px 0 16px;box-shadow:var(--shadow-1)}}"
-                ".backbtn svg{{width:18px;height:18px;transition:transform var(--t-fast);flex:none}}"
-                ".backbtn:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
-                "transform:translateX(-3px);box-shadow:var(--shadow-2)}}"
-                ".backbtn:hover svg{{transform:translateX(-2px)}}"
-                ".backbtn:active{{transform:translateX(-1px)}}"
-                ".backbtn:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
-                f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
-                f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-                f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>")
-        return page.replace("</header>", "</header>" + back + _control_bar(cfg, _board_project(request.args.get("app"))), 1)
+        chips = "".join(
+            f"<a class='pchip{' on' if a.name == _appq else ''}' "
+            f"href='/tasks?app={html.escape(a.name)}'>{html.escape(a.name)}</a>"
+            for a in cfg.apps)
+        back = (
+            "<style>"
+            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:10px 16px;"
+            "background:var(--panel);border:1px solid var(--line2);border-radius:9px;"
+            "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;margin:0}"
+            ".backbtn svg{width:18px;height:18px;flex:none}"
+            ".backbtn:hover{border-color:var(--accent);color:var(--accent)}"
+            ".tasknav{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 30px 0}"
+            ".pchips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}"
+            ".pchips .plabel{color:var(--dim);font-size:12px}"
+            ".pchip{padding:8px 14px;border:1px solid var(--line2);border-radius:99px;background:var(--panel);"
+            "color:var(--dim);font-size:13px;font-weight:600;text-decoration:none}"
+            ".pchip:hover{border-color:var(--accent);color:var(--ink)}"
+            ".pchip.on{background:var(--accentbg);border-color:var(--accent);color:var(--ink)}"
+            "</style>"
+            "<div class=tasknav>"
+            f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
+            "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
+            "stroke-linecap='round' stroke-linejoin='round'>"
+            "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>"
+            f"<div class=pchips><span class=plabel>Project:</span>{chips}</div>"
+            "</div>")
+        return page.replace("</header>", "</header>" + back, 1)
 
     @app.post("/api/dismiss")
     def dismiss_api():
@@ -950,14 +933,14 @@ def create_app(cfg: Config):
                           for kw in ("CRITICAL", "HIGH", "VULN", "EXPLOIT", "RCE"))
 
         if is_critical:
-            # TODO: Create Jira ticket for critical issues
-            # For now, just note it in the audit log
-            try:
-                audit.record("security_reply_ticket_created", ticket_id=ticket_id,
-                            iteration=iteration, response=response,
-                            note="Jira ticket creation not yet implemented")
-            except Exception as e:
-                print(f"Failed to record ticket creation: {e}")
+            # TODO: Create Jira ticket for critical issues.
+            # EU-361 (2026-07-16 audit): this branch used to record a `security_reply_ticket_created`
+            # audit event right under this TODO, with note="not yet implemented" — a forensics trail
+            # asserting a ticket exists on the one path where none is created. Nothing consumed the
+            # event, so it was pure false signal; the `security_reply` event recorded above already
+            # captures the reply itself. Dropped rather than renamed: when the Jira call lands here,
+            # THAT is what should record a `_created` event.
+            pass
 
         # Redirect back to the cockpit (maintains the app selection)
         app = request.form.get("app") or request.args.get("app") or "*"
@@ -1033,6 +1016,33 @@ def create_app(cfg: Config):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
+        # 2026-07-19: the Mode selector posts mode=single|hybrid.
+        mode_raw = (request.form.get("mode") or "").strip().lower()
+        if mode_raw in ("single", "hybrid"):
+            _want = mode_raw == "hybrid"
+            if _want and not backend_pref.get_secondary(cfg):
+                get_state(None)["last_msg"] = "Hybrid mode needs a Secondary model — set one first."
+            else:
+                backend_pref.set_hybrid_mode(_want, cfg)
+                get_state(None)["last_msg"] = (
+                    "Hybrid mode ON — heavy roles (plan/PRD, review) on the Main model; the "
+                    "Builder on the Secondary." if _want else
+                    "Single mode — everything on the Main model (Secondary stays the emergency stand-in).")
+            return redirect("/")
+        # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
+        sec_raw = (request.form.get("secondary") or "").strip()
+        if sec_raw:
+            if sec_raw.lower() == "none":
+                backend_pref.set_secondary(None, cfg)
+                backend_pref.set_hybrid_mode(False, cfg)   # hybrid can't run without a secondary
+                get_state(None)["last_msg"] = "Secondary model cleared — no fallback configured (hybrid off)."
+            else:
+                from .model_registry import ModelRegistry as _MR
+                _sbk = backends.resolve_selection(sec_raw, _MR(cfg))
+                backend_pref.set_secondary(_sbk, cfg)
+                get_state(None)["last_msg"] = (f"Secondary model set to {_sbk} — the unit switches "
+                                               "to it when the main model can't run.")
+            return redirect("/")
         raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
         if app_param and raw.lower() in ("inherit", ""):
@@ -1124,6 +1134,128 @@ def create_app(cfg: Config):
         get_state(None)["last_msg"] = msg
         return redirect("/")
 
+    # ── EU-235: /models — cockpit CRUD for user-defined model backends ──────────────────────────
+    # The management UI over the EU-233 registry + EU-234 secrets store. EU-236 already consumes
+    # registry entries in the Model selector (backend_control), so until this page the operator
+    # could SELECT a custom backend but only create one by hand-editing state/model_registry.json.
+    # Views live in models_views.py (string builders — no templates/ dir in this repo). Every POST
+    # below is automatically covered by the EU-254 _csrf_origin_guard before_request hook (it
+    # guards ALL state-changing methods), which is where the abandoned WIP branch's EU-292 CSRF
+    # finding lands; the EU-293 nav-link finding lands via add_models_nav_link in index(). That
+    # WIP branch (7d448e5) predates the landed secrets layer and is deliberately not merged.
+    from .model_registry import ModelRegistry
+    from .model_registry import _validate as _mr_validate
+    from .secrets import Secrets as _Secrets
+
+    # Placeholder credential_ref used only to satisfy the registry's required-field schema during
+    # the dry-run validation + the initial add(); set_credential immediately rewrites it to the
+    # real derived ``secret://<id>`` (model_registry.py:204-212).
+    _PENDING_REF = "secret://pending"
+
+    def _model_form_fields() -> tuple[dict, str]:
+        """The form's registry fields (whitespace-stripped) + the api_key, SEPARATED: the raw key
+        is never part of the record dict — it goes to the Secrets store via set_credential, which
+        persists only the derived credential_ref (the registry's _ALLOWED_FIELDS whitelist would
+        strip a smuggled key anyway; keeping it out entirely means it can't even transit)."""
+        fields = {k: (request.form.get(k) or "").strip()
+                  for k in ("display_name", "provider", "base_url", "model_id",
+                            "small_fast_model_id")}
+        return fields, (request.form.get("api_key") or "").strip()
+
+    @app.get("/models")
+    def models_page():
+        return models_views.render_models_list(cfg)
+
+    @app.get("/models/add")
+    def models_add_form():
+        return models_views.render_model_form(cfg)
+
+    @app.post("/models/add")
+    def models_add_api():
+        fields, api_key = _model_form_fields()
+        errors = []
+        try:
+            # Dry-run the registry's OWN schema (single source of truth — no duplicated rules
+            # here) BEFORE writing anything: a bad form never leaves a half-added record behind,
+            # and "missing display_name + missing api_key" reports both at once.
+            _mr_validate({**fields, "credential_ref": _PENDING_REF}, partial=False)
+        except ValueError as exc:
+            errors.append(str(exc))
+        if not api_key:
+            errors.append("missing required field(s): api_key")
+        if errors:
+            return models_views.render_model_form(cfg, values=fields, errors=errors)
+        registry = ModelRegistry(cfg)
+        record = registry.add({**fields, "credential_ref": _PENDING_REF})
+        # Stores the raw key in the Secrets store and rewrites credential_ref to the real
+        # secret://<id> — the key never touches the registry file (the EU-234 boundary).
+        registry.set_credential(record["id"], api_key)
+        return redirect("/models")
+
+    @app.get("/models/edit/<model_id>")
+    def models_edit_form(model_id):
+        record = ModelRegistry(cfg).get(model_id)
+        if record is None:
+            return Response("Unknown model backend.", status=404, mimetype="text/plain")
+        return models_views.render_model_form(cfg, record=record)
+
+    @app.post("/models/edit/<model_id>")
+    def models_edit_api(model_id):
+        registry = ModelRegistry(cfg)
+        record = registry.get(model_id)
+        if record is None:
+            return Response("Unknown model backend.", status=404, mimetype="text/plain")
+        fields, api_key = _model_form_fields()
+        try:
+            # Full-form validation (the form always submits every field); the record's existing
+            # credential_ref stands in because the form never carries one. A blank api_key is
+            # VALID on edit — it means "keep the stored key" (the form renders only the mask).
+            _mr_validate({**fields, "credential_ref": record.get("credential_ref") or _PENDING_REF},
+                         partial=False)
+        except ValueError as exc:
+            return models_views.render_model_form(cfg, record=record, values=fields,
+                                                  errors=[str(exc)])
+        registry.update(model_id, fields)
+        if api_key:
+            registry.set_credential(model_id, api_key)
+        return redirect("/models")
+
+    @app.post("/models/delete/<model_id>")
+    def models_delete_api(model_id):
+        registry = ModelRegistry(cfg)
+        record = registry.get(model_id)
+        if record is not None:
+            ref = record.get("credential_ref")
+            if ref:
+                # Secrets(cfg) anchors to the same cfg state dir set_credential wrote
+                # (secrets.py:59-64), so this removes exactly the record's own stored key —
+                # record AND secret go together, nothing orphans in secrets.json.
+                _Secrets(cfg).delete(ref)
+            registry.delete(model_id)
+        # Unknown/already-deleted id: nothing to remove — land back on the list either way.
+        return redirect("/models")
+
+    @app.post("/models/test")
+    def models_test_api():
+        """EU-237: probe the form's CURRENT field values (not the saved record) so the operator
+        can validate a backend before saving — NO state change, ever. A blank api_key with a
+        ``record_id`` (the edit form's hidden field) means "retest with the stored key": the
+        credential is resolved server-side via the record's credential_ref and used only inside
+        the probe — the JSON reply carries {success, message} and never the key (the message is
+        built by backends.test_backend_connection, which never embeds it). Covered by the EU-254
+        origin guard like every other POST here."""
+        fields, api_key = _model_form_fields()
+        if not api_key:
+            rid = (request.form.get("record_id") or "").strip()
+            record = ModelRegistry(cfg).get(rid) if rid else None
+            ref = (record or {}).get("credential_ref") or ""
+            if ref:
+                api_key = _Secrets(cfg).get(ref) or ""
+        # Flask serializes the returned dict as the JSON body (200 either way — "the test ran and
+        # says no" is a successful REQUEST; only the EU-254 guard produces a non-200 here).
+        return backends.test_backend_connection(
+            fields["provider"], fields["base_url"], fields["model_id"], api_key)
+
     @app.post("/api/run-selected")
     def run_selected_api():
         app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project
@@ -1132,7 +1264,9 @@ def create_app(cfg: Config):
             return redirect(f"/tickets?app={app_name}")
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.
-        st = _claim_cockpit_run(app_name)
+        # EU-361: the stop_event is minted HERE, not in _bg — see _claim_cockpit_run's docstring.
+        ev = threading.Event()
+        st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
@@ -1165,9 +1299,10 @@ def create_app(cfg: Config):
         _state["last_run"] = {"app": app_name, "tickets": list(keys)}
 
         def _bg():
+            # EU-361: ``ev`` is the event _claim_cockpit_run already published on ``st`` in the
+            # request thread — the worker closes over it instead of minting its own, so Stop can
+            # never race the thread scheduler.
             st["last_msg"] = ""
-            ev = threading.Event()
-            st["stop_event"] = ev
             errored = False
             reports = []
             # EU-175: bracket this cockpit-initiated run_loop with run_start/run_end (mirroring main.py's
@@ -1217,7 +1352,9 @@ def create_app(cfg: Config):
         drain_app = app_name
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.
-        st = _claim_cockpit_run(app_name)
+        # EU-361: the stop_event is minted HERE, not in _bg — see _claim_cockpit_run's docstring.
+        ev = threading.Event()
+        st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
@@ -1257,9 +1394,10 @@ def create_app(cfg: Config):
             return redirect("/")
 
         def _bg():
+            # EU-361: ``ev`` is the event _claim_cockpit_run already published on ``st`` in the
+            # request thread — the worker closes over it instead of minting its own, so Stop can
+            # never race the thread scheduler.
             st["last_msg"] = ""
-            ev = threading.Event()
-            st["stop_event"] = ev
             errored = False
             reports = []
             # EU-175: bracket this cockpit-initiated run_loop with run_start/run_end (mirroring main.py's
@@ -1343,9 +1481,8 @@ def create_app(cfg: Config):
 
     @app.post("/api/standup")
     def standup_api():
-        if not _state.get("standuping"):
+        if _claim_flag("standuping"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["standuping"] = True
                 try:
                     from . import council
                     asyncio.run(council.hold_standup(cfg, audit=audit))
@@ -1358,9 +1495,8 @@ def create_app(cfg: Config):
 
     @app.post("/api/council")
     def council_api():
-        if not _state.get("councilling"):
+        if _claim_flag("councilling"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["councilling"] = True
                 try:
                     from . import council
                     asyncio.run(council.hold_council(cfg, audit=audit))
@@ -1403,9 +1539,8 @@ def create_app(cfg: Config):
 
     @app.post("/api/scribe")
     def scribe_api():
-        if not _state.get("scribing"):
+        if _claim_flag("scribing"):   # EU-361: claimed here, not inside _bg
             def _bg():
-                _state["scribing"] = True
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
                     _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Technical Writer.")
@@ -1416,48 +1551,20 @@ def create_app(cfg: Config):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/memory")
 
-    @app.post("/api/consolidate")
-    def consolidate_api():
-        from . import consolidate
-        try:
-            r = consolidate.run(cfg)
-            _state["last_msg"] = "✓ " + (str(r).strip() if r else "Consolidated Unit Memory — deduped/pruned the log and folded in recurring lessons.")
-        except Exception as exc:  # noqa: BLE001
-            _state["last_msg"] = f"consolidate failed: {exc}"
-        return redirect("/memory")
-
     @app.get("/memory")
     def memory_page():
         memory.ensure()
-        from . import consolidate
         top = (_working("The Technical Writer is folding recent lessons into Unit Memory…")
                if _state.get("scribing") else "")
+        # 2026-07-19 (Commander order): ONE manual action — "Update memory". The old Consolidate
+        # button and the "Reviewer keeps rejecting these" panel were removed: consolidation (log
+        # dedup/prune + folding recurring Reviewer-rejection lessons) runs AUTOMATICALLY after
+        # every productive autopilot cycle and after every scribe run, and the panel was an
+        # all-time aggregate that no click could ever clear (plus "drill candidate" framing for
+        # the drill feature deleted in EU-327). The lessons the engine learns land in the living
+        # log below — which the officers actually read.
         act = ("" if _state.get("scribing")
-               else _actbar(_actbtn("/api/scribe", "&#128221; Update memory"),
-                            _actbtn("/api/consolidate", "&#129529; Consolidate",
-                                    confirm="Dedup/prune the Lessons log and fold in any recurring "
-                                            "Reviewer-rejection lessons?")))
-        # Surface what the Reviewer keeps rejecting — the unit's own recurring mistakes.
-        pat_html = ""
-        try:
-            pats = consolidate.rejection_patterns(cfg, min_count=2)
-        except Exception:  # noqa: BLE001
-            pats = []
-        if pats:
-            rows = "".join(
-                f"<div class=lrow><div class=lhead><b>{html.escape(p['label'])}</b>"
-                f"<span class=ln>×{p['count']} · {html.escape(', '.join(p['tickets'][:5]))}</span></div>"
-                f"<div class=lact>&#8594; {html.escape(p['action'])}</div></div>" for p in pats)
-            pat_html = (
-                "<style>.lrej{margin:4px 0 18px}.lrow{background:#161122;border:1px solid #3a2b4a;"
-                "border-radius:10px;padding:11px 14px;margin-bottom:9px}.lhead{display:flex;"
-                "justify-content:space-between;gap:10px;align-items:baseline}.lhead b{color:#e9ecf1;font-size:13.5px}"
-                ".ln{color:#b59ad6;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
-                ".lact{color:#9aa3b2;font-size:12.5px;margin-top:5px}</style>"
-                "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>&#9888; Reviewer keeps "
-                "rejecting these</h3><p style='color:#8a929f;font-size:12.5px;margin:0 0 10px'>Folded "
-                "into the log on Consolidate. Each is a drill candidate.</p>"
-                f"<div class=lrej>{rows}</div>")
+               else _actbar(_actbtn("/api/scribe", "&#128221; Update memory")))
         # One-shot confirmation banner ("✓ Technical Writer folded … into Unit Memory") — shown once the Technical Writer
         # finishes (not mid-fold), so the action visibly "took" instead of silently returning here.
         _m = "" if _state.get("scribing") else (_state.pop("last_msg", "") or "")
@@ -1472,7 +1579,7 @@ def create_app(cfg: Config):
             f"<span style='color:#8a929f;font-weight:400;font-size:12px'>· officers see the newest "
             f"{memory.PREAMBLE_LESSONS} in every prompt; the full log lives here</span></h3>"
             "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
-        body = (banner + act + top + pat_html
+        body = (banner + act + top
                 + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>Doctrine</h3>"
                 + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
                 + live_html)
@@ -1503,11 +1610,10 @@ def create_app(cfg: Config):
         topic = (request.form.get("topic") or "").strip()
         if not topic:
             return redirect("/meeting")
-        if not _state.get("meeting"):
+        if _claim_flag("meeting"):   # EU-361: claimed here, not inside _bg
             officers = request.form.getlist("officer") or None
 
             def _bg():
-                _state["meeting"] = True
                 try:
                     from . import council
                     asyncio.run(council.hold_meeting(cfg, topic, officers=officers, audit=audit))
@@ -1518,33 +1624,50 @@ def create_app(cfg: Config):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
 
-    @app.post("/api/ship-review")
-    def ship_review_api():
-        # Ship-review is per-PRODUCT and per-tab now (EU-63): the active tab's project, falling back to
-        # the first shippable product when no tab resolves (never the retired "*"/all-projects).
+    @app.post("/api/qa")
+    def qa_api():
+        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged. The two
+        buttons ran near-identical officer inspections of DEV (patrol: QA/Security/Release inspect
+        + FILE findings as Jira tickets; ship-review: the same lenses debating a DEV→MAIN GO/NO-GO),
+        so a single "Run QA" now does both as phases: patrol first (findings land on the board),
+        then the readiness verdict. The per-phase indicator flags (patrolling / shipreview) are
+        kept live during their phase so the cockpit star and the /council in-session banner keep
+        working unchanged."""
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
-            # No product repo distinct from the unit's own — don't launch ship-review or flash an
-            # empty "running for  …" banner; explain why and bail out.
-            _state["last_msg"] = ("No shippable product configured — ship-review needs a product repo "
-                                  "distinct from the unit.")
-            return redirect("/council")
-        if not _state.get("shipreview"):
-            _state["shipreview"] = True   # set BEFORE redirect so /council shows the in-session indicator
-            _state["last_msg"] = (f"🚀 Ship-review running for {app_name} — the Release Manager + officers are "
-                                  "checking if DEV is ready for MAIN. The verdict posts here and to Telegram.")
+            _state["last_msg"] = ("No project to QA — configure a product repo first.")
+            return redirect("/")
+        if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
+            _state["last_msg"] = (f"🔍 QA running for {app_name} — officers inspect DEV and file "
+                                  "findings, then deliver the DEV→MAIN readiness verdict (posts "
+                                  "here and to Telegram).")
 
             def _bg():
+                notes = []
                 try:
-                    from . import council
-                    asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                    _state["patrolling"] = True
+                    try:
+                        from . import patrol as patrol_mod
+                        asyncio.run(patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                        notes.append("patrol done — findings filed as Jira tickets")
+                    finally:
+                        _state["patrolling"] = False
+                    _state["shipreview"] = True
+                    try:
+                        from . import council
+                        asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                        notes.append("ship verdict posted (see /council + Telegram)")
+                    finally:
+                        _state["shipreview"] = False
+                    _state["last_result"] = f"✓ QA finished for {app_name} — " + "; ".join(notes)
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"ship-review failed: {exc}"
+                    _state["last_result"] = f"QA failed: {exc}" + (
+                        f" (completed: {'; '.join(notes)})" if notes else "")
                 finally:
-                    _state["shipreview"] = False
+                    _state["qa"] = False
             threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/council")
+        return redirect("/")
 
     @app.get("/api/deploy-status")
     def deploy_status_api():
@@ -1716,87 +1839,6 @@ def create_app(cfg: Config):
             }), 400
         return jsonify(compute_merge_stats(cfg.audit_path, time_range))
 
-    @app.post("/api/patrol")
-    def patrol_api():
-        # EU-63: patrol the ONE concrete project of the active tab — the "All projects"/`*` sweep is gone.
-        app_name = _scope(request.form.get("app"))
-        targets = [app_name] if app_name else []
-        if not _state.get("patrolling"):
-            def _bg():
-                _state["patrolling"] = True
-                try:
-                    from . import patrol as patrol_mod
-                    for name in targets:
-                        asyncio.run(patrol_mod.patrol(cfg, name, do_file=True, audit=audit))
-                    scope = targets[0] if targets else "(no project)"
-                    _state["last_result"] = (f"✓ Patrol finished for {scope} — any findings were filed as "
-                                             "Jira tickets assigned to you (see Needs you / your backlog).")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"patrol failed: {exc}"
-                finally:
-                    _state["patrolling"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/")
-
-    @app.get("/approvals")
-    def approvals_page():
-        from . import approvals
-        pend = approvals.pending(cfg)
-        if _state.get("approving"):
-            inner = _working(f"Applying the {_state.get('approving')} recommendation — editing officer "
-                             "doctrine, then committing + pushing…")
-        elif not pend:
-            inner = ("<p style='color:#8a909c'>No pending recommendations. When the Engineering Coach or "
-                     "Engineering Manager proposes something (after a drill or council), it lands here for your "
-                     "Approve / Disapprove — Approve applies it and pushes the doctrine.</p>")
-        else:
-            style = ("<style>.apcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 16px;margin:12px 0}"
-                     ".aphead{font-weight:650;color:#fbbf24;margin-bottom:8px}"
-                     ".aprow{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}"
-                     ".apok{background:#10371f;border:1px solid #1c5238;color:#56d98a;border-radius:8px;padding:9px 14px;font-weight:650;cursor:pointer}"
-                     ".apno{background:#23191a;border:1px solid #3a2f12;color:#f0676b;border-radius:8px;padding:9px 14px;cursor:pointer}</style>")
-            cards = ""
-            for it in pend:
-                cards += (
-                    "<div class=apcard>"
-                    f"<div class=aphead>{html.escape(it['label'])}</div>"
-                    f"<pre class=rep>{html.escape(it['body'])}</pre><div class=aprow>"
-                    f"<form method=post action=/api/approve style='margin:0' "
-                    "onsubmit=\"return confirm('Approve — the unit will apply this and push the doctrine. Continue?')\">"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<button class=apok>&#9989; Approve — apply &amp; push</button></form>"
-                    "<form method=post action=/api/disapprove style='display:flex;gap:6px;margin:0;flex:1'>"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)' style='flex:1'>"
-                    "<button class=apno>Disapprove</button></form></div></div>")
-            inner = style + cards
-        return _wrap("Approvals — officer recommendations", inner)
-
-    @app.post("/api/approve")
-    def approve_api():
-        kind = (request.form.get("kind") or "").strip()
-        if kind and not _state.get("approving"):
-            def _bg():
-                _state["approving"] = kind
-                try:
-                    from . import approvals
-                    asyncio.run(approvals.approve(cfg, kind))
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"approve failed: {exc}"
-                finally:
-                    _state["approving"] = None
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/approvals")
-
-    @app.post("/api/disapprove")
-    def disapprove_api():
-        kind = (request.form.get("kind") or "").strip()
-        reason = (request.form.get("reason") or "").strip()
-        if kind:
-            from . import approvals
-            approvals.disapprove(cfg, kind, reason)
-        return redirect("/approvals")
-
     @app.post("/api/approve-proposals")
     def approve_proposals_api():
         """Approve a queued batch of unit-proposed tickets — file the checked subset to the board
@@ -1922,6 +1964,49 @@ def create_app(cfg: Config):
             for d in _items:
                 tid = html.escape(str(d.get("id") or ""))
                 dapp = html.escape(str(d.get("app") or ""))
+                _qfull = str(d.get("question") or d.get("why") or "")
+                # 2026-07-19 (Commander order / EU-337 format): a structured question renders as a
+                # BRIEF problem line + one-click option buttons (recommended highlighted); clicking
+                # an option ships that option text as the answer — same /api/answer path, so it
+                # lands as a Jira comment and the ticket re-runs (To Do). Unstructured questions
+                # keep the free-text box as before; it also stays as the "Other" fallback.
+                _po = None
+                try:
+                    from . import decisions as _dec
+                    _po = _dec.parse_options(_qfull)
+                except Exception:  # noqa: BLE001
+                    _po = None
+                if _po:
+                    head = html.escape(_po["summary"] or _qfull.splitlines()[0][:200])
+                    btns = ""
+                    for o in _po["options"]:
+                        _cls = "nbtn ok" if o["recommended"] else "nbtn x"
+                        _star = "&#9733; " if o["recommended"] else ""
+                        _lbl = html.escape(o["text"][:110])
+                        _val = html.escape(f"Option {o['n']}: {o['text']}")
+                        btns += (
+                            "<form method=post action=/api/answer style='margin:0'>"
+                            f"<input type=hidden name=ticket value='{tid}'>"
+                            f"<input type=hidden name=app value='{dapp}'>"
+                            f"<input type=hidden name=text value=\"{_val}\">"
+                            f"<button class='{_cls}' title='Ship this option — it lands as a Jira "
+                            f"comment and the ticket re-runs with it'>{_star}{o['n']}. {_lbl}</button></form>")
+                    out.append(
+                        "<div class=ncard>"
+                        f"<div class=q><span class='nbadge dec'>Decision</span>{head}</div>"
+                        f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
+                        f"<div class=nrow>{btns}</div>"
+                        "<form method=post action=/api/answer class=nrow>"
+                        f"<input type=hidden name=ticket value='{tid}'>"
+                        f"<input type=hidden name=app value='{dapp}'>"
+                        "<input type=text name=text placeholder='Other — type your own decision'>"
+                        "<button class='nbtn send'>Ship answer</button></form>"
+                        "<div class=nrow>"
+                        "<form method=post action=/needs/resolve style='margin:0'>"
+                        f"<input type=hidden name=ticket value='{tid}'>"
+                        "<button class='nbtn x'>Dismiss</button></form></div>"
+                        "</div>")
+                    continue
                 why = html.escape(str(d.get("why") or "(no question on file)"))
                 out.append(
                     "<div class=ncard>"
@@ -2015,24 +2100,6 @@ def create_app(cfg: Config):
                     "<button class='nbtn x'>Dismiss</button></form>"
                     "</div>"
                     "</div>")
-            out.append("</div>")
-
-        # ── Officer recommendations — own action form (also counted in rows) ──
-        if s.get("approvals"):
-            out.append(f"<div class=nsec><h3>&#9989; Officer recommendations · {len(s['approvals'])}</h3>")
-            for it in s["approvals"]:
-                out.append(
-                    f"<div class=ncard><div class=q>{html.escape(it['label'])}</div>"
-                    f"<pre class=rep style='max-height:220px;overflow:auto;margin:6px 0 0'>{html.escape(it['body'])}</pre>"
-                    "<div class=nrow>"
-                    "<form method=post action=/api/approve style='margin:0' "
-                    "onsubmit=\"return confirm('Approve — apply and push the doctrine. Continue?')\">"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<button class='nbtn ok'>&#9989; Approve</button></form>"
-                    "<form method=post action=/api/disapprove class=nrow style='flex:1;margin:0'>"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)'>"
-                    "<button class='nbtn no'>Disapprove</button></form></div></div>")
             out.append("</div>")
 
         if s.get("proposals"):
@@ -2780,6 +2847,14 @@ def create_app(cfg: Config):
                 'else cinner.insertBefore(newPending,cinner.firstChild);}'
                 'else if(oldPending)oldPending.remove();'
                 'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
+                # EU-318 — capture the fetched window's max seq BEFORE the append loop below moves
+                # those nodes OUT of frag. The old code scanned frag for `total` AFTER the move, so on
+                # any burst tick total undercounted by the burst size (thread 10-29, 6 new → fetch
+                # 16-35 → 30-35 moved out → frag max 29 → total 30, not 36), making the load-earlier
+                # offset too small and a click within ~5s prepend duplicate bubbles.
+                'var fetchedMax=-1;'
+                'frag.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'var s=parseInt(m.dataset.seq,10);if(s>fetchedMax)fetchedMax=s;});'
                 'if(newThread&&oldThread){'
                 'var maxSeq=-1;'
                 'oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
@@ -2794,11 +2869,9 @@ def create_app(cfg: Config):
                 # where total = max fetched data-seq + 1. Insert the control when it newly appears,
                 # remove it when the fetched fragment no longer has one, update its offset otherwise.
                 'var newLE=frag.querySelector(".load-earlier"),oldLE=cinner.querySelector(".load-earlier");'
-                'if(newLE){var minSeq=Infinity,total=0;'
+                'if(newLE){var minSeq=Infinity,total=fetchedMax+1;'
                 'if(oldThread)oldThread.querySelectorAll(".msg[data-seq]").forEach(function(m){'
                 'var s=parseInt(m.dataset.seq,10);if(s<minSeq)minSeq=s;});'
-                'frag.querySelectorAll(".msg[data-seq]").forEach(function(m){'
-                'var s=parseInt(m.dataset.seq,10);if(s+1>total)total=s+1;});'
                 'var off=(minSeq===Infinity)?parseInt(newLE.dataset.offset||"0",10):(total-minSeq);'
                 'if(oldLE){oldLE.dataset.offset=off;oldLE.dataset.limit=newLE.dataset.limit;}'
                 'else{newLE.dataset.offset=off;cinner.insertBefore(newLE,oldThread||null);}}'
@@ -2843,7 +2916,15 @@ def create_app(cfg: Config):
                 'try{var r=await fetch("/api/chat-thread?offset="+off,{cache:"no-store"});'
                 'var t=r.ok?await r.text():"";'
                 'if(t.trim()){var th=document.querySelector("#cinner .thread"),f=document.createElement("div");'
-                'f.innerHTML=t;while(f.lastChild){th.insertBefore(f.lastChild,th.firstChild);}'
+                'f.innerHTML=t;'
+                # EU-318 — dedup by data-seq before prepending. Belt-and-braces to the offset fix in
+                # refreshChat: the 5s poll can still land between this click's fetch and its insert,
+                # so drop any fetched bubble whose seq is already on screen rather than double-render.
+                'var have={};th.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'have[m.dataset.seq]=1;});'
+                'f.querySelectorAll(".msg[data-seq]").forEach(function(m){'
+                'if(have[m.dataset.seq])m.remove();});'
+                'while(f.lastChild){th.insertBefore(f.lastChild,th.firstChild);}'
                 'btn.dataset.offset=off+lim;btn.disabled=false;btn.textContent=prev;}'
                 'else{btn.remove();}}catch(e){btn.disabled=false;btn.textContent=prev;}}'
                 '</script>')
@@ -2889,12 +2970,21 @@ def create_app(cfg: Config):
                 'if(groupform)groupform.addEventListener("submit",async function(ev){'
                 'ev.preventDefault();'
                 'var text=groupinput.value;if(!text.trim())return;'
-                'var ok=false;'
-                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});ok=!!(r&&r.ok);}'
+                'var ok=false,busy=false;'
+                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});'
+                'ok=!!(r&&r.ok);busy=!!(r&&r.status===409);}'
                 'catch(e){ok=false;}'
-                'if(!ok){groupinput.classList.add("cerr");'
+                # EU-319: a 409 means the officers are mid-reply and the send was REFUSED, not that
+                # it failed — the text stays in the composer either way (that is the data-loss fix),
+                # but backpressure gets its own copy and no red `cerr` ring, because retrying in a
+                # few seconds is the correct move and nothing is broken.
+                'if(!ok){'
+                'if(busy){if(grouperr){grouperr.textContent="The unit is still replying — your message was NOT sent. Press Enter to try again in a moment.";'
+                'grouperr.classList.add("on");}}'
+                'else{groupinput.classList.add("cerr");'
                 'if(grouperr){grouperr.textContent="Message not sent — check your connection and press Enter to retry.";'
-                'grouperr.classList.add("on");}groupinput.focus();return;}'
+                'grouperr.classList.add("on");}}'
+                'groupinput.focus();return;}'
                 'groupinput.classList.remove("cerr");if(grouperr)grouperr.classList.remove("on");'
                 'groupinput.value="";'
                 'await refreshGroup(true);'
@@ -2912,22 +3002,37 @@ def create_app(cfg: Config):
     @app.post("/api/group")
     def group_api():
         from urllib.parse import quote
+
+        from flask import jsonify
         text = (request.form.get("text") or "").strip()
         officer = (request.form.get("officer") or "").strip() or None
-        if text and not _state.get("grouping"):
-            from . import council
-            council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
-            def _bg():
-                _state["grouping"] = True
-                try:
-                    asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
-                                                   audit=audit, echo=False))
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"group chat failed: {exc}"
-                finally:
-                    _state["grouping"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/group?officer=" + quote(officer) if officer else "/group")
+        _dest = "/group?officer=" + quote(officer) if officer else "/group"
+        if not text:
+            return redirect(_dest)
+        # EU-319 + EU-361: claim the room ATOMICALLY, in the request thread. Two problems used to
+        # live in one line (``if text and not _state.get("grouping")``):
+        #   * the flag was set inside _bg(), so two quick sends both passed the check (EU-361);
+        #   * a send that lost the check fell straight through to the 302 below, so the EU-307
+        #     Enter-to-send fetch followed the redirect, saw r.ok, cleared the composer — and the
+        #     Commander's typed message was GONE with the UI reporting success (EU-319: real data
+        #     loss on his own channel, found 2026-07-14 reviewing EU-307's landed code).
+        # A 409 is the honest answer: nothing was queued. The composer keeps the text and says so.
+        if not _claim_flag("grouping"):
+            return jsonify({"queued": False, "busy": True,
+                            "error": "the unit is still replying — nothing was sent"}), 409
+        from . import council
+        council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
+
+        def _bg():
+            try:
+                asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
+                                               audit=audit, echo=False))
+            except Exception as exc:  # noqa: BLE001
+                _state["last_msg"] = f"group chat failed: {exc}"
+            finally:
+                _state["grouping"] = False
+        threading.Thread(target=_bg, daemon=True).start()
+        return redirect(_dest)
 
     @app.get("/api/chat-thread")
     def chat_thread_api():
@@ -3110,8 +3215,18 @@ def create_app(cfg: Config):
                     try:
                         from . import autopilot as _ap
                         _ap.unblock(cfg, tid)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        # 2026-07-19 stabilization: this swallow let the banner claim "the unit
+                        # is re-running it" while the ticket stayed parked — the answer was
+                        # silently lost. Surface it so the Commander can act.
+                        _state["last_msg"] = (f"⚠ answer to {tid} was saved as a comment but the "
+                                              f"unblock FAILED ({exc}) — the ticket is still "
+                                              "parked; /unblock it by hand.")
+                        try:
+                            audit.record("clarify_unblock_failed", ticket_id=tid,
+                                         error=str(exc)[:200])
+                        except Exception:  # noqa: BLE001
+                            pass
                 else:
                     # handle_reply succeeded - ticket is being re-run, transition to To Do
                     try:
@@ -3169,7 +3284,9 @@ def create_app(cfg: Config):
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.
-        st = _claim_cockpit_run(app_name)
+        # EU-361: the stop_event is minted HERE, not in _bg — see _claim_cockpit_run's docstring.
+        ev = threading.Event()
+        st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
@@ -3197,16 +3314,28 @@ def create_app(cfg: Config):
             return redirect("/")
 
         def _bg():
+            # EU-361: ``ev`` comes from _claim_cockpit_run (request thread) — see the run_api twin.
             st["last_msg"] = ""
-            ev = threading.Event()
-            st["stop_event"] = ev
             errored = False
+            reports = []
+            # EU-361: report_api's run was the one cockpit-initiated run_loop with NO EU-175
+            # boundary — run_api / run_selected_api both bracket theirs. Without the pair, a bug
+            # reported through '/report' opened a session that forensics could never close, leaving
+            # an unpaired boundary and a phantom "Working" card (the same ghost-session class EU-175
+            # closed everywhere else).
+            if audit is not None:
+                audit.record("run_start", mode=("DRY-RUN" if rcfg.dry_run else "LIVE"),
+                             tickets=len(worklist or []))
             try:
-                asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
+                reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
                 st["last_msg"] = str(exc)
             finally:
+                # EU-361: run_end fires from the finally — same as its run_api twin — so a worker
+                # that dies on an exception still closes its own boundary.
+                if audit is not None:
+                    audit.record("run_end", tickets=len(reports or []))
                 release_run(app_name or None)   # clears active / run_started / stop_event for this app
                 st["dry_run"] = None            # clear the dry/live flag so the cockpit shows no stale tag
                 # EU-104: on a CLEAN terminal outcome, clear the transient 'Working / stopping…'
@@ -3237,7 +3366,9 @@ def create_app(cfg: Config):
 
 def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
     try:
-        app = create_app(cfg)
+        # EU-361: hand the app the port we are about to bind — the EU-254 Host guard validates
+        # against it, so `general serve --port N` must not leave the guard pinned to 8787.
+        app = create_app(cfg, port=port)
     except ImportError:
         raise SystemExit("Flask is required for the control panel. Run: pip install -r requirements.txt")
     # Stale-process forensics (2026-07-09): the resident serve process kept running PRE-EU-201 code

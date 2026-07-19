@@ -11,7 +11,6 @@ The asserted bugs (all from the ticket):
 * decisions — lockless read-modify-write in add()/resolve() loses or resurrects a decision;
 * usage    — torn ledger lines are dropped by _rows(), so today's burn UNDER-counts and the
              runaway-budget auto-pause (budget_status/over_budget) can fail to trip;
-* governor — torn rows corrupt the rolling-hour call count.
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-from orchestrator import decisions, governor, usage
+from orchestrator import decisions, usage
 from orchestrator.config import Config
 from orchestrator.contracts import Ticket
 
@@ -120,22 +119,10 @@ usage.configure  # leave module pointer as-is; later harnesses reconfigure their
 usage._PATH = None   # reset the module global so we don't leak this tmp path into other harnesses.
 
 # ---------------------------------------------------------------------------------------------------
-# (5) governor.note_call — concurrent bursts (the n>1 batched-append path included) keep every row, so
-#     calls_last_hour counts them all. A torn row would be silently skipped and under-count the hour.
-# ---------------------------------------------------------------------------------------------------
-tmp5 = Path(tempfile.mkdtemp())
-cfg5 = Config(apps=[], audit_path=str(tmp5 / "audit.jsonl"), usage_cap_per_hour=10_000)
-N_THREADS, BURST = 20, 5                          # 20 threads × a 5-call burst each = 100 calls
-_run([(lambda: governor.note_call(cfg5, BURST)) for _ in range(N_THREADS)])
-hour = governor.calls_last_hour(cfg5)
-chk("governor/note_call: concurrent bursts all counted (no torn/lost rows)",
-    hour == N_THREADS * BURST, f"{hour} != {N_THREADS * BURST}")
-
-# ---------------------------------------------------------------------------------------------------
 # (6) approvals — the 2026-07-05 audit §7.4 HIGH race, closed via locking.locked_rmw.
 #     proposals.json: N distinct enqueues from N threads racing approves/denies on other batches
-#     lose nothing, and no actioned batch reverts to pending. approvals.json: a concurrent write
-#     to a second dict key + disapprove('adjutant') keeps BOTH keys' records.
+#     lose nothing, and no actioned batch reverts to pending. (The approvals.json KINDS state and
+#     its two-key interleave test left with the single-report flow, 2026-07-19 stabilization.)
 # ---------------------------------------------------------------------------------------------------
 from orchestrator import approvals, filing
 
@@ -173,30 +160,6 @@ chk("approvals/approve+deny+enqueue race: no actioned batch reverts, none lost",
     and len(approvals.pending_proposals(cfg6)) == (N_BATCH - 16) + 4,
     f"statuses={[by_id.get(b, {}).get('status') for b in approve_ids + deny_ids]}, "
     f"pending={len(approvals.pending_proposals(cfg6))}")
-
-# approvals.json: concurrent writes to two DIFFERENT dict keys never clobber each other.
-# disapprove() is sync; drive the state write the same way approve() does, via its marker path.
-# EU-325 removed the "adjutant" KINDS entry (adjutant.py is gone; KINDS is empty until an officer
-# opts back in), but the underlying lock is keyed on arbitrary dict keys — a synthetic KINDS entry
-# + second key still proves the same contract: locked_rmw must not lose one writer's key to the
-# other's read-modify-write.
-approvals.KINDS = {"test_kind": ("Test Officer — test action", "test_kind-report.md", None)}
-(Path(cfg6.audit_path).with_name("test_kind-report.md")).write_text("test body", encoding="utf-8")
-
-
-def _approve_other_kind():
-    # Simulates a second concurrent state-writer (not a real approval kind) hitting the SAME
-    # approvals.json file at the same time as disapprove(test_kind) below — pinned directly at
-    # the RMW, exactly as approve() calls it, so the state-write interleaving is what's under test.
-    approvals._mutate_state(
-        cfg6, lambda st: {**st, "_other": {"hash": "h1", "action": "approved", "ts": 1.0}})
-
-
-_run([_approve_other_kind, (lambda: approvals.disapprove(cfg6, "test_kind", "not now"))] * 3)
-st6 = approvals._load(cfg6)
-chk("approvals/state: concurrent writes to two different keys keep BOTH",
-    st6.get("_other", {}).get("action") == "approved"
-    and st6.get("test_kind", {}).get("action") == "disapproved", str(st6))
 
 # Regression tripwire: the writers must stay on locking.locked_rmw (a quiet revert to bare
 # write_text reintroduces the lost-update race even if the assertions above get lucky).

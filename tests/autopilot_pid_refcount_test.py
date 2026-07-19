@@ -62,6 +62,13 @@ def chk(n, c, d=""):
 
 _PID = str(os.getpid())
 
+# EU-368 turned the PID file from a bare int into a {"pid", "start"} identity record (a recycled pid
+# made a dead daemon read as alive). These pins are about WHOSE pid the file records, not how it's
+# spelled, so they read the pid back through the record parser instead of string-matching the bytes.
+def _recorded_pid():
+    rec = autopilot._read_pid_record()
+    return str(rec[0]) if rec else None
+
 
 # =============================================================================
 # (1) UNIT — holder refcount semantics on _write_pid()/_remove_pid()
@@ -70,7 +77,7 @@ _PID = str(os.getpid())
 # Two holders: the first remove must keep the file (THE regression pin), the last removes it.
 autopilot._write_pid()
 chk("unit: first _write_pid() creates the file", autopilot._PID_FILE.exists())
-chk("unit: file records THIS pid", autopilot._PID_FILE.read_text().strip() == _PID,
+chk("unit: file records THIS pid", _recorded_pid() == _PID,
     autopilot._PID_FILE.read_text() if autopilot._PID_FILE.exists() else "<missing>")
 autopilot._write_pid()      # sibling drain in the same process registers a second hold
 autopilot._remove_pid()     # first drain exits
@@ -144,7 +151,7 @@ chk("integration: A's exit did NOT delete the PID file while B still runs  ← t
     "file vanished — first-to-exit deleted the shared PID file")
 chk("integration: daemon_running() still True while B runs", autopilot.daemon_running())
 chk("integration: file still records THIS process",
-    autopilot._PID_FILE.exists() and autopilot._PID_FILE.read_text().strip() == _PID)
+    autopilot._PID_FILE.exists() and _recorded_pid() == _PID)
 
 evB.set()                    # now stop the LAST drain
 tB.join(timeout=15)

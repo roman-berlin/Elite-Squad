@@ -24,9 +24,10 @@ Two entry points, wired into ``autopilot.py``:
   * ``connectivity_probe(cfg)``  — True once the outage that triggered an offline-hold has cleared
                                     (Jira base URL reachable AND `git ls-remote` succeeds), used to
                                     auto-resume the loop with no human ``/unblock``.
-  * ``missing_toolchain(app)``   — binaries an app's gate/worktree-setup commands need that are NOT
-                                    resolvable under the daemon's real environment, used to HOLD the
-                                    whole app (one alert) instead of parking its tickets one by one.
+  * ``missing_toolchain(app, cfg=None)`` — binaries an app's gate/worktree-setup commands need that
+                                    are NOT resolvable under the gate's own effective environment
+                                    (``gate._subprocess_env(app)``, EU-322), used to HOLD the whole
+                                    app (one alert) instead of parking its tickets one by one.
 """
 from __future__ import annotations
 
@@ -41,7 +42,18 @@ from pathlib import Path
 # offline-hold path would blind-retry an oversized ticket forever at the same turn budget.
 from .loop import _TURN_LIMIT_MARKERS
 
-_5XX_RE = re.compile(r"\b5\d\d\b")
+# EU-322: a 5xx number only counts with HTTP context. The old bare r"\b5\d\d\b" matched ANY
+# standalone 500-599 integer in the raw exception text loop.py puts in TicketReport.notes —
+# live repro: "AssertionError: expected 500 items, got 499" and a traceback's 'line 512, in _run'
+# both tagged "5xx", so a deterministic ticket failure accrued no error strike (blind-retried
+# every cycle, never parked) AND armed a spurious GLOBAL offline-hold. Now the number must sit
+# next to an HTTP status word (before it) or a 5xx reason phrase (after it); bare reason phrases
+# with no number live in _INFRA_MARKERS below. Input is lowercased by classify().
+_5XX_RE = re.compile(
+    r"\b(?:https?|httperror|status(?:[ _-]?code)?|response(?:[ _-]?code)?)\b\W{0,8}5\d\d\b"
+    r"|\b5\d\d\b\W{0,4}(?:server error|bad gateway|service unavailable|internal server error|"
+    r"gateway time-?out|http version not supported)"
+)
 
 # Substring markers -> infra tag. Order matters: checked top to bottom, first match wins.
 _INFRA_MARKERS: tuple[tuple[str, str], ...] = (
@@ -60,6 +72,11 @@ _INFRA_MARKERS: tuple[tuple[str, str], ...] = (
     ("timed out", "timeout"),
     ("timeout", "timeout"),
     ("read timed out", "timeout"),
+    # EU-322: unambiguous HTTP 5xx reason phrases — these need no adjacent status number, so they
+    # stay simple markers now that a bare 500-599 integer alone no longer classifies (_5XX_RE).
+    ("bad gateway", "5xx"),
+    ("service unavailable", "5xx"),
+    ("internal server error", "5xx"),
 )
 
 
@@ -143,8 +160,9 @@ def connectivity_probe(cfg, *, timeout: float = 5.0) -> bool:
 
 # --------------------------------------------------------------------------------------------- #
 # missing_toolchain — shutil.which every binary an app's gate/worktree-setup commands need under
-# the daemon's REAL environment, so a missing one HOLDS the whole app (one alert) instead of
-# burning every one of its tickets an error strike (the bun-ENOENT signature, c2f5f17).
+# the env the gate itself will run with (gate._subprocess_env(app) — the daemon environ minus
+# secrets, plus app.gate_env overlays; EU-322), so a missing one HOLDS the whole app (one alert)
+# instead of burning every one of its tickets an error strike (the bun-ENOENT signature, c2f5f17).
 # --------------------------------------------------------------------------------------------- #
 
 _SHELL_KEYWORDS = {"cd", "export", "source", "set", "pushd", "popd", "echo", "&&", "true", "false"}
@@ -169,23 +187,33 @@ def _command_binaries(cmd: str) -> list[str]:
     return bins
 
 
-def _binary_available(binary: str, repo_path: str | None) -> bool:
+def _binary_available(binary: str, repo_path: str | None, env: dict[str, str] | None = None) -> bool:
     if "/" in binary:
         base = Path(repo_path).expanduser() if repo_path else Path(".")
         p = (base / binary).expanduser()
         return p.is_file() and os.access(p, os.X_OK)
-    return shutil.which(binary) is not None
+    # EU-322: resolve against the effective gate PATH — shutil.which(path=None) reads the raw
+    # os.environ PATH, which is NOT what the gate subprocess gets when app.gate_env extends it.
+    return shutil.which(binary, path=(env or os.environ).get("PATH")) is not None
 
 
-def missing_toolchain(app) -> list[str]:
+def missing_toolchain(app, cfg=None) -> list[str]:
     """Sorted, de-duped binaries `app`'s gate_commands / gate_commands_by_app / lint_commands /
-    worktree_setup_cmd need that are NOT resolvable under the daemon's real environment. Empty when
-    the toolchain is intact — the common case, so this is cheap to call every cycle."""
+    worktree_setup_cmd need that are NOT resolvable under the env the gate itself runs with
+    (``gate._subprocess_env(app)`` — EU-322: an app whose toolchain resolves only via
+    ``gate_env['PATH']`` must not be spuriously held, which dropped ALL its tickets). `cfg`
+    optionally supplies the unit-wide ``Config.worktree_setup_cmd`` fallback with EXACTLY
+    ``loop._worktree_setup_command``'s precedence (a per-app value — even "" — overrides it).
+    Empty when the toolchain is intact — the common case, so this is cheap to call every cycle."""
     cmds: list[str] = list(getattr(app, "gate_commands", None) or [])
     cmds += list(getattr(app, "lint_commands", None) or [])
     for extra in (getattr(app, "gate_commands_by_app", None) or {}).values():
         cmds += list(extra or [])
-    wsc = getattr(app, "worktree_setup_cmd", None)
+    # EU-322: mirror loop._worktree_setup_command (loop.py:427) — previously only the per-app
+    # worktree_setup_cmd was probed, so a binary needed only by the unit-wide default was never
+    # checked at all (a false negative: the hold stayed blind to it).
+    app_wsc = getattr(app, "worktree_setup_cmd", None)
+    wsc = app_wsc if app_wsc is not None else getattr(cfg, "worktree_setup_cmd", None)
     if wsc:
         cmds.append(wsc)
 
@@ -193,5 +221,15 @@ def missing_toolchain(app) -> list[str]:
     for cmd in cmds:
         needed.update(_command_binaries(cmd))
 
+    # EU-322: probe under the SAME env the gate subprocess will actually get. Best-effort — a
+    # malformed app must never crash the drain cycle, so fall back to the daemon environ (exactly
+    # the pre-EU-322 behaviour). Deferred import: mirrors the local `import requests` style above
+    # and keeps this module's import surface (loop) unchanged.
+    try:
+        from . import gate as _gate
+        env = _gate._subprocess_env(app)
+    except Exception:  # noqa: BLE001 - fall back to the raw daemon environ
+        env = dict(os.environ)
+
     repo_path = getattr(app, "repo_path", None)
-    return sorted(b for b in needed if not _binary_available(b, repo_path))
+    return sorted(b for b in needed if not _binary_available(b, repo_path, env))

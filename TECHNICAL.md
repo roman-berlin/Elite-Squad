@@ -32,8 +32,8 @@ This document describes how it works today and what's planned.
 | General | The orchestrator (`orchestrator/`) | Owns git, the Definition of Done, iteration/cost bounds, every Jira transition, the keep-green merge, notifications, logging |
 | Builder (officer) | Claude Code via the Agent SDK, full tools | Locates code, implements the smallest correct change, runs scoped checks |
 | Reviewer (officer) | A second Claude, **read-only** | Judges the diff on spec conformance + quality; returns the next order on failure |
-| Role sub-agents *(planned)* | QA / Frontend / Backend / DevOps / Security / Database / Docs | The Builder delegates sub-tasks to the matching specialist; logged per task |
-| QA officer *(planned)* | Claude Code + headless browser (Playwright) | Runs smoke/e2e/visual checks on `dev`, feeds failures back |
+| Recon squads | Read-only sub-agents fielded by the patrol officers (`delegation_enabled`) | Parallelize the QA/security/deploy sweeps; findings file as tickets. (Build-time role sub-agents were built, then retired in the Phase-2 §2 collapse — the Builder builds solo.) |
+| QA officer (Scout) | Claude Code recon on `dev` | Hunts runtime/UX/a11y regressions and files findings as tickets |
 
 The Builder↔Reviewer exchange already behaves like two colleagues: the Reviewer's
 required changes become the Builder's next prompt.
@@ -218,8 +218,9 @@ Cost figures are hidden on Max (they are API-rate estimates, not charges).
 - **Clean-tree guarantee** — refuses to start dirty; resets between tickets.
 - **Secrets** come from the environment only, never config or code.
 - **Audit trail** for replay and review.
-- *Planned:* a dedicated security-review role sub-agent and dependency/secret scanning in
-  the gate.
+- Dependency/secret scanning runs **inside the deterministic gate** (shipped). A dedicated
+  LLM security-review role was built, then retired in Phase-2 §2 — the gate scan +
+  the weekly `provost` security recon replaced it.
 
 ---
 
@@ -298,14 +299,15 @@ Global flags: `--config`, `--live` (disable dry-run), `--max-tickets`, `--max-it
 
 ## 19. Roadmap
 
-1. **Role sub-agents** — QA / Frontend / Backend / DevOps / Security / Database / Docs as
-   Claude Code sub-agents. The commander engages the relevant specialists per task
-   (driven by each role's description), and the dashboard logs which roles were used.
+1. **Role sub-agents** — shipped, then retired: build-time specialist delegation was
+   deleted in the Phase-2 §2 collapse (the Builder builds solo); read-only recon squads
+   remain under `delegation_enabled`.
 2. **Hybrid QA officer** — Claude Code + Playwright running smoke/e2e/visual checks on
    `dev` inside the loop, feeding failures back to the Builder; your final check before
    `main` remains.
 3. **Control-panel polish** — live auto-refresh and per-stage timings.
-4. **Security hardening** — security-review role + dependency/secret scanning in the gate.
+4. **Security hardening** — shipped: dependency/secret scanning runs in the deterministic
+   gate; the separate LLM security-review role was retired with it (Phase-2 §2).
 
 ---
 

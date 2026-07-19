@@ -67,6 +67,11 @@ _TIMEOUT_SENTINEL = "__probe_timeout__"
 
 _cache: dict = {"at": 0.0, "result": None}
 _cache_lock = threading.Lock()
+# EU-366: single-flight the expensive `claude -p` probe. `_cache_lock` only guards the tiny
+# read/write of the cache dict — it is deliberately released around the up-to-30s subprocess, so a
+# burst of health callers at TTL expiry each used to launch their OWN probe (a stampede). This lock
+# serializes the actual probe so exactly one runs; the others wait and read its fresh result.
+_probe_lock = threading.Lock()
 
 
 def is_login_failure(text: str | None) -> bool:
@@ -153,13 +158,23 @@ def probe(*, force: bool = False, max_age_s: float | None = None,
         cached = _cache["result"]
         if not force and cached is not None and (now - _cache["at"]) < ttl:
             return dict(cached)
-    rc, out = _run_probe(timeout=timeout)
-    state, detail = _classify(rc, out)
-    result = {"state": state, "detail": detail, "checked_at": now}
-    with _cache_lock:
-        _cache["at"] = now
-        _cache["result"] = dict(result)
-    return result
+    # EU-366 single-flight: serialize the subprocess so a burst of callers runs ONE probe. After
+    # acquiring, re-check the cache — a probe that completed while we waited means we return its
+    # fresh result instead of launching a redundant one (skipped when force=True: force demands a
+    # genuinely fresh probe).
+    with _probe_lock:
+        with _cache_lock:
+            cached = _cache["result"]
+            if not force and cached is not None and (time.time() - _cache["at"]) < ttl:
+                return dict(cached)
+        rc, out = _run_probe(timeout=timeout)
+        state, detail = _classify(rc, out)
+        checked_at = time.time()
+        result = {"state": state, "detail": detail, "checked_at": checked_at}
+        with _cache_lock:
+            _cache["at"] = checked_at
+            _cache["result"] = dict(result)
+        return result
 
 
 def invalidate() -> None:

@@ -1,6 +1,10 @@
 # The General — Technical Design
 
-**Status:** working system (single-app and multi-app), under active extension.
+**Status:** HISTORICAL design document (2025-era). Kept for the record like the dated
+`Documentation/UNIT_REVIEW` files — the officer table and "PLANNED" markers below describe
+the design as first conceived, not today's system. For current reality see `ARCHITECTURE.md`,
+`ORG.md`, and `Documentation/SYSTEM_OVERVIEW.md` (e.g. Scout/Provost/Quartermaster shipped
+long ago; the Drillmaster and build-time specialist corps were built and later retired).
 **Owner:** Roman Berlin. **Runs on:** Roman's Mac (Claude Code + Max plan).
 **Purpose:** an autonomous software-development unit that implements tickets and
 bug-fixes across Roman's SaaS apps, lands passing work on each app's `DEV` branch,

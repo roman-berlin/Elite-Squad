@@ -340,7 +340,8 @@ async def discuss(cfg: Config, officers, digest: str, notes: str,
     return transcript
 
 
-async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str:
+async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
+                       broadcast: bool | None = None) -> str:
     """Run the muster as a multi-round debate; the CTO chairs. Returns the briefing,
     saves the full transcript, and sends the briefing to Telegram."""
     sig = collect_signals(cfg)
@@ -382,8 +383,6 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         max_turns=6, effort="high"), tag="the-general")
     chair_provider, chair_model = chair.provider, chair.model_version
     briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
-    from . import governor
-    governor.note_call(cfg, len(said) + 1)
 
     # Route any ticket-worthy items the briefing proposed into the Commander's approval queue
     # (or, with meeting_autospawn, file them) — the block is stripped from the briefing shown.
@@ -395,15 +394,23 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
 
+    # EU-303: single-sender election (same as daily_brief) — only the elected host broadcasts the
+    # weekly council, so a second scheduler/host can't double-send. Interactive callers force it.
+    if broadcast is None:
+        from . import decisions as _dec
+        broadcast = _dec.should_poll_telegram(cfg)[0]
+
     # Report up to the Commander.
     header = "🎖️ *Daily Council*" if not topic else f"🎖️ *Muster — {topic}*"
-    notify.send(f"{header}\n\n{await notify.report_brief(cfg, briefing)}")
-    if questions:
-        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
-                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
+    if broadcast:
+        notify.send(f"{header}\n\n{await notify.report_brief(cfg, briefing)}")
+        if questions:
+            notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                        + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     if audit is not None:
         audit.record("council", topic=topic or "daily", provider=chair_provider, model=chair_model,
-                     officers=[r for r, _, _ in COUNCIL], questions=len(questions), transcript=saved.name)
+                     officers=[r for r, _, _ in COUNCIL], questions=len(questions),
+                     broadcast=bool(broadcast), transcript=saved.name)
     # The Technical Writer folds this council's lessons into Unit Memory (best-effort — never break the muster).
     try:
         print(f"  {await memory.scribe(cfg)}", flush=True)
@@ -415,6 +422,13 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None) -> str
         await roster.refresh(cfg, audit)
     except Exception as exc:  # noqa: BLE001
         print(f"  Roster refresh skipped: {exc}", flush=True)
+    # EU-378: re-derive the STATE OF DEV brief alongside the roster (same no-LLM, code-derived
+    # contract) so every officer's preamble reflects today's code, not last week's councils.
+    try:
+        from . import devstate
+        devstate.refresh(cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Dev-state refresh skipped: {exc}", flush=True)
     print(f"\n  council saved → {saved}\n", flush=True)
     return briefing
 
@@ -456,8 +470,9 @@ def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None, *,
 async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,
                        audit=None) -> str:
     """An ad-hoc meeting: the relevant officers debate ONE topic, the CTO decides, and the
-    outcome is logged to Unit Memory + Telegram. `officers` is a list of names/keys (None = all);
-    any officer can request one by ending a council turn with a 'MEETING:' line."""
+    outcome is logged to Unit Memory + Telegram. `officers` is a list of names/keys (None = all).
+    Convened on demand (cockpit / CLI / Telegram) — the officer-raised 'MEETING:' request
+    pipeline was deleted in Phase-2 §2 (see the marker above)."""
     sig = collect_signals(cfg)
     digest = format_signals(sig)
     notes = recent_commander_notes(cfg)
@@ -661,8 +676,6 @@ async def _needs_context(cfg: Config) -> str:
                 ids = ", ".join(d.get("id", "?") for d in s["decisions"])
                 parts.append(f"{len(s['decisions'])} open decision(s) awaiting your answer"
                              f" (ticket(s): {ids})")
-            if s["approvals"]:
-                parts.append(f"{len(s['approvals'])} approval(s) pending")
             if s["proposals"]:
                 parts.append(f"{len(s['proposals'])} proposal batch(es) to approve/deny")
             if s["tasks"]:
@@ -1171,7 +1184,7 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
             f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
 
 
-async def daily_brief(cfg: Config, audit=None) -> str:
+async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None) -> str:
     """The LIGHT daily stand-up (best-practice: fast daily, deep weekly).
 
     A deterministic digest — what shipped, what needs the Commander, what awaits a decision
@@ -1179,7 +1192,7 @@ async def daily_brief(cfg: Config, audit=None) -> str:
     bar, the single decision that is genuinely the Commander's. That is ~1 model call, versus the ~8
     of the deep multi-officer council (hold_council), which is now a WEEKLY ceremony. Sends one
     skimmable phone ping; surfaces any Commander decision as a separate 'needs your call'."""
-    from . import dashboard, governor
+    from . import dashboard
     facts = dashboard.standup(cfg)                     # deterministic — yesterday shipped, needs you, awaiting
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
@@ -1200,33 +1213,39 @@ async def daily_brief(cfg: Config, audit=None) -> str:
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
     synth = (run.final or run.text or "").strip()
-    governor.note_call(cfg, 1)
     questions = _commander_questions(synth)
 
+    # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine
+    # holds the cron prevented duplicates, so a second cron/timer/host (or install-server-cron run
+    # twice) each broadcast its own copy. Elect ONE sender (the same host that owns the Telegram
+    # poller, EU-185), unless an interactive caller (cockpit/Telegram /daily) forces broadcast=True.
+    if broadcast is None:
+        from . import decisions as _dec
+        broadcast = _dec.should_poll_telegram(cfg)[0]
+
     # One skimmable phone ping: the deterministic facts + the CTO's focus/decision.
-    notify.send(f"{facts}\n\n{synth}")
-    if questions:
-        notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
-                    + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
+    if broadcast:
+        notify.send(f"{facts}\n\n{synth}")
+        if questions:
+            notify.send("❓ *The unit needs your call:*\n" + "\n".join(f"• {q}" for q in questions)
+                        + "\n\nReply here — I'll act on it, and open a ticket if it's work.")
     try:
         _save_transcript(cfg, "daily", facts, [("CTO", synth)], synth)
     except OSError:
         pass
     if audit is not None:
-        audit.record("daily_brief", questions=len(questions),
+        audit.record("daily_brief", questions=len(questions), broadcast=bool(broadcast),
                      provider=run.provider, model=run.model_version)
     return synth
 
 
 async def hold_standup(cfg: Config, audit=None) -> str:
     """On-demand stand-up (the daily one now runs inside the muster). Saves last-standup.md + notifies."""
-    from . import governor
     digest, rows, handoffs = await _gather_standup(cfg)
     text = _standup_text(rows, handoffs)
     _standup_file(cfg).write_text(text, encoding="utf-8")
     _save_transcript(cfg, "stand-up", digest, rows, "Daily stand-up — see the round-table below.")
     notify.send(_standup_telegram(rows, handoffs))
-    governor.note_call(cfg, len(rows))
     if audit is not None:
         audit.record("standup", officers=[r for r, _ in rows], handoffs=len(handoffs))
     return text

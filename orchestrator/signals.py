@@ -1,9 +1,9 @@
 """Pure, no-LLM track-record aggregation — collect_signals()/format_signals().
 
 Moved verbatim out of drillmaster.py (EU-323): both functions are load-bearing for
-council/roster/adjutant and must survive independently of the LLM drill/apply code that
-remains in drillmaster.py, so drillmaster.py can eventually be deleted without bricking
-every officer that needs the unit's track record.
+council/roster and had to survive the LLM drill/apply code — drillmaster.py was then
+deleted in EU-327 (2026-07-17) without bricking any officer that needs the unit's
+track record.
 """
 from __future__ import annotations
 

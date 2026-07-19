@@ -43,16 +43,20 @@ chk("POST /api/ship-main returns 404 (endpoint removed)", r1.status_code == 404,
 r2 = client.post("/api/ship-main", data={"app": "*"})
 chk("POST /api/ship-main with app='*' returns 404", r2.status_code == 404, f"got {r2.status_code}")
 
-# --- ship-review still works (Release Manager workflow) ---
+# --- the ship-review flow still works through the merged /api/qa (2026-07-19) ---
 reviewed, rdone = [], threading.Event()
 async def fake_ship_review(rcfg, app_name, audit=None):
     reviewed.append(app_name); rdone.set()
 council.ship_review = fake_ship_review
-srv._state["shipreview"] = False
-client.post("/api/ship-review", data={"app": "*"})
+from orchestrator import patrol as _patrol_mod
+async def _fake_patrol(c, app_name, do_file=True, audit=None):
+    return "ok"
+_patrol_mod.patrol = _fake_patrol
+srv._state["qa"] = False
+client.post("/api/qa", data={"app": "*"})
 rdone.wait(3)
-chk("ship-review still resolves '*' to a concrete product", reviewed and reviewed[0] in {"automatixy", "Elite-Unit"}, str(reviewed))
-chk("ship-review never passes the '*' sentinel through", "*" not in reviewed)
+chk("QA still resolves '*' to a concrete product", reviewed and reviewed[0] in {"automatixy", "Elite-Unit"}, str(reviewed))
+chk("QA never passes the '*' sentinel through", "*" not in reviewed)
 
 print("\n============ EU-204 SHIP-ENDPOINT-REMOVAL QA ============")
 passed = sum(1 for _, ok, _ in results if ok)

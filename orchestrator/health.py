@@ -83,6 +83,37 @@ def _git_show(repo_path: str, ref_path: str) -> str | None:
         return None
 
 
+def stale_checkout_check(cfg, app) -> tuple[str, str] | None:
+    """EU-335: warn when the unit's OWN checkout (the code the cockpit is running) is behind its
+    remote base branch — the "runs stale code" condition behind the 2026-07-15 "0 shipped yesterday"
+    daily brief (a dirty tree blocked autopull's fast-forward, so the resident process ran ~40-commit-
+    stale code while lands piled up on origin/dev).
+
+    Fetch-free and cheap: compares the local base-branch tip to the ALREADY-fetched
+    ``origin/<base>`` ref via ``rev-list --count`` (the autopull/self-update fetch keeps origin fresh),
+    so it's safe to run on every health poll. Only meaningful for the unit's own repo — an app whose
+    checkout is the orchestrator repo root; returns None for product apps and when git can't answer.
+
+    Returns ``(status, detail)`` — 'warn' when N commits behind (visible, non-blocking; the fix is a
+    pull + restart, not a work stop), 'ok' when up to date, None when not applicable / can't tell."""
+    from . import sync as _sync
+    try:
+        root = _sync._repo_root(cfg)
+        if Path(app.repo_path).resolve() != root:
+            return None  # only the unit's own code can run "stale" against origin; skip product apps
+        branch = app.base_branch
+        r = _sync._git(root, "rev-list", "--count", f"{branch}..origin/{branch}")
+        if r.returncode != 0:
+            return None  # no origin ref fetched yet, detached HEAD, etc. — can't tell
+        n = int((r.stdout or "0").strip() or "0")
+        if n > 0:
+            return ("warn", f"local {branch} is {n} commit(s) behind origin/{branch} — this cockpit is "
+                            f"running STALE code; pull {branch} and restart the daemon")
+        return ("ok", f"{branch} up to date with origin/{branch}")
+    except Exception:  # noqa: BLE001 - a freshness probe must never take health down
+        return None
+
+
 def worktree_drift_check(cfg, app) -> tuple[str, str] | None:
     """EU-18 doctor assertion: surface whether the (possibly reused) worktree's bun.lock differs from
     DEV's pin. This is INFORMATIONAL, never blocking: ``loop._repin_worktree_deps`` hard-restores
@@ -195,6 +226,12 @@ def checks(cfg) -> list[dict[str, str]]:
             drift = worktree_drift_check(cfg, app)
             if drift:
                 add(f"{tag} · dep pin", drift[0], drift[1])
+        # EU-335: surface a stale unit checkout (the cockpit running behind origin/dev) as a visible
+        # warning — the signal that would have caught the "0 shipped yesterday" incident. Only the
+        # unit's own repo returns non-None here (product apps skip it).
+        stale = stale_checkout_check(cfg, app)
+        if stale:
+            add(f"{tag} · checkout freshness", stale[0], stale[1])
         if app.backlog_backend == "jira":
             add(f"{tag} · Jira creds", "ok" if jira_have else "bad",
                 "set" if jira_have else "JIRA_EMAIL / JIRA_API_TOKEN missing")

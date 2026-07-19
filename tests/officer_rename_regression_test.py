@@ -14,13 +14,14 @@ This harness guards two things that a unit-level map test (officer_names_test.py
      key via OFFICER_NAMES; the new names must resolve, and stable keys must be preserved.
 """
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, ".")
 
 # This harness is a pure source-scan + string round-trip — it never runs an agent. Stub the Agent SDK
-# (as every other test does) so importing an officer module like drillmaster works WITHOUT the SDK
+# (as every other test does) so importing an officer module works WITHOUT the SDK
 # installed; otherwise the suite is red in any environment that lacks it (CI, a fresh checkout).
 import types as _types
 _sdk = _types.ModuleType("claude_agent_sdk")
@@ -73,13 +74,37 @@ BARE_PERSONA_PATTERN = re.compile(
 )
 
 
+def _tracked_orchestrator_py() -> list[Path]:
+    """Git-tracked orchestrator/**/*.py files ONLY (EU-218). run_all.py runs every tests/*_test.py as a
+    separate subprocess sharing this repo checkout; a harness that drops a stray file under
+    orchestrator/ (e.g. a temp fixture) used to false-red this scan on content this harness never
+    wrote. Enumerating via `git ls-files` restricts the scan to files actually committed to the repo,
+    so an untracked artifact can never be seen. Falls back to rglob (the old behaviour) if git is
+    unavailable, so the harness still runs (degraded) outside a git checkout.
+
+    The pathspec is ``:(glob)orchestrator/**/*.py`` (EU-218 iteration-2 reviewer ask): with git's
+    ``:(glob)`` magic, ``**/`` matches zero-or-more directory levels, so this covers BOTH the top-level
+    modules (orchestrator/council.py, …) AND nested ones (orchestrator/backlog/*.py). Note the two
+    footguns this deliberately avoids — a bare ``orchestrator/**/*.py`` WITHOUT ``:(glob)`` matches ONLY
+    the nested files (dropping every top-level module), while ``:(glob)orchestrator/*.py`` is
+    non-recursive and drops the nested ones. The nested/top-level coverage self-checks below pin both."""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--", ":(glob)orchestrator/**/*.py"], cwd=str(ROOT),
+            capture_output=True, text=True, check=True, timeout=15,
+        ).stdout
+        return sorted(ROOT / line for line in out.splitlines() if line)
+    except (subprocess.SubprocessError, OSError):
+        return sorted((ROOT / "orchestrator").rglob("*.py"))
+
+
 def scan_codebase() -> list[tuple[str, int, str]]:
     """Scan each orchestrator module as ONE string (not line-by-line) so a retired name that wraps
     across a line break is still found; report an approximate line number from the match offset."""
     leaks: list[tuple[str, int, str]] = []
-    for path in sorted((ROOT / "orchestrator").rglob("*.py")):
+    for path in _tracked_orchestrator_py():
         rel = path.relative_to(ROOT).as_posix()
-        if rel in ALLOWLIST:
+        if rel in ALLOWLIST or not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
         for pat in (OLD_NAME_PATTERN, BARE_PERSONA_PATTERN):   # full retired names + bare-persona words
@@ -96,6 +121,24 @@ check(
     leaks == [],
     f"{len(leaks)} leak(s): " + "; ".join(f"{f}:{n} {t[:50]}" for f, n, t in leaks[:6]),
 )
+
+# EU-218 (iteration-2 reviewer ask) — RECURSIVE-COVERAGE regression: the tracked-file enumeration must
+# reach modules in NESTED orchestrator/ subdirectories (e.g. orchestrator/backlog/*.py), not only the
+# top-level ones, or a retired name could leak back in below the top level entirely unseen. We assert on
+# BOTH levels of the REAL committed tree so neither regression direction can slip through silently:
+#   • a non-recursive pathspec (":(glob)orchestrator/*.py") would drop every NESTED module → nested check red;
+#   • a bare "orchestrator/**/*.py" WITHOUT :(glob) magic matches ONLY nested files, dropping every
+#     TOP-LEVEL module (council.py, recon.py, …) → top-level check red.
+# path depth is counted by '/'  →  orchestrator/<file>.py == 1, orchestrator/<subdir>/<file>.py >= 2.
+_tracked_rel = {p.relative_to(ROOT).as_posix() for p in _tracked_orchestrator_py()}
+_nested_seen = sorted(r for r in _tracked_rel if r.count("/") >= 2)
+_toplevel_seen = sorted(r for r in _tracked_rel if r.count("/") == 1)
+check("leak scan reaches NESTED orchestrator/ subdirs (e.g. orchestrator/backlog/*.py) — EU-218",
+      len(_nested_seen) >= 1,
+      f"no nested orchestrator module in scan set (tracked={len(_tracked_rel)}) — pathspec not recursive")
+check("leak scan still covers TOP-LEVEL orchestrator/*.py modules (no ** regression) — EU-218",
+      len(_toplevel_seen) >= 1,
+      f"no top-level orchestrator module in scan set (tracked={len(_tracked_rel)}) — ** dropped top level")
 
 # Guard the scanner itself: it MUST be able to see a planted old name, else "0 leaks" is a lie.
 _planted = "A line mentioning the Quartermaster and the Provost Marshal."
@@ -198,9 +241,9 @@ for uikey, gname in warroom._GROUP_NAME.items():
 PROMPT_RENAME = [
     ("orchestrator/council.py",     ["soldiers do not speak", "needs a new soldier", "command soldiers"], "engineers do not speak"),
     ("orchestrator/recon.py",       ["YOU ARE A SOLDIER", "SOLDIER FINDINGS", "Your soldiers"], "YOU ARE AN ENGINEER"),
-    ("orchestrator/drillmaster.py", ["officer or soldier"],                         "officer or engineer"),
-    # orchestrator/adjutant.py was deleted in EU-325 — its "own SOLDIERS"/"own ENGINEERS" rename
-    # pin went with it.
+    # orchestrator/adjutant.py was deleted in EU-325 and orchestrator/drillmaster.py in EU-327 —
+    # their prompt-rename pins went with them (drillmaster's "officer or engineer" prose lived in
+    # the deleted drill()/apply() prompts; signals.py/doctrine.py carry no retired wording).
 ]
 for rel, absent, present in PROMPT_RENAME:
     src = (ROOT / rel).read_text(encoding="utf-8")
@@ -214,7 +257,8 @@ for rel, absent, present in PROMPT_RENAME:
 # REAL function (no LLM, pure string-build) and assert the rendered digest is clean + uses the new
 # name — a source scan alone wouldn't catch a label rebuilt from a retired token at runtime.
 import collections
-from orchestrator import drillmaster
+# EU-327: drillmaster.py is deleted; format_signals' real home is signals.py (EU-323 relocation).
+from orchestrator import signals as drillmaster
 
 _sig = {
     "tasks": 5,

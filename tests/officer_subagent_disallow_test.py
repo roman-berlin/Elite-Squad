@@ -41,8 +41,9 @@ results = []
 def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
-# Construction call spellings in the codebase: the direct name and squad.py's `as _Opts` alias.
-_CALL_KEYS = ("ClaudeAgentOptions(", "_Opts(")
+# Construction call spellings in the codebase: the direct name only (squad.py's `as _Opts` alias
+# left with squad.py in the 2026-07-19 stabilization).
+_CALL_KEYS = ("ClaudeAgentOptions(",)
 
 def _option_blocks(src):
     """Yield the text of each ClaudeAgentOptions(...) / _Opts(...) construction (paren-balanced)."""

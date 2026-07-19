@@ -135,6 +135,13 @@ apps:
     # False by default; only an app with this monorepo/vitest shape should opt in.
     test_collectability_enabled: true
     gate_timeout_sec: 900            # per-command hard cap (default 1800). Kills a hung/runaway test run.
+                                     # EU-218: for THIS repo's own self-gate (`python3 tests/run_all.py`,
+                                     # the EU app's gate_commands), keep the default 1800s — measured
+                                     # full-suite wall-clock is ~214s (382 harnesses), an ~8.4x margin.
+                                     # run_all.py prints WALL-CLOCK every run and warns if it creeps past
+                                     # 50% of the budget (override with GENERAL_GATE_TIMEOUT_SEC); raise
+                                     # this value deliberately (with a comment, as here) only if that
+                                     # warning fires for real added work, not to paper over a hang.
     gate_env:                        # extra env for gate commands so tests can't exhaust RAM
       NODE_OPTIONS: "--max-old-space-size=3072"
     postmerge_commands:              # Sentinel's heavier post-merge net on the landed <base> (e2e/integration
@@ -198,3 +205,15 @@ apps:
     gate_preflight: ["pytest"]        # modules the gate interpreter must import; a miss fails fast with a venv hint
     worktree_setup_cmd: ""            # explicitly install nothing for this app (no Node manifest)
     backlog_backend: "none"
+
+# --- 2026-07 autonomy knobs (defaults shown; uncomment to change) ---
+# planner_enabled: false        # ONE Opus design call/ticket before the build (Phase-2 centerpiece);
+#                               # runs INSTEAD of the Architect when on
+# planner_verdict_park: true    # a Planner CLOSE/ANSWER verdict with no code evidence parks the
+#                               # ticket for you instead of building anyway (EU-375)
+# builder_task_budget: 70000    # per-build SDK token budget, scaled by effort (EU-377); 0 = off
+# max_concurrent_builders: 1    # parallel build slots (EU-380). Leave at 1 on a 24GB Mac —
+#                               # two Opus builders exhaust memory (measured 2026-07-18)
+# self_update_auto_restart: true  # after the unit lands a change to ITSELF, exit gracefully once
+#                                 # idle so the keepalive respawns onto the new code (EU-387)
+# log_retention_days: 0         # auto-purge state/logs day-folders older than N days (0 = keep all)

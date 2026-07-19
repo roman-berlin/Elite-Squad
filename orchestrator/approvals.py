@@ -1,155 +1,38 @@
-"""Approvals inbox — the officers PROPOSE, the Commander approves, the unit APPLIES.
+"""Proposal approvals — the unit PROPOSES tickets, the Commander approves, the unit FILES.
 
-A propose-only officer (e.g. the Engineering Coach's doctrine upgrades) writes a report and stops.
-This collects those pending recommendations so the Commander can **Approve** (the unit runs the
-matching apply coroutine, then commits + pushes the doctrine to The-General) or **Disapprove**
-(cleared, and the reason is logged to Unit Memory so it isn't re-proposed).
+Batches of fileable findings (from filing.parse_tickets) raised by a council/daily, an ad-hoc
+meeting, or an out-of-scope in-dev finding land in a queue so the Commander can Approve (file to
+the board, de-duped — optionally only a chosen subset) or Deny (discard, reason logged).
 
-It's the home for overnight self-improvement too: the unit drills at night, you approve in the
-morning. Only `officers/` is committed — never a blanket `git add -A` — so nothing unrelated ships.
+The old single-report KINDS flow (one officer report → Approve applies a doctrine coroutine and
+pushes) was removed in the 2026-07-19 stabilization: KINDS had been empty since EU-325/EU-327
+retired its last officers, so pending()/approve()/disapprove() and the /approvals page could
+never fire again. The proposal-batch queue below (EU-61) is the one approval path.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from . import locking
 from .config import Config
-
-# kind -> (label, report filename, apply coroutine). Each report maps to an officer `apply`
-# coroutine that approve() awaits generically — no officer is special-cased here. Empty until an
-# officer opts into this single-report approval flow (EU-61's proposal-batch queue below is the
-# separate, always-on approval path).
-KINDS: dict[str, tuple[str, str, Callable[[Config], Awaitable[str]]]] = {}
-
-
-def _state_file(cfg: Config) -> Path:
-    return Path(cfg.audit_path).with_name("approvals.json")
-
-
-def _load(cfg: Config) -> dict:
-    try:
-        d = json.loads(_state_file(cfg).read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _mutate_state(cfg: Config, mutate_fn) -> None:
-    """Locked read-modify-write of approvals.json (2026-07-05 audit §7.4: approve() runs on a
-    server bg thread while disapprove() runs inline on a Flask request thread — the old bare
-    _load/_save pair lost one kind's record under that interleaving). Best-effort like the old
-    _save: an OSError never crashes an approval."""
-    def _mut(st):
-        return mutate_fn(st if isinstance(st, dict) else {})
-    try:
-        locking.locked_rmw(_state_file(cfg), _mut, default={}, corrupt_to_default=True)
-    except OSError:
-        pass
-
-
-def _report_path(cfg: Config, kind: str) -> Path:
-    return Path(cfg.audit_path).with_name(KINDS[kind][1])
 
 
 def _hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
-def pending(cfg: Config) -> list[dict]:
-    """Officer recommendations awaiting a decision — a report that exists and whose current
-    content hasn't already been approved/disapproved."""
-    st = _load(cfg)
-    out: list[dict] = []
-    for kind, (label, _fname, _apply) in KINDS.items():
-        p = _report_path(cfg, kind)
-        try:
-            body = p.read_text(encoding="utf-8") if p.exists() else ""
-        except OSError:
-            body = ""
-        if not body.strip():
-            continue
-        h = _hash(body)
-        if (st.get(kind) or {}).get("hash") == h:   # this exact report already actioned
-            continue
-        out.append({"kind": kind, "label": label, "body": body, "hash": h})
-    return out
-
-
-def _commit_push(msg: str) -> str:
-    """Commit ONLY officers/ (what an apply touches) and push. Never a blanket add -A."""
-    root = str(Path(__file__).resolve().parent.parent)
-    try:
-        subprocess.run(["git", "-C", root, "add", "officers/"], capture_output=True, timeout=30)
-        c = subprocess.run(["git", "-C", root, "commit", "-m", msg],
-                           capture_output=True, text=True, timeout=30)
-        if "nothing to commit" in (c.stdout + c.stderr).lower():
-            return "applied (no officer-file change to push)"
-        p = subprocess.run(["git", "-C", root, "push"], capture_output=True, text=True, timeout=60)
-        return "committed + pushed to origin" if p.returncode == 0 \
-            else f"committed; push failed: {(p.stderr or '').strip()[:140]}"
-    except Exception as exc:  # noqa: BLE001 - commit/push must not crash the approval
-        return f"commit/push error: {exc}"
-
-
-async def approve(cfg: Config, kind: str) -> str:
-    """Apply the recommendation via its registered apply coroutine, then commit + push the doctrine."""
-    if kind not in KINDS:
-        return f"unknown approval kind: {kind}"
-    p = _report_path(cfg, kind)
-    if not p.exists():
-        return f"no pending {kind} report to apply"
-    body = p.read_text(encoding="utf-8")
-    h = _hash(body)
-    label, _fname, apply_fn = KINDS[kind]
-    summary = await apply_fn(cfg)
-    pushed = _commit_push(f"{label} — applied (Commander-approved)")
-
-    def _mark(st: dict) -> dict:
-        st[kind] = {"hash": h, "action": "approved", "ts": time.time()}
-        return st
-    _mutate_state(cfg, _mark)
-    try:
-        from . import notify
-        notify.send(f"✅ Approved & applied — {KINDS[kind][0]}. {pushed}")
-    except Exception:  # noqa: BLE001
-        pass
-    return (summary or "") + "\n\n" + pushed
-
-
-def disapprove(cfg: Config, kind: str, reason: str = "") -> None:
-    """Clear the recommendation and log WHY to Unit Memory so it isn't re-proposed."""
-    if kind not in KINDS:
-        return
-    p = _report_path(cfg, kind)
-    h = _hash(p.read_text(encoding="utf-8")) if p.exists() else ""
-
-    def _mark(st: dict) -> dict:
-        st[kind] = {"hash": h, "action": "disapproved", "reason": reason, "ts": time.time()}
-        return st
-    _mutate_state(cfg, _mark)
-    try:
-        from . import council
-        council.add_commander_note(cfg, f"Disapproved {KINDS[kind][0]}: {reason or '(no reason given)'}")
-    except Exception:  # noqa: BLE001
-        pass
-
-
 # --------------------------------------------------------------------------- #
 # Unit-proposed tickets awaiting the Commander (EU-61 Part B).
 #
-# A second, distinct approval kind: batches of fileable findings (from
-# filing.parse_tickets) raised by a council/daily, an ad-hoc meeting, or an
-# out-of-scope in-dev finding. Instead of going straight to the board, each
-# batch lands in this queue so the Commander can Approve (file to the board,
-# de-duped, with slice-1's Roman-default create) — optionally only a chosen
-# subset of the tickets — or Deny (discard). This is separate state from the
-# KINDS above (those are single-report-hash approvals); a batch
-# is many tickets the Commander can pick through.
+# Batches of fileable findings (from filing.parse_tickets) raised by a
+# council/daily, an ad-hoc meeting, or an out-of-scope in-dev finding. Instead
+# of going straight to the board, each batch lands in this queue so the
+# Commander can Approve (file to the board, de-duped, with slice-1's
+# Roman-default create) — optionally only a chosen subset of the tickets — or
+# Deny (discard). A batch is many tickets the Commander can pick through.
 # --------------------------------------------------------------------------- #
 
 _PROPOSAL_HISTORY_CAP = 100   # keep recent actioned batches for audit, bound the file

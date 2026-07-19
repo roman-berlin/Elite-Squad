@@ -9,11 +9,13 @@ Streams in ``rows`` (everything the badge counts — count == len(rows) == total
   • errored    — runs that ended errored / escalated / awaiting decision, minus dismissed
   • parked     — tickets the autopilot is skipping (blocked_tickets.json)
   • pr         — runs that ended with a PR opened and need Commander review
-  • approval   — officer recommendations awaiting a decision (drill / adjutant reports)
   • proposal   — queued ticket batches awaiting approve/deny
 
-The same items are ALSO exposed under their original keys (``decisions``, ``approvals``,
-``proposals``, ``tasks``) so server.py can render each section with its bespoke action form. There
+(The ``approval`` category — the officer-recommendations KINDS stream — was removed in the
+2026-07-19 stabilization; it had been permanently empty since EU-325/EU-327.)
+
+The same items are ALSO exposed under their original keys (``decisions``, ``proposals``,
+``tasks``) so server.py can render each section with its bespoke action form. There
 is exactly ONE number everywhere — ``count() == len(rows) == total`` — and no stream can raise the
 badge without also rendering in the inbox.
 
@@ -26,9 +28,9 @@ EU-129 — per-project scoping + a single audit parse per render:
 
   Before this fix ``summary()``/``count()`` took no ``app_name`` and always aggregated EVERY
   project, so the Needs-you badge/KPI card showed the SAME number on every cockpit tab. Data is
-  already app-tagged (decisions/approvals/proposals carry an ``app`` field; audit task rows carry
+  already app-tagged (decisions/proposals carry an ``app`` field; audit task rows carry
   ``app`` too), so both entry points now take an ``app_name`` parameter and filter rows to the
-  active project — by the ``app`` field for decisions/approvals/proposals, and by ticket-key
+  active project — by the ``app`` field for decisions/proposals, and by ticket-key
   prefix (``<PREFIX>-123`` -> ``PREFIX``) for errored/parked/PR rows, which don't carry an ``app``
   field of their own. ``ALL_PROJECTS`` (a sentinel, matching
   ``cockpit_state.ALL_PROJECTS_SENTINEL``) preserves the old "aggregate everything" behaviour.
@@ -59,9 +61,17 @@ ALL_PROJECTS = "*"
 # of renders for the SAME tab (KPI card + side panel, or a fast poll) share one computation instead
 # of re-parsing the audit + re-reading every source file on each call. TTL is intentionally short —
 # long enough to collapse the handful of calls in a single render, short enough that a fresh
-# decision/approval/run is never stale for more than a moment.
+# decision/proposal/run is never stale for more than a moment.
 _SUMMARY_CACHE: "dict[tuple, tuple[float, dict]]" = {}
 _SUMMARY_TTL = 3.0
+# EU-362: the cache key embeds the audit signature + per-source-file mtimes, so every audit append
+# orphans ALL previously cached entries — their keys can never be looked up again — while nothing
+# evicted them: a long-lived serve process retained one dead entry per audit append per open tab
+# (2026-07-16 total audit, item 3). Bounds, enforced on every write: expired entries are purged
+# (past the TTL they can never be served), and the cache is hard-capped, dropping oldest-stamped
+# first. The cap only needs to cover the handful of (audit signature, app scope) keys live inside
+# one TTL window — one per open tab plus the "*" aggregate — so 16 is generous.
+_SUMMARY_CACHE_MAX = 16
 
 
 def _ticket_prefix(ticket_id) -> str:
@@ -74,9 +84,8 @@ def _ticket_prefix(ticket_id) -> str:
 
 def _row_matches_app(row: dict, app_name: str, app_prefix: str) -> bool:
     """Whether ``row`` belongs to ``app_name`` — by the row's own ``app``/``app_name`` field when
-    present (decisions/approvals/proposals/tasks carry ``app``; specialist rosters carry
-    ``app_name``), else by ticket-key prefix (covers rows that key on ``ticket_id`` but carry
-    neither field)."""
+    present (decisions/proposals/tasks carry ``app``), else by ticket-key prefix (covers rows
+    that key on ``ticket_id`` but carry neither field)."""
     row_app = row.get("app") or row.get("app_name")
     if row_app:
         return str(row_app) == app_name
@@ -92,8 +101,7 @@ def _cache_key(cfg: Config, app_name: Optional[str]) -> tuple:
     paths = _D._audit_paths(cfg.audit_path)
     sig = _D._audit_sig(paths)
     extra_sigs = []
-    for fname in ("pending_decisions.json", "blocked_tickets.json",
-                  "approvals.json", "proposals.json"):
+    for fname in ("pending_decisions.json", "blocked_tickets.json", "proposals.json"):
         fp = Path(cfg.audit_path).with_name(fname)
         try:
             st = fp.stat()
@@ -107,7 +115,7 @@ def summary(cfg: Config, app_name: Optional[str] = None) -> dict:
     """Unified inbox: a flat ``rows`` list (typed, with category + why) plus backward-compat keys.
 
     Each row is a copy of the source item extended with:
-      ``category`` — one of: decision | errored | parked | pr | approval | proposal
+      ``category`` — one of: decision | errored | parked | pr | proposal
       ``why``      — one-line human reason string (question text, note, or fallback label)
 
     ``total`` == ``len(rows)`` == ``count()`` — one number for every Needs-you surface (EU-102).
@@ -126,6 +134,14 @@ def summary(cfg: Config, app_name: Optional[str] = None) -> dict:
     if hit is not None and now - hit[0] < _SUMMARY_TTL:
         return hit[1]
     result = _summary_uncached(cfg, app_name)
+    # EU-362: bound the cache on the write path. Purge entries past the TTL first (signature-pinned
+    # keys make them unreachable, not just stale), then LRU-cap what survives so a burst of audit
+    # appends can't grow the dict between purges.
+    for k in [k for k, (ts, _) in _SUMMARY_CACHE.items() if now - ts >= _SUMMARY_TTL]:
+        _SUMMARY_CACHE.pop(k, None)
+    while len(_SUMMARY_CACHE) >= _SUMMARY_CACHE_MAX:
+        oldest = min(_SUMMARY_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _SUMMARY_CACHE.pop(oldest, None)
     _SUMMARY_CACHE[key] = (now, result)
     return result
 
@@ -247,21 +263,13 @@ def _summary_uncached(cfg: Config, app_name: Optional[str]) -> dict:
             "why": str(t.get("note") or "blocked — autopilot skipping"),
         })
 
-    # ── 5. Officer recommendations + 6. ticket proposals ──
-    # Both need the Commander, so both ARE part of the unified inbox (rows + badge count), so
+    # ── 5. Ticket proposals ──
+    # They need the Commander, so they ARE part of the unified inbox (rows + badge count), so
     # total == count == len(rows) everywhere and a pending item can never raise the badge without
-    # rendering a row.
-    # EU-129: officer recommendations (drill/adjutant) are unit-wide, NOT per-project — they cover
-    # doctrine/personnel actions, not a single app's tickets — so they are intentionally NOT filtered
-    # by app_name and always show on every tab (same as "All projects"). Proposals DO carry a project
-    # scope and are filtered.
-    approvals_items: list[dict] = []
+    # rendering a row. Proposals carry a project scope and are filtered per tab. (The officer-
+    # recommendations KINDS stream was removed in the 2026-07-19 stabilization — permanently empty
+    # since EU-325/EU-327.)
     proposal_items: list[dict] = []
-    try:
-        from . import approvals as _ap
-        approvals_items = _ap.pending(cfg) or []
-    except Exception:  # noqa: BLE001
-        pass
     try:
         from . import approvals as _ap
         proposal_items = _ap.pending_proposals(cfg) or []
@@ -270,12 +278,6 @@ def _summary_uncached(cfg: Config, app_name: Optional[str]) -> dict:
     if scoped:
         proposal_items = [p for p in proposal_items if _row_matches_app(p, app_name, app_prefix)]
 
-    for a in approvals_items:
-        rows.append({
-            **a,
-            "category": "approval",
-            "why": str(a.get("label") or a.get("kind") or "officer recommendation"),
-        })
     for p in proposal_items:
         _n = len(p.get("proposals") or [])
         rows.append({
@@ -288,7 +290,6 @@ def _summary_uncached(cfg: Config, app_name: Optional[str]) -> dict:
         "rows": rows,
         # Per-stream keys — server.py /needs renders each section with its own action form.
         "decisions": decisions_items,
-        "approvals": approvals_items,
         "proposals": proposal_items,
         "tasks": task_items,
         # ONE number everywhere: count == len(rows) == total (the badge invariant). Every stream that
@@ -305,7 +306,7 @@ def clear_cache() -> None:
 
 def count(cfg: Config, app_name: Optional[str] = None) -> int:
     """Badge number — the unified inbox row count (decisions + errored + parked + PRs +
-    officer approvals + ticket proposals).  count == len(summary()['rows'])
+    ticket proposals).  count == len(summary()['rows'])
     == summary()['total'], always.
 
     EU-129: ``app_name`` scopes the count to ONE project (``None``/``ALL_PROJECTS`` aggregates

@@ -229,6 +229,12 @@ def _last_council(cfg) -> Optional[datetime]:
 # older than this (with no newer event for its ticket) no longer counts as an active block.
 STALE_BLOCK_CUTOFF_S = 24 * 3600
 
+# EU-298: freshness window for the "synced: <peers> · <age> ago" footer. A state clone that
+# stopped syncing days ago rendered in the same neutral grey as a 2-minute-old one (the observed
+# case was "synced: mac · 156h 38m ago"), so a dead sync read as current. Matches the block
+# cutoff — a peer silent for a day has stopped publishing, not merely paused.
+STALE_SYNC_CUTOFF_S = 24 * 3600
+
 # Event types that resolve/supersede an earlier security_block for the same ticket_id: another
 # security_block (a fresh gate hit), any dashboard-terminal outcome (merged/PR/escalated/etc — the
 # ticket moved on), or a plain "build" (the Builder re-attempted the ticket).
@@ -315,7 +321,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
 
     merged = [t for t in ts if t.get("outcome") == "merged→dev"]
     merged_today = [t for t in merged if day(t) == today]
-    sec_blocks = _load_security_blocks(cfg)  # all-time — still feeds the interactive findings list
+    sec_blocks = _load_security_blocks(cfg)  # all-time — the historical record (see /forensics)
     active_sec_blocks = _active_security_blocks(cfg, sec_blocks)  # EU-313: only still-live blocks count
     sec_block_count = len(active_sec_blocks)
     # EU-313: age of the most recent still-active block, for the card to surface inline (e.g.
@@ -342,7 +348,14 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
          "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
-         "security_block_findings": sec_blocks,  # EU-145: pass actual findings for interactive card
+         # EU-145 passes the findings themselves so the card can render an interactive response
+         # form. EU-313 filtered the COUNT to active blocks but kept handing the ALL-TIME list
+         # here, so the card read "0" while still rendering the 2026-06-29 EU-116 block — the only
+         # security_block ever recorded — expanded, with a live "Record response" box. The gate
+         # that produced it was deleted in the Phase-2 collapse (c24f459), so nothing it reports
+         # can be unblocked: a permanent false "needs-you" signal. EU-290: the list now tracks the
+         # count. The historical record still lives at /forensics?cat=security_block.
+         "security_block_findings": active_sec_blocks,
          "active_age": sec_block_age},  # EU-313: age of the most recent active block (None if none)
     ]
 
@@ -899,8 +912,12 @@ def _kpi_html(cards: list[dict]) -> str:
             # decision stays in force; this appends inline into the existing kv div instead.
             age = c.get("active_age")
             kv_text = f'{_esc(c["value"])} · {_esc(age)}' if age else _esc(c["value"])
+            # EU-290: only expand when there is something to act on. A zero-count card sitting
+            # permanently open around "No security blocks recorded yet." is the same fixed
+            # false "needs-you" signal, just with the number fixed.
+            open_attr = " open" if findings else ""
             out.append(
-                f'<details class="kpi {tone}" open>'
+                f'<details class="kpi {tone}"{open_attr}>'
                 f'<summary class=kpisum><div class=kv>{kv_text}</div>'
                 f'<div class=kl>{_esc(c["label"])}</div></summary>'
                 f'{issues_html}'
@@ -1212,7 +1229,7 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
 def _log_html(lines) -> str:
     if not lines:
         return ('<div class=logempty>No live output yet — start a run and the unit\'s '
-                'steps stream here (same as the terminal, minus the noise).</div>')
+                'steps stream here.</div>')
     out = []
     for ln in lines:
         s = ln.strip()
@@ -1267,7 +1284,7 @@ def _needs_side_html(ns: dict) -> str:
     """The Needs-you panel body for the cockpit's side column — a compact preview of the inbox.
 
     EU-102: iterates the unified ``rows`` list from needs.summary(); each row carries a
-    ``category`` badge (decision | errored | parked | pr | approval | proposal | specialist) and a
+    ``category`` badge (decision | errored | parked | pr | proposal) and a
     human ``why`` string.  Gated on ``rows`` — the same list the badge counts — so the panel is never
     "All clear" while the badge is non-zero, and never non-empty while the badge is zero.
     """
@@ -1281,9 +1298,7 @@ def _needs_side_html(ns: dict) -> str:
         "errored": "bad",
         "parked": "warn",
         "pr": "warn",
-        "approval": "warn",
         "proposal": "warn",
-        "specialist": "warn",
     }
     rows = []
     for row in (ns.get("rows") or [])[:8]:
@@ -1303,25 +1318,12 @@ def _needs_side_html(ns: dict) -> str:
 _TALK_HTML = (
     '<div class=talk>'
     '<a class=talkbtn href="/chat"><span class=tki>&#128172;</span>'
-    '<div><b>CTO</b><i>ask the orchestrator 1:1</i></div></a>'
+    '<div class=tkbody><b>CTO</b><i>ask the orchestrator 1:1</i></div>'
+    '<span class=tkarrow>&#8250;</span></a>'
     '<a class=talkbtn href="/group"><span class=tki>&#128101;</span>'
-    '<div><b>Group room</b><i>convene all the officers</i></div></a>'
+    '<div class=tkbody><b>Group room</b><i>convene all the officers</i></div>'
+    '<span class=tkarrow>&#8250;</span></a>'
     '</div>')
-
-
-_TERMINAL_HTML = (
-    '<div class=term>'
-    '<div class=termout id=termout><div class=term-out>Welcome to the terminal. Commands execute in the orchestrator\'s working directory.</div><div class=term-out>Type a command below and press Enter to execute.</div></div>'
-    '<div class=tbox>'
-    '<span class=tbox-prompt>$</span>'
-    '<input type=text id=terminput placeholder="Enter command..." autocomplete=off>'
-    '</div>'
-    '</div>')
-
-
-def _terminal_html() -> str:
-    """Return the terminal panel HTML."""
-    return _TERMINAL_HTML
 
 
 def _md_to_html(text: str) -> str:
@@ -1450,12 +1452,25 @@ def _sync_html_uncached(cfg) -> str:
         return ""
     peers = ", ".join(sorted(p.stem for p in files))
     ago = ""
+    # EU-298: flag a footer whose newest peer publish is past STALE_SYNC_CUTOFF_S. The age text
+    # was always there but rendered in the same neutral grey as a fresh sync, so "156h 38m ago"
+    # read as current. The marker is deliberately textual as well as coloured — a colour-only
+    # signal is invisible to colour-blind/monochrome readers. The stat() failure path below keeps
+    # its original bare output: with no mtime there is no age to judge staleness against.
+    cls = "synced"
     try:
         newest = max(f.stat().st_mtime for f in files)
-        ago = " · " + _fmt_dur(datetime.now().timestamp() - newest) + " ago"
+        age = datetime.now().timestamp() - newest
+        ago = " · " + _fmt_dur(age) + " ago"
+        if age >= STALE_SYNC_CUTOFF_S:
+            cls = "synced stale"
+            ago += " · stale"
     except OSError:
         pass
-    return f'<div class=synced>&#8646; synced: {html.escape(peers)}{html.escape(ago)}</div>'
+    # The fresh case keeps its original unquoted single-class wrapper byte-for-byte; only the
+    # stale case needs the quoted two-class form.
+    wrap = "<div class=synced>" if cls == "synced" else f'<div class="{cls}">'
+    return f'{wrap}&#8646; synced: {html.escape(peers)}{html.escape(ago)}</div>'
 
 
 _BACKLOG_CACHE: dict[str, tuple[float, list]] = {}   # scope -> (fetched_ts, [(AppConfig, Ticket)])
@@ -1533,7 +1548,7 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
     if app and app != "*":
         derrs = {n: m for n, m in derrs.items() if n == app}
     warn = "".join(
-        f'<div class=blempty style="color:var(--bad,#f0676b)">&#9888; {_esc(n)} backlog unreachable — '
+        f'<div class=blempty style="color:var(--bad,var(--bad))">&#9888; {_esc(n)} backlog unreachable — '
         f'{_esc(m)}</div>' for n, m in derrs.items())
     if err:
         return warn + f'<div class=blempty>Backlog unavailable for {scope} — {_esc(err)}</div>'
@@ -1641,9 +1656,6 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<div class=ph>&#128190; Live run log</div>'
         f'<div class=runlog id=runlog data-log-path="{_esc(str(log_stream_path or ""))}">'
         f'<div class=logempty>Waiting for run output…</div></div></section>'
-        f'<section class=panel>'
-        f'<div class=ph>&#128190; Terminal</div>'
-        f'<div class=term>{_terminal_html()}</div></section>'
         '</div>'
         f'<div class=col-side>'
         # EU-297: proof-of-integration call site for the cockpit_views._card partial —
@@ -1819,6 +1831,25 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --text:var(--ink); /* default body text color */
 --positive:var(--ok); /* success / good-state accent */
 --critical:var(--bad)} /* error / bad-state accent */
+/* deep-inset backgrounds that were hardcoded hexes before the 2026-07-19 theme pass */
+:root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}
+/* ── LIGHT THEME (2026-07-19) — toggled via <html data-theme=light>; persisted in
+   localStorage('ui.theme') by the header toggle; every page consumes these through
+   cockpit_views._token_css() so the whole cockpit follows one switch. ── */
+:root[data-theme=light]{color-scheme:light;
+--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;
+--ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;
+--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;
+--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;
+--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;
+--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;
+--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;
+--shadow-1:0 1px 2px rgba(23,32,54,.08);
+--shadow-2:0 8px 24px rgba(23,32,54,.12);
+--shadow-3:0 16px 40px rgba(23,32,54,.16);
+--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(59,98,217,.5);
+--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}
+/* END THEME TOKENS */
 *{box-sizing:border-box}
 /* Keyboard focus is visible on every interactive board surface (a11y): mouse clicks
    stay clean (:focus-visible), but Tab navigation lands on a clear accent ring. */
@@ -1835,11 +1866,11 @@ a{color:var(--info);text-decoration:none}
 button{font:inherit}
 /* header */
 header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--line);
-background:linear-gradient(180deg,#11151e,#0a0c11);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+background:linear-gradient(180deg,var(--panel),var(--bg));position:sticky;top:0;z-index:5;flex-wrap:wrap}
 .brand{font-size:15px;font-weight:750;letter-spacing:.4px;white-space:nowrap;text-transform:uppercase}
-.hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:#9fb0cf;background:#1a2333;border:1px solid #2a3850;border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
+.hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
 .brand b{color:var(--accent)}
-header select{background:#0d1119;border:1px solid var(--line2);color:var(--ink);border-radius:9px;
+header select{background:var(--well);border:1px solid var(--line2);color:var(--ink);border-radius:9px;
 padding:8px 12px;font:inherit;cursor:pointer}
 .spacer{flex:1}
 .gen{font-family:var(--mono);font-size:11px;color:var(--faint);letter-spacing:.02em}
@@ -1855,41 +1886,45 @@ padding:8px 12px;font:inherit;cursor:pointer}
 .hpanel{position:absolute;top:calc(100% + 8px);right:0;z-index:40;min-width:320px;background:var(--panel);
 border:1px solid var(--line2);border-radius:var(--r-lg);padding:10px;box-shadow:var(--shadow-3)}
 .hpi{font-size:12.5px;color:var(--dim);padding:5px 4px}
-.recheck{margin-top:9px;background:#1b2230;border:1px solid var(--line2);color:var(--ink);border-radius:8px;
+.recheck{margin-top:9px;background:var(--line);border:1px solid var(--line2);color:var(--ink);border-radius:8px;
 padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer}
 /* autopilot switch */
 .apsw{display:flex;align-items:center;gap:9px;margin:0;padding:5px 6px 5px 13px;border:1px solid var(--line2);
-border-radius:99px;background:#0d1119}
+border-radius:99px;background:var(--well)}
 .apsw.on{border-color:var(--okline);background:var(--okbg)}
 .apdot{width:8px;height:8px;border-radius:99px;background:var(--faint)}
 .apdot.on{background:var(--ok);animation:pulse2 1.3s infinite}
 .aplabel{font-size:12px;color:var(--ink)}
 .apbtn{border:0;border-radius:99px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
 .apbtn.start{background:var(--accent);color:#fff}
-.apbtn.start:disabled{background:#222a37;color:var(--faint);cursor:not-allowed}
+.apbtn.start:disabled{background:var(--line);color:var(--faint);cursor:not-allowed}
 .apbtn.stop{background:var(--bad);color:#fff}
 .apbtn.drain{background:var(--warn);color:#1a1205;margin-right:7px}
 /* health banner */
 .healthbar{padding:13px 26px}
-.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid #15351f}
+.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid var(--okline)}
 .healthbar.bad{background:linear-gradient(180deg,rgba(42,20,22,.6),transparent);border-bottom:1px solid #3a1a1c}
 .hbrow{display:flex;align-items:center;gap:14px}
 .hbtitle{display:flex;align-items:center;gap:11px;font-weight:650;font-size:14px;flex:1}
-.healthbar.ok .hbtitle{color:#9be7bd}.healthbar.bad .hbtitle{color:#f3a6a8}
+.healthbar.ok .hbtitle{color:var(--ok)}.healthbar.bad .hbtitle{color:var(--bad)}
 .hbdot{width:11px;height:11px;border-radius:99px;flex:none}
 .healthbar.ok .hbdot{background:var(--ok);box-shadow:0 0 0 4px rgba(58,209,127,.13)}
 .healthbar.bad .hbdot{background:var(--bad);animation:pulse3 1.4s infinite}
 @keyframes pulse3{0%,100%{box-shadow:0 0 0 0 rgba(240,103,107,.45)}50%{box-shadow:0 0 0 8px rgba(240,103,107,0)}}
 .hbactions{display:flex;align-items:center;gap:12px}
+.themebtn{background:var(--panel2);border:1px solid var(--line2);color:var(--dim);width:34px;height:34px;
+border-radius:var(--r-md);font-size:16px;cursor:pointer;line-height:1;flex:none;margin-right:10px;
+transition:color var(--t-fast),border-color var(--t-fast)}
+.themebtn:hover{color:var(--ink);border-color:var(--accent)}
 .models{font-size:11px;color:var(--faint)}
-.hbbtn{background:#1b2230;border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:6px 13px;
+.hbbtn{background:var(--line);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:6px 13px;
 font-size:12px;font-weight:600;cursor:pointer}
 .hbissues{margin:11px 0 2px;padding:0;list-style:none;display:grid;gap:6px}
 .hbissues li{font-size:12.5px;color:var(--dim)}
 .tag{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
 .tag.bad{background:var(--badbg);color:var(--bad)}.tag.warn{background:var(--warnbg);color:var(--warn)}
 /* kpis */
-.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:22px 24px 8px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;padding:22px 24px 8px}
 .kpi{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:16px 17px;
 overflow:hidden;box-shadow:var(--shadow-1);transition:border-color var(--t-fast),transform var(--t-fast),box-shadow var(--t-fast)}
 .kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--line2)}
@@ -1915,7 +1950,7 @@ a.kpi:hover{border-color:var(--accent)}
 .secmeta{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
 .secbody{font-size:12px;color:var(--dim);line-height:1.5;margin-bottom:10px;white-space:pre-wrap}
 .secreply{margin-top:8px}
-.secreply textarea{width:100%;background:#0d1119;border:1px solid var(--line2);color:var(--ink);
+.secreply textarea{width:100%;background:var(--well);border:1px solid var(--line2);color:var(--ink);
   border-radius:var(--r-sm);padding:8px 10px;font:inherit;font-size:11px;resize:vertical;min-height:50px;
   margin-bottom:8px}
 .secreply textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
@@ -1938,8 +1973,8 @@ padding:13px 18px;border-bottom:1px solid var(--line);display:flex;align-items:c
 .runhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:10px}
 .runhead .mono{font-size:15px;color:var(--ink);font-weight:600}
 .b{font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;text-transform:uppercase;letter-spacing:.06em}
-.b.live{color:var(--warn);background:var(--warnbg)}.b.muted{color:var(--dim);background:#141a25}
-.b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px #1c4d39 inset}
+.b.live{color:var(--warn);background:var(--warnbg)}.b.muted{color:var(--dim);background:var(--panel2)}
+.b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px var(--okline) inset}
 .b.dry{color:var(--info);background:var(--accentbg);box-shadow:0 0 0 1px var(--accentline) inset}
 .b.ok{color:var(--ok);background:var(--okbg)}.b.bad{color:var(--bad);background:var(--badbg)}.b.warn{color:var(--warn);background:var(--warnbg)}
 .phasebar{display:flex;gap:0;position:relative}
@@ -1954,8 +1989,8 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .phasebar .ph.done::after{background:var(--ok)}
 /* idle = a finished 'last run', not live -> grey the bar so it never reads as in-progress */
 .phasebar.idle .ph.done{color:var(--dim)}
-.phasebar.idle .ph.done span{background:#39424f;border-color:#39424f;box-shadow:none}
-.phasebar.idle .ph.done::after{background:#2b3543}
+.phasebar.idle .ph.done span{background:var(--line2);border-color:var(--line2);box-shadow:none}
+.phasebar.idle .ph.done::after{background:var(--line2)}
 .phasebar .ph.now{color:var(--warn)}
 .phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
 /* failed = the run terminated at this phase -> red stopping node, never reads as cleanly-done */
@@ -1970,7 +2005,7 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .runtapp{font-size:12.5px;color:var(--dim);font-weight:500;margin-left:9px;vertical-align:middle}
 /* EU-106: project label on the per-project Active-run panel header (text-transform:none so a name
    like "Elite-Unit" isn't upper-cased by the .ph rule) */
-.boardproj{text-transform:none;letter-spacing:0;font-size:11.5px;font-weight:600;color:var(--ink);background:#141a25;border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+.boardproj{text-transform:none;letter-spacing:0;font-size:11.5px;font-weight:600;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
 .runsub{font-size:12.5px;color:var(--dim)}.runsub b{color:var(--warn)}
 .runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
 .dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}
@@ -1991,9 +2026,9 @@ padding:4px 11px;font-size:10px;font-weight:700;text-transform:uppercase;letter-
 .offrow{display:flex;align-items:center;gap:12px;padding:10px 18px;border-left:2px solid transparent;transition:background var(--t-fast),border-left-color var(--t-fast)}
 .offrow:hover{background:var(--panel2);border-left-color:var(--accent)}
 a.offrow{text-decoration:none;color:inherit;cursor:pointer}
-.d{width:8px;height:8px;border-radius:99px;flex:none;background:#39424f}
+.d{width:8px;height:8px;border-radius:99px;flex:none;background:var(--line2)}
 .d.live{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse2 1.4s infinite}
-.d.recent{background:var(--info)}.d.idle{background:#39424f}
+.d.recent{background:var(--info)}.d.idle{background:var(--line2)}
 @keyframes pulse2{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}50%{box-shadow:0 0 0 5px rgba(52,211,153,0)}}
 .offmain{flex:1;min-width:0}.offname{font-weight:600;font-size:13px}
 .offrole{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
@@ -2011,7 +2046,7 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .blsum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .blapp{font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-pill);padding:1px 8px;white-space:nowrap}
 .blempty{padding:14px 16px;color:var(--dim);font-size:13px}
-.fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid #161b24}
+.fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid var(--line)}
 .fitem:first-child{border-top:0}
 .fd{width:7px;height:7px;border-radius:99px;margin-top:6px;flex:none;background:var(--faint)}
 .fd.ok{background:var(--ok)}.fd.warn{background:var(--warn)}.fd.bad{background:var(--bad)}
@@ -2019,12 +2054,12 @@ a.offrow{text-decoration:none;color:inherit;cursor:pointer}
 .fbody{font-size:13px;min-width:0}.fmeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:3px}
 .fbullets{margin:3px 0 2px 0;padding-left:15px;font-size:12px}.fbullets li{margin:1px 0;line-height:1.4}
 /* live log */
-.logbox{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#b9c2cf;background:#070a0e;
+.logbox{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--console-ink);background:var(--console);
 margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
 white-space:pre-wrap;word-break:break-word}
 .logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
 /* EU-200: live run log panel - same styles as logbox */
-.runlog{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#b9c2cf;background:#070a0e;
+.runlog{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--console-ink);background:var(--console);
 margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
 white-space:pre-wrap;word-break:break-word}
 .runlog .lg-b{color:var(--warn)}.runlog .lg-ok{color:var(--ok)}.runlog .lg-dim{color:var(--faint)}
@@ -2046,6 +2081,9 @@ margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pul
 .lv.stuck{color:var(--bad);background:var(--badbg)}
 /* synced badge — which machines' audits are merged into this view */
 .synced{margin:6px 24px 0;font-size:11px;color:#5b6b86;letter-spacing:.02em}
+/* EU-298: a sync older than STALE_SYNC_CUTOFF_S reads as a warning, not as neutral chrome —
+   reuses the EU-285a --warn token rather than a new colour literal */
+.synced.stale{color:var(--warn)}
 /* hero — the live-run headline (biggest thing when a run is in flight) */
 .hero{margin:18px 24px 0;padding:16px 20px;border:1px solid var(--accentline);border-radius:var(--r-xl);
 background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));position:relative;overflow:hidden;box-shadow:var(--shadow-2)}
@@ -2072,28 +2110,20 @@ background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));pos
 .ndr{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;margin-top:1px}
 .needall{display:block;padding:11px 18px;font-size:12px;font-weight:650;color:var(--info);border-top:1px solid var(--line)}
 .needspanel .ph::before{background:var(--warn)}
-.talk{padding:10px;display:flex;flex-direction:column;gap:8px}
-.talkbtn{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line2);border-radius:var(--r-lg);
-background:#0d1119;text-decoration:none;color:inherit;transition:border-color var(--t-fast),background var(--t-fast)}
-.talkbtn:hover{border-color:var(--accent);background:var(--panel2)}
-.tki{font-size:20px}.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
-/* terminal panel */
-.term{display:flex;flex-direction:column;height:100%;min-height:280px;background:#070a0e;border-radius:0 0 var(--r-xl) var(--r-xl)}
-.termout{flex:1;font-family:var(--mono);font-size:12px;line-height:1.5;color:#b9c2cf;padding:12px 16px;
-overflow:auto;white-space:pre-wrap;word-break:break-word;min-height:200px}
-.termout .term-prompt{color:#4d7cff;font-weight:600}
-.termout .term-cmd{color:#e7ebf2}
-.termout .term-out{color:#9be7bd}
-.termout .term-err{color:#f0676b}
-.tbox{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--line2);background:var(--panel)}
-.tbox-prompt{font-family:var(--mono);font-size:13px;color:#4d7cff;font-weight:600;white-space:nowrap}
-.tbox input{flex:1;background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);
-padding:8px 12px;font-family:var(--mono);font-size:13px}
-.tbox input:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
-@media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
-@media(max-width:680px){.kpis{grid-template-columns:repeat(2,1fr)}.hbactions .models{display:none}}
+.talk{padding:6px;display:flex;flex-direction:column;gap:8px}
+.talkbtn{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-lg);
+background:var(--well);text-decoration:none;color:inherit;transition:border-color var(--t-fast),background var(--t-fast),transform var(--t-fast)}
+.talkbtn:hover{border-color:var(--accent);background:var(--panel2);transform:translateX(2px)}
+.tki{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;flex:none;
+font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);border-radius:var(--r-md)}
+.tkbody{flex:1;min-width:0}
+.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
+.tkarrow{color:var(--faint);font-size:18px;flex:none;transition:color var(--t-fast)}
+.talkbtn:hover .tkarrow{color:var(--accent)}
+@media(max-width:1080px){.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
+@media(max-width:680px){.kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.hbactions .models{display:none}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
-::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#222b39;border-radius:8px}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
 </style></head><body>
 <header>
   <div class=brand>&#9733; Elite Unit <b>·</b> War Room{{HOST}}</div>
@@ -2101,12 +2131,17 @@ padding:8px 12px;font-family:var(--mono);font-size:13px}
   <div class=spacer></div>
   {{AUTOPILOT}}
   {{HEALTHPILL}}
+  <button id=themetoggle class=themebtn type=button title="Toggle light / dark" onclick="uiTheme()">&#9681;</button>
   <span class=gen><span id=streamdot class="sdot off" title="live stream"></span>live · {{GEN}}</span>
 </header>
 {{HEALTHBAR}}
 {{BAR}}
 <div id=board>{{BOARD}}</div>
 <script>
+try{document.documentElement.dataset.theme=localStorage.getItem("ui.theme")||"dark"}catch(e){}
+function uiTheme(){try{var r=document.documentElement;
+  r.dataset.theme=r.dataset.theme==="light"?"dark":"light";
+  localStorage.setItem("ui.theme",r.dataset.theme);}catch(e){}}
 var APP="{{APP}}";
 function proj(v){APP=v;var p=new URLSearchParams(location.search);p.set("app",v);location.search="?"+p.toString();}
 document.addEventListener("click",function(e){
@@ -2114,12 +2149,12 @@ document.addEventListener("click",function(e){
     if(!d.classList.contains("collapse") && !d.contains(e.target)) d.removeAttribute("open");
   });
 });
-// Collapsible Activity panel + resizable terminal live INSIDE #board, which the SSE feed re-renders
+// Collapsible Activity panel + resizable log panels live INSIDE #board, which the SSE feed re-renders
 // every frame — so persist their state and re-apply it after each refresh (otherwise it resets).
 function saveUi(){try{
   ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
     if(p)localStorage.setItem("ui.open."+id,p.open?"1":"0");});
-  ["logbox","blbox","actbox","termout"].forEach(function(id){var el=document.getElementById(id);
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
     if(el)localStorage.setItem("ui.scroll."+id,el.scrollTop);});
 }catch(e){}}
 function applyUi(){try{
@@ -2140,11 +2175,11 @@ function applyBoard(html){
   // if you were at the bottom (following live output) we keep you pinned there; otherwise we restore
   // your exact scroll position instead of jumping to the top/bottom.
   var keep={};
-  ["logbox","blbox","actbox","termout"].forEach(function(id){var el=document.getElementById(id);
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
     if(el)keep[id]={top:el.scrollTop,bottom:_atBottom(el)};});
   b.innerHTML=html;
   applyUi();
-  ["logbox","blbox","actbox","termout"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
     if(el&&k)el.scrollTop=k.bottom?el.scrollHeight:k.top;
     else if(el&&id==="logbox")el.scrollTop=el.scrollHeight;});
 }
@@ -2264,57 +2299,6 @@ startStream();
       }
     }
   };
-})();
-// Terminal functionality
-(function(){
-  var input=document.getElementById("terminput");
-  var output=document.getElementById("termout");
-  if(!input||!output)return;
-
-  input.addEventListener("keydown",async function(e){
-    if(e.key==="Enter"){
-      e.preventDefault();
-      var cmd=input.value.trim();
-      if(!cmd)return;
-
-      // Echo the command
-      var cmdLine=document.createElement("div");
-      cmdLine.innerHTML='<span class=term-prompt>$</span> <span class=term-cmd>'+cmd.replace(/</g,"&lt;")+'</span>';
-      output.appendChild(cmdLine);
-
-      // Send to backend
-      try{
-        var formData=new FormData();
-        formData.append("cmd",cmd);
-        var res=await fetch("/api/terminal",{method:"POST",body:formData});
-        var data=await res.json();
-
-        // Display output or error
-        var outLine=document.createElement("div");
-        if(data.error){
-          outLine.innerHTML='<span class=term-err>Error: '+data.error.replace(/</g,"&lt;")+'</span>';
-        }else if(data.output){
-          outLine.innerHTML='<span class=term-out>'+data.output.replace(/</g,"&lt;").replace(/\\n/g,"<br>")+'</span>';
-        }else{
-          outLine.innerHTML='<span class=term-out>(no output)</span>';
-        }
-        output.appendChild(outLine);
-      }catch(err){
-        var errLine=document.createElement("div");
-        errLine.innerHTML='<span class=term-err>Error: '+err.message+'</span>';
-        output.appendChild(errLine);
-      }
-
-      // Clear input and scroll to bottom
-      input.value="";
-      output.scrollTop=output.scrollHeight;
-    }
-  });
-
-  // Auto-focus input when clicking anywhere in the terminal
-  document.querySelector(".term").addEventListener("click",function(){
-    input.focus();
-  });
 })();
 </script>
 </body></html>"""

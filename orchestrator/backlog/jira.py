@@ -38,6 +38,38 @@ ROMAN_ACCOUNT_ID = "70121:051c9744-3c4d-4dfb-b2e5-d7a0e87c2443"
 # block the drain thread forever (every adapter call runs inline in the autopilot cycle).
 _HTTP_TIMEOUT = float(os.environ.get("JIRA_HTTP_TIMEOUT", "30") or 30)
 
+# Jira hard-caps an issue summary at 255 chars; we store 240 to leave room. EU-365: the cap has to be
+# applied in exactly ONE place, because create_task's stored title is what find_open_by_summary later
+# compares against — see _summary_for_jira.
+_SUMMARY_MAX = 240
+
+# Jira's comment endpoint pages (default 50/page, oldest-first). Ask for the biggest page it serves
+# and bound the walk: 20 x 100 = 2000 comments is far past any real decision thread, and the cap is
+# what stops a paging bug (or a backend that ignores startAt) from hanging the drain thread — every
+# adapter call runs inline in the autopilot cycle (same reasoning as _HTTP_TIMEOUT above).
+_COMMENT_PAGE = 100
+_COMMENT_MAX_PAGES = 20
+
+
+class BacklogSearchError(RuntimeError):
+    """A de-dup search could not be COMPLETED — the answer is 'unknown', not 'no duplicate'.
+
+    EU-365 (2026-07-16 total audit): find_open_by_summary used to swallow every RequestException and
+    return None. filing.py:109 reads None as "nothing open matches" and files, so one 5xx from
+    Atlassian minted a duplicate of every finding in the batch — silently defeating the de-dup EU-42
+    depends on. Raising instead makes the search failure fail-CLOSED: filing.py's per-finding
+    `except Exception` records it in FilingResult.failed (escalated, never buried) and skips the
+    create, so a search hiccup under-files visibly rather than duplicating invisibly.
+    """
+
+
+def _summary_for_jira(summary: str) -> str:
+    """The EXACT title create_task persists — the one string both the write and the de-dup compare
+    must agree on. EU-365: create_task stored `summary[:240]` while find_open_by_summary compared the
+    FULL summary, so any finding with a >240-char title could never match the ticket it had itself
+    filed and re-filed on every run."""
+    return (summary or "").strip()[:_SUMMARY_MAX]
+
 
 def _with_default_timeout(session):
     """Make every request on ``session`` carry a default timeout (EU-358). Call sites may still
@@ -134,6 +166,13 @@ class JiraAdapter(BacklogAdapter):
         return fields
 
     def _jql_for_status(self, status: str) -> str:
+        # `status` is a LOGICAL name ("In Progress", the ready column) — map it to this board's
+        # workflow name exactly as set_status does. EU-365: only the WRITE path mapped, so a board
+        # whose status_map renames the column ("In Progress" -> "In Development") was queried for a
+        # status it doesn't have: Jira answers 0 issues, raise_for_status passes, and the drain
+        # reports "queue clear" while the whole column sits there. Same silent-empty class as the
+        # auth-blind 200 below. getattr: several harnesses inject adapters with no status_map.
+        status = getattr(self, "status_map", {}).get(status, status)
         clauses = []
         if self.project:
             clauses.append(f'project = "{self.project}"')
@@ -200,10 +239,27 @@ class JiraAdapter(BacklogAdapter):
 
     def comments(self, key: str) -> list[dict[str, Any]]:
         """All comments on an issue, oldest -> newest (GET issue/{key}/comment). The read half of a
-        decision round-trip: the loop posts a question as a comment, the Commander answers in one."""
-        resp = self.session.get(self._url(f"issue/{key}/comment"))
-        resp.raise_for_status()
-        return list((resp.json() or {}).get("comments", []) or [])
+        decision round-trip: the loop posts a question as a comment, the Commander answers in one.
+
+        EU-365: this used to read ONE page. Jira returns comments oldest-first, 50 per page, so on a
+        long decision thread the Commander's newest reply fell off the end and latest_answer() —
+        which reads the LAST comment — handed the loop a stale answer to act on. Page to the end."""
+        out: list[dict[str, Any]] = []
+        start = 0
+        for _ in range(_COMMENT_MAX_PAGES):
+            resp = self.session.get(self._url(f"issue/{key}/comment"),
+                                    params={"startAt": start, "maxResults": _COMMENT_PAGE})
+            resp.raise_for_status()
+            body = resp.json() or {}
+            page = list(body.get("comments") or [])
+            out.extend(page)
+            start += len(page)
+            total = body.get("total")
+            # Stop on: a short/empty page, the reported total reached, or no total at all (a backend
+            # or fake that omits it — re-reading page 0 forever is the failure to avoid).
+            if not page or not isinstance(total, int) or start >= total:
+                break
+        return out
 
     def latest_answer(self, ticket) -> str | None:
         """The most recent HUMAN comment on the ticket — the Commander's answer in a decision
@@ -273,13 +329,18 @@ class JiraAdapter(BacklogAdapter):
 
     # -- filing (officers raise their own tickets) ------------------------ #
     def create_task(self, summary: str, description: str, labels=None,
-                    issue_type: str = "Task", priority: str | None = None) -> str | None:
+                    issue_type: str = "Task", priority: str | None = None,
+                    parent: str | None = None) -> str | None:
         fields: dict[str, Any] = {
             "project": {"key": self.project},
-            "summary": summary[:240],
+            "summary": _summary_for_jira(summary),
             "issuetype": {"name": issue_type},
             "description": _adf(description or summary),
         }
+        # EU-301: link a child Task to its Epic via the team-managed `parent` field (these boards are
+        # simplified/next-gen — children group under an Epic by `parent`, not the classic epic-link).
+        if parent:
+            fields["parent"] = {"key": parent}
         # Always pin an assignee: the configured one, else Roman by default. Leaving it unset makes
         # Jira fall back to the token owner (implicit currentUser()), so tickets the unit files would
         # never reach Roman's queue.
@@ -294,8 +355,52 @@ class JiraAdapter(BacklogAdapter):
         r.raise_for_status()
         return r.json().get("key")
 
+    # -- Epic completion (EU-374, closes EU-301's step 5) ------------------ #
+    def parent_epic_key(self, key: str) -> str | None:
+        """The key of the EPIC this issue is a child of (the team-managed ``parent`` field EU-301
+        links children with), or None. Deliberately Epic-only: on these next-gen boards ``parent``
+        also carries sub-task→Task links, and the Epic auto-close must never fire on one of those.
+        Any API/shape hiccup returns None — the caller (loop._maybe_close_epic) is best-effort and
+        an unresolved parent simply leaves the Epic open."""
+        try:
+            r = self.session.get(self._url(f"issue/{key}"), params={"fields": "parent"})
+            r.raise_for_status()
+            parent = ((r.json().get("fields") or {}).get("parent") or {})
+            ptype = ((((parent.get("fields") or {}).get("issuetype") or {}).get("name")) or "")
+            if parent.get("key") and ptype.strip().lower() == "epic":
+                return parent["key"]
+            return None
+        except requests.RequestException:
+            return None
+
+    def epic_children(self, epic_key: str) -> list[dict[str, str]]:
+        """All child issues of an Epic (``parent = <epic>`` JQL, the EU-301 linkage) as
+        ``[{key, summary, status, status_category}]`` — exactly what the Epic auto-close needs to
+        decide whether every sibling is Done/QA. Raises on an HTTP failure (and on Jira's
+        auth-blind 200, see _raise_if_unauthenticated) instead of returning [] — an empty list
+        must mean "the Epic truly has no children", never "the search broke", or a hiccup could
+        vacuously prove the siblings done (the caller also re-checks the landed child is present)."""
+        r = self.session.post(self._url("search/jql"), json={
+            "jql": f'parent = "{epic_key}" ORDER BY created ASC',
+            "maxResults": 100, "fields": ["summary", "status"]})
+        r.raise_for_status()
+        self._raise_if_unauthenticated(r)
+        out: list[dict[str, str]] = []
+        for it in r.json().get("issues", []) or []:
+            f = it.get("fields", {}) or {}
+            status = (f.get("status") or {}) or {}
+            out.append({
+                "key": it.get("key", "") or "",
+                "summary": (f.get("summary") or "").strip(),
+                "status": (status.get("name") or "").strip(),
+                "status_category": (((status.get("statusCategory") or {}).get("key")) or "").strip(),
+            })
+        return out
+
     def find_open_by_summary(self, summary: str) -> str | None:
-        """Return an OPEN ticket with a matching summary (de-dup), else None."""
+        """Return an OPEN ticket with a matching summary (de-dup), else None — None means the search
+        RAN and found no duplicate. A search that could not run raises BacklogSearchError instead, so
+        a caller can never read an outage as "nothing open matches" and file a duplicate (EU-365)."""
         q = summary.replace('"', " ").replace("\\", " ").strip()[:120]
         if not q:
             return None
@@ -304,11 +409,17 @@ class JiraAdapter(BacklogAdapter):
                 "jql": f'project = "{self.project}" AND statusCategory != Done AND summary ~ "{q}"',
                 "maxResults": 5, "fields": ["summary"]})
             r.raise_for_status()
-            for it in r.json().get("issues", []):
-                if ((it.get("fields", {}) or {}).get("summary", "")).strip().lower() == summary.strip().lower():
-                    return it.get("key")
-        except requests.RequestException:
-            return None
+            issues = r.json().get("issues", [])
+        except requests.RequestException as exc:
+            raise BacklogSearchError(
+                f"de-dup search failed for project '{self.project}': {exc}") from exc
+        # Compare truncated-vs-truncated: the candidate's stored summary is what create_task could
+        # persist, so normalise this summary the same way before matching (EU-365).
+        want = _summary_for_jira(summary).lower()
+        for it in issues:
+            stored = ((it.get("fields", {}) or {}).get("summary", "") or "").strip().lower()
+            if stored == want:
+                return it.get("key")
         return None
 
     # -- Senior PM operations: close & transition -------------------------------- #

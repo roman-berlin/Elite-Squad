@@ -22,10 +22,21 @@ cfg = Config(apps=[], audit_path=str(Path(tempfile.mkdtemp()) / "audit.jsonl"))
 
 # --- structure is read from the code (can't drift) ---
 doc = roster.build_doc(cfg, "Shipped 3 tickets to DEV today.")
+# EU-260: the Test Engineer left this list when it left the code — c276155 (Phase-2 §2) deleted
+# test_engineer.py + officers/test-engineer.md and dropped the Tests phase, but the roster row survived
+# and re-emitted the retired officer into ROSTER.md daily. tests/eu260_org_reality_test.py pins that it
+# stays gone (and that the Engineering Manager, still seated on the council, does NOT).
 for officer in ["CTO", "Engineering Manager", "Product Manager", "Dev Team Lead", "Code Reviewer",
-                "Test Engineer", "QA Engineer", "Security Engineer", "Release Manager", "SRE",
-                "Engineering Coach", "Scrum Master", "Mayor"]:
+                "QA Engineer", "Security Engineer", "Release Manager", "SRE",
+                "Scrum Master"]:
     chk(f"doc lists {officer}", officer in doc)
+chk("doc does NOT list the retired Test Engineer (EU-260)", "Test Engineer" not in doc)
+# EU-327 (2026-07-17): the Engineering Coach (drillmaster) is retired — drill()/apply() had zero
+# production callers after EU-323/EU-331 relocated its load-bearing pieces (signals, doctrine).
+chk("doc does NOT list the retired Engineering Coach (EU-327)", "Engineering Coach" not in doc)
+# 2026-07-19 stabilization: the Mayor (liaison) phantom row is gone — liaison.py was deleted in
+# 40da120 (Phase-2 §2) but the roster row survived; the retired-subsystems guard now pins it out.
+chk("doc does NOT list the retired Mayor / liaison", "Mayor" not in doc and "Inter-unit Ambassador" not in doc)
 chk("doc carries the status line", "Shipped 3 tickets to DEV today." in doc)
 chk("doc dated 'As of'", "_As of" in doc)
 
@@ -33,7 +44,7 @@ chk("doc dated 'As of'", "_As of" in doc)
 mer = roster.mermaid_chart()
 chk("chart is mermaid flowchart", mer.startswith("```mermaid") and "flowchart TD" in mer)
 chk("chart roots at the Commander -> CTO", "Commander · Roman" in mer and "G[CTO" in mer)
-chk("chart hangs every officer off the General", mer.count("G --> ") == 12)   # 13 officers minus the General (EU-66 adds the Mayor / liaison; EU-110 adds Scrum Master)
+chk("chart hangs every officer off the General", mer.count("G --> ") == 9)   # 10 officers minus the General (EU-110 adds Scrum Master; EU-260 retires the Test Engineer; EU-327 retires the Engineering Coach; 2026-07-19 retires the Mayor / liaison row)
 
 # --- model column is auto-aware ---
 fixed = Config(apps=[], audit_path="/tmp/x.jsonl", auto_model=False, builder_model="claude-opus-4-8")
@@ -75,7 +86,7 @@ async def _no_status(c): return "Quiet day — 2 merges, 0 parks."
 roster._status_line = _no_status
 p = asyncio.run(roster.refresh(cfg))
 chk("refresh wrote ROSTER.md", p.exists() and p.name == "ROSTER.md")
-chk("written doc has the chart + officers", "flowchart TD" in p.read_text() and "Engineering Coach" in p.read_text())
+chk("written doc has the chart + officers", "flowchart TD" in p.read_text() and "Scrum Master" in p.read_text())
 chk("latest_status reads the status back", roster.latest_status(cfg) == "Quiet day — 2 merges, 0 parks.")
 
 # --- cockpit /roster-doc route ---

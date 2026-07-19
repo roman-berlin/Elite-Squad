@@ -116,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     apc.add_argument("app", nargs="?", default=None, help="app to work; omit to cover every backlogged app")
     apc.add_argument("--once", action="store_true", help="run a single cycle then exit (good for a live test)")
     apc.add_argument("--interval", type=int, default=60, help="seconds to wait when the queue is empty (default 60)")
+    apc.add_argument("--force", action="store_true",
+                     help="start even when a detached daemon already holds the PID file")
     ub = sub.add_parser("unblock", help="clear a parked (escalated) ticket so autopilot retries it")
     ub.add_argument("ticket", nargs="?", default=None, help="ticket id; omit to clear all parked")
 
@@ -276,7 +278,6 @@ def _consolidate(args) -> int:
         for p in pats:
             print(f"  ×{p['count']:<3} {p['label']}  ({', '.join(p['tickets'][:5])})")
             print(f"        → {p['action']}")
-            print(f"        drill: {p['drill']}")
         print("")
     else:
         print("No recurring rejection pattern (need a theme across 2+ tickets).\n")
@@ -444,6 +445,25 @@ async def _main(argv: list[str]) -> int:
     if args.command == "serve":
         from . import server
         cfg._source_path = args.config   # so the cockpit's onboard form knows which config.yaml to edit
+        # EU-386: dirty-tree respawn forensics — an accidental (crash / KeepAlive) respawn onto
+        # uncommitted changes must be loud, not silent. Wired here rather than in server.serve()
+        # because this is the one line every cockpit boot takes (CLI and launchd daemon alike);
+        # serve's own process_start audit line stays in server.py. Warn FIRST so the dirty-tree
+        # message precedes any auto-resumed drain's output.
+        from . import autopilot as _ap
+        _ap.warn_dirty_tree(cfg, "serve")
+        # EU-387: if THIS boot is the respawn a self-update exit asked for, record the completion
+        # and clear the one-shot flag (a second boot must not re-consume it).
+        from .audit import AuditLog as _AL
+        try:
+            _ap.consume_self_restart_flag(cfg, _AL(cfg.audit_path))
+        except Exception:  # noqa: BLE001 — boot bookkeeping must never block serving
+            pass
+        # EU-385 (EU-224a): auto-resume drains persisted as RUNNING when the previous process
+        # died — the crash-respawn recovery that closed the 66-minute dead-drain gap. A drain the
+        # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and
+        # the EU-356 autopilot_stop_requested audit trail are the discriminators). Never raises.
+        _ap.resume_armed_drains(cfg)
         server.serve(cfg, port=args.port)
         return 0
 
@@ -581,6 +601,15 @@ async def _main(argv: list[str]) -> int:
                 and not backends.available("glm")):
             print("GLM is selected but GLM_AUTH_TOKEN is not configured — set it (and restart) "
                   "or run with --model opus.")
+            return 2
+        # EU-368: the same detached-daemon guard the cockpit has had since EU-103 (server.py:605).
+        # Without it this path walked straight into autopilot()'s unconditional _write_pid(), so the
+        # CLI overwrote a live launchd daemon's record and two daemons drained one queue against one
+        # PID file — the EU-355 hermeticity incident class, but in production.
+        if autopilot_mod.daemon_is_external() and not getattr(args, "force", False):
+            print("autopilot is already running as a detached daemon — stop it first (unload the "
+                  "launchd keepalive agent, or close the terminal it runs in) before starting "
+                  "another, or pass --force if you're sure.")
             return 2
         await autopilot_mod.autopilot(cfg, args.app, once=getattr(args, "once", False),
                                       interval=getattr(args, "interval", 60))

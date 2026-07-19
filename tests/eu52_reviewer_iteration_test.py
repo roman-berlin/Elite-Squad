@@ -44,7 +44,8 @@ def fake_for_reviewer(cfg, diff="", iteration=1):
     seen["iteration"] = iteration
     return models.SONNET, f"sonnet (it={iteration})"
 ran = {}
-async def fake_run_agent(prompt, options, tag="", cfg=None, routing_tier=None):
+async def fake_run_agent(prompt, options, tag="", ticket_id=None, pass_number=None,
+                          cfg=None, routing_tier=None):   # EU-258: mirror the real signature
     ran["model"] = getattr(options, "model", None)
     return RR('{"verdict": "PASS", "spec_met": true}')
 reviewer_mod.run_agent = fake_run_agent
@@ -129,7 +130,8 @@ chk("review iteration tracks the build iteration one-for-one",
 # squad has no ladder officer left. adjutant.py itself was deleted in EU-325.)
 import re
 _pin = re.compile(r"[^_]model=cfg\.(reviewer_model|builder_model)")   # the bare hardcode pattern
-for _mod in ("pm", "scrum", "drillmaster", "quartermaster"):
+# EU-327 (2026-07-17): drillmaster.py deleted — drop it from the hardcoded-Opus scan set.
+for _mod in ("pm", "scrum", "quartermaster"):
     _src = (Path("orchestrator") / f"{_mod}.py").read_text(encoding="utf-8")
     chk(f"{_mod}: routes through the economical ladder (models.for_officer)",
         "models.for_officer(" in _src)

@@ -169,6 +169,81 @@ chk("warm empty-counts drop: parked EU-9 is reset (gone from disk)", "EU-9" not 
 chk("warm empty-counts drop: concurrent AUTO-3 is preserved", after6.get("AUTO-3") == 1, str(after6))
 
 # ============================================================================================== #
+# AC7 (EU-278): COLD process + EMPTY counts — the gap AC5 (cold+non-empty) and AC6 (warm+empty)
+#      leave open. A fresh process whose only error-tracked ticket parks calls save with counts={}:
+#      no project prefix to own it by, and a cold baseline to fall back on. The key was therefore
+#      preserved on disk rather than reset, so after an /unblock the ticket got ~1 retry instead of
+#      3 (a mild park-after-3 defeat). Closed by seeding ownership from the DRAIN's own declared
+#      scope when `counts` carries no prefix of its own. Verified failing on 2026-07-17: disk stayed
+#      {"EU-9": 3, "AUTO-3": 1}.
+# ============================================================================================== #
+print("\n=== AC7: cold-process empty-counts park resets own key; foreign key preserved ===")
+app7 = AppConfig(name="elite-unit", repo_path=str(tmp), base_branch="dev", protected_branch="main",
+                 backlog_backend="jira", backlog={"base_url": "https://x.atlassian.net", "project_key": "EU"})
+cfg7 = Config(apps=[app7], audit_path=str(tmp / "ac7_audit.jsonl"), use_worktree=False)
+# A previous incarnation left EU-9 at the park threshold; a concurrent AUTO drain owns AUTO-3.
+autopilot._error_counts_file(cfg7).write_text('{"EU-9": 3, "AUTO-3": 1}')
+
+def _cold_empty_save():
+    # Brand-new thread => guaranteed-cold baseline, exactly like a fresh process after a restart.
+    autopilot._enter_drain_scope(cfg7, "elite-unit")
+    autopilot.save_error_counts(cfg7, {})        # EU-9 parked -> counts empty
+
+th7 = threading.Thread(target=_cold_empty_save)
+th7.start(); th7.join()
+after7 = autopilot.load_error_counts(cfg7)
+chk("cold empty-counts park: parked EU-9 is reset on disk (gets its full retry budget back)",
+    "EU-9" not in after7, str(after7))
+chk("cold empty-counts park: concurrent drain's AUTO-3 is preserved", after7.get("AUTO-3") == 1,
+    str(after7))
+
+# The drain's scope must not over-claim: an UNSTAMPED save (no drain scope) still has no ownership
+# signal from an empty counts, so it must fall back to preserving — never guess.
+autopilot._error_counts_file(cfg7).write_text('{"EU-9": 3, "AUTO-3": 1}')
+def _unstamped_empty_save():
+    autopilot.save_error_counts(cfg7, {})
+th7b = threading.Thread(target=_unstamped_empty_save)
+th7b.start(); th7b.join()
+after7b = autopilot.load_error_counts(cfg7)
+chk("an UNSTAMPED empty-counts save claims nothing (both keys preserved)",
+    after7b == {"EU-9": 3, "AUTO-3": 1}, str(after7b))
+
+# ============================================================================================== #
+# AC8 (EU-278): the baseline cache is keyed by a STABLE per-drain identity, not the OS thread ident.
+#      _prune_dead_error_counts_seen only dropped rows whose ident was NOT live, so a recycled-but-
+#      live ident let a new drain inherit a dead predecessor's baseline for the same (path, ident)
+#      key — the one path that could still reintroduce the foreign-key clobber EU-274 fixed. An app
+#      name is stable for the drain's whole life and unique across concurrent drains (EU-64's
+#      per-project single-writer), so ident reuse stops being representable at all.
+# ============================================================================================== #
+print("\n=== AC8: baseline cache keyed on the drain identity, not the OS thread ident ===")
+chk("no cache row is keyed by an OS thread ident (an int)",
+    all(not isinstance(k[1], int) for k in autopilot._error_counts_seen),
+    str(list(autopilot._error_counts_seen)))
+chk("the stamped drain's row is keyed by its app name",
+    any(k[1] == "elite-unit" for k in autopilot._error_counts_seen),
+    str(list(autopilot._error_counts_seen)))
+
+# The same drain identity across two DIFFERENT threads shares one baseline row — a per-thread cache
+# would hand the second thread a cold baseline instead.
+cfg8 = Config(apps=[app7], audit_path=str(tmp / "ac8_audit.jsonl"), use_worktree=False)
+def _stamped(counts):
+    def _go():
+        autopilot._enter_drain_scope(cfg8, "elite-unit")
+        autopilot.save_error_counts(cfg8, counts)
+    t = threading.Thread(target=_go); t.start(); t.join()
+
+_stamped({"EU-9": 2})                                    # thread A warms the drain's baseline
+cur8 = autopilot.load_error_counts(cfg8); cur8["AUTO-3"] = 1
+autopilot._error_counts_file(cfg8).write_text(__import__("json").dumps(cur8))
+_stamped({"EU-9": 2, "EU-10": 1})                        # thread B: same drain, must see the baseline
+after8 = autopilot.load_error_counts(cfg8)
+chk("a later thread of the SAME drain keeps the drain's own keys", after8.get("EU-9") == 2, str(after8))
+chk("a later thread of the SAME drain still preserves the foreign AUTO-3", after8.get("AUTO-3") == 1,
+    str(after8))
+
+
+# ============================================================================================== #
 # AC4: load_error_counts / _MAX_TICKET_ERRORS / save_error_counts signature are unchanged
 # ============================================================================================== #
 print("\n=== AC4: load-side and threshold constant untouched ===")

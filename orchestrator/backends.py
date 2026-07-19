@@ -135,6 +135,39 @@ def _pin_value(value: str | None) -> str:
     return v
 
 
+# 2026-07-19 (Commander order): HYBRID MODE — the Main model does the heavy thinking
+# (Planner/Architect PRD, Reviewer judgment, PM/debug investigation), the Secondary does the
+# regular building against that plan. Run-scoped like the backend pin: loop.run sets the
+# secondary here when hybrid is on, and the SDK seam resolves per-CALL by officer tag.
+_HYBRID_SECONDARY = contextvars.ContextVar("model_hybrid_secondary", default=None)
+
+# The officer tags that count as "regular developing" — everything else stays on the Main model.
+_HYBRID_BUILD_TAGS = frozenset({"builder"})
+
+
+def set_hybrid(secondary: str | None):
+    """Pin the hybrid-mode secondary backend for this run context (None = hybrid off)."""
+    return _HYBRID_SECONDARY.set(_pin_value(secondary) if secondary else None)
+
+
+def reset_hybrid(token) -> None:
+    try:
+        _HYBRID_SECONDARY.reset(token)
+    except (LookupError, ValueError, TypeError):
+        pass
+
+
+def current_for_tag(tag: str | None) -> str:
+    """The EFFECTIVE backend for one officer call: in hybrid mode a build-role tag routes to the
+    pinned secondary; every other tag (planner/architect/reviewer/pm/council/…) — and every call
+    outside hybrid mode — uses the run's main backend. apply() keeps its fail-closed behaviour,
+    so an unusable secondary still degrades to NATIVE rather than a broken endpoint."""
+    sec = _HYBRID_SECONDARY.get(None)
+    if sec and (tag or "").strip().lower() in _HYBRID_BUILD_TAGS:
+        return sec
+    return current()
+
+
 def set_backend(value: str | None, registry=None):
     """Pin the backend for the current run context. Returns a token for :func:`reset_backend`.
 
@@ -180,6 +213,11 @@ SENSITIVE_KEYS: frozenset[str] = frozenset({
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "GENERAL_COCKPIT_PROMOTE",
+    # EU-371(3), 2026-07-16 total audit: the paid z.ai bearer was inherited by every officer/gate
+    # subprocess building untrusted product code (EU-255 stripped Jira/Telegram only). Safe to
+    # strip for GLM runs too — :func:`apply` reads the token in the PARENT (os.environ, untouched)
+    # and hands it to the child as ANTHROPIC_AUTH_TOKEN, a different key (see ``_glm_env``).
+    "GLM_AUTH_TOKEN",
 })
 SENSITIVE_PREFIXES: tuple[str, ...] = ("JIRA_", "TELEGRAM_")
 
@@ -211,6 +249,54 @@ def available(backend: str) -> bool:
     return True
 
 
+def resolve_for_run(cfg=None, app_name: str | None = None) -> tuple[str, str | None]:
+    """2026-07-19 (Commander order): the MAIN/SECONDARY pick for a run.
+
+    Returns ``(backend, fallback_reason)``: the app's main model (backend_pref.active) when it is
+    usable, else the configured SECONDARY when that is usable — with a human reason string so the
+    caller can audit/notify — else the main unchanged (the existing hard blocks then fire exactly
+    as before, so with NO secondary configured behaviour is byte-identical to the old world).
+
+    "Usable" is deliberately cheap and static-plus-cached: GLM needs its token/config
+    (glm_config_issues); the native Claude backend needs the plan limit NOT hit
+    (usage.plan_limit_hit — itself cached); a custom registry backend counts usable (no probe).
+    Never raises."""
+    try:
+        from . import backend_pref
+        primary = backend_pref.active(cfg, app_name)
+    except Exception:  # noqa: BLE001
+        return NATIVE, None
+    try:
+        sec = backend_pref.get_secondary(cfg)
+    except Exception:  # noqa: BLE001
+        sec = None
+    if not sec or sec == primary:
+        # No stand-in configured → the old world, at the old cost: no usability probe at all
+        # (plan_limit_hit shells out on a cold cache — too heavy for every launch).
+        return primary, None
+
+    def _usable(bk: str) -> tuple[bool, str]:
+        try:
+            if normalize(bk) == GLM:
+                iss = glm_config_issues()
+                return (not iss, "; ".join(iss) if iss else "")
+            if normalize(bk) == NATIVE:
+                from . import usage
+                hit = usage.plan_limit_hit(cfg) if cfg is not None else {}
+                return (not hit.get("hit"), "plan limit hit" if hit.get("hit") else "")
+            return True, ""
+        except Exception:  # noqa: BLE001
+            return True, ""   # an unknowable state must never block dispatch here
+
+    ok, why = _usable(primary)
+    if ok:
+        return primary, None
+    sec_ok, _ = _usable(sec)
+    if sec_ok:
+        return sec, f"main '{primary}' unavailable ({why}) — using secondary '{sec}'"
+    return primary, None
+
+
 def alternates(current: str) -> list[str]:
     """Runnable backend ids OTHER than ``current`` — the options to offer when the active backend is
     blocked (e.g. an Opus/Claude plan-limit). Used by the cockpit's limit prompt (EU-191). NATIVE is
@@ -222,6 +308,24 @@ def alternates(current: str) -> list[str]:
 def glm_model() -> str:
     """The GLM model id to send (env-overridable, defaults to ``glm-4.6``)."""
     return (os.environ.get("GLM_MODEL") or _GLM_MODEL_DEFAULT).strip()
+
+
+def glm_model_for(requested: str | None) -> str:
+    """2026-07-19: TIER-PARALLEL GLM pick — the GLM variant matching the CLASS of the Claude
+    model the officer asked for. A Sonnet/Haiku-class request maps to ``GLM_MODEL_MID`` (the
+    "parallel to Sonnet" model, e.g. glm-4.5-air); an Opus/deep-class request — or an unknown —
+    keeps the top ``GLM_MODEL``. With GLM_MODEL_MID unset, every tier gets the top model, i.e.
+    exactly the old behaviour."""
+    mid = (os.environ.get("GLM_MODEL_MID") or "").strip()
+    if not mid:
+        return glm_model()
+    try:
+        from . import models as _models
+        if _models.tier_of(requested or "") <= 1:      # haiku/sonnet class
+            return mid
+    except Exception:  # noqa: BLE001
+        pass
+    return glm_model()
 
 
 def _glm_env() -> dict[str, str]:
@@ -314,7 +418,9 @@ def apply(options, backend: str | None = None, registry=None) -> str:
         merged = dict(getattr(options, "env", None) or {})
         merged.update(_glm_env())
         options.env = merged
-        options.model = glm_model()
+        # Tier-parallel pick: honour the CLASS of the model the officer requested (a Sonnet-class
+        # build call gets the mid GLM; Opus/deep-class judgment gets the top GLM).
+        options.model = glm_model_for(getattr(options, "model", None))
         return GLM
     if v in _NATIVE_ALIASES:
         return NATIVE
@@ -420,3 +526,88 @@ def glm_test_connection(timeout: float = 8.0) -> tuple[bool, str]:
     if code == 400:
         return False, f"request rejected (HTTP 400) — the endpoint is reachable; check GLM_MODEL ({model})"
     return False, f"GLM endpoint returned HTTP {code}"
+
+
+# ── EU-237: form-supplied backend connection test (the /models "Test connection" button) ─────────
+
+def test_backend_connection(provider: str, base_url: str, model_id: str, api_key: str,
+                            timeout: float = 5.0) -> dict:
+    """LIVE probe of a FORM-SUPPLIED backend config — the POST /models/test handler behind the
+    /models add/edit form's Test-connection button (EU-237). Returns ``{"success", "message"}``
+    (a dict, not :func:`glm_test_connection`'s tuple: the route hands it straight back as the
+    JSON body).
+
+    Unlike :func:`glm_test_connection` (env-configured GLM), every input arrives from the form:
+    nothing is read from env or the registry, nothing is persisted, and the ``api_key`` is used
+    solely inside the one probe request — it NEVER appears in the returned message (the EU-234
+    boundary: messages carry the base URL / model id / HTTP status, never the credential).
+
+    ``provider`` decides the request shape (the registry's PROVIDERS enum is the source of truth):
+
+    * ``anthropic`` — POST ``<base>/v1/messages`` (the Anthropic messages shape).
+    * ``openai``    — POST ``<base>/v1/chat/completions`` (the OpenAI chat shape).
+
+    Both send a 1-max-token ``ping`` so a successful test costs ~nothing, with a short 5s default
+    timeout so the cockpit button answers fast. Never raises — any failure maps to an actionable
+    ``message`` like the GLM prober's.
+    """
+    from .model_registry import PROVIDERS  # deferred: avoid a hard import cycle at module load
+
+    def _fail(message: str) -> dict:
+        return {"success": False, "message": message}
+
+    prov = (provider or "").strip().lower()
+    base = (base_url or "").strip().rstrip("/")
+    model = (model_id or "").strip()
+    key = (api_key or "").strip()
+    # Static validation first (no network) — same spirit as glm_config_issues: catch what is
+    # knowable without a call, so a half-filled form gets an instant, targeted answer.
+    if prov not in PROVIDERS:
+        return _fail(f"unknown provider {prov!r} — expected one of {', '.join(PROVIDERS)}")
+    if not re.match(r"^https?://", base, re.IGNORECASE):
+        return _fail(f"base URL is missing or not a valid URL ({base or 'empty'!r})")
+    if not model:
+        return _fail("model ID is empty")
+    if not key:
+        return _fail("no API key to test — paste one into the form (or save first, then retest)")
+    if base.lower().endswith("/v1"):
+        # Tolerate a base pasted WITH the /v1 suffix (common for OpenAI-compatible hosts): the
+        # paths below carry their own /v1, and <host>/v1/v1/… would 404 a perfectly good config.
+        base = base[:-3].rstrip("/")
+    payload = {"model": model, "max_tokens": 1,
+               "messages": [{"role": "user", "content": "ping"}]}
+    if prov == "anthropic":
+        url = f"{base}/v1/messages"
+        headers = {
+            # A real run forwards the key as a bearer (ANTHROPIC_AUTH_TOKEN — see
+            # _registry_backend_env), while api.anthropic.com proper authenticates via x-api-key.
+            # Send BOTH so the probe matches whichever shape the endpoint expects — same key
+            # either way, and neither header ever leaves this request.
+            "authorization": f"Bearer {key}",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+    else:
+        url = f"{base}/v1/chat/completions"
+        headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
+    try:
+        import requests
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    except requests.exceptions.ConnectionError:
+        return _fail(f"cannot reach {base} — check the base URL and your network")
+    except requests.exceptions.Timeout:
+        return _fail(f"{base} timed out after {timeout:.0f}s — check the base URL")
+    except Exception as exc:  # noqa: BLE001 — a cockpit probe must never raise into the route
+        return _fail(f"connection test failed ({type(exc).__name__})")
+    code = resp.status_code
+    if 200 <= code < 300:
+        return {"success": True, "message": f"OK — {model} answered at {base}"}
+    if code in (401, 403):
+        return _fail(f"API key rejected (HTTP {code}) — check the key (incorrect or expired)")
+    if code == 404:
+        return _fail(f"endpoint not found (HTTP 404) — check the base URL ({base})")
+    if code == 400:
+        return _fail(f"request rejected (HTTP 400) — the endpoint is reachable; "
+                     f"check the model ID ({model})")
+    return _fail(f"endpoint returned HTTP {code}")

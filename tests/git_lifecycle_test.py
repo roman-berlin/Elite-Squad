@@ -161,10 +161,17 @@ chk(
 )
 
 # ============================================================================ #
-# 2) NON-FF RETRY                                                               #
-#    Another commit lands on origin/dev between trial_merge and land_trial;    #
-#    the retry logic (fetch + rebase + re-push) must resolve it cleanly.       #
+# 2) NON-FF RACE → LandRaceError, NOTHING lands (EU-259)                        #
+#    Another commit lands on origin/dev between trial_merge and land_trial.     #
+#    Pre-EU-259 land_trial rebased the trial onto the new base and re-pushed —  #
+#    but that COMBINED tree was never gated (a gate bypass) and left the        #
+#    caller's merge_sha pointing at a phantom commit. The correct contract:     #
+#    land_trial raises LandRaceError, lands NOTHING, and leaves a clean base;   #
+#    the loop requeues and the next drain re-trials + re-gates against the new  #
+#    base. Only an honest fast-forward ever advances origin/dev.                #
 # ============================================================================ #
+from orchestrator.git_ops import LandRaceError  # noqa: E402
+
 g2, origin2, mac2 = make_isolated("noff")
 
 feature2 = "autodev/eu-81b"
@@ -190,39 +197,37 @@ G(interloper, "add", "-A")
 G(interloper, "commit", "-m", "concurrent ticket landed first")
 G(interloper, "push", "origin", "dev")
 
-dev_before2 = out(origin2, "rev-parse", "dev")  # already advanced by concurrent push
+dev_before2 = out(origin2, "rev-parse", "dev")  # the concurrent commit — the ONLY thing on dev
 
-# land_trial must recover from the non-FF push rejection via rebase + retry.
-raised = False
+# land_trial must REFUSE to land the ungated combined tree: it raises LandRaceError.
+raised_land_race = False
 try:
     g2.land_trial(temp2)
+    chk("non-ff: land_trial did NOT silently land the ungated tree", False, "no exception raised")
+except LandRaceError:
+    raised_land_race = True
+    chk("non-ff: land_trial raises LandRaceError on a base-advanced race", True)
 except Exception as e:   # noqa: BLE001
-    raised = True
-    chk("non-ff: land_trial raised unexpectedly (retry should have resolved)", False, str(e))
+    chk("non-ff: land_trial raised the WRONG exception type", False, f"{type(e).__name__}: {e}")
 
-if not raised:
-    chk("non-ff: land_trial succeeded (retry resolved the non-FF push)", True)
+if raised_land_race:
     dev_after2 = out(origin2, "rev-parse", "dev")
-    chk("non-ff: origin/dev advanced past the concurrent commit", dev_after2 != dev_before2)
-    chk(
-        "non-ff: concurrent commit is an ancestor of the new origin/dev (history preserved)",
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", dev_before2, dev_after2],
-            cwd=str(origin2), capture_output=True,
-        ).returncode == 0,
-    )
-
-    g2.delete_local_branch(feature2)
-    g2.delete_remote_branch(feature2)
-    g2.sync_main_base()
-
-    assert_post_land_invariants("non-ff", g2, origin2, mac2, feature2)
-
-    # Feature content from EU-81b arrived on origin/dev despite the concurrent land.
-    chk(
-        "non-ff: eu81b.txt is present on origin/dev after retry land",
-        "eu81b.txt" in out(origin2, "ls-tree", "-r", "--name-only", "dev"),
-    )
+    chk("non-ff: origin/dev UNCHANGED — nothing ungated landed",
+        dev_after2 == dev_before2, f"{dev_before2[:9]} -> {dev_after2[:9]}")
+    # the local checkout is clean and detached at the (old) base — the trial branch is gone
+    branches = out(g2.repo, "branch", "--list", temp2)
+    chk("non-ff: the trial branch was cleaned up", temp2 not in branches, branches)
+    # The feature branch still holds the work — the loop requeues and the NEXT drain re-trials it
+    # (setup() re-fetches + re-detaches the worktree to the fresh base, then trial_merge + gate run
+    # again). That loop-level re-trial + re-gate is pinned in tests/land_race_requeue_test.py; here
+    # we assert only the git-level contract: land_trial refused, landed nothing, and left clean state.
+    chk("non-ff: the local checkout is not left on the trial branch (detached/clean)",
+        temp2 not in out(g2.repo, "rev-parse", "--abbrev-ref", "HEAD"))
+    # The concurrent commit is untouched on origin/dev — we neither clobbered nor rebased over it.
+    chk("non-ff: the concurrent commit is still the origin/dev tip",
+        out(origin2, "rev-parse", "dev") == dev_before2)
+    chk("non-ff: EU-81b's file did NOT land (gate never validated it against the new base)",
+        "eu81b.txt" not in out(origin2, "ls-tree", "-r", "--name-only", "dev"))
 
 
 # ============================================================================ #

@@ -46,7 +46,8 @@ def chk(n, c, d=""):
 # ── 1) _token_css FALLBACK branch ────────────────────────────────────────────────
 # Live path first (sanity): a real :root block is present, so we read it, not the fallback.
 live = V._token_css()
-chk("live path returns a :root token block", live.startswith("<style>:root{") and live.endswith("</style>"))
+chk("live path returns a :root token block (+ theme boot, 2026-07-19)",
+    live.startswith("<style>:root{") and "</style>" in live and "data-theme=light" in live)
 
 # Force the failure branch: blow away the :root{} the regex looks for.
 _saved = warroom._PAGE
@@ -56,8 +57,9 @@ try:
 finally:
     warroom._PAGE = _saved
 
-chk("fallback still yields a valid :root style block", fb == "<style>" + V._TOKENS_FALLBACK + "</style>")
-chk("fallback is never an empty/broken <style>", fb.startswith("<style>:root{") and fb.endswith("</style>"))
+chk("fallback still yields a valid :root style block (+ theme boot, 2026-07-19)",
+    fb == "<style>" + V._TOKENS_FALLBACK + "</style>" + V._THEME_BOOT)
+chk("fallback is never an empty/broken <style>", fb.startswith("<style>:root{") and "</style>" in fb)
 chk("fallback carries the core palette + system tokens",
     all(t in fb for t in ("--bg", "--ink", "--accent", "--ring", "--r-md", "--okline")))
 # and the live path is restored after the swap (no global leakage)

@@ -118,8 +118,8 @@ def configure_timeouts(cfg) -> None:
 
 def _timeout_for_tag(tag: str) -> float:
     """Per-role wall-clock budget (EU-221). The builder tag gets the larger budget — real
-    code changes legitimately run long; every other officer tag (planner/reviewer/pm/adjutant/
-    drillmaster/council/...) gets the shorter default, which is where the observed stalls
+    code changes legitimately run long; every other officer tag (planner/reviewer/pm/
+    council/...) gets the shorter default, which is where the observed stalls
     (2026-07-10 GLM planner, 2026-07-08 AUTO-93 75-min review) happened."""
     if tag == "builder":
         return _BUILDER_TIMEOUT_S
@@ -243,7 +243,7 @@ async def run_agent(prompt: str, options: ClaudeAgentOptions, tag: str = "",
     # mutually exclusive with EU-174 tier routing (which mutates process-global env). When GLM is
     # the run's backend, bypass routing entirely and go straight to the single seam.
     from . import backends as _backends
-    if _backends.current() == _backends.GLM:
+    if _backends.current_for_tag(tag) == _backends.GLM:
         return await _run_agent_unrouted(prompt, options, tag=tag, ticket_id=ticket_id,
                                          pass_number=pass_number)
 
@@ -333,14 +333,18 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     # (per-subprocess only — zero process-global mutation) and overrides options.model. Returns the
     # backend actually applied (fail-closed to Opus if GLM is unconfigured).
     from . import backends as _backends
-    effective_backend = _backends.apply(options)
+    # 2026-07-19 hybrid mode: resolve per officer tag — a build-role call may route to the
+    # SECONDARY backend while planner/reviewer calls in the same run stay on the Main model.
+    effective_backend = _backends.apply(options, backend=_backends.current_for_tag(tag))
     # EU-255: credential-minimize THIS officer subprocess (it builds/tests injection-prone,
     # untrusted product code). The SDK builds the child env as {**os.environ, **options.env}
     # (subprocess_cli.py), so blank the orchestrator-only Jira/Telegram creds in options.env — a
     # key merely ABSENT from options.env still inherits from the parent. Applied at this single
     # seam (after apply(), for both backends) rather than inside apply(), which stays a pure
-    # model/backend transform. Model auth (CLAUDE_CODE_OAUTH_TOKEN / the GLM z.ai bearer) is not
-    # sensitive by this predicate, so it passes through untouched.
+    # model/backend transform. Native model auth (CLAUDE_CODE_OAUTH_TOKEN) is not sensitive by
+    # this predicate, so it passes through untouched; the raw GLM_AUTH_TOKEN *is* stripped since
+    # EU-371(3) — harmless for GLM runs, because apply() above already read it in the parent and
+    # injected it into options.env under ANTHROPIC_AUTH_TOKEN, a key the strip never touches.
     _strip = _backends.secret_strip_overrides()
     if _strip:
         _merged_env = dict(getattr(options, "env", None) or {})

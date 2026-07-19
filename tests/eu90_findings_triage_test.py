@@ -153,7 +153,7 @@ _review_raw: list[str] = [""]            # review.raw (reviewer ===TICKETS=== bl
 
 
 async def _stub_review(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                       already_bounced=None):
+                       already_bounced=None, gate_evidence=""):   # EU-265: real signature
     return ReviewResult(
         verdict=Verdict.FAIL,
         spec_met=False,
@@ -175,9 +175,11 @@ loop.reviewer_mod.review = _stub_review
 loop._notify = lambda cfg, text: notify_calls.append(text)
 loop.run_gate = lambda app, paths=None, **_: GateResult(passed=True, report="")
 
-# Stub async _decision_brief so the post-loop escalation path doesn't network.
+# Stub async _decision_brief so the post-loop escalation path doesn't network. EU-337: the reviewer-
+# findings ping now routes through _decision_brief; echo the raw notes so this harness (which checks
+# the ping carries the finding detail) still exercises that content.
 async def _stub_decision_brief(cfg, ticket_id, raw):
-    return ""
+    return raw
 
 loop._decision_brief = _stub_decision_brief
 loop.decisions.reply_hint = lambda ticket_id: ""

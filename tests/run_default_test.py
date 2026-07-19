@@ -1,4 +1,8 @@
-"""'+ New task' defaults to LIVE (build + merge to DEV); dry-run is opt-in; the dry flag clears after a run."""
+"""/api/run defaults to LIVE (build + merge to DEV); dry-run is opt-in; the dry flag clears after a run.
+
+EU-289 removed the "+ New task" toolbar panel that used to drive this route (intake is Jira-only);
+the route itself stays for scripted use, which is what this harness exercises directly.
+"""
 import sys, types, tempfile, threading, time
 from pathlib import Path
 
@@ -44,9 +48,16 @@ def wait_idle():
             return
         time.sleep(0.05)
 
-# 1) control bar form uses the dry-run checkbox, not a "live" one
+# 1) the control bar carries no ad-hoc run form at all.
+# CONTRACT CHANGE (EU-289, 2026-07-17): this used to assert `name=dryrun` IS in the bar — the
+# opt-in checkbox on the "+ New task" panel's POST /api/run form. Roman had that panel removed
+# ("remove New task — we use only Jira"), so the whole form is gone and the old assertion pinned
+# deleted markup. Inverted into a positive pin of the new contract; the dry-run DEFAULT behaviour
+# it was really protecting is unaffected and still covered by the /api/run checks below (default
+# submit → LIVE, dryrun=on → DRY), which drive the endpoint directly rather than via the markup.
 bar = srv._control_bar(cfg, "automatixy", True)
-chk("control bar uses 'dryrun' checkbox", "name=dryrun" in bar)
+chk("control bar no longer ships the ad-hoc run form (EU-289: intake is Jira-only)",
+    "name=dryrun" not in bar and "/api/run" not in bar, bar[:160])
 chk("control bar dropped the 'live' checkbox", "name=live" not in bar)
 
 # 2) default submit (no dryrun) -> LIVE
@@ -82,3 +93,7 @@ for n, ok, det in results:
 print("------------------------------------------------------")
 print(f"  {passed}/{len(results)} passed")
 print("  RESULT:", "ALL GREEN" if passed == len(results) else f"{len(results)-passed} FAIL")
+# EU-302 class (failure-blind harness): this file printed "N FAIL" and still exited 0, so a real
+# regression only surfaced via run_all's soft-tally and was invisible to a direct run — which is
+# exactly how it read GREEN in isolation while failing in the suite (2026-07-17). Exit honestly.
+sys.exit(0 if passed == len(results) else 1)

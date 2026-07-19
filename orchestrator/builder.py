@@ -42,7 +42,9 @@ Approach, in order:
    test cannot be made to fail without your change, fix the test until it can. When a test is
    genuinely test-after — you changed the code before writing it, or you are adjusting an existing
    test — MUTATION-CHECK it instead: revert your change (or move the asserted line), confirm the
-   test goes RED, then restore. Add or adjust ONLY the tests for what you changed.
+   test goes RED, then restore. Add or adjust ONLY the tests for what you changed. A new test
+   FILE must exit non-zero on any failed check — verify by forcing one check red and running the
+   file standalone (a harness that prints FAIL but exits 0 hides every regression it ever finds).
 
 PRE-SUBMIT GATES (mandatory — run these BEFORE you write your summary / hand off to Reviewer).
 These checks are the unit's biggest Reviewer friction sources; the Reviewer will bounce the diff if
@@ -223,6 +225,23 @@ def turns_for(cfg: Config, effort: str) -> int:
     """Max build turns for this effort: the configured base, scaled up for high/max."""
     base = int(getattr(cfg, "builder_max_turns", 60) or 60)
     return max(base, int(base * _TURN_SCALE.get(effort, 1.0)))
+
+
+def budget_for(cfg: Config, effort: str) -> int:
+    """EU-377: the pass's task_budget (tokens of NEW content — model output + tool results read),
+    scaled by effort like turns_for. 0 disables (no budget sent).
+
+    Why this and not max_turns alone: the builder's cost is quadratic in turns (fitted over 319
+    passes: in_tok ≈ 728·N² + 26,491·N, a 36x replay multiple), and 70% of the 1,455-tok/turn
+    context growth is TOOL RESULTS — full suite stdout read in, then re-sent every remaining
+    turn. A turn cap can't see that; a task budget counts exactly it. The server shows the model
+    a countdown, so it paces itself and lands gracefully instead of grinding to the turn ceiling
+    and dying (ceiling runs: 10.4% of passes, 27.7% of builder spend, 24.4% outright failures)."""
+    base = int(getattr(cfg, "builder_task_budget", 0) or 0)
+    if base <= 0:
+        return 0
+    # The SDK floor is 20,000; anything lower would be rejected.
+    return max(20_000, int(base * _TURN_SCALE.get(effort, 1.0)))
 
 
 # EU-38: prior_issues/feedback is the single biggest input-token contributor on retries — it grows
@@ -524,6 +543,15 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         max_turns=turns_for(cfg, eff),
         effort=eff,
     )
+    # EU-377: pace the pass with an API-side task budget (tokens of NEW content — output + tool
+    # results read). The model sees a countdown and wraps up gracefully instead of grinding to the
+    # turn ceiling and dying. Anthropic-only: GLM/z.ai won't honour the beta header the SDK sends
+    # with output_config.task_budget, so a routed-GLM pass keeps today's turn-cap-only behaviour.
+    _budget = budget_for(cfg, eff)
+    if _budget:
+        from . import backends as _backends
+        if not _backends.is_glm(cfg):
+            options.task_budget = {"total": _budget}
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
     # Sonnet-cap → one-shot Opus retry for this pass (per-call, no weekly pin — see run_agent_with_fallback)

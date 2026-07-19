@@ -55,25 +55,37 @@ _recon.run_officer = fake_officer
 
 filed, commented, statused, bodies = [], [], [], []
 class FakeBL:
-    def create_task(s, summary, description, labels=None):
-        filed.append((summary, labels)); bodies.append(description); return f"AUTO-{100 + len(filed)}"
+    # EU-301: create_task now takes issue_type (Epic vs Task) + parent (epic link).
+    def create_task(s, summary, description, labels=None, issue_type="Task", priority=None, parent=None):
+        if issue_type == "Epic":
+            filed.append((summary, labels, "Epic", None)); bodies.append(description); return "AUTO-EPIC"
+        filed.append((summary, labels, "Task", parent)); bodies.append(description)
+        return f"AUTO-{100 + len([f for f in filed if f[2] == 'Task'])}"
     def add_comment(s, ticket, body): commented.append(body)
     def set_status(s, ticket, st): statused.append(st)
 backlog_base.make_backlog = lambda app: FakeBL()
 
-parent = types.SimpleNamespace(id="EU-17", summary="rename the officers", description="rename all", ephemeral=False)
+parent = types.SimpleNamespace(id="EU-17", summary="rename the officers", description="rename all",
+                               acceptance_criteria=["all officers renamed"], ephemeral=False)
 res = asyncio.run(scrum.split(cfg, "automatixy", parent, recap="tried twice", reason="spans the whole repo"))
 
+_tasks = [f for f in filed if f[2] == "Task"]
 chk("split ok", res["ok"] is True)
-chk("filed both fragments", len(filed) == 2 and len(res["keys"]) == 2)
-chk("fragments labelled auto-split", all("auto-split" in (l or []) for _, l in filed))
-chk("fragment carries the parent reference", "EU-17" in filed[0][0] or True)  # title is the slice; body has the ref
-chk("parent comment names the fragment keys", commented and "AUTO-101" in commented[0] and "AUTO-102" in commented[0])
+# EU-301: an EPIC is created + the 2 work pieces + a mandatory verify child = 3 Task children.
+chk("an Epic is created", any(f[2] == "Epic" for f in filed) and res.get("epic") == "AUTO-EPIC")
+chk("filed 2 work pieces + 1 verify child = 3 children", len(_tasks) == 3 and len(res["keys"]) == 3,
+    f"tasks={len(_tasks)} keys={len(res['keys'])}")
+chk("a Verify & close child is appended", any("Verify & close" in f[0] for f in _tasks),
+    str([f[0] for f in _tasks]))
+chk("children linked to the Epic via parent", all(f[3] == "AUTO-EPIC" for f in _tasks),
+    str([f[3] for f in _tasks]))
+chk("children labelled auto-split", all("auto-split" in (f[1] or []) for f in _tasks))
+chk("parent comment names the Epic + children", commented and "AUTO-EPIC" in commented[0])
 chk("parent moved out of the queue (Done)", "Done" in statused)
-# the rule (Commander 2026-07-08): the parent closes (Done) with the "split into X,Y,Z" comment, and the
-# fragments — the active work now — move to In Progress ("in development"), not left sitting in To Do.
-chk("each fragment is moved to In Progress (in development), not left To Do",
-    statused.count("In Progress") == 2, str(statused))
+# EU-300/EU-301 (supersedes the 2026-07-08 "fragments → In Progress" rule): children start in To Do;
+# the drain marks In Development on ticket_start, so ≤1 child per board is ever In Development.
+chk("children are NOT pre-marked In Progress (start To Do)",
+    statused.count("In Progress") == 0, str(statused))
 # a fresh parent (split-depth 0) → fragments stamped <!-- autosplit-depth: 1 --> so re-splits are bounded.
 # HTML-comment marker (fleet fix): invisible in Jira + a human ticket body is very unlikely to type it.
 chk("fragment body carries an incremented autosplit-depth: 1 marker",

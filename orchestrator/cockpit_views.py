@@ -44,7 +44,24 @@ _TOKENS_FALLBACK = (
     "--t-xs:11px;--t-sm:12.5px;--t-md:14px;--t-lg:18px;--t-xl:24px;--t-2xl:32px;"
     # semantic color-role aliases (EU-296) — map onto the existing palette above.
     "--surface:var(--panel);--border:var(--line);--text:var(--ink);"
-    "--positive:var(--ok);--critical:var(--bad)}")
+    "--positive:var(--ok);--critical:var(--bad)}"
+    # 2026-07-19 theme pass — mirrors _PAGE's extra tokens + light override (kept in sync by
+    # the live extraction below; this fallback only serves tests / offline previews).
+    ":root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}"
+    ":root[data-theme=light]{color-scheme:light;"
+    "--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;"
+    "--ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;"
+    "--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;"
+    "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
+    "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
+    "--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;"
+    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;"
+    "--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}")
+
+# Applies the saved theme BEFORE first paint on every page that injects the tokens, so
+# sub-pages follow the War Room header's toggle with no flash.
+_THEME_BOOT = ("<script>try{document.documentElement.dataset.theme="
+               "localStorage.getItem('ui.theme')||'dark'}catch(e){}</script>")
 
 
 def _token_css() -> str:
@@ -55,12 +72,17 @@ def _token_css() -> str:
         import re
 
         from . import warroom
-        m = re.search(r":root\{[^}]*\}", warroom._PAGE)
+        # 2026-07-19: grab the WHOLE token region — the dark :root, the extra-token :root, and
+        # the [data-theme=light] override — up to the END THEME TOKENS sentinel, so light mode
+        # flows to every standalone page from the one source in _PAGE.
+        m = re.search(r":root\{.*?/\* END THEME TOKENS \*/", warroom._PAGE, re.S)
+        if not m:
+            m = re.search(r":root\{[^}]*\}", warroom._PAGE)
         if m:
-            return "<style>" + m.group(0) + "</style>"
+            return "<style>" + m.group(0) + "</style>" + _THEME_BOOT
     except Exception:  # noqa: BLE001 - tests / preview render without the War Room module loaded
         pass
-    return "<style>" + _TOKENS_FALLBACK + "</style>"
+    return "<style>" + _TOKENS_FALLBACK + "</style>" + _THEME_BOOT
 
 
 def _back_home() -> str:
@@ -206,7 +228,8 @@ def _bug_title(text: str) -> str:
 
 def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
     """Frame a bug report for the unit (and save an optional screenshot beside the audit log).
-    Single source of truth for both the '+ New task → Bug' panel and the legacy /report form."""
+    EU-289: the toolbar's '+ New task → Bug' panel was the other caller until it was removed
+    (intake is Jira-only); the /report form + /api/report are what still route through here."""
     desc = f"Fix this problem found during QA on DEV:\n{text or '(no description)'}"
     if screenshot is not None and getattr(screenshot, "filename", ""):
         import re
@@ -288,18 +311,26 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
     backend_label = "Claude"  # Default, updated below
     try:
         from . import backends as _bk, backend_pref as _bp
-        _cur = _bk.normalize(_bp.active(cfg) if cfg is not None else _bk.NATIVE)
+        _last = state.get("last_run") or {}
+        # EU-223: name the affected app (the paused run's project) so the switch — and the
+        # server-side handler — flips only THAT app's backend, not the whole unit.
+        _affected_app = (_last.get("app") or "").strip() or None
+        # EU-242: resolve the CURRENT backend through the affected app, not the global pref. The
+        # switch this banner renders is app-scoped (it posts `app=` and the handler calls
+        # set_active(..., app_name=app_param), server.py:1183-1186), so a global-derived _cur made
+        # the offer disagree with the thing being switched whenever that app carried an EU-223
+        # override: global=GLM + app=Opus offered "Continue on Opus" to an app already on Opus,
+        # which cleared the banner and auto-resumed straight back into the same limit. active()
+        # falls through to the global pref when there's no override, so the no-override path is
+        # byte-for-byte unchanged.
+        _cur = _bk.normalize(_bp.active(cfg, _affected_app) if cfg is not None else _bk.NATIVE)
         backend_label = "Claude (Opus)" if _cur == _bk.NATIVE else "GLM (Z.ai)"
         _alts = _bk.alternates(_cur)
         if _alts:
             _alt = _alts[0]
             _label = "GLM (Z.ai)" if _alt == _bk.GLM else "Claude (Opus)"
-            _last = state.get("last_run") or {}
             _tickets = [t for t in (_last.get("tickets") or []) if t]
             _resume = (" &amp; resume " + html.escape(", ".join(_tickets))) if _tickets else ""
-            # EU-223: name the affected app (the paused run's project) so the switch — and the
-            # server-side handler — flips only THAT app's backend, not the whole unit.
-            _affected_app = (_last.get("app") or "").strip() or None
             continue_offer = (
                 "<form method=post action=/api/continue-on-alternate style='margin:8px 0 0'>"
                 f"<input type=hidden name=backend value='{html.escape(_alt)}'>"
@@ -416,108 +447,6 @@ def _tab_bar(cfg: Config, current_app: str | None) -> str:
 </div>"""
 
 
-# ── EU-314: per-project pipeline board ──────────────────────────────────────────
-# One consolidated board for the ACTIVE project tab only — every in-flight/recent ticket with its
-# current stage (dashboard.derive_pipeline_stage) and age — so the Commander stops cross-reading
-# KPI cards / /tasks / /needs to see "what's happening right now". Scoped exactly like
-# needs.summary(cfg, app_name) already scopes per app (EU-129 pattern): NOT a single global list.
-_MERGED_RECENCY_SECS = 30 * 60   # a just-merged ticket lingers ~30m on the board, then drops off
-
-# EU-315: per-tone row colour, keyed off dashboard.pipeline_stage_tone(task) — reuses the same
-# palette vars _token_css() already defines, so Blocked / Needs-you / Errored are each visually
-# distinct at a glance instead of identical --dim grey text.
-_STAGE_TONE_COLOR = {
-    "bad": "var(--bad)", "warn": "var(--warn)", "blocked": "var(--info)", "ok": "var(--ok)",
-}
-
-
-def _pipeline_board(cfg: Config, tasks: list[dict], app_name: str | None,
-                    blocked_set: set[str] | None = None) -> str:
-    """Render the active tab's pipeline board: one row per ticket — id, current stage, age.
-
-    ``tasks`` is the caller's already-loaded ``dashboard.load_tasks(cfg.audit_path)`` result (one
-    entry per RUN, newest run first) — never reloaded here, mirroring ``needs.py``'s "load once,
-    filter many" contract. Filtered to ``app_name`` with the SAME rule ``needs.py``'s
-    ``_row_matches_app`` uses (the row's own ``app`` field, else a ticket-key prefix match) — pass
-    a falsy ``app_name`` to show every project (unscoped).
-
-    ``blocked_set`` (EU-315): the REAL parked set — the ticket ids in blocked_tickets.json
-    (``warroom._load_blocked``). A row whose ticket is a member renders with the distinct Blocked
-    tone/label and, once past ``warroom.STALE_BLOCK_CUTOFF_S``, greyed as ``(stale)``. Blocked-ness
-    is membership in this set, NOT a run ``outcome`` (there is no ``blocked`` outcome). When
-    ``None``, the board loads the set itself from ``cfg`` so a direct caller still gets the real
-    state; pass an explicit set (even empty) to override that self-load.
-
-    Age-filter rule: every non-terminal / needs-you row always shows; a ``merged→dev`` row shows
-    only while recent (< ``_MERGED_RECENCY_SECS`` since it ended), so a just-landed ticket lingers
-    briefly instead of vanishing the instant it merges. ``cfg`` is accepted (used to self-load the
-    parked set) and otherwise matches the ``needs.summary(cfg, app_name)`` convention this mirrors.
-    """
-    from datetime import datetime
-
-    from . import needs as _needs
-
-    if blocked_set is None:
-        blocked_set = set()
-        if cfg is not None:
-            try:
-                from . import warroom as _wr
-                blocked_set = {str(b) for b in _wr._load_blocked(cfg)}
-            except Exception:  # noqa: BLE001 - the board must never break on a bad parked-set read
-                blocked_set = set()
-    else:
-        blocked_set = {str(b) for b in blocked_set}
-
-    app_prefix = str(app_name).strip().upper() if app_name else ""
-    now_naive = datetime.now()
-
-    def _age_secs(ref) -> float | None:
-        if ref is None:
-            return None
-        now = datetime.now(ref.tzinfo) if getattr(ref, "tzinfo", None) else now_naive
-        return max((now - ref).total_seconds(), 0.0)
-
-    rows = []
-    for t in tasks:
-        if app_name and not _needs._row_matches_app(t, app_name, app_prefix):
-            continue
-        age_secs = _age_secs(t.get("ended") or t.get("started"))
-        if age_secs is None:
-            continue  # no timestamp at all — nothing to show an age for
-        if (t.get("outcome") or "") == "merged→dev" and age_secs >= _MERGED_RECENCY_SECS:
-            continue  # merged AND old — the one row kind the board drops (the recency rule)
-        raw_tid = str(t.get("ticket_id") or "")
-        is_blocked = raw_tid in blocked_set
-        tid = html.escape(raw_tid)
-        stage_text = D.derive_pipeline_stage(t, is_blocked=is_blocked)
-        age = html.escape(D._human_dur(age_secs))
-        # EU-315: freshness hardening — a parked (blocked) row past the staleness cutoff is NEVER
-        # shown as a plain active Blocked row; it stays visible (greyed), not silently dropped, so
-        # the Commander can still see it aged out rather than losing the signal entirely. Blocked-
-        # ness + its staleness are both derived from the real parked set (blocked_set membership),
-        # never from a run outcome.
-        stale = D.is_blocked_stale(t, is_blocked=is_blocked)
-        if stale:
-            tone_cls, color = "pbstale", "var(--faint)"
-            stage_text += " (stale)"
-        else:
-            tone = D.pipeline_stage_tone(t, is_blocked=is_blocked)
-            tone_cls = f"pbstage-{tone}" if tone else "pbstage-default"
-            color = _STAGE_TONE_COLOR.get(tone, "var(--dim)")
-        stage = html.escape(stage_text)
-        rows.append(
-            '<div class=pbrow style="display:flex;align-items:center;gap:var(--s-3);'
-            'padding:var(--s-2) 0;border-top:1px solid var(--border)">'
-            f'<span class="mono pbid" style="font-weight:600">{tid}</span>'
-            f'<span class="pbstage {tone_cls}" style="color:{color};flex:1">{stage}</span>'
-            f'<span class=pbage style="color:var(--faint);font-size:var(--t-xs)">{age}</span>'
-            '</div>'
-        )
-    body = ("".join(rows) if rows else
-            '<div class=pbempty style="color:var(--dim)">No in-flight tickets right now.</div>')
-    return _card("Pipeline", body)
-
-
 def backend_control(cfg, app_name: str | None = None) -> str:
     """EU-190/EU-223: the STICKY model-backend selectors for the cockpit control bar.
 
@@ -565,33 +494,65 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         note = ("<span class=\"tbnote bad\" title=\"Set GLM_AUTH_TOKEN and restart\">"
                 "&#9888; GLM key missing — runs blocked</span>")
     elif active == _bk.GLM:
-        note = "<span class=tbnote style=\"color:#8a909c\">&#8599; prompts go to Z.ai</span>"
+        note = "<span class=\"tbnote dim\" title=\"GLM is a third-party provider — prompts (code, tickets, diffs) leave Anthropic\">&#8599; prompts go to Z.ai</span>"
     else:
         note = ""
-    per_project = ""
-    if app_name:
-        override = backend_pref.get_apps(cfg).get(app_name)
-        inherit_label = "Opus" if active == _bk.NATIVE else "GLM"
-        popts = (f"<option value='inherit' {'selected' if not override else ''}>"
-                 f"Inherit global ({inherit_label})</option>"
-                 f"<option value='opus' {'selected' if override == _bk.NATIVE else ''}>"
-                 f"Opus (Claude)</option>")
-        if glm_ok or override == _bk.GLM:
-            glm_plabel = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
-            popts += (f"<option value='glm' {'selected' if override == _bk.GLM else ''}>"
-                      f"{glm_plabel}</option>")
-        per_project = (
-            f'<form method=post action=/api/model class=tbf '
-            f'title="Model for {html.escape(app_name)} only">'
-            f'<input type=hidden name="app" value="{html.escape(app_name)}">'
-            '<span style="font-size:12px;color:#8a909c;margin-right:4px">This project</span>'
-            f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{popts}</select>'
-            '</form>')
+    # 2026-07-19 (Commander order): the toolbar speaks MAIN + SECONDARY, not global/inherit.
+    # The per-app override (EU-223, for dual drains) still exists in backend_pref/api — it just
+    # no longer renders here; the toolbar's job is the simple mental model:
+    #   Main model      — what the unit runs on.
+    #   Secondary       — the stand-in it switches to (loudly) when the main can't run
+    #                     (Claude plan limit, GLM token missing). None = pause instead (old world).
+    #   ＋ Add model    — the /models registry page (add a backend + API key, test connection).
+    secondary = backend_pref.get_secondary(cfg)
+    hybrid_on = backend_pref.get_hybrid(cfg) and bool(secondary)
+    sec_opts = f"<option value='none' {'selected' if not secondary else ''}>None</option>"
+    for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
+        _bid = _entry["id"]
+        if _bid == active:
+            continue                      # the main model can't be its own stand-in
+        if _bid == _bk.GLM and not show_glm:
+            continue
+        _lbl = ("Opus (Claude)" if _bid == _bk.NATIVE
+                else ("GLM (Z.ai)" if _bid == _bk.GLM
+                      else html.escape(_entry.get("label") or _bid)))
+        sec_opts += (f"<option value='{html.escape(_bid)}' "
+                     f"{'selected' if secondary == _bid else ''}>{_lbl}</option>")
+    fb_note = ""
+    try:
+        _run_bk, _fb_why = _bk.resolve_for_run(cfg, app_name)
+        if _fb_why:
+            fb_note = ('<span class="tbnote run" title="' + html.escape(_fb_why) + '">'
+                       '&#8644; running on secondary</span>')
+    except Exception:  # noqa: BLE001
+        pass
     return (
-        '<form method=post action=/api/model class=tbf title="Model backend — applies to all runs">'
-        '<span style="font-size:12px;color:#8a909c;margin-right:4px">Model</span>'
+        '<form method=post action=/api/model class=tbf '
+        'title="Main model — what the unit runs on (all projects)">'
+        '<span class=tbsel-label>Main model</span>'
         f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
-        f'</form>{note}{per_project}')
+        f'</form>{note}'
+        '<form method=post action=/api/model class=tbf '
+        'title="Secondary model — the unit switches to it (loudly) when the main can&#39;t run: '
+        'Claude plan limit hit, or GLM key missing. None = pause and wait instead.">'
+        '<span class=tbsel-label>Secondary</span>'
+        f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
+        f'</form>{fb_note}'
+        '<form method=post action=/api/model class=tbf '
+        'title="Single: everything runs on the Main model (Secondary is the emergency stand-in). '
+        'Hybrid: the Main model does the heavy thinking (plan/PRD, review, debug judgment) and '
+        'the Secondary does the regular building against that plan. Needs a Secondary.">'
+        '<span class=tbsel-label>Mode</span>'
+        f'<select name=mode onchange="this.form.submit()" style="font-size:13px" '
+        f'{"disabled title=\"Set a Secondary model first\"" if not secondary else ""}>'
+        f"<option value='single' {'selected' if not hybrid_on else ''}>Single</option>"
+        f"<option value='hybrid' {'selected' if hybrid_on else ''}>Hybrid</option>"
+        '</select></form>'
+        + ('<span class="tbnote dim" title="Heavy roles (plan/review) on the Main model; the '
+           'Builder on the Secondary.">&#9878; plan on main &middot; build on secondary</span>'
+           if hybrid_on and secondary else "")
+        + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
+        'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>')
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
@@ -614,12 +575,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # same concrete project as ``app0`` for the "Choose a ticket" nav link too.
     nav_app = app0  # concrete project (or first configured app if none active); never "*"
     tab_bar = _tab_bar(cfg, current_app)
-    apps = "".join(
-        f"<option value='{html.escape(a.name)}' {'selected' if a.name == current_app else ''}>"
-        f"{html.escape(a.name)}</option>" for a in cfg.apps)
-    effort = "".join(f"<option value='{e}'>{e}</option>"
-                     for e in ("low", "medium", "high", "xhigh", "max"))
-    run_dis = "disabled" if (_state["active"] or not healthy) else ""
+    # EU-289: the app/effort <select> options and the run_dis gate lived only in the "+ New task"
+    # panel, which is gone (intake is Jira-only) — so they went with it. The /api/run route itself
+    # stays for scripted use; only the affordance was removed.
     if _state["active"]:
         status = '<span class="tbnote run">&#9679; run in progress…</span>'
     elif _state.get("last_msg"):
@@ -702,7 +660,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     if ap_stopping:
         # Drain in progress: show a neutral "finishing…" label, no buttons.
         ap_html = (
-            '<span class=tbdiv></span>'
             '<div class="tbap stopping" title="Finishing current ticket, then standing down">'
             '<span class="apdot-sm stop"></span>'
             '<span class=tbaplabel>&#9203;&nbsp;Stopping&hellip;</span>'
@@ -713,7 +670,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         ap_label = f'Autopilot&nbsp;<b>ON</b>&nbsp;<span class=ext>(external)</span>&nbsp;&middot;&nbsp;{ap_appq}' if ap_external else f'Autopilot&nbsp;<b>ON</b>&nbsp;&middot;&nbsp;{ap_appq}'
         ap_class = "tbap on ext" if ap_external else "tbap on"
         ap_html = (
-            '<span class=tbdiv></span>'
             f'<div class="{ap_class}">'
             '<span class="apdot-sm on"></span>'
             f'<span class=tbaplabel>{ap_label}</span>'
@@ -740,7 +696,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                        f"{html.escape(app0 or '')}? "
                        f"The unit will work In-Progress tickets first, then To-Do, until the queue is empty or you press Stop.')")
         ap_html = (
-            '<span class=tbdiv></span>'
             '<div class="tbap off">'
             '<span class="apdot-sm off"></span>'
             '<span class=tbaplabel>Autopilot</span>'
@@ -790,7 +745,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     model_banner = ""
     if _malert:
         model_banner = (
-            '<div role=alert style="background:#3a1113;border:1px solid #7f1d1d;color:#fecaca;'
+            '<div role=alert style="background:var(--badbg);border:1px solid var(--badline);color:var(--bad);'
             'padding:9px 13px;border-radius:8px;margin:0 0 8px;font-size:13px;display:flex;'
             'align-items:center;gap:12px;flex-wrap:wrap">'
             f'<span>&#9888;&#65039; {html.escape(_malert)}</span>'
@@ -802,11 +757,22 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 <style>
 /* Control bar — consumes the EU-39 design tokens (palette/radius/elevation/ring) from
    the War Room's :root{{}}, so a re-skin there flows through here too. */
-.tbar{{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:11px 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
-.tbar .btn{{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:9px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background var(--t-fast),border-color var(--t-fast)}}
-.tbar .btn:hover{{background:var(--line)}}
+.tbar{{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:var(--s-3);align-items:stretch;padding:var(--s-3) 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
+/* Row 1: run | build (stretches to absorb slack) | QA.  Row 2: the nav strip, full width —
+   so both rows run edge-to-edge and nothing floats in dead space. */
+.tbar>.tclu:nth-of-type(4){{grid-column:1 / -1;flex-direction:row;align-items:center;justify-content:flex-start;gap:var(--s-3)}}
+.tbar>.tbnote{{grid-column:1 / -1}}
+.tbar>.grow{{display:none}}
+/* 2026-07-19 redesign: each cluster is a quiet card — label as an overline INSIDE the group —
+   so the bar reads as run · build · QA · nav sections instead of scattered buttons. */
+.tbar .tclu{{display:flex;flex-direction:column;gap:var(--s-1);justify-content:center;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--s-2) var(--s-3)}}
+.tbar .btn{{display:inline-flex;align-items:center;gap:7px;height:34px;background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:0 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background var(--t-fast),border-color var(--t-fast)}}
+.tbar .btn:hover{{border-color:var(--accent)}}
 .tbar .btn.primary{{background:var(--accent);border-color:var(--accent);color:#fff}}
-.tbar .btn.primary:hover{{background:#2f5ce0}}
+.tbar .btn.primary:hover{{background:var(--accent-hover)}}
+.tbar select{{height:34px;background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:0 8px;font:inherit;font-size:13px;cursor:pointer}}
+.tbar select:hover{{border-color:var(--accent)}}
+.tbar .tbsel-label{{font-size:var(--t-xs);color:var(--faint);margin-right:2px}}
 .tbar .btn:focus-visible,.tbar summary:focus-visible,.tbar .panel a:focus-visible,.tbar .panel button:focus-visible{{outline:none;box-shadow:var(--ring)}}
 .tbar details.menu{{position:relative}}
 .tbar details.menu>summary{{list-style:none}}
@@ -822,10 +788,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .panel.form select,.tbar .panel.form input[type=text]{{background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:var(--r-md);padding:8px 10px;font:inherit;width:100%}}
 .tbar .panel.form .row{{display:flex;gap:8px;align-items:center}}
 .tbar .panel.form button{{display:block;width:100%;background:var(--accent);color:#fff;border:0;border-radius:var(--r-md);padding:9px;font-weight:650;cursor:pointer}}
-.tbar .panel.form button:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}
+.tbar .panel.form button:disabled{{background:var(--line);color:var(--faint);cursor:not-allowed}}
 .tbar .panel .sep{{height:1px;background:var(--line);margin:5px 4px}}
 .tbar .panel .ph{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);padding:6px 11px 3px}}
-.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.run{{color:var(--warn)}}.tbar .tbnote.bad{{color:var(--bad)}}.tbar .tbnote.ok{{color:var(--ok);font-weight:600}}
+.tbar .tbnote{{font-size:12px;margin-left:2px}}.tbar .tbnote.dim{{color:var(--faint)}}.tbar .tbnote.run{{color:var(--warn)}}.tbar .tbnote.bad{{color:var(--bad)}}.tbar .tbnote.ok{{color:var(--ok);font-weight:600}}
 .tbar .btn.deploy{{background:#1f7a45;border-color:#2c9a5f;color:#fff}}.tbar .btn.deploy:hover{{background:#1a6b3c}}.tbar .btn.deploy .cbadge{{background:#0c3a22}}
 .tbar .btn.ship{{background:#7c3aed;border-color:#8b5cf6;color:#fff}}.tbar .btn.ship:hover{{background:#6d28d9}}.tbar .btn.ship .cbadge{{background:#3b1d7a}}
 .tbar .tbdiv{{width:1px;height:22px;background:var(--line2);margin:0 7px;align-self:center;display:inline-block}}
@@ -839,11 +805,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 /* EU-299 (EU-285d) — toolbar clusters: group the flat button row into labeled sections
    (build · QA · nav) instead of one flat emoji row. Spacing uses the EU-296 --s-* scale;
    labels use the --t-xs type token — no new ad-hoc px literals. */
-.tbar .tclu{{display:inline-flex;align-items:center;gap:var(--s-2)}}
-.tbar .tclabel{{font-size:var(--t-xs);font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-right:var(--s-1)}}
+.tbar .tclabel{{font-size:var(--t-xs);font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}}
 .tbar .tcrow{{display:inline-flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}}
 /* EU-103 — per-project Autopilot section */
-.tbar .tbap{{display:inline-flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--panel2)}}
+.tbar .tbap{{display:inline-flex;align-items:center;gap:8px;padding:0;border:0;background:none}}
 .tbar .tbap.on{{border-color:var(--okline);background:var(--okbg)}}
 .tbar .tbap.on.ext{{border-color:var(--infoline);background:var(--infobg)}}
 .tbar .tbap.stopping{{border-color:var(--warnline);background:var(--warnbg)}}
@@ -852,9 +817,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .apdot-sm.stop{{background:var(--warn)}}
 .tbar .tbaplabel{{font-size:12px;color:var(--ink);white-space:nowrap}}
 .tbar .tbaplabel .ext{{font-size:10px;color:var(--info);font-weight:600;margin-left:4px}}
-.tbar .aptbtn{{border:0;border-radius:var(--r-md);padding:5px 11px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}}
-.tbar .aptbtn.start{{background:var(--accent);color:#fff}}.tbar .aptbtn.start:hover{{background:#2f5ce0}}
-.tbar .aptbtn.start:disabled{{background:#222a37;color:var(--faint);cursor:not-allowed}}
+.tbar .aptbtn{{border:0;height:34px;border-radius:var(--r-md);padding:0 14px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}}
+.tbar .aptbtn.start{{background:var(--accent);color:#fff}}.tbar .aptbtn.start:hover{{background:var(--accent-hover)}}
+.tbar .aptbtn.start:disabled{{background:var(--line);color:var(--faint);cursor:not-allowed}}
 .tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
 .tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
@@ -865,6 +830,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,var(--accent),var(--info));border-radius:var(--r-pill);animation:dsl 1.4s ease-in-out infinite}}
 @keyframes dsp{{to{{transform:rotate(360deg)}}}}
 @keyframes dsl{{0%{{margin-left:-38%}}100%{{margin-left:100%}}}}
+@media(max-width:1150px){{
+.tbar{{grid-template-columns:1fr}}
+.tbar>.tclu:nth-of-type(4){{flex-direction:column;align-items:stretch}}
+}}
 @media(max-width:820px){{
 .tbar{{gap:7px;padding:10px 14px}}
 .tbar .btn{{padding:8px 10px;font-size:12px}}
@@ -874,39 +843,24 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 </style>
 <div class=tbar>
   <div class=tclu>
-    <span class=tclabel>build</span>
+    <span class=tclabel>run</span>
     <div class=tcrow>
-      <details class=menu>
-        {_btn("&#43; New task", tag="summary")}
-        <div class="panel form">
-          <form method=post action=/api/run enctype=multipart/form-data onsubmit="return this.dryrun.checked||confirm('Build and merge to DEV. Continue?')">
-            <input type=hidden name=kind value=task>
-            <div class=row style="gap:16px;margin-bottom:3px">
-              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=feature checked> &#10024; Feature</label>
-              <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#c4c9d2;cursor:pointer"><input type=radio name=type value=bug> &#128030; Bug</label>
-            </div>
-            <input type=text name=text placeholder="Describe the feature — or the bug: where, what you saw, expected">
-            <label style="font-size:12px;color:#8a909c;display:block;margin:3px 0 0">Screenshot <span style="color:#5c6573">(optional, for bugs)</span><input type=file name=screenshot accept="image/*" style="display:block;margin-top:3px;font-size:12px"></label>
-            <div class=row>
-              <select name=app title=project style="flex:1">{apps}</select>
-              <select name=effort title=effort style="flex:1"><option value=''>effort: auto</option>{effort}</select>
-            </div>
-            <label style="font-size:13px;color:#c4c9d2"><input type=checkbox name=dryrun> dry run (build only — no merge)</label>
-            <button {run_dis}>&#9654; Run</button>
-          </form>
-        </div>
-      </details>
-      {backend_control(cfg, app0)}
       {ap_html}
       {ship_html}
     </div>
   </div>
 
   <div class=tclu>
+    <span class=tclabel>build</span>
+    <div class=tcrow>
+      {backend_control(cfg, app0)}
+    </div>
+  </div>
+
+  <div class=tclu>
     <span class=tclabel>QA</span>
     <div class=tcrow>
-      <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128225; Patrol", attrs=f' {busy("patrolling")}' if busy("patrolling") else "")}</form>
-      <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128640; Ship review", attrs=f' {busy("shipreview")}' if busy("shipreview") else "")}</form>
+      <form method=post action=/api/qa class=tbf onsubmit="return confirm('Run QA for {html.escape(app0)}? QA + Security + Release officers inspect DEV and FILE findings as Jira tickets, then deliver a DEV\\u2192MAIN readiness verdict (posted here and to Telegram).')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
     </div>
   </div>
 
@@ -922,10 +876,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
           <a href="/tasks">&#128203; Task log{fr_tasks}</a>
           <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
           <a href="/memory">&#128221; Unit memory{fr_mem}</a>
-          <a href="/usage">&#128202; Token usage{fr_usage}</a>
-          <a href="/budget">&#128176; Budget monitor</a>
+          <a href="/usage">&#128202; Usage &amp; budget{fr_usage}</a>
           <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
-          <a href="/roster-doc">&#128101; Unit roster</a>
         </div>
       </details>
     </div>

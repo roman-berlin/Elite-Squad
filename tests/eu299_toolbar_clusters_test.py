@@ -4,8 +4,8 @@ Acceptance criteria under test:
   1. `_control_bar()` groups the buttons into three labeled clusters — 'build', 'QA', 'nav' —
      each rendered as a cluster label styled with the `--t-xs` token, instead of one flat
      button row inside `.tbar`.
-  2. Every existing action is preserved verbatim: Patrol form (action=/api/patrol), Ship review
-     (action=/api/ship-review), Jira link (/jira?app=), Roster link (/roster-doc), New-task Run
+  2. Every existing action is preserved: the merged Run QA form (action=/api/qa — Patrol and
+     Ship-review folded into one, 2026-07-19), Jira link (/jira?app=), Roster link (/roster-doc), New-task Run
      form (/api/run), Autopilot forms (/api/autopilot), and the Reports menu links.
   3. Buttons inside the clusters render through the `cockpit_views._btn` partial (shared `.btn`
      base + `_btn`'s inline `--r-xl`/`--s-*`/`--t-md` tokens) — no new hand-rolled button CSS.
@@ -89,22 +89,23 @@ chk("<div class=tbar> outer wrapper is preserved",
 # ---------------------------------------------------------------------------
 # 2. Every existing action preserved verbatim
 # ---------------------------------------------------------------------------
-chk("Patrol form action preserved (action=/api/patrol)", "action=/api/patrol" in bar)
-chk("Patrol label glyph preserved", "&#128225; Patrol" in bar)
-chk("Ship review form action preserved (action=/api/ship-review)", "action=/api/ship-review" in bar)
-chk("Ship review label glyph preserved", "&#128640; Ship review" in bar)
+# 2026-07-19: Patrol + Ship-review merged into the single Run QA action (Commander order).
+chk("merged QA form action present (action=/api/qa)", "action=/api/qa" in bar)
+chk("Run QA label glyph preserved", "&#128269; Run QA" in bar)
 chk("Jira link preserved (/jira?app=)", "/jira?app=automatixy" in bar)
 chk("Jira label glyph preserved", "&#128268; Jira" in bar)
 chk("Roster link preserved (/roster-doc)", 'href="/roster-doc"' in bar)
 chk("Roster still a top-level class=\"btn\" element (EU-68/EU-94 contract)",
     'class="btn" href="/roster-doc"' in bar)
-chk("New-task Run form preserved (/api/run)", "action=/api/run" in bar)
-chk("New-task Run button label preserved", "&#9654; Run" in bar)
+# EU-289 retired the "+ New task" panel (intake is Jira-only), so EU-299's "preserve the Run
+# form verbatim" pins are superseded — tests/eu289_toolbar_cleanup_test.py now pins its ABSENCE.
 chk("Autopilot form preserved (/api/autopilot)", "action=/api/autopilot" in bar)
 chk("Open logs link preserved (is_mac=True)", "&#128194; Open logs" in bar and "open-logs" in bar)
 
-for _href in ("/tasks", "/council", "/memory", "/usage", "/budget", "/forensics",
-             "/roster-doc"):
+# EU-289 de-duped this menu: "Budget monitor" (/budget) merged into "Usage & budget" (/usage),
+# and the duplicate "Unit roster" item went (the top-level Roster btn above still covers
+# /roster-doc). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
+for _href in ("/tasks", "/council", "/memory", "/usage", "/forensics", "/roster-doc"):
     chk(f"Reports menu link preserved: {_href}", f'href="{_href}"' in bar)
 
 # ---------------------------------------------------------------------------
@@ -125,7 +126,9 @@ assert style_blocks, "control bar must emit a <style> block"
 style_block = "\n".join(style_blocks)  # tab_bar and the control bar each emit their own <style>
 tclu_rules = "\n".join(l for l in style_block.split("}") if "tclu" in l or "tclabel" in l or "tcrow" in l)
 chk("new cluster CSS rules exist", bool(tclu_rules.strip()), "no .tclu/.tclabel/.tcrow rules found")
-_px_literals = re.findall(r"[:\s](\d+)px", tclu_rules)
+# 2026-07-19 redesign: cluster cards carry a 1px hairline border — a border WIDTH, not spacing;
+# the guard is about spacing staying on the --s-* scale, so hairlines are exempt.
+_px_literals = [n for n in re.findall(r"[:\s](\d+)px", tclu_rules) if n != "1"]
 chk("no new ad-hoc px literals in the cluster grouping CSS (uses var(--s-*) instead)",
     not _px_literals, f"found px literals in cluster CSS: {_px_literals}")
 

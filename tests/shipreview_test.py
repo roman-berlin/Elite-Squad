@@ -7,7 +7,7 @@ from pathlib import Path
 
 sdk = types.ModuleType("claude_agent_sdk")
 class _D:
-    def __init__(self, *a, **k): pass
+    def __init__(self, *a, **k): self.__dict__.update(k)   # keep kwargs so the read-only check can inspect ClaudeAgentOptions
     def __call__(self, *a, **k): return self
 sdk.__getattr__ = lambda n: _D
 sys.modules["claude_agent_sdk"] = sdk
@@ -28,8 +28,10 @@ async def fake_inspect(cfg, name):
 qm.inspect = fake_inspect
 
 calls = []
+seen_options = []
 async def fake_run_agent(prompt, options, tag=None):
     calls.append(tag)
+    seen_options.append(options)
     if tag == "the-general":
         text = ("**VERDICT** — GO WITH CAVEATS\n\n**BLOCKERS** — None\n\n"
                 "**PRE-FLIGHT** — smoke-test /leads\n\n**FOR THE COMMANDER** — Promote DEV→MAIN? Your call.")
@@ -61,7 +63,14 @@ check("convened Quartermaster + Provost + Inspector",
 check("the General chaired the recommendation", "the-general" in calls)
 check("verdict + blockers present", "VERDICT" in decision and "BLOCKERS" in decision)
 check("promotion framed as the Commander's call", "Your call" in decision and "Promote DEV" in decision)
-check("no MAIN write — read-only officers (Write/Edit disallowed)", True)  # by construction
+# 2026-07-19 stabilization: this check was a hardcoded True ("by construction") — it asserted
+# nothing. Inspect the captured ClaudeAgentOptions for the real read-only contract instead.
+check("no MAIN write — every officer call disallows Write/Edit",
+      bool(seen_options) and all(
+          "Write" in (getattr(o, "disallowed_tools", None) or [])
+          and "Edit" in (getattr(o, "disallowed_tools", None) or [])
+          for o in seen_options),
+      str([getattr(o, "disallowed_tools", None) for o in seen_options]))
 
 print("\n=========== SHIP-REVIEW QA ===========")
 for n, ok, d in results:

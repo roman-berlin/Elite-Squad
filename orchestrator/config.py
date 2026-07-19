@@ -149,12 +149,10 @@ class Config:
     # tier is real (it falls back to high only on non-Opus models).
     builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
-
-    # --- EU-108/118: multi-provider fallback for plan-limit handling ---
-    # When a provider (e.g., Claude Max plan) hits its limit, autopilot can switch to another
-    # provider/model that still has capacity (utilization < 1.0). This provides graceful degradation.
-    # Empty means disabled; otherwise a list of (model, provider_id) tuples in priority order.
-    fallback_providers: list[tuple[str, str]] = field(default_factory=list)
+    # 2026-07-19: the DEEP-architecture model — the Planner/Architect climbs to it (at max effort)
+    # for L/XL, effort-max/ultracode, or architecture/epic-labelled tickets only. "" disables the
+    # deep tier (the planner then stays on the normal Opus-ceiling auto pick).
+    deep_model: str = "claude-fable-5"
 
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
@@ -174,16 +172,37 @@ class Config:
     #     (code, tickets, diffs) to Z.ai, a third-party sub-processor. The interactive cockpit picker
     #     is the explicit, gated path; a YAML default is a standing opt-in. Meetings/ceremonies
     #     (standup/council/etc.) currently stay on Opus regardless.
-    #   • The fleet dollar cap (max_cost_usd) does NOT price GLM (glm-4.6 isn't in the SDK's
-    #     Anthropic pricing table → ~$0), so it does not bound GLM runs; per_ticket_token_budget /
-    #     per_ticket_time_budget_min still do. Per-provider GLM pricing + an automation opt-in are
-    #     tracked for Phase 2.
+    #   • The fleet dollar cap (max_cost_usd) DOES count GLM spend — the SDK's ResultMessage.total_cost_usd
+    #     for glm-4.6 calls is non-zero (confirmed live in state/usage_ledger.jsonl) and feeds Budget.add
+    #     the same as Claude calls; it was only ever inert because the default max_cost_usd=0.0 disables
+    #     the cap. EU-222 adds a separate GLM quota-availability pre-flight (loop._run_inner) that fails
+    #     the run closed, before any worklist processing, when GLM is the active backend and
+    #     usage.dual_provider_budget_status() reports it over/near its quota — a quota-availability gate,
+    #     not a parallel price table.
     model_backend: str = "opus"
 
     # --- effort (thinking depth): low | medium | high | xhigh | max  (xhigh = Opus-only "ultra") ---
     builder_effort: str = "high"            # default / fallback base when sizing is off
     reviewer_effort: str = "high"
     builder_max_turns: int = 60             # base build turn budget; high/max effort scale it up (see builder.turns_for)
+    # EU-377: API-side task budget for a build pass — tokens of NEW content (model output + tool
+    # results read), NOT the replayed transcript. The model sees a countdown and paces itself to a
+    # graceful land instead of grinding to the turn ceiling (ceiling runs measured 2026-07-17:
+    # 10.4% of passes, 27.7% of builder spend, 24.4% of them fail outright). Effort-scaled like
+    # turns (builder.budget_for); base 70K ≈ half the ~140K of intake a 96-turn pass accumulates.
+    # 0 disables. Anthropic-only (GLM passes ignore it). SDK floor: 20,000.
+    builder_task_budget: int = 70_000
+    # EU-380: builder slots per drain. 1 (default) = the historic serial drain, byte-identical
+    # path. >1 = N concurrent builders over a shared queue, each in its own slot worktree
+    # (<app>-s<N>), split-siblings mutexed, lands effectively serialized on the event loop and
+    # race-absorbed by EU-379's in-process re-trial. Measured envelope: N=2 ≈ 1.7x throughput,
+    # N=3 ≈ 2.9x; N≥5 collides with the observed 235M-token/5h plan ceiling — don't.
+    max_concurrent_builders: int = 1
+    # EU-387 (closes the EU-224/EU-384 epic): after a live land to the unit's OWN repo, exit the
+    # process cleanly at the next fully-idle drain cycle (exit 75) so the keepalive respawns it on
+    # the new code, and EU-385's boot resume re-arms the drains. Refuses on a dirty tree (EU-386).
+    # False = today's notify-only behaviour. Requires a keepalive (launchd/systemd) to be useful.
+    self_update_auto_restart: bool = True
     adaptive_effort: bool = True            # size the Builder's effort from the ticket (XS->low … XL->max)
     escalate_effort_on_retry: bool = False  # OFF by default (2026-07-05 audit): 135/135 round-≥2 reviewer
                                             # objections were textually NEW, so bumping effort on retry (and the
@@ -203,6 +222,21 @@ class Config:
                                             # FLAG it (Telegram + audit + ticket comment) if red — never reverts, that's
                                             # the SRE's job. NO-OP for any app without a `smoke_command` (smoke.should_run),
                                             # so arming it costs nothing until an app opts a command in.
+    # EU-271: declared fields, not phantoms. ci_conclusion.py read `ci_conclusion_enabled` via a
+    # getattr default while Config never declared it — and Config.load routes YAML through
+    # _known_only, which DROPS unknown keys, so the documented off-switch was silently discarded at
+    # load time and the 300s window was unreachable without a code change.
+    ci_conclusion_enabled: bool = True          # EU-251 ARMED by default: after a live land, read the REAL
+                                                # GitHub Actions conclusion for the merge commit instead of
+                                                # trusting the Builder's "CI will go green". NO-OP for a
+                                                # non-CI ticket (ci_conclusion.should_run gates every gh call).
+    ci_conclusion_timeout_sec: float = 300.0    # THROUGHPUT TRADE-OFF: the poll is synchronous, so a CI-labelled
+                                                # land blocks the loop for up to this long. Real GH runs often
+                                                # exceed 300s, in which case the outcome is an unconfirmed
+                                                # 'timeout' rather than the intended red catch — lower it to
+                                                # favour throughput, raise it to buy more real conclusions, or
+                                                # set ci_conclusion_enabled=false to opt out entirely.
+    ci_conclusion_poll_interval_sec: float = 15.0  # seconds between `gh run list` probes within that window
     auto_mode: bool = False                 # officers never park for your approval — the PM decides + the unit keeps building (you review/reverse after)
     readiness_gate: bool = False            # hand back an under-specified ticket (no AC + thin desc) BEFORE building — see readiness.py
     readiness_min_desc: int = 80            # a description shorter than this (and not just the title) counts as "thin"
@@ -224,7 +258,7 @@ class Config:
     # --- Architect officer: produces lightweight ADRs for feature/large tickets before the build
     #     — decides whether to produce an ADR (feature/large) or skip (bug/small), and triggers
     #     Scrum Master split when the design exceeds thresholds. ---
-    architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
+    architect_enabled: bool = False         # OFF by default (armed in Roman's live config as the Planner's fallback): Architect runs before build for feature/large tickets
 
     # --- Planner (Phase-2 §2 centerpiece): ONE Opus design call/ticket before the build that
     #     absorbs the Architect ADR + squad-lead planning + Scrum split decision. Produces the
@@ -232,6 +266,28 @@ class Config:
     #     in-scope file list. When on, it runs INSTEAD of the Architect. OFF by default — arm it
     #     once proven live, which then unlocks retiring the separate Test Engineer coverage pass. ---
     planner_enabled: bool = False
+
+    # EU-225: when the Planner independently verdicts CLOSE/ANSWER AND the ticket id is provably
+    # already shipped (in the Technical Writer changelog AND a commit on origin/<base>), close it to
+    # QA with evidence instead of rebuilding it (EU-191 was fully rebuilt 2 days after it landed).
+    # Double-keyed + routes to QA (reversible, not Done) so the old senior_pm auto-close mistake
+    # can't recur. Set False to fall back to the conservative "build anyway".
+    autoclose_already_landed: bool = True
+
+    # EU-375: the fallback for the case above when there is NO landed-code evidence — the Planner
+    # says CLOSE/ANSWER/REFILE but nothing proves the work already shipped. Rather than build it
+    # anyway (AUTO-57, 2026-07-16: a correct CLOSE verdict still burned 1.5M tokens into the 60-min
+    # wall clock), park it with the Planner's reason for the Commander. Never closes anything — the
+    # evidence-keyed close above owns that; this only declines to spend a build on a ticket the
+    # Planner judged isn't work. Fires once per ticket, so /unblock is an unambiguous "build it".
+    # Set False to restore the pre-EU-375 "build anyway".
+    planner_verdict_park: bool = True
+
+    # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
+    # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a
+    # recurring failure carries its known fix instead of the Builder rediscovering it. Reuses the
+    # EXISTING forensics.classify/attempts — no new memory store. Set False to disable.
+    retry_forensics_enabled: bool = True
 
     # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
     #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
@@ -255,8 +311,7 @@ class Config:
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
 
-    # --- usage governor (server frugality) ---
-    usage_cap_per_hour: int = 40            # cap discretionary officer-discussion calls / rolling hour; 0 = off
+    # --- daily token budget (runaway-loop guard) ---
     daily_token_budget: int = 100_000_000   # tokens/day ceiling; autopilot AUTO-PAUSES new tickets when today's
                                             # ledger burn (input+output, incl. cache reads) hits this. ARMED by
                                             # default as a runaway-loop guard sized to Max-plan headroom — tune in

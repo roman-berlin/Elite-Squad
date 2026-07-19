@@ -84,7 +84,7 @@ def locked_rewrite(path: str | Path, keep_fn: Callable[[list[str]], list[str]]) 
     load-bearing: both take the per-path thread lock AND an exclusive ``flock`` on the DATA
     file's own fd, so a rewrite can never truncate mid-append or drop a row that landed
     between its read and its write (the 2026-07-05 audit §7.4 races: governor's hourly prune
-    vs note_call, usage.prune on CLI start vs the serve process's record()). In-place
+    vs another appender, usage.prune on CLI start vs the serve process's record()). In-place
     seek(0)+truncate is deliberate — a temp-file + ``os.replace`` swap (locked_rmw's pattern)
     would strand a concurrently blocked appender on the orphaned old inode, losing its row
     invisibly, because ``flock`` serialises on the inode the appender already has open.

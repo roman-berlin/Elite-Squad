@@ -154,10 +154,13 @@ def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
         from .loop import _recent_no_changes_ticket_ids
         no_changes_ids = _recent_no_changes_ticket_ids(cfg)
         if no_changes_ids:
+            # 2026-07-19 stabilization: the old condition `len(items) < len(items) + len(...)` was
+            # vacuously true and `skipped` counted the guard SET, not filtered tickets — the log
+            # lied. Count the actual delta (and still log when everything was filtered).
+            before = len(items)
             items = [(a, t) for (a, t) in items if t.id not in no_changes_ids]
-            if items and len(items) < len(items) + len(no_changes_ids):
-                # Only log if we actually filtered something out
-                skipped = len(no_changes_ids)
+            skipped = before - len(items)
+            if skipped:
                 print(f"  · EU-116 drain guard: skipped {skipped} ticket(s) with recent no_changes outcome", flush=True)
     except Exception:  # noqa: BLE001 - drain guard must not break the run
         pass

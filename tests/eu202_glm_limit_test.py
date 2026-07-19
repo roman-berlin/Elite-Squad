@@ -131,7 +131,10 @@ def test_plan_limit_banner_opus_to_glm():
     # Mock backend_pref.active to return NATIVE
     import orchestrator.backend_pref as _bp
     orig_active = _bp.active
-    _bp.active = lambda cfg=None: backends.NATIVE
+    # Stub mirrors the REAL active(cfg=None, app_name=None) signature — EU-242 made the banner
+    # resolve the AFFECTED APP's backend, and a one-arg stub raises TypeError inside the
+    # banner's `except Exception`, blanking the button and failing these pins spuriously.
+    _bp.active = lambda cfg=None, app_name=None: backends.NATIVE
 
     state = {
         "plan_limit_hit": True,
@@ -167,7 +170,10 @@ def test_plan_limit_banner_glm_to_opus():
     # Mock backend_pref.active to return GLM
     import orchestrator.backend_pref as _bp
     orig_active = _bp.active
-    _bp.active = lambda cfg=None: backends.GLM
+    # Stub mirrors the REAL active(cfg=None, app_name=None) signature — EU-242 made the banner
+    # resolve the AFFECTED APP's backend, and a one-arg stub raises TypeError inside the
+    # banner's `except Exception`, blanking the button and failing these pins spuriously.
+    _bp.active = lambda cfg=None, app_name=None: backends.GLM
 
     state = {
         "plan_limit_hit": True,
@@ -202,7 +208,10 @@ def test_plan_limit_banner_no_alternate():
 
     import orchestrator.backend_pref as _bp
     orig_active = _bp.active
-    _bp.active = lambda cfg=None: backends.NATIVE
+    # Stub mirrors the REAL active(cfg=None, app_name=None) signature — EU-242 made the banner
+    # resolve the AFFECTED APP's backend, and a one-arg stub raises TypeError inside the
+    # banner's `except Exception`, blanking the button and failing these pins spuriously.
+    _bp.active = lambda cfg=None, app_name=None: backends.NATIVE
 
     state = {
         "plan_limit_hit": True,

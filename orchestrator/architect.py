@@ -26,8 +26,8 @@ from .builder import size_ticket
 from .config import Config
 from .contracts import Ticket
 
-# Default threshold for when a design is "too big" and should trigger a Scrum Master split.
-# Can be overridden via config.architect_split_threshold (default: 5 touch-points or 3 distinct modules).
+# Threshold for when a design is "too big" and should trigger a Scrum Master split
+# (5 touch-points or 3 distinct modules). Fixed here — Config declares no override knob.
 DEFAULT_SPLIT_THRESHOLD = {
     "touch_points": 5,      # Max files/areas before suggesting split
     "modules": 3,           # Max distinct modules/components before suggesting split
@@ -302,7 +302,7 @@ async def design(cfg: Config, ticket: Ticket, repo_context: str = "",
     from . import recon, models
 
     # Model selection: Opus for design reasoning, high effort, 18 turns
-    model, mreason = models.for_officer(cfg, effort="high", ceiling_model=cfg.reviewer_model)
+    model, _aeffort, mreason = models.for_planner(cfg, ticket, effort="high")
     if getattr(cfg, "auto_model", False):
         print(f"  · architect model: {mreason}", flush=True)
 
@@ -377,12 +377,3 @@ async def should_run_architect(cfg: Config, ticket: Ticket) -> bool:
 
     # Default: run for anything larger than S/M
     return True
-
-
-async def produce_adr_only(cfg: Config, ticket: Ticket, repo_context: str = ""
-                          ) -> ADRExtraction:
-    """Force ADR production (skip the gated skip logic).
-
-    Use this when you know an ADR is needed regardless of ticket size
-    (e.g., Commander override, pre-planned feature)."""
-    return await design(cfg, ticket, repo_context=repo_context, gated=False)

@@ -65,8 +65,8 @@ chk("patterns: tickets listed", themes["tenant_isolation"]["tickets"] == ["AUTO-
 chk("patterns: missing tests recurs", "missing_tests" in themes and themes["missing_tests"]["count"] == 2)
 chk("patterns: PASS reviews ignored", all("AUTO-8" not in p["tickets"] for p in pats))
 chk("patterns: a one-off (naming) is NOT a pattern", "naming_style" not in themes)
-chk("patterns: each carries an action + a drill proposal",
-    all(p["action"] and p["drill"].startswith("Drill") for p in pats))
+chk("patterns: each carries a recommended action (drill proposals left with EU-327)",
+    all(p["action"] and "drill" not in p for p in pats))
 chk("patterns: sorted by count desc", [p["count"] for p in pats] == sorted([p["count"] for p in pats], reverse=True))
 
 # --- run(): fold rejection lessons into the log, dedup/prune, write; idempotent ---
@@ -82,7 +82,8 @@ chk("run: wrote the file", r1["written"])
 r2 = consolidate.run(cfg)
 chk("run: idempotent — no duplicate lessons on re-run", r2["added"] == [])
 
-# --- cockpit /memory: shows rejection patterns + Consolidate action ---
+# --- cockpit /memory (2026-07-19): the rejection panel + Consolidate button are GONE —
+# consolidation runs automatically (autopilot cycle + scribe); the page keeps one action. ---
 from orchestrator import server
 scfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(tmp), base_branch="dev",
                               protected_branch="main", backlog_backend="none")],
@@ -91,10 +92,10 @@ scfg.detected_auth = lambda: "test"
 client = server.create_app(scfg).test_client()
 r = client.get("/memory"); body = r.get_data(as_text=True)
 chk("/memory returns 200", r.status_code == 200, str(r.status_code))
-chk("/memory surfaces recurring rejections", "Reviewer keeps rejecting" in body and "tenant filter" in body)
-chk("/memory has a Consolidate action", "/api/consolidate" in body)
-rc = client.post("/api/consolidate")
-chk("/api/consolidate redirects to /memory", rc.status_code in (301, 302) and "/memory" in rc.headers.get("Location", ""))
+chk("/memory no longer renders the never-clearing rejection panel", "keeps rejecting" not in body)
+chk("/memory no longer offers a Consolidate action", "/api/consolidate" not in body)
+chk("the lessons the engine folds STILL reach the officers' preamble path",
+    "Update memory" in body and "officers see the newest" in body)
 
 print("\n============= CONSOLIDATION QA =============")
 passed = sum(1 for _, ok, _ in results if ok)

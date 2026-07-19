@@ -140,6 +140,61 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
         pass
 
 
+# 2026-07-19 (Commander order): the MAIN + SECONDARY model pair. "secondary" is the designated
+# stand-in the unit switches to when the main model can't run (Claude plan limit hit, GLM token
+# missing) — the fallback EU-108/118 promised but never wired. Stored beside the global backend:
+# {"backend": "opus", "secondary": "glm", "apps": {...}}. None = no secondary configured.
+_NO_SECONDARY = (None, "", "none")
+
+
+def get_secondary(cfg=None) -> str | None:
+    """The persisted SECONDARY backend id, or None when not configured."""
+    bk = _load(cfg).get("secondary")
+    if not bk or str(bk).lower() in ("none",):
+        return None
+    return backends.resolve_selection(bk, _registry(cfg))
+
+
+def set_secondary(bk: str | None, cfg=None) -> None:
+    """Persist (or clear — bk in (None,'','none')) the secondary backend. Best-effort."""
+    reg = _registry(cfg)
+
+    def _mutate(current: dict) -> dict:
+        data = dict(current) if isinstance(current, dict) else {}
+        if bk in _NO_SECONDARY or str(bk).lower() == "none":
+            data.pop("secondary", None)
+        else:
+            data["secondary"] = backends.resolve_selection(bk, reg)
+        return data
+
+    try:
+        locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
+        pass
+
+
+def get_hybrid(cfg=None) -> bool:
+    """Whether HYBRID MODE is on (heavy roles on Main, building on Secondary). Meaningful only
+    when a secondary is configured; the loop treats hybrid-without-secondary as single mode."""
+    return bool(_load(cfg).get("hybrid"))
+
+
+def set_hybrid_mode(on: bool, cfg=None) -> None:
+    """Persist the hybrid-mode flag. Best-effort."""
+    def _mutate(current: dict) -> dict:
+        data = dict(current) if isinstance(current, dict) else {}
+        if on:
+            data["hybrid"] = True
+        else:
+            data.pop("hybrid", None)
+        return data
+
+    try:
+        locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
+        pass
+
+
 def active(cfg=None, app_name: str | None = None) -> str:
     """The effective active backend for ``app_name`` (global when omitted): the app's own override,
     else the persisted GLOBAL preference, else the ``config.yaml`` default, else Opus. Returns a

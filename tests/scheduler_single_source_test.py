@@ -4,11 +4,34 @@ They were a drift trap — editing one schedule silently missed the other. This 
 plists/wrappers ever drift back, if any source file resurrects a launchctl/LaunchAgents/.plist reference,
 if the surviving single source loses the council/small-talk/patrol cadence it now solely owns, or if any
 repo doc re-acquires a stale `com.roman.general.*` / `launchctl` instruction (EU-56 iter-3 doc-reality)."""
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
+
+
+def _tracked(*patterns: str) -> list[Path]:
+    """Git-tracked files matching `patterns` ONLY (EU-218 needle scans below — #3 source refs and #5
+    doc refs). run_all.py runs every harness as a subprocess sharing this checkout, so a stray file
+    dropped anywhere under scripts/, orchestrator/, or a doc dir by some OTHER harness (or a leftover
+    temp artifact) could false-red these needle scans on content this harness never wrote. Restricting
+    to `git ls-files` means only files actually committed to the repo are ever seen — an untracked
+    artifact can't turn this red. (Check #2 below deliberately stays a raw glob: it exists BECAUSE it
+    must catch a stray/untracked *.plist.) Falls back to a raw glob if git is unavailable."""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--"] + list(patterns), cwd=str(ROOT),
+            capture_output=True, text=True, check=True, timeout=15,
+        ).stdout
+        return sorted(ROOT / line for line in out.splitlines() if line and (ROOT / line).exists())
+    except (subprocess.SubprocessError, OSError):
+        found: list[Path] = []
+        for pat in patterns:
+            found.extend(ROOT.glob(pat))
+        return sorted(found)
+
 
 results = []
 def chk(n, c, d=""):
@@ -36,11 +59,14 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    daemon (Finish & stop graceful shutdown). server.py has a comment about launchctl failure.
 #    2026-07-09: install-mac-cockpit-daemon.sh is the CURRENT cockpit keepalive installer (the serve
 #    counterpart of the autopilot daemon), not a retired scheduler — allow-listed for the same reason.
+#    2026-07-19: general-autopull.sh is the CURRENT EU-335 autopull agent script (brought under
+#    version control by the stabilization sweep; its header cites its launchd plist) — same class.
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
+             "scripts/general-autopull.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
-for p in list(ROOT.glob("orchestrator/**/*.py")) + list(SCRIPTS.glob("*.sh")):
+for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):
     rel = p.relative_to(ROOT).as_posix()
     if rel in SRC_ALLOW:
         continue
@@ -93,15 +119,14 @@ DOC_ALLOW = {"Documentation/SYSTEM_OVERVIEW.md", "Documentation/UNIT_REVIEW_2026
 DOC_NEEDLES = ("com.roman.general", "launchctl", "LaunchAgents",
                "run-autopilot.sh", "run-council.sh", "run-patrol.sh", "run-smalltalk.sh", "run-sync.sh")
 doc_offenders = []
-for d in DOC_DIRS:
-    for p in sorted(d.glob("*.md")):
-        rel = p.relative_to(ROOT).as_posix()
-        if rel in DOC_ALLOW:
-            continue
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        hits = sorted(n for n in DOC_NEEDLES if n in text)
-        if hits:
-            doc_offenders.append(f"{rel} → {','.join(hits)}")
+for p in _tracked("*.md", "Documentation/*.md"):
+    rel = p.relative_to(ROOT).as_posix()
+    if rel in DOC_ALLOW:
+        continue
+    text = p.read_text(encoding="utf-8", errors="ignore")
+    hits = sorted(n for n in DOC_NEEDLES if n in text)
+    if hits:
+        doc_offenders.append(f"{rel} → {','.join(hits)}")
 chk("no repo doc references the retired launchd plists/run-*.sh (corrected schedule can't drift back)",
     not doc_offenders, f"offenders={doc_offenders}")
 

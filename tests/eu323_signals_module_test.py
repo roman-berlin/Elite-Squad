@@ -104,16 +104,24 @@ for py in (ROOT / "orchestrator").glob("*.py"):
 check("no file anywhere in orchestrator/ imports collect_signals/format_signals from .drillmaster",
       not stray, f"still found in: {stray}")
 
-# === 3. drillmaster.py no longer DEFINES the two functions, but still resolves them ============
-dm_src = (ROOT / "orchestrator/drillmaster.py").read_text(encoding="utf-8")
-check("drillmaster.py no longer defines collect_signals", "def collect_signals" not in dm_src)
-check("drillmaster.py no longer defines format_signals", "def format_signals" not in dm_src)
-check("drillmaster.py imports collect_signals/format_signals from .signals (drill()/_prompt keep resolving)",
-      re.search(r"from\s+\.signals\s+import\s+.*collect_signals.*format_signals|"
-                r"from\s+\.signals\s+import\s+.*format_signals.*collect_signals", dm_src) is not None,
-      "missing re-import — drill()/_prompt would NameError")
+# === 3. drillmaster.py no longer DEFINES the two functions ====================================
+# EU-327 (2026-07-17): drillmaster.py is DELETED — the end-state this whole relocation was the
+# prerequisite for. An absent file trivially satisfies "no longer defines"; the re-import pin is
+# moot (there is no drill()/_prompt left to resolve). If the file ever RETURNS, the transitional
+# pins re-arm so a resurrected module can't quietly re-define the relocated functions.
+_dm = ROOT / "orchestrator/drillmaster.py"
+if _dm.exists():
+    dm_src = _dm.read_text(encoding="utf-8")
+    check("drillmaster.py no longer defines collect_signals", "def collect_signals" not in dm_src)
+    check("drillmaster.py no longer defines format_signals", "def format_signals" not in dm_src)
+    check("drillmaster.py imports collect_signals/format_signals from .signals (drill()/_prompt keep resolving)",
+          re.search(r"from\s+\.signals\s+import\s+.*collect_signals.*format_signals|"
+                    r"from\s+\.signals\s+import\s+.*format_signals.*collect_signals", dm_src) is not None,
+          "missing re-import — drill()/_prompt would NameError")
+else:
+    check("drillmaster.py deleted (EU-327) — relocation complete, nothing left to re-define", True)
 
-if _import_ok:
+if _import_ok and _dm.exists():   # EU-327: no runtime module left to probe once deleted
     from orchestrator import drillmaster
     check("drillmaster.collect_signals resolves at runtime (attribute still present)",
           callable(getattr(drillmaster, "collect_signals", None)))

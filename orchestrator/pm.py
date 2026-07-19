@@ -69,8 +69,13 @@ Above that line:
     WHY PM CANNOT RESOLVE: <one sentence — the specific authority, credential, or irreducible context only the Commander has>
     BLOCKER: <one sentence — what is blocked and why it's his call>
     DECISION: <the single question he must answer>
-    OPTIONS: <A vs B in a few words, or "—" if not a choice>
-    RECOMMENDATION: <your suggested call + the one key trade-off>
+    OPTIONS:
+    1. <first way forward, one line> (RECOMMENDED) — <the one key trade-off>
+    2. <second way forward, one line>
+    3. <optional third way, one line>
+  Number the options exactly like that ("1." / "2." / "3.") and mark EXACTLY ONE with
+  "(RECOMMENDED)" — the cockpit renders them as one-click buttons and the Commander can reply
+  with just the number from his phone.
   The WHY PM CANNOT RESOLVE line is MANDATORY — omitting it invalidates the escalation.
   The Commander reads this on his phone — if he can't grasp the decision in five seconds, it's too long."""
 
@@ -184,11 +189,15 @@ Judge honestly:
     (b) you genuinely CANNOT resolve it from the ticket, docs, and existing conventions alone, AND
     (c) you can state in one sentence the specific authority or information only the Commander has.
     If you can't articulate all three, TRIAGE: RESOLVE.
-  When escalating, write a tight 1–3 line brief in EXACTLY this shape:
+  When escalating, write a tight brief in EXACTLY this shape:
     WHY PM CANNOT RESOLVE: <one sentence — the specific authority or information only the Commander has>
     BLOCKER: <one sentence — what is blocked>
     DECISION: <the single question he must answer>
-    RECOMMENDATION: <your suggested call>
+    OPTIONS:
+    1. <first way forward, one line> (RECOMMENDED)
+    2. <second way forward, one line>
+  Number the options ("1." / "2." / optionally "3.") and mark EXACTLY ONE "(RECOMMENDED)" —
+  they render as one-click buttons in the cockpit and a phone reply can be just the number.
   The WHY PM CANNOT RESOLVE line is MANDATORY — omitting it invalidates the escalation.
 
 Bias strongly to RESOLVE when the work is substantively done and only discipline is missing. Use SPLIT

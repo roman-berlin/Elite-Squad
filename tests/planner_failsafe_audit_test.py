@@ -115,6 +115,32 @@ ok("(2b) planner max_turns is at least 24 (GLM turn-batching headroom)",
    f"max_turns = {_OptsCapture.last.get('max_turns')}")
 
 
+# (2c) EU-266: a garbled (JSON-less) reply is a briefless BUILD but NOT a silent one — the audit
+# event must say why the brief is empty (pre-fix it was indistinguishable from a designed BUILD).
+class _GarbledRun:
+    final = "Sure! I looked at the ticket and here are my thoughts, no JSON though."
+    text = final
+    cost_usd = 0.1
+    num_turns = 2
+    input_tokens = 10
+    output_tokens = 5
+    provider = "Anthropic"
+    model_version = "claude-opus-4-8"
+
+
+async def _garbled(*a, **k):
+    return _GarbledRun()
+
+
+audit_g = FakeAudit()
+with patch.object(planner, "run_agent", _garbled):
+    res_g = asyncio.run(planner.plan(_CFG, _TICKET, audit=audit_g))
+ok("(2c) a garbled reply still fail-safes to BUILD", res_g.verdict == "BUILD")
+_gerr = str([kw for ev, kw in audit_g.events if ev == "planner"][0].get("error") or "")
+ok("(2d) …but the audit event says the plan was unparseable (EU-266, not silent)",
+   "unparseable" in _gerr, f"error={_gerr!r}")
+
+
 # (3) happy path records no error field
 class _GoodRun:
     final = '{"verdict": "BUILD", "approach": "x", "testable_ac": ["a"], "in_scope_files": ["f"]}'
