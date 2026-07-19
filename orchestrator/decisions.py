@@ -436,6 +436,55 @@ def parse_options(question: str) -> dict | None:
     return {"summary": " ".join(summary)[:400], "options": opts}
 
 
+def summarize_question(question: str, limit: int = 140) -> str:
+    """A one-line brief of a stored decision question: the first meaningful sentence, with
+    command dumps / test walls cut off. For the cockpit card headline — the full text stays
+    available behind the details fold."""
+    q = " ".join(str(question or "").split())
+    for cut in (" $ /", " $ python", "``` ", " (exit "):
+        i = q.find(cut)
+        if i > 20:
+            q = q[:i]
+    for end in (". ", "? ", "! "):
+        i = q.find(end)
+        if 30 <= i <= limit:
+            return q[:i + 1].strip()
+    return (q[:limit].rstrip() + "…") if len(q) > limit else q
+
+
+# The known UNSTRUCTURED question classes (stored before the EU-337 format, or produced by
+# deterministic loop paths) → a brief + 1-3 synthesized options, one recommended. The option
+# text is written as an actionable instruction, because choosing it ships through /api/answer:
+# a Jira comment + the ticket back to To Do with the instruction baked into the re-run.
+_SYNTH_CLASSES: list[tuple[tuple[str, ...], str, list[tuple[str, bool]]]] = [
+    (("is RED before any build", "gate fails on the clean base"),
+     "This ticket parked while base 'dev' was RED (the gate failed on the clean tree).",
+     [("Re-queue now — the base is green again, build this ticket as specced", True),
+      ("Split it into smaller tickets first", False)]),
+    (("ran out of turns", "too big for a single pass", "iteration limit"),
+     "The build ran out of turns — the ticket is likely too big for one pass.",
+     [("Split this ticket into smaller sub-tickets and build those", True),
+      ("Retry as-is — give it one more full pass", False)]),
+    (("max passes", "PM escalated", "Reviewer's required changes"),
+     "The build hit max passes — the Reviewer kept demanding changes.",
+     [("Retry with the Reviewer's required changes as the spec", True),
+      ("Split this ticket into smaller sub-tickets and build those", False)]),
+]
+
+
+def synthesize_options(question: str) -> dict | None:
+    """parse_options-shaped dict for a KNOWN unstructured question class, else None. Gives the
+    pre-format decision backlog the same brief + one-click recommended options the new
+    escalations carry natively."""
+    q = str(question or "")
+    for needles, brief, opts in _SYNTH_CLASSES:
+        if any(n.lower() in q.lower() for n in needles):
+            return {"summary": brief, "synthesized": True,
+                    "options": [{"n": i + 1, "text": text, "recommended": rec}
+                                for i, (text, rec) in enumerate(opts)]}
+    return None
+
+
 def expand_option_reply(question: str, answer: str) -> str:
     """A bare '2' / 'option 2' reply against a structured question becomes the full option text
     (so the Jira comment and the re-run spec carry the decision, not a bare digit). Any other

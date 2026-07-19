@@ -1910,42 +1910,42 @@ def create_app(cfg: Config, port: int = 8787):
         style = (
             "<style>"
             ".nsec{margin:4px 0 24px}.nsec h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;"
-            "color:#8a929f;margin:0 0 10px;font-weight:700}"
-            ".ncard{background:#12161f;border:1px solid #232936;border-radius:11px;padding:13px 15px;margin:9px 0}"
-            ".ncard .q{color:#e9ecf1;margin-bottom:6px}.ncard .meta{color:#6b7480;font-size:12px;"
+            "color:var(--dim);margin:0 0 10px;font-weight:700}"
+            ".ncard{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px;margin:9px 0}"
+            ".ncard .q{color:var(--ink);margin-bottom:6px}.ncard .meta{color:var(--faint);font-size:12px;"
             "font-family:ui-monospace,Menlo,monospace}"
             ".nrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}"
-            ".nrow input[type=text]{flex:1;min-width:200px;background:#0d1119;border:1px solid #2a3343;"
-            "color:#e9ecf1;border-radius:8px;padding:8px 10px;font:inherit}"
+            ".nrow input[type=text]{flex:1;min-width:200px;background:var(--bg);border:1px solid var(--line2);"
+            "color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit}"
             ".nbtn{border:0;border-radius:8px;padding:8px 13px;font-weight:650;cursor:pointer;font:inherit;"
             "text-decoration:none;display:inline-block}"
-            ".nbtn.ok{background:#10371f;border:1px solid #1c5238;color:#56d98a}.nbtn.send{background:#3b6cff;color:#fff}"
-            ".nbtn.no{background:#23191a;border:1px solid #3a2f12;color:#f0676b}"
-            ".nbtn.x{background:#1a1f2a;border:1px solid #2a3343;color:#8a929f}"
-            ".ncard details>summary{cursor:pointer;color:#e9ecf1;list-style:none;display:flex;"
+            ".nbtn.ok{background:var(--okbg);border:1px solid var(--okline);color:var(--ok)}.nbtn.send{background:var(--accent);color:#fff}"
+            ".nbtn.no{background:var(--badbg);border:1px solid var(--badline);color:var(--bad)}"
+            ".nbtn.x{background:var(--panel2);border:1px solid var(--line2);color:var(--dim)}"
+            ".ncard details>summary{cursor:pointer;color:var(--dim);font-size:12.5px;list-style:none;display:flex;"
             "align-items:center;gap:8px;outline:none}"
             ".ncard details>summary::-webkit-details-marker{display:none}"
-            ".ncard details>summary::before{content:'\\25B8';color:#6b7480;font-size:11px;transition:transform .15s}"
+            ".ncard details>summary::before{content:'\\25B8';color:var(--faint);font-size:11px;transition:transform .15s}"
             ".ncard details[open]>summary::before{transform:rotate(90deg)}"
-            ".ncard .ndetail{margin:11px 0 2px;padding:11px 13px;background:#0d1119;border:1px solid #222a38;"
+            ".ncard .ndetail{margin:11px 0 2px;padding:11px 13px;background:var(--well);border:1px solid var(--line);"
             "border-radius:8px}"
-            ".ncard .ndt{color:#c3cad6;font-size:13px;line-height:1.5;margin:5px 0}"
-            ".ncard .ndt.sub{color:#8a929f;padding-left:8px}.ncard .ndt.muted{color:#6b7480}"
-            ".ncard .ndt b{color:#e9ecf1;font-weight:650}"
-            ".nbanner{background:#0f2740;border:1px solid #1c4a78;color:#9cc9ff;border-radius:9px;"
+            ".ncard .ndt{color:var(--ink);font-size:13px;line-height:1.5;margin:5px 0}"
+            ".ncard .ndt.sub{color:var(--dim);padding-left:8px}.ncard .ndt.muted{color:var(--faint)}"
+            ".ncard .ndt b{color:var(--ink);font-weight:650}"
+            ".nbanner{background:var(--accentbg);border:1px solid var(--accentline);color:var(--info);border-radius:9px;"
             "padding:11px 14px;margin:0 0 16px;font-size:13.5px;font-weight:600}"
             ".ncard label.pcheck{display:flex;gap:8px;align-items:flex-start;margin:7px 0;"
-            "color:#c3cad6;font-size:13.5px;cursor:pointer}"
+            "color:var(--ink);font-size:13.5px;cursor:pointer}"
             ".ncard label.pcheck input{margin-top:3px}"
-            ".ncard .psev{color:#fbbf24;font-weight:650}.ncard .ptype{color:#6b7480;font-size:12px}"
-            ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}"
+            ".ncard .psev{color:var(--warn);font-weight:650}.ncard .ptype{color:var(--faint);font-size:12px}"
+            ".nempty{color:var(--ok);padding:30px;text-align:center;font-size:15px}"
             # EU-102 — colour-coded category badges for the unified inbox
             ".nbadge{display:inline-block;border-radius:5px;padding:2px 7px;font-size:11px;"
             "font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-right:6px}"
-            ".nbadge.dec{background:#1e1450;color:#a78bfa}"    # decision   — purple
-            ".nbadge.err{background:#2a1010;color:#f87171}"    # errored    — red
-            ".nbadge.prk{background:#1f1600;color:#fbbf24}"    # parked     — amber
-            ".nbadge.opr{background:#0c1f20;color:#34d399}"    # open PR    — teal
+            ".nbadge.dec{background:var(--accentbg);color:var(--accent)}"    # decision   — purple
+            ".nbadge.err{background:var(--badbg);color:var(--bad)}"    # errored    — red
+            ".nbadge.prk{background:var(--warnbg);color:var(--warn)}"    # parked     — amber
+            ".nbadge.opr{background:var(--okbg);color:var(--ok)}"    # open PR    — teal
             "</style>")
         # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
         _m = _state.pop("last_msg", "") or ""
@@ -1992,11 +1992,18 @@ def create_app(cfg: Config, port: int = 8787):
                 _po = None
                 try:
                     from . import decisions as _dec
-                    _po = _dec.parse_options(_qfull)
+                    _po = _dec.parse_options(_qfull) or _dec.synthesize_options(_qfull)
                 except Exception:  # noqa: BLE001
                     _po = None
                 if _po:
-                    head = html.escape(_po["summary"] or _qfull.splitlines()[0][:200])
+                    head = html.escape(_po["summary"]
+                                       or _dec.summarize_question(_qfull))
+                    # a synthesized card keeps the original text reachable — briefly headlined,
+                    # fully inspectable (2026-07-19: "unclear walls" order)
+                    _ctx = ("<details><summary>Full context</summary>"
+                            f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
+                            "</div></div></details>"
+                            if _po.get("synthesized") else "")
                     btns = ""
                     for o in _po["options"]:
                         _cls = "nbtn ok" if o["recommended"] else "nbtn x"
@@ -2014,6 +2021,7 @@ def create_app(cfg: Config, port: int = 8787):
                         "<div class=ncard>"
                         f"<div class=q><span class='nbadge dec'>Decision</span>{head}</div>"
                         f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
+                        f"{_ctx}"
                         f"<div class=nrow>{btns}</div>"
                         "<form method=post action=/api/answer class=nrow>"
                         f"<input type=hidden name=ticket value='{tid}'>"
@@ -2026,11 +2034,17 @@ def create_app(cfg: Config, port: int = 8787):
                         "<button class='nbtn x'>Dismiss</button></form></div>"
                         "</div>")
                     continue
-                why = html.escape(str(d.get("why") or "(no question on file)"))
+                _brief = html.escape(_dec.summarize_question(_qfull)
+                                     or str(d.get("why") or "(no question on file)"))
+                _full = ("<details><summary>Full context</summary>"
+                         f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
+                         "</div></div></details>"
+                         if len(_qfull) > 160 else "")
                 out.append(
                     "<div class=ncard>"
-                    f"<div class=q><span class='nbadge dec'>Decision</span>{why}</div>"
+                    f"<div class=q><span class='nbadge dec'>Decision</span>{_brief}</div>"
                     f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
+                    f"{_full}"
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     f"<input type=hidden name=app value='{dapp}'>"
@@ -2106,7 +2120,7 @@ def create_app(cfg: Config, port: int = 8787):
                 why = html.escape(str(t.get("why") or "PR opened — review needed"))
                 pr_url = str(t.get("pr_url") or "")
                 pr_link = (f" &middot; <a href='{html.escape(pr_url)}' target=_blank "
-                           f"style='color:#34d399'>{html.escape(pr_url)}</a>") if pr_url else ""
+                           f"style='color:var(--ok)'>{html.escape(pr_url)}</a>") if pr_url else ""
                 review_btn = (f"<a class='nbtn ok' href='{html.escape(pr_url)}' target=_blank>"
                               "Review PR</a>") if pr_url else ""
                 out.append(
