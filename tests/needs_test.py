@@ -29,40 +29,29 @@ s = needs.summary(cfg)
 check("empty -> total 0", s["total"] == 0, str(s))
 check("empty side panel says 'All clear'", "All clear" in warroom._needs_side_html(s))
 
-# --- seed all three streams ---
+# --- seed the decision + task streams ---
 (d / "pending_decisions.json").write_text(json.dumps(
     [{"id": "AUTO-9", "app": "automatixy", "question": "DD/MM or MM/DD?", "summary": "date format"}]))
-# EU-325: the single-report approval path is generic — approvals.KINDS is empty until an officer
-# opts in (the adjutant officer that used to seed it was deleted). Register a synthetic officer
-# report so the approvals-stream aggregation + side-panel render are still exercised.
-from orchestrator import approvals as _approvals
-async def _coach_apply(_cfg):  # pragma: no cover - summary() never invokes the apply coroutine
-    return "applied"
-_approvals.KINDS["coach"] = ("Engineering Coach — doctrine upgrade", "coach-report.md", _coach_apply)
-(d / "coach-report.md").write_text("## Proposal: tighten the Engineer exit gate", encoding="utf-8")
 dashboard.load_tasks = lambda p: [{"ticket_id": "AUTO-7", "outcome": "errored", "app": "automatixy",
                                    "note": "build blew up", "started": datetime.now()}]
 dashboard.load_dismissed = lambda p: {}
 
 s = needs.summary(cfg)
 check("decisions stream picked up", len(s["decisions"]) == 1, str(s["decisions"]))
-check("approvals stream picked up", len(s["approvals"]) == 1, str(s["approvals"]))
 check("tasks (needs-you) stream picked up", len(s["tasks"]) == 1, str(s["tasks"]))
-check("total aggregates all three", s["total"] == 3, str(s["total"]))
-check("count() matches total", needs.count(cfg) == 3)
+check("total aggregates both", s["total"] == 2, str(s["total"]))
+check("count() matches total", needs.count(cfg) == 2)
 
 side = warroom._needs_side_html(s)
 check("side panel shows the decision", "DD/MM" in side)
-check("side panel shows the approval", "Engineering Coach" in side)
 check("side panel shows the failed run", "AUTO-7" in side and "errored" in side)
 check("side panel links to the inbox", "/needs" in side and "Open inbox" in side)
 
 # --- EU-93: count == len(items) invariant ---
 # needs.count() must equal the number of rows the panel will render — the single source of truth.
-# All streams (decisions + approvals + proposals + tasks) must sum to the same number that the
+# All streams (decisions + proposals + tasks) must sum to the same number that the
 # KPI badge and the side-panel header badge both show.
-all_items = (s.get("decisions", []) + s.get("approvals", []) + s.get("proposals", [])
-             + s.get("tasks", []))
+all_items = (s.get("decisions", []) + s.get("proposals", []) + s.get("tasks", []))
 check("EU-93: count() == len(panel items)", needs.count(cfg) == len(all_items),
       f"count={needs.count(cfg)} items={len(all_items)}")
 

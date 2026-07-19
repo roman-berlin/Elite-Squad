@@ -1284,7 +1284,7 @@ def _needs_side_html(ns: dict) -> str:
     """The Needs-you panel body for the cockpit's side column — a compact preview of the inbox.
 
     EU-102: iterates the unified ``rows`` list from needs.summary(); each row carries a
-    ``category`` badge (decision | errored | parked | pr | approval | proposal | specialist) and a
+    ``category`` badge (decision | errored | parked | pr | proposal) and a
     human ``why`` string.  Gated on ``rows`` — the same list the badge counts — so the panel is never
     "All clear" while the badge is non-zero, and never non-empty while the badge is zero.
     """
@@ -1298,9 +1298,7 @@ def _needs_side_html(ns: dict) -> str:
         "errored": "bad",
         "parked": "warn",
         "pr": "warn",
-        "approval": "warn",
         "proposal": "warn",
-        "specialist": "warn",
     }
     rows = []
     for row in (ns.get("rows") or [])[:8]:

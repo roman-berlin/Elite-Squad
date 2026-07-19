@@ -32,17 +32,16 @@ Deviations from the ticket text, forced by the tree as it stands 2026-07-18:
     would fight a landed doctrine and an existing green assertion.
   * The registry lives HERE, not in a new orchestrator/retired.py: this change is scoped to
     tests/ only. Promoting it to a shared module later is a one-file move.
-  * drillmaster/squad are NOT registered: dead-but-present is not retired — both modules still
-    exist with live code (drillmaster's deletion is EU-327, still To Do), and registering a live
-    module fails guard C by design.
-  * KNOWN LIVE VESTIGE (found writing this guard): liaison.py was deleted by 40da120 (Phase-2
-    §2, 2026-07-06 — config.py:395/notify.py:458 both say the channel is DELETED, and no
-    council.COUNCIL seat backs it, unlike adjutant's), yet roster.py:56 still ships a liaison
-    _OFFICER_ROWS row and roster.py:81 a mermaid node — the exact phantom-officer class EU-260
-    closed for test_engineer. Cleaning roster.py is outside this change's file scope, so those
-    two references sit in PENDING: reported as a WARN every run, never silently blessed, and the
-    entry self-destructs (fails) the moment the row is removed. Registering liaison at all means
-    any NEW surface that starts rendering the Mayor trips the guard immediately.
+  * 2026-07-19 stabilization: drillmaster (EU-327), squad, governor, and doctrine are now
+    registered — all four modules are deleted from disk. squad/governor/doctrine fell in the
+    stabilization sweep (zero production imports / write-only / caller died with drillmaster);
+    their entries are token-less because their obvious tokens ("squad", "governor", "doctrine")
+    are generic English that live code uses in unrelated senses (recon squads, cost governor
+    comments, memory doctrine).
+  * The liaison roster row (the KNOWN LIVE VESTIGE this guard originally reported as PENDING)
+    was removed in the same 2026-07-19 sweep — roster.py no longer ships the row or the mermaid
+    node, guard C now asserts the key's absence, and officers.py keeps only the display label
+    per the EU-260 label-superset doctrine (the ALLOW entry).
 
 Guard predicates are pure functions, self-tested against synthetic fixtures in section 5 (the
 eu43_docs_guard_teeth pattern), so the mutation-proof of the ticket's AC — fake retired token
@@ -88,6 +87,10 @@ RETIRED = {
     "hr_synthesis":  ("hr",            (),                 "4fdb13a / Phase-2 §2 slice B"),
     "adjutant_cli":  ("adjutant",      (),                 "4bf4fe2 (EU-325) — officer stays in post"),
     "liaison":       ("liaison",       ("liaison",),       "40da120 / Phase-2 §2"),
+    "drillmaster":   ("drillmaster",   (),                 "12ff475 (EU-327)"),
+    "squad_lanes":   ("squad",         (),                 "2026-07-19 stabilization — zero imports since Phase-2 §2"),
+    "usage_governor": ("governor",     (),                 "2026-07-19 stabilization — write-only, budget never read"),
+    "doctrine_backups": ("doctrine",   (),                 "2026-07-19 stabilization — last caller died with EU-327"),
 }
 
 # Rendering sources guard B scans — the surfaces that make live claims to a human.
@@ -110,11 +113,8 @@ ALLOW = {
 # WARNs every run instead of failing; self-destructs (fails) once the reference is gone so the
 # entry cannot outlive the vestige. Do NOT add entries here to silence a new failure — new
 # references to retired tokens are the bug this guard exists to catch.
-PENDING = {
-    ("roster.py", "liaison"):
-        "phantom officer row (roster.py:56 + mermaid node :81) survived 40da120 — needs its own "
-        "roster cleanup ticket; remove this entry with that land",
-}
+# (Empty since 2026-07-19: the liaison roster-row vestige was cleaned in the stabilization sweep.)
+PENDING: dict = {}
 
 
 # =====================================================================================
@@ -241,13 +241,14 @@ for pair in sorted(set(PENDING) - seen_pending):
     chk(f"PENDING entry is stale — the vestige is gone, remove it: {pair}", False, PENDING[pair])
 
 # --- 4) guard C: the runtime roster rosters no retired officer key -----------------------------
-# Keys asserted absent are only those whose POST is retired. adjutant/liaison rows are governed
-# above: adjutant's stays by doctrine (council-backed, EU-325 + eu260 test §4), liaison's is the
-# PENDING vestige. OFFICER_NAMES is deliberately untouched (label superset — see docstring).
+# Keys asserted absent are only those whose POST is retired. The adjutant row is governed above
+# (stays by doctrine — council-backed, EU-325 + eu260 test §4). liaison joined the absent set on
+# 2026-07-19 when its phantom row was cleaned. OFFICER_NAMES is deliberately untouched (label
+# superset — see docstring).
 from orchestrator import roster  # noqa: E402  (needs the SDK stub above)
 
 row_keys = [key for key, *_ in roster._OFFICER_ROWS]
-for key in ("test_engineer", "senior_pm"):
+for key in ("test_engineer", "senior_pm", "liaison"):
     chk(f"guard C: '{key}' absent from roster._OFFICER_ROWS", key not in row_keys)
 
 # --- 5) teeth: the predicates catch the defect class on synthetic fixtures ---------------------

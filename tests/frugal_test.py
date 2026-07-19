@@ -1,4 +1,4 @@
-"""QA for the frugal server profile: cheap models for discussion, merged daily, usage governor."""
+"""QA for the frugal server profile: cheap models for discussion, merged daily."""
 import asyncio, sys, tempfile, types
 from pathlib import Path
 
@@ -14,7 +14,7 @@ results = []
 def check(n, c, d=""):
     results.append((n, bool(c), d))
 
-from orchestrator import council, governor, memory
+from orchestrator import council, memory
 from orchestrator.config import Config, AppConfig
 
 class RR:
@@ -54,14 +54,6 @@ check("daily discussions run on Sonnet", all(m == cfg.discussion_model for m, _ 
 check("daily sends exactly ONE muster briefing", sum(1 for m in sent if "Briefing" in m) == 1, str(sent))
 check("no separate stand-up Telegram (truly merged)", not any(m.startswith("🫡") for m in sent))
 check("daily still records the stand-up status", (d / "last-standup.md").exists())
-
-# --- usage governor ---
-cfg.usage_cap_per_hour = 2
-governor.note_call(cfg, 3)
-check("over the hourly cap -> throttled", not governor.under_budget(cfg))
-check("calls_last_hour counts recent calls", governor.calls_last_hour(cfg) >= 3)
-cfg.usage_cap_per_hour = 0
-check("cap 0 disables the governor", governor.under_budget(cfg))
 
 print("\n================ FRUGAL-SERVER QA ================")
 passed = sum(1 for _, ok, _ in results if ok)

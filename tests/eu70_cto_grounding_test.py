@@ -144,7 +144,7 @@ import orchestrator.needs as _needs_mod
 _orig_summary = _needs_mod.summary
 
 def _summary_zero(cfg):
-    return {"decisions": [], "approvals": [], "proposals": [], "tasks": [], "total": 0}
+    return {"decisions": [], "proposals": [], "tasks": [], "total": 0}
 
 _needs_mod.summary = _summary_zero
 # force council to reload the module reference
@@ -163,7 +163,6 @@ chk("_needs_context zero: does NOT say '7' (regression: fabricated count)",
 def _summary_nonzero(cfg):
     return {
         "decisions": [{"id": "AUTO-23"}, {"id": "AUTO-32"}],
-        "approvals": [],
         "proposals": [],
         "tasks": [{"ticket_id": "EU-17", "outcome": "errored", "app": "automatixy"}],
         "total": 3,
@@ -183,24 +182,23 @@ chk("_needs_context nonzero: labelled live/cite-only",
     "live" in ctx_nonzero and ("cite ONLY" in ctx_nonzero or "never guess" in ctx_nonzero),
     repr(ctx_nonzero))
 
-# ── 3c. Approvals + proposals only (no decisions/tasks) ──────────────────────
-def _summary_approvals_only(cfg):
+# ── 3c. Proposals only (no decisions/tasks) ──────────────────────────────────
+# (The approvals KINDS stream was removed in the 2026-07-19 stabilization; needs.summary no
+# longer exposes an "approvals" key and _needs_context no longer reads one.)
+def _summary_proposals_only(cfg):
     return {
         "decisions": [],
-        "approvals": [{"id": "AP-1"}],
         "proposals": [{"id": "PR-1"}],
         "tasks": [],
-        "total": 2,
+        "total": 1,
     }
 
-_needs_mod.summary = _summary_approvals_only
+_needs_mod.summary = _summary_proposals_only
 ctx_ap = _run(council._needs_context(cfg))
-chk("_needs_context approvals/proposals: mentions approvals",
-    "approval" in ctx_ap, repr(ctx_ap))
-chk("_needs_context approvals/proposals: mentions proposals",
+chk("_needs_context proposals: mentions proposals",
     "proposal" in ctx_ap, repr(ctx_ap))
-chk("_needs_context approvals/proposals: total is 2 (not invented)",
-    "2 total" in ctx_ap or "2" in ctx_ap, repr(ctx_ap))
+chk("_needs_context proposals: total is 1 (not invented)",
+    "1 total" in ctx_ap or "1" in ctx_ap, repr(ctx_ap))
 
 # ── 3d. needs.summary() raises — must degrade gracefully (return empty string) ──
 def _summary_broken(cfg):
@@ -222,7 +220,7 @@ _needs_mod.summary = _orig_summary
 # non-zero count.  (The original bug: CTO said "7 awaiting decision" when
 # pending_decisions.json had 0 entries.)
 def _summary_zero_decisions(cfg):
-    return {"decisions": [], "approvals": [], "proposals": [], "tasks": [], "total": 0}
+    return {"decisions": [], "proposals": [], "tasks": [], "total": 0}
 
 _needs_mod.summary = _summary_zero_decisions
 ctx_reg = _run(council._needs_context(cfg))

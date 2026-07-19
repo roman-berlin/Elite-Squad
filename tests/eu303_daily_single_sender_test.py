@@ -60,7 +60,6 @@ def run_daily(broadcast, elected=True):
          patch.object(council, "_commander_questions", lambda s: []), \
          patch.object(council, "_save_transcript", lambda *a, **k: None), \
          patch("orchestrator.memory.preamble", lambda: ""), \
-         patch("orchestrator.governor.note_call", lambda *a, **k: None), \
          patch("orchestrator.dashboard.standup", lambda cfg: "FACTS"), \
          patch("orchestrator.decisions.should_poll_telegram", lambda cfg: (elected, "test")):
         kwargs = {} if broadcast is None else {"broadcast": broadcast}

@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 # --------------------------------------------------------------------------------------------------
 
 _STATE_KEYS = ("active", "last_msg", "last_result", "dry_run",
-               "last_activity", "run_started", "stop_event", "log_seq", "approving",
+               "last_activity", "run_started", "stop_event", "log_seq",
                "autopilot_mode", "autopilot_on", "log_path",
                "plan_limit_hit", "plan_limit_reset_at")
 
@@ -40,7 +40,7 @@ def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
     return {"active": False, "last_msg": "", "last_result": "", "dry_run": None,
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
-            "approving": None, "autopilot_mode": None, "autopilot_on": False, "log_path": None,
+            "autopilot_mode": None, "autopilot_on": False, "log_path": None,
             "plan_limit_hit": False, "plan_limit_reset_at": None}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.

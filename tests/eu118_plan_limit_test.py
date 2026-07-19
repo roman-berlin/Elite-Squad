@@ -4,7 +4,6 @@
 Tests that:
 1. usage.plan_limit_hit() correctly detects when ANY plan limit has utilization >= 1.0
 2. usage.plan_limit_hit() caches results to avoid repeated probes
-3. usage.available_fallback_provider() returns available fallback providers
 4. Agent run sets is_plan_limit flag when SDK errors indicate plan limits
 """
 
@@ -17,7 +16,7 @@ import time
 sys.path.insert(0, ".")
 
 # Import from the orchestrator package
-from orchestrator.usage import plan_limit_hit, plan_limit_reset_cache, available_fallback_provider
+from orchestrator.usage import plan_limit_hit, plan_limit_reset_cache
 
 
 def test_plan_limit_hit_when_utilization_ge_1():
@@ -99,55 +98,6 @@ def test_plan_limit_reset_cache():
     assert len(_plan_limit_hit_cache["over_limits"]) == 0, "Cache should be cleared of over_limits"
 
     print("  ✓ plan_limit_reset_cache clears cache correctly")
-
-
-def test_available_fallback_provider():
-    """available_fallback_provider returns configured fallback with capacity."""
-    # Create a mock config with fallback providers
-    class MockConfig:
-        fallback_providers = [
-            ("claude-opus-4-8", "provider_a"),
-            ("claude-sonnet-4-6", "provider_b"),
-        ]
-
-    cfg = MockConfig()
-
-    # Should return the first fallback provider when current model is different
-    result = available_fallback_provider(cfg, "claude-opus-4-8")
-    assert result is not None, "Should find a fallback provider"
-    assert result[0] == "claude-sonnet-4-6", "Should return the first non-matching provider"
-    assert result[1] == "provider_b", "Should return the correct provider ID"
-
-    print("  ✓ available_fallback_provider returns fallback correctly")
-
-
-def test_available_fallback_provider_none_when_same():
-    """available_fallback_provider returns None when fallback is same as current."""
-    class MockConfig:
-        fallback_providers = [
-            ("claude-opus-4-8", "provider_a"),
-        ]
-
-    cfg = MockConfig()
-
-    # Should return None when the only fallback is the same as current
-    result = available_fallback_provider(cfg, "claude-opus-4-8")
-    assert result is None, "Should return None when fallback is same as current model"
-
-    print("  ✓ available_fallback_provider returns None for same model")
-
-
-def test_available_fallback_provider_none_when_empty():
-    """available_fallback_provider returns None when no fallbacks configured."""
-    class MockConfig:
-        fallback_providers = []
-
-    cfg = MockConfig()
-
-    result = available_fallback_provider(cfg, "claude-opus-4-8")
-    assert result is None, "Should return None when no fallbacks configured"
-
-    print("  ✓ available_fallback_provider returns None when empty")
 
 
 def test_plan_usage_utilization_triggers_halt():
@@ -299,9 +249,6 @@ def main():
     test_plan_limit_not_hit_when_utilization_lt_1()
     test_plan_limit_caching()
     test_plan_limit_reset_cache()
-    test_available_fallback_provider()
-    test_available_fallback_provider_none_when_same()
-    test_available_fallback_provider_none_when_empty()
     test_plan_usage_utilization_triggers_halt()
     test_autopilot_stops_new_tickets_when_limit_hit()
     test_clean_halt_no_repeated_failures()

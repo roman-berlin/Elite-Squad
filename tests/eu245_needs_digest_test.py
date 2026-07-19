@@ -191,16 +191,11 @@ for p in (ROOT / "orchestrator").glob("*.py"):
 chk("no orchestrator source calls a corridor-convene / small-talk function (all deleted)",
     not offenders, str(offenders))
 
-governor_src = (ROOT / "orchestrator" / "governor.py").read_text(encoding="utf-8")
-# The OLD, misleading wording claimed the governor still caps corridor small-talk as a live,
-# discretionary ceremony ("chatter (corridor small-talk, spontaneous meetings)"). That ceremony is
-# gone (council.py's Phase-2 §2 marker) — a mention of it framed as DELETED/retired is fine (that's
-# what documents the retirement, same as council.py's own marker); the LIVE-ceremony framing must not.
-chk("governor.py no longer frames corridor small-talk as a live ceremony it currently caps",
-    "chatter (corridor small-talk" not in governor_src.lower()
-    and "caps the *discretionary*\nchatter" not in governor_src, governor_src[:400])
-chk("governor.py documents corridor small-talk's retirement (not silently scrubbed, just corrected)",
-    "corridor small-talk" in governor_src.lower() and "delete" in governor_src.lower(), governor_src[:600])
+# governor.py was deleted in the 2026-07-19 stabilization (write-only in production — nothing read
+# its budget); its corridor-small-talk wording checks went with it. The retired-subsystems registry
+# (tests/retired_subsystems_test.py) now pins that the module stays gone.
+chk("governor.py stays deleted (2026-07-19 stabilization)",
+    not (ROOT / "orchestrator" / "governor.py").exists())
 
 print("\n============ EU-245 NEEDS-YOU DIGEST QA ============")
 passed = sum(1 for _, ok, _ in results if ok)

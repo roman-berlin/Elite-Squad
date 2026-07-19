@@ -377,12 +377,3 @@ async def should_run_architect(cfg: Config, ticket: Ticket) -> bool:
 
     # Default: run for anything larger than S/M
     return True
-
-
-async def produce_adr_only(cfg: Config, ticket: Ticket, repo_context: str = ""
-                          ) -> ADRExtraction:
-    """Force ADR production (skip the gated skip logic).
-
-    Use this when you know an ADR is needed regardless of ticket size
-    (e.g., Commander override, pre-planned feature)."""
-    return await design(cfg, ticket, repo_context=repo_context, gated=False)

@@ -3,8 +3,10 @@
 What this ticket added:
   1. A first-class "Roster" button in the cockpit's top nav bar (cockpit_views._control_bar),
      one click away, not buried in a sub-menu.
-  2. The liaison / Mayor officer fully wired into officers.py (SOT) → roster.py
-     → html_view() → /roster-doc, so every officer with role · duty · model shows up.
+  2. (Historical) The liaison / Mayor officer wired into the roster. The Mayor's roster row was
+     removed in the 2026-07-19 stabilization — liaison.py died in 40da120 and the row was the last
+     phantom reference — so this harness now pins the label superset (officers.py) and the row's
+     ABSENCE, while the nav-button criterion stays as landed.
 
 Tests here cover the EU-68 acceptance criterion specifically:
   "a Roster button in the cockpit opens a page listing every officer (role · duty · model)
@@ -39,26 +41,22 @@ def chk(name: str, cond, detail: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# 1. officers.py SOT: display("liaison") resolves to "Mayor"
-#    (the canonical name that appears everywhere — board, roster, group-room labels)
+# 1. officers.py SOT: display("liaison") still resolves to "Mayor" — the EU-260 label-superset
+#    doctrine keeps retired keys renderable for historical audit records.
 # ---------------------------------------------------------------------------
-chk('display("liaison") → "Mayor" (officers.py single source of truth)',
+chk('display("liaison") → "Mayor" (label superset for historical records)',
     officers.display("liaison") == "Mayor",
     f"got: {officers.display('liaison')!r}")
 
 # ---------------------------------------------------------------------------
-# 2. html_view() surfaces Mayor + Inter-unit Ambassador duty in the rendered table
-#    (the acceptance criterion: "listing every officer (role · duty · model)")
+# 2. html_view() lists every CURRENT officer and no longer renders the retired Mayor row
 # ---------------------------------------------------------------------------
 cfg = Config(apps=[], audit_path=str(Path(tempfile.mkdtemp()) / "audit.jsonl"))
 view = roster.html_view(cfg)
 
-chk('html_view() includes "Mayor" in the officer table',
-    "Mayor" in view,
-    "liaison officer missing from the cockpit page")
-chk('html_view() includes the liaison duty text',
-    "Inter-unit Ambassador" in view,
-    "liaison duty row missing from the cockpit page")
+chk('html_view() does NOT render the retired Mayor row (2026-07-19 stabilization)',
+    "Mayor" not in view and "Inter-unit Ambassador" not in view,
+    "the liaison phantom row is back on the cockpit page")
 chk('html_view() includes every officer listed in _OFFICER_ROWS',
     all(officers.display(key) in view for key, *_ in roster._OFFICER_ROWS),
     str([officers.display(k) for k, *_ in roster._OFFICER_ROWS if officers.display(k) not in view]))
@@ -78,12 +76,9 @@ resp = client.get("/roster-doc")
 page = resp.get_data(as_text=True)
 
 chk("/roster-doc returns HTTP 200", resp.status_code == 200, str(resp.status_code))
-chk('/roster-doc page contains "Mayor" (new officer is live on the page)',
-    "Mayor" in page,
-    "Mayor absent from the rendered /roster-doc page")
-chk('/roster-doc page contains "Inter-unit Ambassador"',
-    "Inter-unit Ambassador" in page,
-    "liaison duty absent from the rendered /roster-doc page")
+chk('/roster-doc page does NOT render the retired Mayor row',
+    "Mayor" not in page and "Inter-unit Ambassador" not in page,
+    "the liaison phantom row is back on the served /roster-doc page")
 
 # ---------------------------------------------------------------------------
 # 4. Nav button: the "Roster" link is in the TOP-LEVEL control bar, NOT gated

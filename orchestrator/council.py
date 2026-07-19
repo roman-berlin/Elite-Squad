@@ -383,8 +383,6 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
         max_turns=6, effort="high"), tag="the-general")
     chair_provider, chair_model = chair.provider, chair.model_version
     briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
-    from . import governor
-    governor.note_call(cfg, len(said) + 1)
 
     # Route any ticket-worthy items the briefing proposed into the Commander's approval queue
     # (or, with meeting_autospawn, file them) — the block is stripped from the briefing shown.
@@ -677,8 +675,6 @@ async def _needs_context(cfg: Config) -> str:
                 ids = ", ".join(d.get("id", "?") for d in s["decisions"])
                 parts.append(f"{len(s['decisions'])} open decision(s) awaiting your answer"
                              f" (ticket(s): {ids})")
-            if s["approvals"]:
-                parts.append(f"{len(s['approvals'])} approval(s) pending")
             if s["proposals"]:
                 parts.append(f"{len(s['proposals'])} proposal batch(es) to approve/deny")
             if s["tasks"]:
@@ -1195,7 +1191,7 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
     bar, the single decision that is genuinely the Commander's. That is ~1 model call, versus the ~8
     of the deep multi-officer council (hold_council), which is now a WEEKLY ceremony. Sends one
     skimmable phone ping; surfaces any Commander decision as a separate 'needs your call'."""
-    from . import dashboard, governor
+    from . import dashboard
     facts = dashboard.standup(cfg)                     # deterministic — yesterday shipped, needs you, awaiting
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
@@ -1216,7 +1212,6 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
     synth = (run.final or run.text or "").strip()
-    governor.note_call(cfg, 1)
     questions = _commander_questions(synth)
 
     # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine
@@ -1245,13 +1240,11 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
 
 async def hold_standup(cfg: Config, audit=None) -> str:
     """On-demand stand-up (the daily one now runs inside the muster). Saves last-standup.md + notifies."""
-    from . import governor
     digest, rows, handoffs = await _gather_standup(cfg)
     text = _standup_text(rows, handoffs)
     _standup_file(cfg).write_text(text, encoding="utf-8")
     _save_transcript(cfg, "stand-up", digest, rows, "Daily stand-up — see the round-table below.")
     notify.send(_standup_telegram(rows, handoffs))
-    governor.note_call(cfg, len(rows))
     if audit is not None:
         audit.record("standup", officers=[r for r, _ in rows], handoffs=len(handoffs))
     return text

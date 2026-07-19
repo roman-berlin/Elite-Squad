@@ -150,12 +150,6 @@ class Config:
     builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
 
-    # --- EU-108/118: multi-provider fallback for plan-limit handling ---
-    # When a provider (e.g., Claude Max plan) hits its limit, autopilot can switch to another
-    # provider/model that still has capacity (utilization < 1.0). This provides graceful degradation.
-    # Empty means disabled; otherwise a list of (model, provider_id) tuples in priority order.
-    fallback_providers: list[tuple[str, str]] = field(default_factory=list)
-
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
     # always-on box stays light against the Max limit and never competes with your own Opus coding.
@@ -313,8 +307,7 @@ class Config:
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
 
-    # --- usage governor (server frugality) ---
-    usage_cap_per_hour: int = 40            # cap discretionary officer-discussion calls / rolling hour; 0 = off
+    # --- daily token budget (runaway-loop guard) ---
     daily_token_budget: int = 100_000_000   # tokens/day ceiling; autopilot AUTO-PAUSES new tickets when today's
                                             # ledger burn (input+output, incl. cache reads) hits this. ARMED by
                                             # default as a runaway-loop guard sized to Max-plan headroom — tune in

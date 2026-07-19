@@ -1036,80 +1036,6 @@ def create_app(cfg: Config, port: int = 8787):
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/api/terminal/stream")
-    def terminal_stream_api():
-        """Server-Sent Events: live-tail the orchestrator's terminal/log output for the cockpit's
-        interactive terminal panel.
-
-        EU-154: reuses the existing stdout ring buffer (``cockpit_state._LOG``, a
-        ``deque(maxlen=600)`` that already feeds the War Room live-feed panel) instead of a new
-        log source. Live-tails from CONNECT time only — whatever backlog is already in the buffer
-        when the client connects is never replayed, only lines appended afterwards. Polls every
-        0.5s and emits one raw ``data: <line>\n\n`` frame per new line (a bare SSE data frame,
-        not the ``event: <type>`` form ``_sse()`` produces — the terminal panel just wants plain
-        lines). Sends a ``: heartbeat\n\n`` comment roughly every 15s while idle, and resyncs
-        against the ring buffer's current contents if it has wrapped past what this stream last
-        saw (the bookmark fell off the back of the deque).
-
-        EU-343: that resync loses every line in the gap — under a burst (a big stack-trace dump,
-        verbose sub-process output) more than ``maxlen`` lines can land inside one 0.5s poll
-        window. It now emits a gap marker first, so the hole is visible rather than silent; the
-        operator is usually watching this panel during exactly the incident that causes the burst.
-        The resync itself cannot duplicate: ``bookmark`` is always the deque's tail (it is only
-        ever assigned ``new_items[-1]``) and production only appends, so everything in the resync
-        snapshot is strictly newer than the bookmark and was never sent.
-        """
-        from flask import Response
-
-        def gen():
-            snapshot = list(_LOG)
-            bookmark = snapshot[-1] if snapshot else None   # last backlog entry — never replayed
-            last_heartbeat = time.time()
-            try:
-                while True:
-                    snapshot = list(_LOG)
-                    if bookmark is None:
-                        new_items = snapshot
-                    else:
-                        idx = None
-                        for i in range(len(snapshot) - 1, -1, -1):
-                            if snapshot[i] is bookmark:
-                                idx = i
-                                break
-                        if idx is None:
-                            # idx is None => the bookmark wrapped off the ring buffer since our
-                            # last poll (maxlen exceeded) — resync to whatever it currently holds
-                            # instead of guessing how much was missed.
-                            # EU-343: say so. Resyncing silently leaves the panel looking healthy
-                            # with a hole in it. The count is deliberately absent: it would have to
-                            # be inferred from the shared log sequence, which release_run also bumps
-                            # WITHOUT appending to _LOG (cockpit_state._bump_log_seq_only), so any
-                            # number here would be a guess dressed up as a fact. "Some lines were
-                            # dropped, here is where the stream resumes" is what we actually know.
-                            yield (f"data: ... lines dropped — the {_LOG.maxlen}-line terminal "
-                                   f"buffer wrapped past this stream during a burst; resuming from "
-                                   f"the newest {len(snapshot)} lines ...\n\n")
-                            new_items = snapshot
-                        else:
-                            new_items = snapshot[idx + 1:]
-                    if new_items:
-                        for line, _key in new_items:
-                            yield f"data: {line}\n\n"
-                        bookmark = new_items[-1]
-                        last_heartbeat = time.time()
-                    else:
-                        now = time.time()
-                        if now - last_heartbeat >= 15:
-                            yield ": heartbeat\n\n"
-                            last_heartbeat = now
-                    time.sleep(0.5)
-            except GeneratorExit:
-                # Client disconnected — unwind quietly, nothing left to clean up.
-                return
-
-        return Response(gen(), mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
     @app.get("/tasks")
     def tasks_page():
         # EU-129: Resolve the active project first so needs.count() can scope to it.
@@ -2108,64 +2034,6 @@ def create_app(cfg: Config, port: int = 8787):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
 
-    @app.get("/approvals")
-    def approvals_page():
-        from . import approvals
-        pend = approvals.pending(cfg)
-        if _state.get("approving"):
-            inner = _working(f"Applying the {_state.get('approving')} recommendation — editing officer "
-                             "doctrine, then committing + pushing…")
-        elif not pend:
-            inner = ("<p style='color:#8a909c'>No pending recommendations. When the Engineering Coach or "
-                     "Engineering Manager proposes something (after a drill or council), it lands here for your "
-                     "Approve / Disapprove — Approve applies it and pushes the doctrine.</p>")
-        else:
-            style = ("<style>.apcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 16px;margin:12px 0}"
-                     ".aphead{font-weight:650;color:#fbbf24;margin-bottom:8px}"
-                     ".aprow{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}"
-                     ".apok{background:#10371f;border:1px solid #1c5238;color:#56d98a;border-radius:8px;padding:9px 14px;font-weight:650;cursor:pointer}"
-                     ".apno{background:#23191a;border:1px solid #3a2f12;color:#f0676b;border-radius:8px;padding:9px 14px;cursor:pointer}</style>")
-            cards = ""
-            for it in pend:
-                cards += (
-                    "<div class=apcard>"
-                    f"<div class=aphead>{html.escape(it['label'])}</div>"
-                    f"<pre class=rep>{html.escape(it['body'])}</pre><div class=aprow>"
-                    f"<form method=post action=/api/approve style='margin:0' "
-                    "onsubmit=\"return confirm('Approve — the unit will apply this and push the doctrine. Continue?')\">"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<button class=apok>&#9989; Approve — apply &amp; push</button></form>"
-                    "<form method=post action=/api/disapprove style='display:flex;gap:6px;margin:0;flex:1'>"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)' style='flex:1'>"
-                    "<button class=apno>Disapprove</button></form></div></div>")
-            inner = style + cards
-        return _wrap("Approvals — officer recommendations", inner)
-
-    @app.post("/api/approve")
-    def approve_api():
-        kind = (request.form.get("kind") or "").strip()
-        if kind and _claim_flag("approving", kind):   # EU-361: claimed here, not inside _bg
-            def _bg():
-                try:
-                    from . import approvals
-                    asyncio.run(approvals.approve(cfg, kind))
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"approve failed: {exc}"
-                finally:
-                    _state["approving"] = None
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/approvals")
-
-    @app.post("/api/disapprove")
-    def disapprove_api():
-        kind = (request.form.get("kind") or "").strip()
-        reason = (request.form.get("reason") or "").strip()
-        if kind:
-            from . import approvals
-            approvals.disapprove(cfg, kind, reason)
-        return redirect("/approvals")
-
     @app.post("/api/approve-proposals")
     def approve_proposals_api():
         """Approve a queued batch of unit-proposed tickets — file the checked subset to the board
@@ -2384,24 +2252,6 @@ def create_app(cfg: Config, port: int = 8787):
                     "<button class='nbtn x'>Dismiss</button></form>"
                     "</div>"
                     "</div>")
-            out.append("</div>")
-
-        # ── Officer recommendations — own action form (also counted in rows) ──
-        if s.get("approvals"):
-            out.append(f"<div class=nsec><h3>&#9989; Officer recommendations · {len(s['approvals'])}</h3>")
-            for it in s["approvals"]:
-                out.append(
-                    f"<div class=ncard><div class=q>{html.escape(it['label'])}</div>"
-                    f"<pre class=rep style='max-height:220px;overflow:auto;margin:6px 0 0'>{html.escape(it['body'])}</pre>"
-                    "<div class=nrow>"
-                    "<form method=post action=/api/approve style='margin:0' "
-                    "onsubmit=\"return confirm('Approve — apply and push the doctrine. Continue?')\">"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<button class='nbtn ok'>&#9989; Approve</button></form>"
-                    "<form method=post action=/api/disapprove class=nrow style='flex:1;margin:0'>"
-                    f"<input type=hidden name=kind value='{html.escape(it['kind'])}'>"
-                    "<input type=text name=reason placeholder='why not? (logged so it won&#39;t re-propose)'>"
-                    "<button class='nbtn no'>Disapprove</button></form></div></div>")
             out.append("</div>")
 
         if s.get("proposals"):
