@@ -770,7 +770,17 @@ def create_app(cfg: Config, port: int = 8787):
 
         def gen():
             appkey = appq or None
+            # 2026-07-19: WAIT for the log instead of closing — the panel connects at page load,
+            # often seconds BEFORE the run's open_run_log sets log_path; the old instant
+            # "No active run log" + close left the panel on "Waiting for run output…" through
+            # EventSource reconnect flicker. Poll the state until a path appears (or ~60s idle).
             log_path = st.get("log_path")
+            waited = 0.0
+            while not log_path and waited < 60.0:
+                yield ": waiting-for-log\n\n"
+                time.sleep(1.0)
+                waited += 1.0
+                log_path = get_state(appkey).get("log_path")
             if not log_path:
                 yield _sse("log", "No active run log to stream.")
                 return
@@ -1008,8 +1018,7 @@ def create_app(cfg: Config, port: int = 8787):
 
         def _run_form(target_app: str, rows_html: str, btn_label: str) -> str:
             # One run form = one app/Jira. Multiple ticket checkboxes are fine — they're all this app.
-            return ('<form method=post action=/api/run-selected '
-                    'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
+            return ('<form method=post action=/api/run-selected>'
                     f'<input type=hidden name=app value="{html.escape(target_app)}">'
                     f'<div class=tlist>{_select_all}{rows_html}</div>'
                     '<div class=trun>'

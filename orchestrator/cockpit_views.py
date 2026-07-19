@@ -699,25 +699,20 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         # Autopilot off: offer two start modes that genuinely differ (EU-103 iter-2).
         #  · 'Choose tickets' opens the per-ticket picker (pick specific tickets, then run them).
         #  · 'Resume implementing' picks up pending work (In-Progress first, then To-Do) on the active backend.
-        _conf_choose = (f"return confirm('Open the ticket picker for "
-                        f"{html.escape(app0 or '')} to choose specific tickets to develop?')")
-        _conf_drain = (f"return confirm('Resume implementing for "
-                       f"{html.escape(app0 or '')}? "
-                       f"The unit will work In-Progress tickets first, then To-Do, until the queue is empty or you press Stop.')")
+        # 2026-07-19 (Commander order): NO confirm popups — these are explicit clicks with
+        # visible, stoppable outcomes (the picker is pure navigation; a drain has a Stop button).
         ap_html = (
             '<div class="tbap off">'
             '<span class="apdot-sm off"></span>'
             '<span class=tbaplabel>Autopilot</span>'
-            f'<form method=post action=/api/autopilot class=tbf '
-            f'onsubmit="{_conf_choose}">'
+            f'<form method=post action=/api/autopilot class=tbf>'
             f'<input type=hidden name=action value=start>'
             f'<input type=hidden name=app value="{ap_appq}">'
             '<input type=hidden name=mode value=choose>'
             f'<button class="aptbtn start" {ap_dis} '
             'title="Pick specific tickets to develop (opens the ticket picker)">'
             '&#127915;&nbsp;Choose tickets</button></form>'
-            f'<form method=post action=/api/autopilot class=tbf '
-            f'onsubmit="{_conf_drain}">'
+            f'<form method=post action=/api/autopilot class=tbf>'
             f'<input type=hidden name=action value=start>'
             f'<input type=hidden name=app value="{ap_appq}">'
             '<input type=hidden name=mode value=drain>'
@@ -878,7 +873,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <div class=tclu>
     <span class=tclabel>QA</span>
     <div class=tcrow>
-      <form method=post action=/api/qa class=tbf onsubmit="return confirm('Run QA for {html.escape(app0)}? QA + Security + Release officers inspect DEV and FILE findings as Jira tickets, then deliver a DEV\\u2192MAIN readiness verdict (posted here and to Telegram).')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
+      <form method=post action=/api/qa class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
     </div>
   </div>
 
