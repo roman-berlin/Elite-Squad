@@ -254,8 +254,8 @@ def _result_banner(state: dict) -> str:
     if not msg:
         return ""
     bad = any(w in msg.lower() for w in ("fail", "error"))
-    fg, border, bg = (("#f0676b", "#5a1f22", "#2a1417") if bad
-                      else ("#7fe3a6", "#1c5238", "#10371f"))
+    fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
+                      else ("var(--ok)", "var(--okline)", "var(--okbg)"))
     return (f"<div style='background:{bg};border-bottom:1px solid {border};color:{fg};"
             f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
 
@@ -505,7 +505,6 @@ def backend_control(cfg, app_name: str | None = None) -> str:
     #                     (Claude plan limit, GLM token missing). None = pause instead (old world).
     #   ＋ Add model    — the /models registry page (add a backend + API key, test connection).
     secondary = backend_pref.get_secondary(cfg)
-    hybrid_on = backend_pref.get_hybrid(cfg) and bool(secondary)
     sec_opts = f"<option value='none' {'selected' if not secondary else ''}>None</option>"
     for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
         _bid = _entry["id"]
@@ -538,19 +537,13 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         '<span class=tbsel-label>Secondary</span>'
         f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
         f'</form>{fb_note}'
-        '<form method=post action=/api/model class=tbf '
-        'title="Single: everything runs on the Main model (Secondary is the emergency stand-in). '
-        'Hybrid: the Main model does the heavy thinking (plan/PRD, review, debug judgment) and '
-        'the Secondary does the regular building against that plan. Needs a Secondary.">'
-        '<span class=tbsel-label>Mode</span>'
-        f'<select name=mode onchange="this.form.submit()" style="font-size:13px" '
-        f'{"disabled title=\"Set a Secondary model first\"" if not secondary else ""}>'
-        f"<option value='single' {'selected' if not hybrid_on else ''}>Single</option>"
-        f"<option value='hybrid' {'selected' if hybrid_on else ''}>Hybrid</option>"
-        '</select></form>'
-        + ('<span class="tbnote dim" title="Heavy roles (plan/review) on the Main model; the '
-           'Builder on the Secondary.">&#9878; plan on main &middot; build on secondary</span>'
-           if hybrid_on and secondary else "")
+        # 2026-07-19 (Commander order): NO Mode select — two models configured = hybrid,
+        # automatically (heavy thinking on Main, building on Secondary); one model = single.
+        + ('<span class="tbnote dim" title="Two models configured → hybrid automatically: the '
+           'Main model does the heavy thinking (plan/PRD, review, debug judgment); the Secondary '
+           'does the regular building. Clear the Secondary to go back to one model.">'
+           '&#9878; hybrid: plan on main &middot; build on secondary</span>'
+           if secondary else "")
         + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
         'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>')
 
@@ -581,7 +574,17 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     if _state["active"]:
         status = '<span class="tbnote run">&#9679; run in progress…</span>'
     elif _state.get("last_msg"):
-        status = f'<span class="tbnote bad">{html.escape(_state["last_msg"])}</span>'
+        # 2026-07-19: tone by CONTENT — "connection OK" showed in error-red before (every
+        # last_msg carried class=bad). Red is for failures only; success reads green.
+        _m = _state["last_msg"]
+        _ml = _m.lower()
+        if any(w in _ml for w in ("fail", "error", "not configured", "missing", "refused", "⚠")):
+            _tone = "bad"
+        elif any(w in _ml for w in ("ok", "✓", "set to", "cleared", "connected", "saved")):
+            _tone = "ok"
+        else:
+            _tone = "dim"
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
     else:
         status = ""
 
