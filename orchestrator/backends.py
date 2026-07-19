@@ -216,6 +216,54 @@ def available(backend: str) -> bool:
     return True
 
 
+def resolve_for_run(cfg=None, app_name: str | None = None) -> tuple[str, str | None]:
+    """2026-07-19 (Commander order): the MAIN/SECONDARY pick for a run.
+
+    Returns ``(backend, fallback_reason)``: the app's main model (backend_pref.active) when it is
+    usable, else the configured SECONDARY when that is usable — with a human reason string so the
+    caller can audit/notify — else the main unchanged (the existing hard blocks then fire exactly
+    as before, so with NO secondary configured behaviour is byte-identical to the old world).
+
+    "Usable" is deliberately cheap and static-plus-cached: GLM needs its token/config
+    (glm_config_issues); the native Claude backend needs the plan limit NOT hit
+    (usage.plan_limit_hit — itself cached); a custom registry backend counts usable (no probe).
+    Never raises."""
+    try:
+        from . import backend_pref
+        primary = backend_pref.active(cfg, app_name)
+    except Exception:  # noqa: BLE001
+        return NATIVE, None
+    try:
+        sec = backend_pref.get_secondary(cfg)
+    except Exception:  # noqa: BLE001
+        sec = None
+    if not sec or sec == primary:
+        # No stand-in configured → the old world, at the old cost: no usability probe at all
+        # (plan_limit_hit shells out on a cold cache — too heavy for every launch).
+        return primary, None
+
+    def _usable(bk: str) -> tuple[bool, str]:
+        try:
+            if normalize(bk) == GLM:
+                iss = glm_config_issues()
+                return (not iss, "; ".join(iss) if iss else "")
+            if normalize(bk) == NATIVE:
+                from . import usage
+                hit = usage.plan_limit_hit(cfg) if cfg is not None else {}
+                return (not hit.get("hit"), "plan limit hit" if hit.get("hit") else "")
+            return True, ""
+        except Exception:  # noqa: BLE001
+            return True, ""   # an unknowable state must never block dispatch here
+
+    ok, why = _usable(primary)
+    if ok:
+        return primary, None
+    sec_ok, _ = _usable(sec)
+    if sec_ok:
+        return sec, f"main '{primary}' unavailable ({why}) — using secondary '{sec}'"
+    return primary, None
+
+
 def alternates(current: str) -> list[str]:
     """Runnable backend ids OTHER than ``current`` — the options to offer when the active backend is
     blocked (e.g. an Opus/Claude plan-limit). Used by the cockpit's limit prompt (EU-191). NATIVE is

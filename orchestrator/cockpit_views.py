@@ -497,30 +497,48 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         note = "<span class=\"tbnote dim\" title=\"GLM is a third-party provider — prompts (code, tickets, diffs) leave Anthropic\">&#8599; prompts go to Z.ai</span>"
     else:
         note = ""
-    per_project = ""
-    if app_name:
-        override = backend_pref.get_apps(cfg).get(app_name)
-        inherit_label = "Opus" if active == _bk.NATIVE else "GLM"
-        popts = (f"<option value='inherit' {'selected' if not override else ''}>"
-                 f"Inherit global ({inherit_label})</option>"
-                 f"<option value='opus' {'selected' if override == _bk.NATIVE else ''}>"
-                 f"Opus (Claude)</option>")
-        if glm_ok or override == _bk.GLM:
-            glm_plabel = "GLM (Z.ai)" if glm_ok else "GLM (Z.ai) — key missing"
-            popts += (f"<option value='glm' {'selected' if override == _bk.GLM else ''}>"
-                      f"{glm_plabel}</option>")
-        per_project = (
-            f'<form method=post action=/api/model class=tbf '
-            f'title="Model for {html.escape(app_name)} only">'
-            f'<input type=hidden name="app" value="{html.escape(app_name)}">'
-            '<span class=tbsel-label>This project</span>'
-            f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{popts}</select>'
-            '</form>')
+    # 2026-07-19 (Commander order): the toolbar speaks MAIN + SECONDARY, not global/inherit.
+    # The per-app override (EU-223, for dual drains) still exists in backend_pref/api — it just
+    # no longer renders here; the toolbar's job is the simple mental model:
+    #   Main model      — what the unit runs on.
+    #   Secondary       — the stand-in it switches to (loudly) when the main can't run
+    #                     (Claude plan limit, GLM token missing). None = pause instead (old world).
+    #   ＋ Add model    — the /models registry page (add a backend + API key, test connection).
+    secondary = backend_pref.get_secondary(cfg)
+    sec_opts = f"<option value='none' {'selected' if not secondary else ''}>None</option>"
+    for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
+        _bid = _entry["id"]
+        if _bid == active:
+            continue                      # the main model can't be its own stand-in
+        if _bid == _bk.GLM and not show_glm:
+            continue
+        _lbl = ("Opus (Claude)" if _bid == _bk.NATIVE
+                else ("GLM (Z.ai)" if _bid == _bk.GLM
+                      else html.escape(_entry.get("label") or _bid)))
+        sec_opts += (f"<option value='{html.escape(_bid)}' "
+                     f"{'selected' if secondary == _bid else ''}>{_lbl}</option>")
+    fb_note = ""
+    try:
+        _run_bk, _fb_why = _bk.resolve_for_run(cfg, app_name)
+        if _fb_why:
+            fb_note = ('<span class="tbnote run" title="' + html.escape(_fb_why) + '">'
+                       '&#8644; running on secondary</span>')
+    except Exception:  # noqa: BLE001
+        pass
     return (
-        '<form method=post action=/api/model class=tbf title="Model backend — applies to all runs">'
-        '<span class=tbsel-label>Model</span>'
+        '<form method=post action=/api/model class=tbf '
+        'title="Main model — what the unit runs on (all projects)">'
+        '<span class=tbsel-label>Main model</span>'
         f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
-        f'</form>{note}{per_project}')
+        f'</form>{note}'
+        '<form method=post action=/api/model class=tbf '
+        'title="Secondary model — the unit switches to it (loudly) when the main can&#39;t run: '
+        'Claude plan limit hit, or GLM key missing. None = pause and wait instead.">'
+        '<span class=tbsel-label>Secondary</span>'
+        f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
+        f'</form>{fb_note}'
+        '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
+        'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>')
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,

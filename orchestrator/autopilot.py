@@ -782,8 +782,12 @@ def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str
                         continue
                 ap_cfg = copy.copy(cfg)
                 ap_cfg.dry_run = False   # a resumed drain is live by definition (mirrors Start)
-                bk = backend_pref.active(ap_cfg, app_name)   # EU-190/EU-223 sticky pick
+                # EU-190/EU-223 sticky pick + 2026-07-19 MAIN/SECONDARY resolution
+                bk, _fb_why = backends.resolve_for_run(ap_cfg, app_name)
                 ap_cfg.model_backend = bk
+                if _fb_why:
+                    audit.record("model_fallback", app=key, backend=bk, reason=_fb_why)
+                    print(f"↻ auto-resume: {_fb_why}", flush=True)
                 if bk == backends.GLM and not backends.available("glm"):
                     audit.record("autopilot_resume_skipped", app=key, reason="glm-unconfigured")
                     print(f"↻ auto-resume: NOT resuming {key or 'unit-wide'} — GLM selected but "
@@ -1697,46 +1701,74 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # are hit. This prevents silent churn where the autopilot spins on rate-limit errors.
             plan_check = usage.plan_limit_hit(cfg)
             if plan_check.get("hit"):
-                over_limits = plan_check.get("over_limits", [])
+                # 2026-07-19 (Commander order): the SECONDARY model absorbs a plan-limit hit —
+                # resolve_for_run returns the usable secondary when one is configured, so the
+                # drain keeps working on it (loudly) instead of pausing. No secondary → the
+                # pause below fires exactly as before.
+                from . import backends as _bks
+                _fb_bk, _fb_why = _bks.resolve_for_run(cfg, app_name)
+                if _fb_why:
+                    if getattr(cfg, "model_backend", None) != _fb_bk:
+                        cfg.model_backend = _fb_bk
+                        audit.record("model_fallback", app=app_name or "", backend=_fb_bk,
+                                     reason=_fb_why)
+                        notify.send(f"⇄ Plan limit hit — autopilot continues on the secondary "
+                                    f"model ({_fb_bk}). It switches back when the limit resets.")
+                        print(f"  ⇄ {_fb_why} — drain continues on {_fb_bk}", flush=True)
+                    plan_limit_paused = False
+                    # fall through to normal work — the secondary carries the drain
+                else:
+                    over_limits = plan_check.get("over_limits", [])
 
-                # Halt autopilot when plan limits are hit (no fallback switch implemented yet)
-                if not plan_limit_paused:
-                    limit_names = [limit.get("label", limit.get("key", "unknown")) for limit in over_limits]
-                    reset_times = list(set(limit.get("resets_in", "unknown") for limit in over_limits))
+                    # Halt autopilot when plan limits are hit (no usable secondary configured)
+                    if not plan_limit_paused:
+                        limit_names = [limit.get("label", limit.get("key", "unknown")) for limit in over_limits]
+                        reset_times = list(set(limit.get("resets_in", "unknown") for limit in over_limits))
 
-                    # Send severe Telegram alert (one-shot per session)
-                    notify.plan_limit_alert(over_limits, reset_times)
+                        # Send severe Telegram alert (one-shot per session)
+                        notify.plan_limit_alert(over_limits, reset_times)
 
-                    # Also send regular notification for logs
-                    notify.send(f"⛔ Autopilot paused — Claude plan limit(s) reached: {', '.join(limit_names)}. "
-                                f"Resets at: {', '.join(reset_times)}. "
-                                f"Resuming could cause API errors and silent churn.")
+                        # Also send regular notification for logs
+                        notify.send(f"⛔ Autopilot paused — Claude plan limit(s) reached: {', '.join(limit_names)}. "
+                                    f"Resets at: {', '.join(reset_times)}. "
+                                    f"Resuming could cause API errors and silent churn.")
 
-                    # Set cockpit state so the banner appears
-                    try:
-                        from . import cockpit_state as _cs
-                        # Find the earliest reset timestamp
-                        reset_at = None
-                        for limit in over_limits:
-                            ts = limit.get("resets_at")
-                            if ts:
-                                epoch = ts if isinstance(ts, (int, float)) else 0
-                                if reset_at is None or epoch < reset_at:
-                                    reset_at = epoch
-                        _cs.set_plan_limit_hit(app_name, hit=True, reset_at=reset_at)
-                    except Exception:  # noqa: BLE001 - state update must never break autopilot
-                        pass
+                        # Set cockpit state so the banner appears
+                        try:
+                            from . import cockpit_state as _cs
+                            # Find the earliest reset timestamp
+                            reset_at = None
+                            for limit in over_limits:
+                                ts = limit.get("resets_at")
+                                if ts:
+                                    epoch = ts if isinstance(ts, (int, float)) else 0
+                                    if reset_at is None or epoch < reset_at:
+                                        reset_at = epoch
+                            _cs.set_plan_limit_hit(app_name, hit=True, reset_at=reset_at)
+                        except Exception:  # noqa: BLE001 - state update must never break autopilot
+                            pass
 
-                    audit.record("plan_limit_pause", over_limits=over_limits)
-                    print(f"  · Claude plan limit(s) reached: {', '.join(limit_names)} — holding new tickets "
-                          f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
-                    plan_limit_paused = True
-                if once:
-                    stop_reason = "plan-limit"   # EU-232
-                    break
-                _sleep(max(30, interval), stop_event)
-                continue
-            # Clear plan-limit state when no longer hit
+                        audit.record("plan_limit_pause", over_limits=over_limits)
+                        print(f"  · Claude plan limit(s) reached: {', '.join(limit_names)} — holding new tickets "
+                              f"to prevent silent churn (resets: {', '.join(reset_times)}).", flush=True)
+                        plan_limit_paused = True
+                    if once:
+                        stop_reason = "plan-limit"   # EU-232
+                        break
+                    _sleep(max(30, interval), stop_event)
+                    continue
+            # Clear plan-limit state when no longer hit; also switch back to the MAIN model if
+            # the fallback had engaged (the pref didn't change — only this drain's working copy).
+            # Best-effort: minimal test cfgs may lack the attrs — never break the drain loop.
+            try:
+                from . import backend_pref as _bp
+                _main_bk = _bp.active(cfg, app_name)
+                if not plan_check.get("hit") and getattr(cfg, "model_backend", _main_bk) != _main_bk:
+                    cfg.model_backend = _main_bk
+                    audit.record("model_fallback_cleared", app=app_name or "", backend=_main_bk)
+                    notify.send(f"⇄ Plan limit cleared — autopilot is back on the main model ({_main_bk}).")
+            except Exception:  # noqa: BLE001
+                pass
             if plan_limit_paused:
                 try:
                     from . import cockpit_state as _cs

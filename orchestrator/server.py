@@ -189,12 +189,37 @@ def _resolve_run_backend(rcfg, app_name: str | None = None) -> str | None:
     if app_name is None:
         _apps = getattr(rcfg, "apps", None)
         app_name = _apps[0].name if _apps else None
-    bk = backend_pref.active(rcfg, app_name)
+    # 2026-07-19: MAIN/SECONDARY resolution — when the main model can't run and a usable
+    # secondary is configured, the run proceeds on the secondary (loudly); with no secondary the
+    # old hard block fires unchanged (EU-190's no-SILENT-fallback rule — this fallback is loud).
+    bk, why = backends.resolve_for_run(rcfg, app_name)
     rcfg.model_backend = bk
+    if why:
+        _note_model_fallback(why)
     if bk == backends.GLM and not backends.available("glm"):
         return ("GLM is selected but GLM_AUTH_TOKEN is not configured — set it and restart, "
-                "or switch the Model back to Opus.")
+                "or switch the Main model back to Opus (or configure a Secondary).")
     return None
+
+
+_MODEL_FALLBACK_LOG_INTERVAL_S = 600.0
+_last_model_fallback_log = 0.0
+
+
+def _note_model_fallback(why: str) -> None:
+    """One throttled console + Telegram line per window when the secondary engages — loud, not spam."""
+    global _last_model_fallback_log
+    import time as _time
+    now = _time.time()
+    if now - _last_model_fallback_log >= _MODEL_FALLBACK_LOG_INTERVAL_S:
+        _last_model_fallback_log = now
+        print(f"  ⇄ model fallback: {why}", flush=True)
+        try:
+            from . import notify as _notify
+            _notify.send(f"⇄ Model fallback engaged — {why}. Runs continue on the secondary; "
+                         "switch back or fix the main model when ready.")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def create_app(cfg: Config, port: int = 8787):
@@ -991,6 +1016,19 @@ def create_app(cfg: Config, port: int = 8787):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
+        # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
+        sec_raw = (request.form.get("secondary") or "").strip()
+        if sec_raw:
+            if sec_raw.lower() == "none":
+                backend_pref.set_secondary(None, cfg)
+                get_state(None)["last_msg"] = "Secondary model cleared — no fallback configured."
+            else:
+                from .model_registry import ModelRegistry as _MR
+                _sbk = backends.resolve_selection(sec_raw, _MR(cfg))
+                backend_pref.set_secondary(_sbk, cfg)
+                get_state(None)["last_msg"] = (f"Secondary model set to {_sbk} — the unit switches "
+                                               "to it when the main model can't run.")
+            return redirect("/")
         raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
         if app_param and raw.lower() in ("inherit", ""):
