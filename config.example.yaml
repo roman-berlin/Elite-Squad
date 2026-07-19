@@ -205,3 +205,15 @@ apps:
     gate_preflight: ["pytest"]        # modules the gate interpreter must import; a miss fails fast with a venv hint
     worktree_setup_cmd: ""            # explicitly install nothing for this app (no Node manifest)
     backlog_backend: "none"
+
+# --- 2026-07 autonomy knobs (defaults shown; uncomment to change) ---
+# planner_enabled: false        # ONE Opus design call/ticket before the build (Phase-2 centerpiece);
+#                               # runs INSTEAD of the Architect when on
+# planner_verdict_park: true    # a Planner CLOSE/ANSWER verdict with no code evidence parks the
+#                               # ticket for you instead of building anyway (EU-375)
+# builder_task_budget: 70000    # per-build SDK token budget, scaled by effort (EU-377); 0 = off
+# max_concurrent_builders: 1    # parallel build slots (EU-380). Leave at 1 on a 24GB Mac —
+#                               # two Opus builders exhaust memory (measured 2026-07-18)
+# self_update_auto_restart: true  # after the unit lands a change to ITSELF, exit gracefully once
+#                                 # idle so the keepalive respawns onto the new code (EU-387)
+# log_retention_days: 0         # auto-purge state/logs day-folders older than N days (0 = keep all)

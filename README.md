@@ -27,9 +27,11 @@ See `ARCHITECTURE.md` for the design. This file is how to run it.
 ./general drain                     # every app that has a tracker
 ```
 
-Everything runs **dry-run by default**: the General executes the whole loop —
-including a *trial* merge into dev to preview whether dev would stay green — but
-pushes nothing, merges nothing, and writes nothing to Jira. Add `--live` when ready:
+Runs are **live by default** (`dry_run: false` is the code default): the General
+builds, gates, merges to dev, and updates Jira. For a no-changes preview, set
+`dry_run: true` in config.yaml — the whole loop still executes, including a *trial*
+merge into dev to preview whether dev would stay green, but nothing is pushed,
+merged, or written to Jira. `--live` overrides a dry-run config for one invocation:
 
 ```bash
 ./general --live task automatixy "Fix missing scrollbar on the dashboard table" --ac "..."
@@ -117,8 +119,8 @@ description) — the Reviewer judges against exactly those.
 
 ## Recommended workflow for building your SaaS
 
-1. `./general task <app> "..." --ac "..."` in **dry-run**; read the summary + `audit.jsonl`.
-2. When the trial says *would merge to dev (dev stays green)*, re-run with `--live`.
+1. `./general task <app> "..." --ac "..."` with `dry_run: true` set in config.yaml; read the summary + `audit.jsonl`.
+2. When the trial says *would merge to dev (dev stays green)*, re-run with `--live` (or set `dry_run: false`).
 3. Do your QA on `dev` (with Cowork — k6, e2e, a visual check of that scrollbar).
 4. You merge `dev → main`.
 
@@ -157,7 +159,8 @@ fallback. Opus is never affected and stays the default.
 
 ## Safety model (read before `--live`)
 
-- **Dry-run is the default** and previews dev health without side effects.
+- **Dry-run preview on demand** — set `dry_run: true` in config.yaml to run the whole
+  loop with zero side effects (the code default is LIVE; `--live` overrides a dry config).
 - **`main` is never touched** — the General is code-blocked from it; you merge dev→main.
 - **dev is kept green**: a merge that fails dev's gate is auto-reverted and turned into a PR.
 - **Reviewer is read-only** at the permission layer — it cannot edit code.

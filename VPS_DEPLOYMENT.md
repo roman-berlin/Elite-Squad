@@ -200,11 +200,11 @@ and meetings run on demand now):
 not attempt a push — so sync exits clean instead of logging a 403 every run. Drop the flag only if you
 give the box git **write** credentials (then it pushes its own councils back for the Mac to see).
 
-**Frugality (so you never hit the Max limit):** the server's discussions run on **Sonnet**, and corridor
-small-talk on **Haiku** — Opus is reserved for *implementation* on your Mac. A usage governor caps
-discretionary chatter (`usage_cap_per_hour`, default 40 calls/hr): if an hour's already busy, a
-small-talk is skipped rather than spent. The daily muster is council + stand-up merged into one, run
-off-peak at 06:30. Net: necessary meetings + study only, on cheap models, self-throttled.
+**Frugality (so you never hit the Max limit):** the server's discussions run on **Sonnet** —
+Opus is reserved for *implementation* on your Mac. Ceremonies are on-demand (corridor small-talk
+and the hourly usage governor were retired — Phase-2 §2 / 2026-07-19 stabilization); the
+`daily_token_budget` ceiling auto-pauses the autopilot on runaway burn. Net: necessary meetings
+only, on cheap models.
 
 ## Step 6 — Reach the cockpit (don't expose it)
 

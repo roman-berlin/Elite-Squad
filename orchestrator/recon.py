@@ -1,6 +1,7 @@
 """Recon delegation — any READ-ONLY recon officer (QA Engineer, Security Engineer, Release Manager) can field a SQUAD
-when the surface is big enough to warrant it, then synthesize one report. The read-only sibling of
-the Dev Team Lead's squad.py, with the same discipline (Roman's reflexes):
+when the surface is big enough to warrant it, then synthesize one report. (The build-time squad —
+squad.py — was retired with the Phase-2 §2 collapse; recon is the one delegation mechanism.)
+The discipline (Roman's reflexes):
 
 - **Solo is the default.** With `delegation_enabled` off, this is byte-for-byte the old single-agent
   run — no extra cost, no behaviour change.
@@ -13,7 +14,7 @@ the Dev Team Lead's squad.py, with the same discipline (Roman's reflexes):
   the officer's OWN format — the officer's system prompt carries the verdict format through planning,
   the soldiers, and the synthesis, so the output is identical in shape to a solo run.
 
-One master switch (`delegation_enabled`) arms both the Dev Team Lead's squad and these recon squads.
+One master switch (`delegation_enabled`) arms these recon squads (and only them).
 """
 from __future__ import annotations
 

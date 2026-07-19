@@ -470,8 +470,9 @@ def _autospawn_tickets(cfg: Config, decision_raw: str, audit=None, *,
 async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | None = None,
                        audit=None) -> str:
     """An ad-hoc meeting: the relevant officers debate ONE topic, the CTO decides, and the
-    outcome is logged to Unit Memory + Telegram. `officers` is a list of names/keys (None = all);
-    any officer can request one by ending a council turn with a 'MEETING:' line."""
+    outcome is logged to Unit Memory + Telegram. `officers` is a list of names/keys (None = all).
+    Convened on demand (cockpit / CLI / Telegram) — the officer-raised 'MEETING:' request
+    pipeline was deleted in Phase-2 §2 (see the marker above)."""
     sig = collect_signals(cfg)
     digest = format_signals(sig)
     notes = recent_commander_notes(cfg)

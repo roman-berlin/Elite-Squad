@@ -13,7 +13,7 @@ cd ~/Projects/General
 Then open **http://localhost:8787** in your browser. It binds to localhost only (no one
 else can reach it). Runs happen in the background, so the page stays responsive.
 
-The board **auto-refreshes every 5 seconds** — no need to reload.
+The board **streams live over SSE** (with a 5-second poll as fallback) — no need to reload.
 
 ---
 
@@ -45,11 +45,11 @@ always unit-wide — your officers serve every project.)
 
 | Card | What it means |
 |------|---------------|
-| **Merged → DEV today** | Tickets the unit shipped to DEV (moved to QA) today. |
-| **Merged total** | All-time merges to DEV (for the selected scope). |
+| **Merged → DEV today** | Tickets the unit shipped to DEV (moved to QA) today — links to `/merge-stats`. |
 | **Needs you** | Tickets parked for you: a PR was opened, an escalation, or an error. Amber when > 0. |
 | **Parked** | Tickets the autopilot auto-skipped because they're stuck. Amber when > 0. |
-| **Security blocks** | Times the Provost Marshal blocked a merge on a CRITICAL/HIGH finding. Red when > 0. |
+| **Security blocks** | Times the deterministic security gate blocked a merge on a CRITICAL/HIGH finding. Red when > 0. |
+| **Tokens** | Today's token burn against the daily budget. |
 
 ---
 
@@ -57,7 +57,7 @@ always unit-wide — your officers serve every project.)
 
 The ticket the unit is working right now (or the most recent run if idle).
 
-- **Phase bar:** `Build → Gate → Review → Security → Land`. A filled green dot = phase
+- **Phase bar:** `Build → Gate → Review → Land`. A filled green dot = phase
   complete; an amber pulsing dot = the phase happening now.
 - **● live** badge when a run is in progress; **last run** when idle.
 - Below: current **pass** number, the latest **verdict**, and the **branch**.
@@ -66,16 +66,16 @@ The ticket the unit is working right now (or the most recent run if idle).
 
 ## Roster (right column)
 
-All **8 officers**, in chain of command, each with a status dot and last action:
+All **10 officers**, in chain of command, each with a status dot and last action:
 
-- 🟢 **green (pulsing)** — on duty right now (Field Engineer + Inspector General during a build).
+- 🟢 **green (pulsing)** — on duty right now (Dev Team Lead + Code Reviewer during a build).
 - 🔵 **blue** — acted in the last 10 minutes.
 - ⚪ **grey** — idle.
 
-The officers: **The General** (orchestrator) · **Adjutant** (S-1 / personnel) ·
-**Field Engineer** (Builder) · **Inspector General** (Reviewer) · **Scout** (S-2 / QA) ·
-**Provost Marshal** (security gate) · **Quartermaster** (S-4 / deploy) ·
-**Drillmaster** (doctrine).
+The officers: **CTO** (orchestrator) · **Engineering Manager** · **Product Manager** ·
+**Scrum Master** (ticket splitting) · **Dev Team Lead** (Builder) · **Code Reviewer** ·
+**QA Engineer** (S-2 recon) · **Security Engineer** · **Release Manager** (S-4 deploy
+readiness) · **SRE** (S-3 integration & rollback — deterministic, no model).
 
 ---
 
@@ -98,8 +98,7 @@ daily-council outcomes — each with the ticket, project, and how long ago.
 - **▶ Run** — launch it.
 
 Plus quick actions: **🐞 Report a problem** (file a QA bug with an optional screenshot),
-**🫡 Daily standup**, **🎖️ Drill** (Drillmaster reviews the unit), **💬 Council**
-(convene the officers), and **📋 Task log**.
+**🫡 Daily standup**, **💬 Council** (convene the officers), and **📋 Task log**.
 
 ### Task log (`/tasks`)
 
@@ -122,7 +121,7 @@ apps:
     backlog_backend: jira
     backlog:
       base_url: https://toibis.atlassian.net
-      project: SIG
+      project_key: SIG
       assignee: "70121:051c9744-3c4d-4dfb-b2e5-d7a0e87c2443"
       queue_statuses: ["In Progress", "To Do"]
 ```
@@ -135,5 +134,5 @@ Restart `general serve` and the new project appears in the switcher.
 
 - **Data source:** the board reads your real `audit.jsonl` (what the General actually did)
   and your real `config.yaml` apps. Nothing is invented.
-- **Live streaming** of each officer's actions as they happen (per-event SSE) is the next
-  war-room upgrade; today the board refreshes on a 5s poll.
+- **Live streaming** of officer actions is per-event SSE (shipped); a 5s poll remains as
+  the fallback when the stream drops.

@@ -2,8 +2,8 @@
 
 Every officer is just a text file with three parts (per the "agents are text files"
 principle): **Identity** (who they are), **Knowledge** (what they ground on), **Skills**
-(the SOP — how they work). Sharpen the file → sharpen the officer. The **Engineering Coach**
-proposes edits to these files from the unit's track record; you approve.
+(the SOP — how they work). Sharpen the file → sharpen the officer. (The Engineering Coach that once proposed
+edits to these files was retired in EU-327 — charter upkeep is Commander-driven now.)
 
 Filenames are the *internal keys* (`scout.md` = the `scout` officer) and stay army-themed by
 design — see `Documentation/OFFICER_NAMING.md`. The headings below are the canonical display
@@ -21,7 +21,6 @@ COMMANDER (you)
        │           Technical Writer (Docs) · AI officer · Judge Advocate (Legal) · Growth
        ├── Code Reviewer   (Reviewer)    — independent read-only audit  → inspector.md
        ├── Performance Engineer (Perf)   — hot-path benchmark gate      → performance-engineer.md
-       ├── Engineering Coach (Doctrine)  — improves the officers daily   → drillmaster.md
        ├── QA Engineer     (S-2 Recon)   — browser / e2e on DEV          → scout.md
        ├── Security Engineer (Security)  — security gate                 → provost.md
        └── Release Manager (S-4 DevOps)  — CI / deploy readiness         → quartermaster.md
@@ -51,4 +50,4 @@ officers (the tree above) and a template so you can formalize any specialist the
    looks like.
 2. Turn it into `Identity / Knowledge / Skills` using `_TEMPLATE.md`.
 3. Drop it in your repo's `.claude/agents/<name>.md` so the Dev Team Lead can dispatch to it.
-4. Manage it: review its work, let the Engineering Coach refine the file when it slips.
+4. Manage it: review its work and refine the file yourself when it slips.

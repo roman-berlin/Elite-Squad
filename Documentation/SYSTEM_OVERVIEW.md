@@ -236,8 +236,10 @@ ring buffer (`server.py:46-64`) and pushed to the browser via Server-Sent Events
 
 **Reports pages:** Token usage (`/usage`, `server.py:1166`), Failure forensics (`/forensics`,
 `server.py:1492`), Unit roster (`/roster-doc`, `server.py:1552`), Unit memory (`/memory`,
-`server.py:839`), Daily muster & meetings (`/council`), Task log (`/tasks`),
-Approvals (`/approvals`, `server.py:1015`).
+`server.py:839`), Daily muster & meetings (`/council`), Task log (`/tasks`). (The
+`/approvals` single-report page was removed in the 2026-07-19 stabilization — its KINDS
+registry had been permanently empty since EU-325/EU-327; ticket-proposal batches render
+in `/needs`.)
 
 A **health gate** blocks runs until green: `health.summary` (`health.py:81`) checks Claude login, the
 Agent SDK, git, gh, Telegram, and per-app repo/branch/gate/worktree/Jira (`health.py:34-78`). Run
@@ -388,9 +390,9 @@ means the ladder is shifting work off Opus as intended.
 > (On the Max plan there's no per-call dollar charge, so this token ceiling — not the no-op USD
 > `max_cost_usd: 0` — is the meaningful budget.)
 
-A separate rolling-hour governor
-(`orchestrator/governor.py`, `usage.jsonl`) caps **discretionary** chatter (small-talk / spontaneous
-meetings) at `usage_cap_per_hour` (`governor.py:59-64`) — the daily muster and your chats always run.
+(The separate rolling-hour governor (`orchestrator/governor.py`) was deleted in the 2026-07-19
+stabilization — it recorded calls but nothing ever read its budget; the token ceiling above is
+the one live spend guard.)
 
 ---
 
@@ -446,7 +448,6 @@ All live beside `audit_path` (the repo root) and are **gitignored** unless noted
 |---|---|---|
 | `audit.jsonl` | `audit.AuditLog.record` (`audit.py:21-25`) | Append-only event log — the spine of observability |
 | `usage_ledger.jsonl` | `usage.record` via `agent.run_agent` (`usage.py:40-57`) | Per-call token ledger (today/7d/30d) |
-| `usage.jsonl` | `governor.note_call` (`governor.py:23-31`) | Rolling-hour discretionary-call counter |
 | `pending_decisions.json` | `decisions.add/_save` (`decisions.py:42-56`) | Parked decisions awaiting a Commander answer |
 | `blocked_tickets.json` | `autopilot.save_blocked` (`autopilot.py:53-57`) | Parked ticket skip-set (cleared by `/unblock`) |
 | `telegram_offset.txt` | `decisions._write_offset` (`decisions.py:233-237`) | Last processed Telegram update id |
@@ -460,7 +461,6 @@ All live beside `audit_path` (the repo root) and are **gitignored** unless noted
 | `memory/UNIT.live.md` | `memory.update_log` (`memory.py:143-152`) | Gitignored living lessons log |
 | `postmortems/<TICKET>.md` | `forensics.write_postmortem` (`forensics.py:135-168`) | Auto post-mortems |
 | `ROSTER.md` | `roster.refresh` (`roster.py:188-198`) | Daily roster doc |
-| `approvals.json` | `orchestrator/approvals.py` | Pending officer recommendations to Approve/Disapprove |
 | `dismissed.json` / `recent_projects.json` / `qa-reports/` | dashboard / projects / server | Dismissed runs · recent projects · bug screenshots |
 | `.unit-state/` | `sync.ensure_state_clone` (`sync.py:104-139`) | The orphan-branch state clone |
 | `.general-worktrees/<app>` | `git_ops.setup` (`git_ops.py:60-84`) | Per-app isolated worktrees |
@@ -495,7 +495,6 @@ Selected meaningful knobs from the `Config`/`AppConfig` dataclasses; **default**
 | `delegation_max_soldiers` | `4` | Engineer cap per recon inspection (`delegation_min_ac` was removed with the build squad) |
 | `pm_enabled` | `true` | Consult the PM on a Builder halt |
 | `council_rounds` | `2` | Council discussion rounds |
-| `usage_cap_per_hour` | `40` | Cap discretionary officer chatter / hour (0 = off) |
 | `daily_token_budget` | `100_000_000` | Tokens/day ceiling for autopilot auto-pause (runaway guard; 0 = off — tune to Max headroom) |
 | `budget_alert_pct` | `0.8` | Telegram heads-up at this fraction of the ceiling |
 | `meeting_autospawn` | `false` | A (human-convened) meeting may file the tickets it proposes |

@@ -115,7 +115,7 @@ Anything else is a FAIL and `required_changes` becomes the Builder's next order.
 - `max_cost_usd` budget across the run (summed `ResultMessage.total_cost_usd`).
 - **`main` is code-protected** — `git_ops` refuses to checkout/commit/merge it.
 - **Reviewer read-only** enforced via `disallowed_tools`, not prompt alone.
-- **dry-run default**; secrets from env only; full JSONL audit log.
+- **dry-run preview** via `dry_run: true` in config.yaml (the code default is live); secrets from env only; full JSONL audit log.
 
 ## Components
 

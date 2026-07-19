@@ -254,7 +254,7 @@ class Config:
     # --- Architect officer: produces lightweight ADRs for feature/large tickets before the build
     #     — decides whether to produce an ADR (feature/large) or skip (bug/small), and triggers
     #     Scrum Master split when the design exceeds thresholds. ---
-    architect_enabled: bool = False         # ARMED: Architect runs before build for feature/large tickets
+    architect_enabled: bool = False         # OFF by default (armed in Roman's live config as the Planner's fallback): Architect runs before build for feature/large tickets
 
     # --- Planner (Phase-2 §2 centerpiece): ONE Opus design call/ticket before the build that
     #     absorbs the Architect ADR + squad-lead planning + Scrum split decision. Produces the

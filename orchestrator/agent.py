@@ -118,8 +118,8 @@ def configure_timeouts(cfg) -> None:
 
 def _timeout_for_tag(tag: str) -> float:
     """Per-role wall-clock budget (EU-221). The builder tag gets the larger budget — real
-    code changes legitimately run long; every other officer tag (planner/reviewer/pm/adjutant/
-    drillmaster/council/...) gets the shorter default, which is where the observed stalls
+    code changes legitimately run long; every other officer tag (planner/reviewer/pm/
+    council/...) gets the shorter default, which is where the observed stalls
     (2026-07-10 GLM planner, 2026-07-08 AUTO-93 75-min review) happened."""
     if tag == "builder":
         return _BUILDER_TIMEOUT_S

@@ -37,10 +37,10 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 
 ## 2. Cockpit basics
 **2.1 KPIs** — top strip.
-- Expect: Merged today / Merged total / Needs you / Parked / Security blocks, each a number.
+- Expect: Merged → DEV today / Needs you / Parked / Security blocks / Tokens, each a number.
 
-**2.2 Roster** — right column, 8 officers.
-- Expect: The General, Adjutant, Field Engineer, Inspector General, Scout, Provost Marshal, Quartermaster, Drillmaster, each with a status dot + "last seen".
+**2.2 Roster** — right column, 10 officers.
+- Expect: CTO, Engineering Manager, Product Manager, Scrum Master, Dev Team Lead, Code Reviewer, QA Engineer, Security Engineer, Release Manager, SRE, each with a status dot + "last seen".
 
 **2.3 Activity feed** — recent outcomes + councils.
 
@@ -106,16 +106,19 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 
 ---
 
-## 7. Squad delegation
+## 7. Recon delegation
 *(armed: `delegation_enabled: true` in config.yaml — restart after changing)*
 
-**7.1 Small ticket** — run a tiny ticket (typo/copy, <3 acceptance criteria).
-- Expect: a normal **solo** build (no split).
+The flag arms the **read-only recon squads** the patrol officers (QA Engineer / Security
+Engineer / Release Manager) field to parallelize their sweeps. (The build-time squad split —
+soldiers building slices — was deleted in the Phase-2 §2 collapse; the Builder always builds
+solo now.)
 
-**7.2 Big ticket** — run an L/XL ticket or one with ≥3 acceptance criteria. **[LIVE or dry-run]**
-- Expect: feed prints `squad · split into N: …`, then each **soldier** runs in turn (`soldier N/N · <role> (effort …)`), each sized to its slice; the combined diff then goes through gate → review → merge as usual.
+**7.1 Patrol with the flag on** — run a patrol (Views → Patrol, or `./general patrol <app>`).
+- Expect: the patrol report notes squads being fielded; findings still file as tickets.
 
-**7.3 Fail-safe** — (sanity) if the plan is thin/atomic, it silently falls back to a solo build. No error.
+**7.2 Flag off** — same patrol with `delegation_enabled: false`.
+- Expect: officers sweep solo; same report shape, no squad lines.
 
 ---
 
@@ -177,8 +180,8 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 ## 13. Proactive autonomy
 *(only fires under Autopilot; throttled by cooldown)*
 
-**13.1 Auto-convened meeting** — when an officer ends a council turn with a `MEETING:` line, the next Autopilot cycle convenes that huddle once.
-- Check: after a council that raised a `MEETING:`, an autopilot cycle produces a meeting on that topic; it isn't repeated next cycle.
+**13.1 (retired)** — the auto-convened `MEETING:` pipeline was deleted with the events.py
+autonomy layer (Phase-2 §2). Meetings are convened on demand (cockpit / CLI / Telegram).
 
 **13.2 Meeting auto-spawn** *(`meeting_autospawn: true`)* — a meeting that proposes tickets files them (de-duped); drills/hires stay proposal-only.
 
@@ -186,12 +189,12 @@ the earlier ones passed. Tick **PASS/FAIL** and note anything odd.
 
 ---
 
-## 14. Memory, drill, scribe
+## 14. Memory & scribe
 **14.1 Unit memory** — Views → **Unit memory** (or `./general memory`).
 - Expect: Mission, Standing Orders, per-app notes, Scribe-maintained Lessons (newest first). Your hand-edits between markers are preserved.
 
-**14.2 Drill** — `./general drill` (drillmaster CLI; no longer available as a cockpit web-UI menu item).
-- Expect: Drillmaster proposes officer upgrades + onboarding/refresher notes (proposal only).
+**14.2 (retired)** — `./general drill` and the Drillmaster were deleted (EU-327); charter
+upkeep is Commander-driven now.
 
 **14.3 Scribe** — Unit → **Update memory** (or `./general scribe`).
 - Expect: recent councils/runs folded into Unit Memory between the protected markers.
