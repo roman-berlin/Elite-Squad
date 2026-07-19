@@ -17,6 +17,8 @@ These assertions are the AC, not the implementation: they pin what must be GONE,
 still be REACHABLE, and that no report is listed twice.
 """
 import re
+from pathlib import Path as _P
+ROOT = _P(__file__).resolve().parent.parent
 import sys
 import tempfile
 import types
@@ -90,10 +92,18 @@ chk("Autopilot form survives (action=/api/autopilot)", "action=/api/autopilot" i
 # ---------------------------------------------------------------------------
 # 2. Patrol + Ship review reachable from ONE QA control
 # ---------------------------------------------------------------------------
-chk("both QA flows still exist: Patrol form preserved", "action=/api/patrol" in bar)
-chk("both QA flows still exist: Ship review form preserved", "action=/api/ship-review" in bar)
-chk("Patrol label glyph preserved", "&#128225; Patrol" in bar)
-chk("Ship review label glyph preserved", "&#128640; Ship review" in bar)
+# 2026-07-19 (Commander order): Patrol + Ship-review merged into ONE "Run QA" action —
+# the two buttons ran near-identical officer inspections. Both FLOWS survive inside the
+# merged /api/qa worker (pinned against server source below); the toolbar carries one button.
+chk("the merged QA form posts /api/qa", "action=/api/qa" in bar)
+chk("Run QA label glyph present", "&#128269; Run QA" in bar)
+chk("the old Patrol form is gone", "action=/api/patrol" not in bar)
+chk("the old Ship review form is gone", "action=/api/ship-review" not in bar)
+_ssrc = (ROOT / "orchestrator" / "server.py").read_text(encoding="utf-8")
+chk("the merged endpoint still runs the patrol flow (findings filed)",
+    "patrol_mod.patrol(cfg, app_name, do_file=True" in _ssrc)
+chk("the merged endpoint still runs the ship-review flow (readiness verdict)",
+    "council.ship_review(cfg, app_name" in _ssrc)
 
 # Structural: isolate the QA cluster and assert it exposes exactly ONE control, a <details>
 # menu whose panel holds both flows — not two sibling top-level buttons.
@@ -102,22 +112,9 @@ chk("a QA cluster still exists in the toolbar", _qa is not None,
     "could not locate the <span class=tclabel>QA</span> cluster")
 qa_block = _qa.group(1) if _qa else ""
 
-chk("the QA cluster exposes a single collapsible control (one <details class=menu>)",
-    qa_block.count("<details class=menu>") == 1,
-    f"expected exactly 1 <details class=menu> in the QA cluster, found "
-    f"{qa_block.count('<details class=menu>')}")
-
-chk("the QA control is labeled 'QA' via a summary button",
-    re.search(r"<summary[^>]*>[^<]*QA<", qa_block) is not None,
-    "no <summary ...>QA</summary> control found in the QA cluster")
-
-_qa_details = qa_block.find("<details class=menu>")
-_qa_patrol = qa_block.find("action=/api/patrol")
-_qa_ship = qa_block.find("action=/api/ship-review")
-chk("both QA flows live INSIDE the single QA control's panel (not as top-level siblings)",
-    _qa_details >= 0 and _qa_details < _qa_patrol and _qa_details < _qa_ship,
-    "the patrol/ship-review forms are not nested inside a QA <details> panel "
-    f"(details@{_qa_details}, patrol@{_qa_patrol}, ship-review@{_qa_ship})")
+chk("the QA cluster exposes a single control (the merged Run QA form, no dropdown)",
+    qa_block.count("<details class=menu>") == 0 and qa_block.count("action=/api/qa") == 1,
+    f"expected exactly one /api/qa form and no dropdown, got: {qa_block[:200]}")
 
 # ---------------------------------------------------------------------------
 # 3. Reports menu: no duplicate of a top-level button, no two items per report

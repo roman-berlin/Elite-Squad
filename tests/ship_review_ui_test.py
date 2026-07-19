@@ -56,13 +56,15 @@ cfg_empty = Config(apps=[], audit_path=str(tmp / "audit.jsonl"), use_worktree=Fa
 cfg_empty.detected_auth = lambda: "test"
 empty_client = server.create_app(cfg_empty).test_client()
 server._state["shipreview"] = False
+server._state["qa"] = False
 server._state.pop("last_msg", None)
-resp = empty_client.post("/api/ship-review", data={"app": "*"})
-chk("POST ship-review w/o product redirects to /council", resp.status_code in (301, 302)
-    and "/council" in resp.headers.get("Location", ""))
-chk("no shippable product => _state['shipreview'] not set", not server._state.get("shipreview"))
-chk("last_msg explains why ship-review didn't run",
-    "No shippable product configured" in server._state.get("last_msg", ""))
+resp = empty_client.post("/api/qa", data={"app": "*"})
+chk("POST QA w/o any project redirects home (2026-07-19 merged action)",
+    resp.status_code in (301, 302))
+chk("no project => neither phase flag is set",
+    not server._state.get("shipreview") and not server._state.get("qa"))
+chk("last_msg explains why QA didn't run",
+    "No project to QA" in server._state.get("last_msg", ""))
 chk("no empty 'running for ' banner appears",
     "running for " not in server._state.get("last_msg", ""))
 

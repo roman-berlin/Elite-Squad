@@ -120,7 +120,7 @@ def _reset():
     # The ceremony flags are popped BEFORE reset_run_state(): that seam rebuilds each key from
     # _new_state(), which has no entry for the ceremony flags, so it KeyErrors on any it finds.
     for k in ("standuping", "councilling", "scribing", "meeting", "patrolling",
-              "grouping", "shipreview"):
+              "grouping", "shipreview", "qa"):
         cockpit_state._state.pop(k, None)
     cockpit_state.reset_run_state()
     _NoStartThread.made = []
@@ -217,7 +217,7 @@ CEREMONIES = [
     ("/api/council", {}, "councilling"),
     ("/api/scribe", {}, "scribing"),
     ("/api/meeting", {"topic": "budget"}, "meeting"),
-    ("/api/patrol", {"app": "alpha"}, "patrolling"),
+    ("/api/qa", {"app": "alpha"}, "qa"),
     ("/api/group", {"text": "hello unit"}, "grouping"),
 ]
 

@@ -1572,33 +1572,50 @@ def create_app(cfg: Config, port: int = 8787):
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/council")
 
-    @app.post("/api/ship-review")
-    def ship_review_api():
-        # Ship-review is per-PRODUCT and per-tab now (EU-63): the active tab's project, falling back to
-        # the first shippable product when no tab resolves (never the retired "*"/all-projects).
+    @app.post("/api/qa")
+    def qa_api():
+        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged. The two
+        buttons ran near-identical officer inspections of DEV (patrol: QA/Security/Release inspect
+        + FILE findings as Jira tickets; ship-review: the same lenses debating a DEV→MAIN GO/NO-GO),
+        so a single "Run QA" now does both as phases: patrol first (findings land on the board),
+        then the readiness verdict. The per-phase indicator flags (patrolling / shipreview) are
+        kept live during their phase so the cockpit star and the /council in-session banner keep
+        working unchanged."""
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
-            # No product repo distinct from the unit's own — don't launch ship-review or flash an
-            # empty "running for  …" banner; explain why and bail out.
-            _state["last_msg"] = ("No shippable product configured — ship-review needs a product repo "
-                                  "distinct from the unit.")
-            return redirect("/council")
-        if not _state.get("shipreview"):
-            _state["shipreview"] = True   # set BEFORE redirect so /council shows the in-session indicator
-            _state["last_msg"] = (f"🚀 Ship-review running for {app_name} — the Release Manager + officers are "
-                                  "checking if DEV is ready for MAIN. The verdict posts here and to Telegram.")
+            _state["last_msg"] = ("No project to QA — configure a product repo first.")
+            return redirect("/")
+        if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
+            _state["last_msg"] = (f"🔍 QA running for {app_name} — officers inspect DEV and file "
+                                  "findings, then deliver the DEV→MAIN readiness verdict (posts "
+                                  "here and to Telegram).")
 
             def _bg():
+                notes = []
                 try:
-                    from . import council
-                    asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                    _state["patrolling"] = True
+                    try:
+                        from . import patrol as patrol_mod
+                        asyncio.run(patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                        notes.append("patrol done — findings filed as Jira tickets")
+                    finally:
+                        _state["patrolling"] = False
+                    _state["shipreview"] = True
+                    try:
+                        from . import council
+                        asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                        notes.append("ship verdict posted (see /council + Telegram)")
+                    finally:
+                        _state["shipreview"] = False
+                    _state["last_result"] = f"✓ QA finished for {app_name} — " + "; ".join(notes)
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"ship-review failed: {exc}"
+                    _state["last_result"] = f"QA failed: {exc}" + (
+                        f" (completed: {'; '.join(notes)})" if notes else "")
                 finally:
-                    _state["shipreview"] = False
+                    _state["qa"] = False
             threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/council")
+        return redirect("/")
 
     @app.get("/api/deploy-status")
     def deploy_status_api():
@@ -1769,27 +1786,6 @@ def create_app(cfg: Config, port: int = 8787):
                           f"{'|'.join(MERGE_STATS_TIME_RANGES)}"),
             }), 400
         return jsonify(compute_merge_stats(cfg.audit_path, time_range))
-
-    @app.post("/api/patrol")
-    def patrol_api():
-        # EU-63: patrol the ONE concrete project of the active tab — the "All projects"/`*` sweep is gone.
-        app_name = _scope(request.form.get("app"))
-        targets = [app_name] if app_name else []
-        if _claim_flag("patrolling"):   # EU-361: claimed here, not inside _bg
-            def _bg():
-                try:
-                    from . import patrol as patrol_mod
-                    for name in targets:
-                        asyncio.run(patrol_mod.patrol(cfg, name, do_file=True, audit=audit))
-                    scope = targets[0] if targets else "(no project)"
-                    _state["last_result"] = (f"✓ Patrol finished for {scope} — any findings were filed as "
-                                             "Jira tickets assigned to you (see Needs you / your backlog).")
-                except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"patrol failed: {exc}"
-                finally:
-                    _state["patrolling"] = False
-            threading.Thread(target=_bg, daemon=True).start()
-        return redirect("/")
 
     @app.post("/api/approve-proposals")
     def approve_proposals_api():

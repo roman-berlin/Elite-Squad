@@ -11,7 +11,8 @@ Asserts the complete fix:
   - _control_bar(cfg, "*") bakes a CONCRETE app into every single-app ACTION button (no value="*"),
     while NAV links ("Choose a ticket") keep ?app=* so All-projects actually lists all projects.
   - cfg.app() is NEVER called with "*" while rendering the bar.
-  - /api/patrol with app="*" no longer KeyErrors; EU-63 retired the all-projects sweep, so "*" resolves
+  - /api/qa (the 2026-07-19 merged Patrol+Ship-review action) with app="*" no longer KeyErrors;
+    EU-63 retired the all-projects sweep, so "*" resolves
     to ONE concrete project (the active tab; default = first app) rather than every app.
   - /api/run with app="*" starts a real run instead of reporting "could not start: '*'".
 """
@@ -72,19 +73,23 @@ chk("single-app ACTION buttons emit no app value=\"*\" hidden field", 'value="*"
 chk("action buttons fall back to the first concrete app", "automatixy" in bar)
 chk("cfg.app() was never called with '*' while rendering (the crash invariant)", not star_calls, str(star_calls))
 
-# --- 2) /api/patrol with app="*": EU-63 retired the all-projects sweep — `*` now resolves to ONE
+# --- 2) /api/qa with app="*": EU-63 retired the all-projects sweep — `*` now resolves to ONE
 #        concrete project (the session's active tab; default = first app), never a KeyError on cfg.app("*") ---
 swept = []
 async def fake_patrol(c, app_name, do_file=True, audit=None):
     swept.append(app_name)
     return "ok"
 patrol_mod.patrol = fake_patrol
-srv._state["patrolling"] = False
+srv._state["qa"] = False
+from orchestrator import council as _council
+async def _fake_ship(c, app_name, audit=None):
+    return "GO"
+_council.ship_review = _fake_ship
 srv._state["last_msg"] = ""
 client = srv.create_app(cfg).test_client()
-client.post("/api/patrol", data={"app": "*"})
+client.post("/api/qa", data={"app": "*"})
 for _ in range(40):
-    if not srv._state.get("patrolling") and swept:
+    if not srv._state.get("qa") and swept:
         break
     time.sleep(0.05)
 chk("Patrol on '*' scopes to one concrete project (EU-63: no all-projects sweep)",

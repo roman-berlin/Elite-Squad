@@ -819,13 +819,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <div class=tclu>
     <span class=tclabel>QA</span>
     <div class=tcrow>
-      <details class=menu>
-        {_btn("&#128269; QA", tag="summary")}
-        <div class="panel">
-          <form method=post action=/api/patrol class=tbf onsubmit="return confirm('Run a patrol? QA Engineer + Security Engineer + Release Manager will inspect DEV and FILE findings as Jira tickets assigned to you.')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128225; Patrol", attrs=f' {busy("patrolling")}' if busy("patrolling") else "")}</form>
-          <form method=post action=/api/ship-review class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128640; Ship review", attrs=f' {busy("shipreview")}' if busy("shipreview") else "")}</form>
-        </div>
-      </details>
+      <form method=post action=/api/qa class=tbf onsubmit="return confirm('Run QA for {html.escape(app0)}? QA + Security + Release officers inspect DEV and FILE findings as Jira tickets, then deliver a DEV\\u2192MAIN readiness verdict (posted here and to Telegram).')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
     </div>
   </div>
 

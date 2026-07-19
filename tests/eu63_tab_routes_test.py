@@ -72,23 +72,29 @@ swept = []
 async def fake_patrol(c, app_name, do_file=True, audit=None):
     swept.append(app_name); return "ok"
 patrol_mod.patrol = fake_patrol
+# 2026-07-19: /api/qa (the merged Patrol+Ship-review action) also runs the ship phase — stub it
+# so this scoping harness stays hermetic.
+from orchestrator import council as _council
+async def _fake_ship(c, app_name, audit=None):
+    return "GO"
+_council.ship_review = _fake_ship
 
 client.get("/tickets?app=Elite-Unit")          # focus the Elite-Unit tab for this session
-srv._state["patrolling"] = False
-client.post("/api/patrol")                      # NO app field -> must use the active tab
+srv._state["qa"] = False
+client.post("/api/qa")                          # NO app field -> must use the active tab
 for _ in range(40):
-    if not srv._state.get("patrolling") and swept:
+    if not srv._state.get("qa") and swept:
         break
     time.sleep(0.05)
-chk("app-less patrol scopes to the active tab (Elite-Unit)", swept == ["Elite-Unit"], str(swept))
+chk("app-less QA scopes to the active tab (Elite-Unit)", swept == ["Elite-Unit"], str(swept))
 
 # switching the active tab via a concrete ?app changes what later app-less actions target
 swept.clear()
 client.get("/tickets?app=automatixy")
-srv._state["patrolling"] = False
-client.post("/api/patrol")
+srv._state["qa"] = False
+client.post("/api/qa")
 for _ in range(40):
-    if not srv._state.get("patrolling") and swept:
+    if not srv._state.get("qa") and swept:
         break
     time.sleep(0.05)
 chk("focusing another tab re-scopes the next action (automatixy)", swept == ["automatixy"], str(swept))

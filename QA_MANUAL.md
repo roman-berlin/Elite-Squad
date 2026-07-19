@@ -114,7 +114,7 @@ Engineer / Release Manager) field to parallelize their sweeps. (The build-time s
 soldiers building slices — was deleted in the Phase-2 §2 collapse; the Builder always builds
 solo now.)
 
-**7.1 Patrol with the flag on** — run a patrol (Views → Patrol, or `./general patrol <app>`).
+**7.1 Recon with the flag on** — run QA (toolbar → **Run QA**, or `./general patrol <app>`).
 - Expect: the patrol report notes squads being fielded; findings still file as tickets.
 
 **7.2 Flag off** — same patrol with `delegation_enabled: false`.
@@ -159,7 +159,7 @@ solo now.)
 **11.2 Meeting** — Unit → **Convene a meeting**, give a topic.
 - Expect: the relevant officers debate, the General writes a decision record (saved under councils).
 
-**11.3 Ship-review** — Unit → **Ship review**.
+**11.3 Ship-review** — runs as phase 2 of the toolbar's **Run QA** (after the patrol files findings); the verdict posts to /council + Telegram.
 - Expect: Quartermaster certifies, officers debate, the General issues **GO / NO-GO** — and explicitly leaves the MAIN promotion to **you**.
 
 ---

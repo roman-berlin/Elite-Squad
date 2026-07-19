@@ -4,8 +4,8 @@ Acceptance criteria under test:
   1. `_control_bar()` groups the buttons into three labeled clusters — 'build', 'QA', 'nav' —
      each rendered as a cluster label styled with the `--t-xs` token, instead of one flat
      button row inside `.tbar`.
-  2. Every existing action is preserved verbatim: Patrol form (action=/api/patrol), Ship review
-     (action=/api/ship-review), Jira link (/jira?app=), Roster link (/roster-doc), New-task Run
+  2. Every existing action is preserved: the merged Run QA form (action=/api/qa — Patrol and
+     Ship-review folded into one, 2026-07-19), Jira link (/jira?app=), Roster link (/roster-doc), New-task Run
      form (/api/run), Autopilot forms (/api/autopilot), and the Reports menu links.
   3. Buttons inside the clusters render through the `cockpit_views._btn` partial (shared `.btn`
      base + `_btn`'s inline `--r-xl`/`--s-*`/`--t-md` tokens) — no new hand-rolled button CSS.
@@ -89,10 +89,9 @@ chk("<div class=tbar> outer wrapper is preserved",
 # ---------------------------------------------------------------------------
 # 2. Every existing action preserved verbatim
 # ---------------------------------------------------------------------------
-chk("Patrol form action preserved (action=/api/patrol)", "action=/api/patrol" in bar)
-chk("Patrol label glyph preserved", "&#128225; Patrol" in bar)
-chk("Ship review form action preserved (action=/api/ship-review)", "action=/api/ship-review" in bar)
-chk("Ship review label glyph preserved", "&#128640; Ship review" in bar)
+# 2026-07-19: Patrol + Ship-review merged into the single Run QA action (Commander order).
+chk("merged QA form action present (action=/api/qa)", "action=/api/qa" in bar)
+chk("Run QA label glyph preserved", "&#128269; Run QA" in bar)
 chk("Jira link preserved (/jira?app=)", "/jira?app=automatixy" in bar)
 chk("Jira label glyph preserved", "&#128268; Jira" in bar)
 chk("Roster link preserved (/roster-doc)", 'href="/roster-doc"' in bar)
