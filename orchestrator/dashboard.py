@@ -294,9 +294,9 @@ def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
             d["tools"] = ev.get("tools", []) or []
             d["build_summary"] = ev.get("summary", "")
         elif kind == "gate":
-            # EU-136: record the gate's phase + result only — never map straight to a "Gate" stage
-            # label. derive_pipeline_stage() below decides what to show, and a subsequent "build"
-            # event (the normal retry-after-fail path) always wins over a stale gate phase.
+            # EU-136: record the gate's phase + result only — consumers decide what to show,
+            # and a subsequent "build" event (the normal retry-after-fail path) always wins
+            # over a stale gate phase.
             t["phase"] = "gate"
             t["gate_passed"] = ev.get("passed")
         elif kind == "review":
@@ -441,110 +441,6 @@ def _badge(outcome: Optional[str]) -> str:
     cls = {"merged→dev": "ok", "dry-run": "muted", "PR / needs you": "warn",
            "escalated": "warn", "errored": "bad"}.get(outcome or "", "muted")
     return f'<span class="b {cls}">{html.escape(outcome or "running…")}</span>'
-
-
-# ── EU-314: pipeline-stage helper ──────────────────────────────────────────────
-# Sub-ticket 1 of the EU-288 split was meant to land a canonical `derive_pipeline_stage()` (a
-# fuller stage machine) BEFORE this ticket needed it — but a repo-wide grep finds no such helper
-# anywhere yet. To keep THIS ticket independently-shippable (the split's stated intent), a small
-# local stand-in lives here: it derives a stage label purely from the fields already on a run row
-# (`outcome`, `verdict`, `passes`). `cockpit_views._pipeline_board()` calls this one. The moment
-# Sub-ticket 1's real helper exists, swap the caller over and delete this stand-in.
-_OUTCOME_STAGE = {
-    "merged→dev": "Merged → dev",
-    "PR / needs you": "PR opened — needs review",
-    "escalated": "Escalated — needs you",
-    "dry-run": "Dry run complete",
-    "errored": "Errored — needs you",
-    "awaiting decision": "Awaiting your decision",
-    "re-queued": "Re-queued",
-    "split": "Split into sub-tickets",
-}
-
-
-def derive_pipeline_stage(task: dict[str, Any], is_blocked: bool = False) -> str:
-    """Best-effort pipeline-stage label for one run row — see the module note above (TEMPORARY
-    stand-in for Sub-ticket 1's canonical helper). Never raises; always returns a non-empty label.
-
-    ``is_blocked`` (EU-315): the ticket is a member of the parked set (blocked_tickets.json). That
-    membership is the SINGLE source of the Blocked state — a parked ticket is labelled "Blocked"
-    regardless of the terminal outcome its last run happens to carry (usually escalated / PR). It
-    wins over every other label so the Commander sees WHY the ticket is stuck.
-
-    Otherwise: a finished run (``outcome`` set) maps straight through ``_OUTCOME_STAGE``. A still-
-    running run (no ``outcome`` yet) is inferred from the latest Reviewer ``verdict``, the latest
-    gate result, and how many Builder ``passes`` it has been through.
-
-    EU-136 hardening: a ``build`` event that follows a FAILED ``gate`` always wins over the gate's
-    own phase — the stage keeps reading "Building" (with a retry marker), never a bare "Gate"
-    label the run could get stuck showing. Only when the run is CURRENTLY sitting at a just-failed
-    gate (no rebuild recorded yet) does the label mention verification is pending — and even then
-    it never uses the literal word "Gate".
-    """
-    if is_blocked:
-        return "Blocked"
-    outcome = task.get("outcome")
-    if outcome:
-        return _OUTCOME_STAGE.get(outcome, str(outcome))
-    verdict = str(task.get("verdict") or "").strip().upper()
-    if verdict == "FAIL":
-        return "Revising (Reviewer requested changes)"
-    if verdict == "PASS":
-        return "Reviewed — landing"
-    passes = task.get("passes") or 0
-    if task.get("phase") == "gate" and task.get("gate_passed") is False:
-        label = "Verifying — retry pending"
-        return f"{label} (pass {passes})" if passes else label
-    if passes:
-        label = f"Building (pass {passes})"
-        return f"{label} · retry" if task.get("gate_retry") else label
-    return "Building"
-
-
-def pipeline_stage_tone(task: dict[str, Any], is_blocked: bool = False) -> str:
-    """EU-315: the pipeline board's per-row colour TONE — so ``Blocked`` / ``Needs-you`` /
-    ``Errored`` rows each render visually distinct instead of identical grey text. Reuses the same
-    tone vocabulary ``_kpi_metric(..., tone=...)`` already uses (``ok``/``warn``/``bad``), plus a
-    board-specific ``blocked`` tone.
-
-    ``is_blocked`` (membership in blocked_tickets.json) is the SINGLE source of the Blocked tone —
-    it is derived from the real parked set the caller passes in, NOT from ``outcome`` (there is no
-    ``blocked`` outcome; see the note by ``_OUTCOME``). It wins over the outcome-based tones below
-    so a parked ticket reads Blocked even though its last run's outcome was escalated / PR.
-
-    ``errored`` gets its OWN tone ('bad'), split out from the rest of ``_NEEDS_YOU`` ('warn') — the
-    ticket calls for Errored to be distinct from generic Needs-you, even though both are members of
-    ``_NEEDS_YOU`` for the digest/needs-panel purpose. Returns "" (no special tone) for an
-    in-flight/building/dry-run/etc. row."""
-    if is_blocked:
-        return "blocked"
-    outcome = task.get("outcome")
-    if outcome == "errored":
-        return "bad"
-    if outcome in _NEEDS_YOU:
-        return "warn"
-    if outcome == "merged→dev":
-        return "ok"
-    return ""
-
-
-def is_blocked_stale(task: dict[str, Any], is_blocked: bool = False,
-                     now: Optional[datetime] = None) -> bool:
-    """EU-315: true when a PARKED (blocked) row's latest event is older than the freshness cutoff,
-    so a block from days ago never renders forever as a plain ACTIVE Blocked row. ``is_blocked`` is
-    the ticket's membership in blocked_tickets.json (the real parked set) — the same signal that
-    drives ``pipeline_stage_tone``; a non-parked row is never flagged stale by this Blocked-specific
-    check (each outcome has its own lifecycle). Reuses ``warroom.STALE_BLOCK_CUTOFF_S`` (EU-313's
-    24h window) rather than duplicating the constant — imported lazily to avoid the warroom ->
-    cockpit_views/dashboard import cycle (same pattern as ``cockpit_views._token_css``)."""
-    if not is_blocked:
-        return False
-    ref = task.get("ended") or task.get("started")
-    if ref is None:
-        return False  # no timestamp at all — can't judge age, fail open (never falsely stale)
-    from . import warroom
-    now = now or (datetime.now(ref.tzinfo) if getattr(ref, "tzinfo", None) else datetime.now())
-    return (now - ref).total_seconds() >= warroom.STALE_BLOCK_CUTOFF_S
 
 
 def _detail_html(t: dict[str, Any]) -> str:
@@ -698,10 +594,12 @@ def needs_chat_summary(t: dict[str, Any]) -> str:
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
                 needs_count: int | None = None, cfg=None, app_name: str | None = None) -> str:
-    # EU-314: the pipeline board renders from the FULL run set for the active tab, same as the KPI
-    # cards below — never the ?filter= narrowed `tasks` local gets reassigned to further down.
-    _all_tasks = tasks
-    # Cards summarize the FULL run set, regardless of any active scope filter.
+    # 2026-07-19 (Commander order): the task log is PER-PROJECT — everything on the page (cards,
+    # filters, table) is scoped to the chosen project. Rows with no app stamp (e.g. ghost-parked
+    # stubs) are kept so their Unblock action never disappears behind a scope.
+    if app_name:
+        tasks = [t for t in tasks if not t.get("app") or str(t.get("app")) == app_name]
+    # Cards summarize the FULL scoped run set, regardless of any active ?filter= narrowing.
     total = len(tasks)
     merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
     needs = latest_needs_you(tasks, dismissed)   # one row per ticket (latest run), not every old run
@@ -800,33 +698,18 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
         + f'<div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
         for l, v, kind in cards)
     banner = ""
+    _appq = f"&app={html.escape(app_name)}" if app_name else ""
     if flt:
         banner = (f'<div class=fltbar>Showing <b>{html.escape(_FILTER_LABEL.get(flt, flt))}</b> only '
-                  f'· <a href="/tasks">show all</a></div>')
+                  f'· <a href="/tasks?filter=all{_appq}">show all runs</a></div>')
     empty = "No tasks match this filter." if flt else "No tasks yet — run the CTO."
     rows_html = "\n".join(rows) or f'<tr><td colspan={ncols} class=muted>{empty}</td></tr>'
 
-    # EU-314: the per-project pipeline board — the DEFAULT-view overview of the active tab. Rendered
-    # only when the caller identifies an active project tab (``app_name``); a page with no scoped
-    # project (e.g. the static `general dashboard` command, or an unscoped call) gets no board, same
-    # as before this ticket. It is ALSO suppressed while a KPI deep-link filter (``?filter=``) is
-    # active: those views are focused drill-downs ("show me only the merged/parked rows"), so an
-    # unfiltered board beside them would contradict the filter and re-surface rows the filter hides.
-    board_html = ""
-    if app_name and not flt:
-        try:
-            from . import cockpit_views as _cv
-            # EU-315: the Blocked state is membership in the parked set (blocked_tickets.json), NOT
-            # a run outcome. The default board view carries no ``blocked`` (server.py only loads it
-            # for the ?filter=parked drill-down), so load the real parked set here and pass it in so
-            # parked tickets render with the distinct Blocked class + freshness handling.
-            from . import warroom as _wr
-            _board_blocked = {str(b) for b in (_wr._load_blocked(cfg) if cfg is not None else [])}
-            board_html = _cv._pipeline_board(cfg, _all_tasks, app_name, _board_blocked)
-        except Exception:  # noqa: BLE001 - the board must never break the whole /tasks page render
-            board_html = ""
-
-    return (_TEMPLATE.replace("{{CARDS}}", cards_html).replace("{{BOARD}}", board_html)
+    # (The EU-314 per-project pipeline board was removed 2026-07-19 with the task-log redesign —
+    # in-flight state lives on the cockpit board; this page is the per-project run LOG.)
+    _title = f"★ Task log — {html.escape(app_name)}" if app_name else "★ CTO — cockpit"
+    return (_TEMPLATE.replace("★ CTO — cockpit", _title, 1)
+            .replace("{{CARDS}}", cards_html).replace("{{BOARD}}", "")
             .replace("{{PANEL}}", panel)
             .replace("{{FILTER}}", banner)
             .replace("{{HEAD}}", "".join(head)).replace("{{ROWS}}", rows_html)

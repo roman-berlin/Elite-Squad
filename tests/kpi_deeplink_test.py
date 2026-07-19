@@ -74,9 +74,11 @@ body = client.get("/tasks?filter=merged").get_data(as_text=True)
 chk("merged view: shows the merged ticket", "AUTO-100" in body)
 chk("merged view: hides a non-merged ticket", "AUTO-400" not in body)
 
-# --- 4. unfiltered /tasks still shows everything ---
+# --- 4. 2026-07-19: /tasks opens on the DONE tickets (merged) by default; ?filter=all shows all ---
 body = client.get("/tasks").get_data(as_text=True)
-chk("unfiltered /tasks shows all tickets", "AUTO-100" in body and "AUTO-400" in body)
+chk("bare /tasks defaults to the merged (done) view", "AUTO-100" in body and "AUTO-400" not in body)
+body = client.get("/tasks?filter=all").get_data(as_text=True)
+chk("/tasks?filter=all shows every run", "AUTO-100" in body and "AUTO-400" in body)
 
 # --- 5. /forensics?cat=security_block is a security-scoped view ---
 r = client.get("/forensics?cat=security_block"); body = r.get_data(as_text=True)

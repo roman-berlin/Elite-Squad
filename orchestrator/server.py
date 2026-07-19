@@ -809,7 +809,11 @@ def create_app(cfg: Config, port: int = 8787):
     def tasks_page():
         # EU-129: Resolve the active project first so needs.count() can scope to it.
         _appq = _board_project(request.args.get("app"))
-        flt = (request.args.get("filter") or "").strip()
+        # 2026-07-19 (Commander order): the task log's job is "the tickets DONE in the project I
+        # choose" — so with no explicit ?filter= it opens on Merged → dev. ?filter=all shows every
+        # run; the other deep-link filters (needs/parked) keep working.
+        _raw_flt = request.args.get("filter")
+        flt = "merged" if _raw_flt is None else _raw_flt.strip()
         # 'parked' scopes to the auto-skipped blocked set, which lives outside the task log.
         blocked = warroom._load_blocked(cfg) if flt.lower() == "parked" else None
         try:
@@ -817,32 +821,44 @@ def create_app(cfg: Config, port: int = 8787):
             _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
-        # EU-314: pass cfg + the resolved active project so render_html renders the per-project
-        # pipeline board for THIS tab; switching the ?app= tab (via _tab_bar) changes _appq and
-        # therefore the board's ticket set.
         page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
                              active_filter=flt, blocked=blocked, needs_count=_needs_cnt,
                              cfg=cfg, app_name=_appq)
-        # This board view is reached from the cockpit's Reports menu, so it needs a way back like
-        # every other sub-page (it renders via D.render_html, which bypasses _wrap's "← cockpit").
-        # Carry the active tab's concrete project so 'back' returns to it (EU-63: no 'All projects').
+        # Header injected after the template's </header>: a back button + a per-project chip row.
+        # 2026-07-19: this used to append the FULL cockpit control bar (model selector, autopilot,
+        # resume buttons) — none of which belongs on a log page — and its back-button CSS was
+        # written as non-f-string pieces with doubled {{ }} braces, i.e. INVALID CSS, which left
+        # the back-arrow SVG unsized (the giant-arrow bug). Plain single-brace CSS now, and the
+        # only control is choosing WHICH project's log to read.
         _home = f"/?app={html.escape(_appq)}" if _appq else "/"
-        back = (f"<style>"
-                ".backbtn{{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
-                "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
-                "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;"
-                "transition:all var(--t-fast);margin:14px 0 16px;box-shadow:var(--shadow-1)}}"
-                ".backbtn svg{{width:18px;height:18px;transition:transform var(--t-fast);flex:none}}"
-                ".backbtn:hover{{background:var(--line);border-color:var(--accent);color:var(--accent);"
-                "transform:translateX(-3px);box-shadow:var(--shadow-2)}}"
-                ".backbtn:hover svg{{transform:translateX(-2px)}}"
-                ".backbtn:active{{transform:translateX(-1px)}}"
-                ".backbtn:focus-visible{{outline:none;box-shadow:var(--ring)}}</style>"
-                f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
-                f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-                f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>")
-        return page.replace("</header>", "</header>" + back + _control_bar(cfg, _board_project(request.args.get("app"))), 1)
+        chips = "".join(
+            f"<a class='pchip{' on' if a.name == _appq else ''}' "
+            f"href='/tasks?app={html.escape(a.name)}'>{html.escape(a.name)}</a>"
+            for a in cfg.apps)
+        back = (
+            "<style>"
+            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:10px 16px;"
+            "background:#151a23;border:1px solid #232936;border-radius:9px;"
+            "color:#e8eaed;font-size:14px;font-weight:600;text-decoration:none;margin:0}"
+            ".backbtn svg{width:18px;height:18px;flex:none}"
+            ".backbtn:hover{border-color:#3b6cff;color:#3b6cff}"
+            ".tasknav{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 30px 0}"
+            ".pchips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}"
+            ".pchips .plabel{color:#8a909c;font-size:12px}"
+            ".pchip{padding:8px 14px;border:1px solid #232936;border-radius:99px;background:#151a23;"
+            "color:#8a909c;font-size:13px;font-weight:600;text-decoration:none}"
+            ".pchip:hover{border-color:#3b6cff;color:#e8eaed}"
+            ".pchip.on{background:#1b2740;border-color:#3b6cff;color:#e8eaed}"
+            "</style>"
+            "<div class=tasknav>"
+            f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
+            "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
+            "stroke-linecap='round' stroke-linejoin='round'>"
+            "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>"
+            f"<div class=pchips><span class=plabel>Project:</span>{chips}</div>"
+            "</div>")
+        return page.replace("</header>", "</header>" + back, 1)
 
     @app.post("/api/dismiss")
     def dismiss_api():
