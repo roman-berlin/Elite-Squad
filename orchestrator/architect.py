@@ -302,7 +302,7 @@ async def design(cfg: Config, ticket: Ticket, repo_context: str = "",
     from . import recon, models
 
     # Model selection: Opus for design reasoning, high effort, 18 turns
-    model, mreason = models.for_officer(cfg, effort="high", ceiling_model=cfg.reviewer_model)
+    model, _aeffort, mreason = models.for_planner(cfg, ticket, effort="high")
     if getattr(cfg, "auto_model", False):
         print(f"  · architect model: {mreason}", flush=True)
 

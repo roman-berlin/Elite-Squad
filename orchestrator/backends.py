@@ -310,6 +310,24 @@ def glm_model() -> str:
     return (os.environ.get("GLM_MODEL") or _GLM_MODEL_DEFAULT).strip()
 
 
+def glm_model_for(requested: str | None) -> str:
+    """2026-07-19: TIER-PARALLEL GLM pick — the GLM variant matching the CLASS of the Claude
+    model the officer asked for. A Sonnet/Haiku-class request maps to ``GLM_MODEL_MID`` (the
+    "parallel to Sonnet" model, e.g. glm-4.5-air); an Opus/deep-class request — or an unknown —
+    keeps the top ``GLM_MODEL``. With GLM_MODEL_MID unset, every tier gets the top model, i.e.
+    exactly the old behaviour."""
+    mid = (os.environ.get("GLM_MODEL_MID") or "").strip()
+    if not mid:
+        return glm_model()
+    try:
+        from . import models as _models
+        if _models.tier_of(requested or "") <= 1:      # haiku/sonnet class
+            return mid
+    except Exception:  # noqa: BLE001
+        pass
+    return glm_model()
+
+
 def _glm_env() -> dict[str, str]:
     """The ``options.env`` overrides that aim ONE subprocess at z.ai. A fresh dict every call.
 
@@ -400,7 +418,9 @@ def apply(options, backend: str | None = None, registry=None) -> str:
         merged = dict(getattr(options, "env", None) or {})
         merged.update(_glm_env())
         options.env = merged
-        options.model = glm_model()
+        # Tier-parallel pick: honour the CLASS of the model the officer requested (a Sonnet-class
+        # build call gets the mid GLM; Opus/deep-class judgment gets the top GLM).
+        options.model = glm_model_for(getattr(options, "model", None))
         return GLM
     if v in _NATIVE_ALIASES:
         return NATIVE

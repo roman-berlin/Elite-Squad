@@ -93,7 +93,19 @@ def test_architect_model_selection_and_run():
             chk("run_officer gets correct officer", call_kwargs.get("officer") == "architect")
             chk("run_officer gets correct cfg", call_kwargs.get("cfg") is cfg)
             chk("run_officer gets correct cwd", call_kwargs.get("cwd") == "/fake/repo")
-            chk("run_officer uses reviewer model as ceiling", call_kwargs.get("model") == "test-custom-reviewer-model")
+            # 2026-07-19 tiering: a 5-AC Story sizes L → a DEEP-architecture task, so the
+            # Architect climbs to cfg.deep_model at max effort (the reviewer ceiling now governs
+            # only ROUTINE tickets — pinned below with the deep tier disabled).
+            chk("a deep (L, 5-AC) ticket climbs to the deep model",
+                call_kwargs.get("model") == cfg.deep_model)
+
+        cfg.deep_model = ""      # deep tier disabled → the old reviewer-model ceiling rules
+        with patch("orchestrator.recon.run_officer", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = "SKIP_ADR"
+            await design(cfg, feature_ticket, repo_context="test-ctx", gated=True)
+            call_kwargs = mock_run.call_args[1]
+            chk("deep tier off → reviewer model stays the ceiling",
+                call_kwargs.get("model") == "test-custom-reviewer-model")
             chk("run_officer gets high effort", call_kwargs.get("effort") == "high")
 
     asyncio.run(run_test())

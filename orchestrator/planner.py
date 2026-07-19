@@ -199,8 +199,8 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
     if app is None:
         app = cfg.app(ticket.app or cfg.apps[0].name)
     try:
-        model, mreason = models.for_officer(cfg, effort="high", ceiling_model=cfg.reviewer_model)
-        if getattr(cfg, "auto_model", False):
+        model, _peffort, mreason = models.for_planner(cfg, ticket, effort="high")
+        if getattr(cfg, "auto_model", False) or "deep" in mreason:
             print(f"  · planner model: {mreason}", flush=True)
         options = ClaudeAgentOptions(
             model=model,

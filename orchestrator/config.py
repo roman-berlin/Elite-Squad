@@ -149,6 +149,10 @@ class Config:
     # tier is real (it falls back to high only on non-Opus models).
     builder_model: str = "claude-opus-4-8"
     reviewer_model: str = "claude-opus-4-8"
+    # 2026-07-19: the DEEP-architecture model — the Planner/Architect climbs to it (at max effort)
+    # for L/XL, effort-max/ultracode, or architecture/epic-labelled tickets only. "" disables the
+    # deep tier (the planner then stays on the normal Opus-ceiling auto pick).
+    deep_model: str = "claude-fable-5"
 
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
