@@ -64,81 +64,6 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
-# ── EU-187: cockpit terminal-panel hardening ────────────────────────────────────────────────────
-# POST /api/terminal used to run FREE-FORM shell (`Popen(cmd, shell=True)`) — an unauthenticated
-# local RCE surface (2026-07-06 audit, finding N4). It is now constrained to a vetted, no-shell
-# allowlist executed with shell=False over an argv parsed by shlex. Two hard rules the allowlist
-# enforces: (1) NO interpreters — python/bun/node/sh/… are equivalent to arbitrary code and are
-# deliberately absent; (2) file-reading commands may ONLY read paths that resolve INSIDE the
-# orchestrator working directory (absolute / `..`-escaping operands are rejected, so the endpoint
-# cannot exfiltrate /etc/passwd, ~/.ssh, or out-of-tree secrets).
-TERMINAL_ALLOWED_COMMANDS = frozenset({
-    "git", "ls", "pwd", "echo", "cat", "head", "tail", "grep", "wc",
-    "find", "date", "whoami", "uname", "df", "du", "which",
-})
-
-# Commands taking file/path operands — their operands are confined to the working directory.
-TERMINAL_PATH_COMMANDS = frozenset({"cat", "head", "tail", "grep", "wc", "find", "ls", "du"})
-
-# Shell chaining/substitution/redirection/globbing chars. Even under shell=False (where they are
-# inert to subprocess) a command string containing them is rejected outright — a no-shell
-# allowlisted command never needs them, and rejecting keeps the "no shell interpretation, ever"
-# intent unambiguous.
-_TERMINAL_METACHARACTERS = set(";|&$`()<>\\*?")
-
-
-def _terminal_validate(cmd: str, cwd: Path):
-    """Validate a cockpit-terminal command against the EU-187 no-shell allowlist.
-
-    Returns ``(argv, None)`` when the command is safe to run with shell=False, else
-    ``(None, error_message)`` (caller returns HTTP 403). NEVER executes anything — validation is
-    purely structural so it can be unit-tested in isolation (tests/eu187_terminal_allowlist_test.py).
-    """
-    import shlex
-
-    if any(c in (cmd or "") for c in _TERMINAL_METACHARACTERS):
-        bad = " ".join(sorted(set(cmd) & _TERMINAL_METACHARACTERS))
-        return None, f"Command contains disallowed shell character(s): {bad}"
-    try:
-        argv = shlex.split(cmd or "")
-    except ValueError as e:
-        return None, f"Could not parse command: {e}"
-    if not argv:
-        return None, "No command provided"
-
-    program = argv[0]
-    if program not in TERMINAL_ALLOWED_COMMANDS:
-        return None, (
-            f"Command {program!r} is not allowed. Only a vetted set of read-only commands may run "
-            f"in the terminal panel: {', '.join(sorted(TERMINAL_ALLOWED_COMMANDS))}."
-        )
-
-    # Confine file-reading commands to the working directory: reject any operand that resolves
-    # outside `cwd`. Flags (leading '-') and non-path tokens (e.g. a grep PATTERN) are left alone.
-    if program in TERMINAL_PATH_COMMANDS:
-        cwd_resolved = cwd.resolve()
-        for tok in argv[1:]:
-            if not tok or tok.startswith("-"):
-                continue
-            looks_like_path = tok.startswith(("/", "~", ".")) or "/" in tok
-            if not looks_like_path:
-                continue  # e.g. grep's PATTERN, or a subcommand word
-            candidate = Path(tok).expanduser()
-            try:
-                resolved = (candidate if candidate.is_absolute()
-                            else (cwd_resolved / candidate)).resolve()
-            except Exception:  # noqa: BLE001
-                return None, f"Invalid path operand: {tok!r}"
-            try:
-                resolved.relative_to(cwd_resolved)
-            except ValueError:
-                return None, (
-                    f"Path {tok!r} is outside the working directory. The terminal panel may only "
-                    "read files inside the orchestrator working directory."
-                )
-    return argv, None
-
-
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -223,15 +148,6 @@ def compute_merge_stats(audit_path: str, time_range: str, now: float | None = No
 # EU-361: guards the compare-and-set on the one-shot ceremony flags below. Separate from
 # cockpit_state's run locks on purpose — a ceremony is not a run and must not contend with one.
 _flag_lock = threading.Lock()
-
-# EU-149's cap on what /api/terminal returns; EU-362 made it the cap on what it ever HOLDS.
-_TERMINAL_OUTPUT_CAP = 65536
-# EU-362: /api/terminal's output pump is an implementation detail of one request, NOT one of the
-# cockpit's background workers. Bound to the real class at import so a harness following the house
-# pattern of stubbing ``server.threading`` to run workers inline can't starve the pipe and hang the
-# child it is trying to test.
-_PumpThread = threading.Thread
-
 
 def _claim_flag(name: str, value=True) -> bool:
     """Compare-and-set a one-shot ceremony flag. True = the caller now OWNS the ceremony and must
@@ -333,7 +249,8 @@ def create_app(cfg: Config, port: int = 8787):
     # EU-254 — CSRF/Origin/Host guard on every state-changing route. form-urlencoded/multipart POSTs
     # are CORS "simple requests" (no preflight), so WITHOUT this a page open in Roman's browser — or
     # an attacker domain DNS-rebound to 127.0.0.1:8787 — could drive the unit (run, model switch,
-    # stop, approve) cross-origin. Generalizes EU-187's /api/terminal-only allowlist to all ~30
+    # stop, approve) cross-origin. Generalizes the EU-187-era /api/terminal-only origin allowlist
+    # (that endpoint was removed 2026-07-19 with the cockpit terminal panel) to all ~30
     # state-changing POST routes (this file has no PUT/PATCH/DELETE today; guarded anyway so a future
     # one is covered for free). Same-origin check: if an Origin header is present it must name an
     # allowed cockpit host; else if a Referer is present its host must match; and in ALL cases the
@@ -570,154 +487,6 @@ def create_app(cfg: Config, port: int = 8787):
         # Shell out to `open` — non-blocking; Finder/default app opens in the background.
         subprocess.Popen(["open", str(requested)], close_fds=True)   # noqa: S603,S607
         return jsonify({"ok": True, "path": str(requested)})
-
-    @app.post("/api/terminal")
-    def terminal_api():
-        """Execute a command in the terminal panel and return the output.
-
-        EU-149: Integrated terminal in the cockpit — executes shell commands and returns
-        the combined stdout/stderr. Commands run in the orchestrator's working directory
-        with a 10-second timeout.
-
-        EU-146: Runs via Popen with ``start_new_session=True`` (its own process group,
-        same pattern as gate.py's ``run_commands``) so a backgrounded/forked child (e.g.
-        a bare `vitest` typed into the terminal) can't outlive a timeout. On
-        TimeoutExpired — and in a finally block covering every exit path — the WHOLE
-        process group is SIGKILL-ed via ``os.killpg``, not just the top process PID.
-
-        EU-187: free-form shell execution was a local RCE surface (unauthenticated command
-        execution as the cockpit's user). The endpoint now NEVER invokes a shell — the input is
-        tokenised with ``shlex`` and validated against a fixed allowlist BEFORE anything reaches
-        subprocess (see ``_terminal_validate`` / ``TERMINAL_ALLOWED_COMMANDS`` above), then run
-        with ``shell=False``.
-
-        EU-362 (2026-07-16 audit): the 64KB cap is applied WHILE READING, on a pump thread, not
-        after ``communicate()`` has already materialised the whole output in memory — the cockpit
-        is a long-lived process and one `find /` typed into the panel used to cost it however many
-        megabytes that printed. Past the cap the pipe is still drained and discarded: stop reading
-        and the child blocks forever on a full pipe buffer.
-
-        Security:
-        * No shell — ``Popen(argv, shell=False)``, never a shell-interpreted string.
-        * argv[0] must be in the module allowlist (interpreters are absent) — else 403.
-        * File-reading commands are confined to the working directory — else 403.
-        * Shell metacharacters (chaining/substitution/redirection/globbing) — else 403.
-        * Commands run in a subprocess with a timeout; output capped at 64KB.
-
-        Returns JSON ``{"output": "<combined stdout/stderr>", "error": "<error message or null>"}``.
-        """
-        from flask import jsonify
-        import subprocess
-
-        cmd = (request.form.get("cmd") or "").strip()
-        if not cmd:
-            return jsonify({"output": "", "error": "No command provided"}), 400
-
-        # Basic command validation - reject obvious shell escapes
-        if any(c in cmd for c in ["\x00", "\n", "\r"]):
-            return jsonify({"output": "", "error": "Invalid characters in command"}), 400
-
-        run_cwd = Path(cfg.config_path).parent if hasattr(cfg, "config_path") else Path.cwd()
-
-        # EU-187: allowlist + path-confinement + metachar check BEFORE anything runs. A rejected
-        # command returns 403 and never reaches Popen.
-        argv, err = _terminal_validate(cmd, run_cwd)
-        if err is not None:
-            return jsonify({"output": "", "error": err}), 403
-
-        proc = None
-        pgid = None
-        try:
-            # EU-146: Popen (not run) + start_new_session=True so the process and any child it
-            # forks/backgrounds share one process group we can kill as a unit. EU-187: shell=False,
-            # a validated argv — never a shell-interpreted string.
-            # EU-362: stderr is folded into stdout so there is ONE pipe to pump — two pipes would
-            # need hand-rolled select/deadlock avoidance, which is exactly what communicate() was
-            # here to do.
-            proc = subprocess.Popen(
-                argv,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=str(run_cwd),
-                env=dict(os.environ),
-                start_new_session=True,
-            )
-            # EU-362: capture the process-group id NOW, while the child is certainly alive.
-            # start_new_session makes it == proc.pid, but reading it back later is not equivalent:
-            # once the leader is reaped ``os.getpgid(proc.pid)`` raises ProcessLookupError, which
-            # is precisely why the finally sweep below never killed anything.
-            try:
-                pgid = os.getpgid(proc.pid)
-            except OSError:
-                pgid = None
-
-            kept: list[str] = []
-            stats = {"kept": 0, "total": 0}
-
-            def _pump(pipe):
-                """Drain the child's output, retaining at most _TERMINAL_OUTPUT_CAP characters.
-
-                EU-362: everything past the cap is read and thrown away rather than left in the
-                pipe — a child that fills the pipe buffer blocks in write() forever, so we must
-                keep reading; we just must not keep the bytes."""
-                try:
-                    while True:
-                        chunk = pipe.read(4096)
-                        if not chunk:
-                            break
-                        stats["total"] += len(chunk)
-                        room = _TERMINAL_OUTPUT_CAP - stats["kept"]
-                        if room > 0:
-                            piece = chunk[:room]
-                            kept.append(piece)
-                            stats["kept"] += len(piece)
-                except Exception:  # noqa: BLE001 — a closed/killed pipe just ends the pump
-                    pass
-
-            pump = _PumpThread(target=_pump, args=(proc.stdout,), daemon=True)
-            pump.start()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                # EU-146: Kill the entire process group, not just the shell PID. (Safe to resolve
-                # the pgid from the pid here — the process has NOT been reaped on this path.)
-                try:
-                    os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
-                except (ProcessLookupError, OSError):
-                    proc.kill()
-                # Reap the zombie so it doesn't linger.
-                try:
-                    proc.wait(timeout=1)
-                except Exception:
-                    pass
-                return jsonify({"output": "", "error": "Command timed out (10s limit)"}), 408
-            pump.join(timeout=2)   # the child is gone; let the pump drain what's left in the pipe
-            output = "".join(kept)
-            if stats["total"] > _TERMINAL_OUTPUT_CAP:
-                output += "\n... (output truncated)"
-            return jsonify({"output": output, "error": None})
-        except Exception as e:
-            return jsonify({"output": "", "error": str(e)}), 500
-        finally:
-            # EU-146: Final sweep — if anything in the group is still alive (e.g. a
-            # backgrounded grandchild the reap above didn't catch), kill it.
-            # EU-362: this used to be guarded by ``proc.poll() is None``, which is always false
-            # here — proc.wait() has already returned by the time we reach the finally on the
-            # success path — so the sweep was dead code and a `sleep 30 &` typed into the panel
-            # survived every non-timeout request. It now always runs, against the pgid captured at
-            # spawn. An empty group just returns ESRCH, which is what the except swallows.
-            if pgid is not None:
-                try:
-                    os.killpg(pgid, 9)
-                except (ProcessLookupError, OSError):
-                    pass
-            if proc is not None:
-                try:
-                    proc.wait(timeout=1)
-                except Exception:
-                    pass
 
     @app.get("/api/autopilot")
     def autopilot_status_api():

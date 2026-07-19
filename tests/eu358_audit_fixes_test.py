@@ -298,8 +298,8 @@ chk("an event with no timestamp is not treated as recent", "EU-NOTS" not in ids,
 # ================= warroom.py — JS regex survives Python escaping ================= #
 from orchestrator import warroom  # noqa: E402
 
-chk("terminal JS regex carries backslash-n (not a literal newline)",
-    "replace(/\\n/g" in warroom._PAGE)
+# (The original subject of this pin — the terminal panel's replace(/\n/g) — was removed
+# 2026-07-19 with the panel; the page-wide invariant below is what the fix was really about.)
 chk("no JS regex in the page contains a literal newline",
     "replace(/\n/g" not in warroom._PAGE)
 

@@ -63,14 +63,9 @@ ok("(1c) the routing line matches the LIVE flag",
    ("ROUTING_ENABLED is OFF" in doc) == (not routing_on),
    f"is_routing_enabled()={routing_on}")
 
-try:
-    from orchestrator.server import TERMINAL_ALLOWED_COMMANDS
-    ok("(1d) the terminal allowlist line matches server.TERMINAL_ALLOWED_COMMANDS",
-       ", ".join(sorted(TERMINAL_ALLOWED_COMMANDS)) in doc)
-    ok("(1e) no interpreter is in the allowlist (the line's premise)",
-       not ({"python", "python3", "node", "bun", "sh", "bash"} & set(TERMINAL_ALLOWED_COMMANDS)))
-except ImportError:
-    ok("(1d) server import unavailable — line dropped from brief", "EU-187" not in doc)
+# (1d) 2026-07-19: the cockpit terminal (and its EU-187 allowlist) was removed with the panel —
+# the brief must no longer claim terminal guardrails that don't exist.
+ok("(1d) the brief carries no cockpit-terminal guardrails line", "Cockpit terminal" not in doc)
 
 live = [key for key, *_ in _OFFICER_ROWS]
 retired = sorted(set(OFFICER_NAMES) - set(live))

@@ -53,16 +53,8 @@ def build_doc(cfg=None) -> str:
                      "DORMANT (Commander's decision, 2026-07-07). Do not write code assuming "
                      "tier dispatch, and do not arm it.")
 
-    # Cockpit terminal guardrails — from the server's own allowlist constants (EU-187).
-    try:
-        from .server import TERMINAL_ALLOWED_COMMANDS
-        allowed = ", ".join(sorted(TERMINAL_ALLOWED_COMMANDS))
-        lines.append(f"- Cockpit terminal (EU-187): shell=False over an argv allowlist ({allowed}). "
-                     "Interpreters (python/node/bun/sh) are BANNED — `python3 -c` gets a 403; "
-                     "shell metacharacters are rejected outright; path operands are confined to "
-                     "the working directory.")
-    except Exception:  # noqa: BLE001 — a server import failure just drops this line
-        pass
+    # (The cockpit-terminal guardrails line was removed 2026-07-19 with the terminal panel and
+    # its /api/terminal endpoint — no terminal, nothing to brief.)
 
     # Officer reality — live set from the roster rows (the same source ROSTER.md renders from);
     # retired = label-dictionary keys that no longer have a roster row (kept in OFFICER_NAMES so

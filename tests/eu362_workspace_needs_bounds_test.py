@@ -1,8 +1,8 @@
 """EU-362 — the per-session Workspace store and the needs summary cache must be bounded.
 
 The remaining two of the three resource leaks in the 2026-07-16 audit's EU-362 batch (the
-/api/terminal half landed separately as 5a5a167, pinned by tests/eu362_terminal_bounds_test.py —
-its docstring explicitly leaves these two open):
+/api/terminal half landed separately as 5a5a167; that endpoint — and its harness — were removed
+2026-07-19 together with the cockpit terminal panel):
 
   1. ``cockpit_state.workspace_for()`` stored a fresh ``Workspace`` under EVERY session id it was
      ever asked about, forever — and ``server._session_id()`` mints a fresh ``token_hex`` for any
