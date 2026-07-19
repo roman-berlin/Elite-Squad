@@ -612,7 +612,11 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     fr_standup = _fresh(_wr._mtime(_base.with_name("last-standup.md")))
     try:
         from . import memory as _mem
-        fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
+        # 2026-07-19: "Update memory" (the scribe) writes the LIVING log (UNIT.live.md), not the
+        # Commander doctrine (UNIT.md) — the stamp read only the doctrine, so it stayed "22d ago"
+        # after every update. Show the NEWER of the two so the stamp tracks either write.
+        _mt = [d for d in (_wr._mtime(_mem.UNIT_PATH), _wr._mtime(_mem.LIVE_PATH)) if d]
+        fr_mem = _fresh(max(_mt)) if _mt else ""
     except Exception:  # noqa: BLE001
         fr_mem = ""
 
@@ -754,7 +758,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar{{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:var(--s-3);align-items:stretch;padding:var(--s-3) 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
 /* Row 1: run | build (stretches to absorb slack) | QA.  Row 2: the nav strip, full width —
    so both rows run edge-to-edge and nothing floats in dead space. */
-.tbar>.tclu:nth-of-type(4){{grid-column:1 / -1;flex-direction:row;align-items:center;justify-content:flex-start;gap:var(--s-3)}}
+.tbar>.tclu:nth-of-type(4){{grid-column:1 / -1;flex-direction:row;align-items:center;gap:var(--s-3)}}
+/* 2026-07-19: the NAV row stretches its buttons edge-to-edge so it fills the width like the
+   action row above — no dead space to the right. The label stays natural-width; the button row
+   grows, and each button shares the space evenly. */
+.tbar>.tclu:nth-of-type(4)>.tcrow{{flex:1;flex-wrap:nowrap}}
+.tbar>.tclu:nth-of-type(4)>.tcrow>.btn{{flex:1;justify-content:center}}
 .tbar>.tbnote{{grid-column:1 / -1}}
 .tbar>.grow{{display:none}}
 /* 2026-07-19 redesign: each cluster is a quiet card — label as an overline INSIDE the group —
