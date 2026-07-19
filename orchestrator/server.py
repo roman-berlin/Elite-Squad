@@ -1950,6 +1950,49 @@ def create_app(cfg: Config, port: int = 8787):
             for d in _items:
                 tid = html.escape(str(d.get("id") or ""))
                 dapp = html.escape(str(d.get("app") or ""))
+                _qfull = str(d.get("question") or d.get("why") or "")
+                # 2026-07-19 (Commander order / EU-337 format): a structured question renders as a
+                # BRIEF problem line + one-click option buttons (recommended highlighted); clicking
+                # an option ships that option text as the answer — same /api/answer path, so it
+                # lands as a Jira comment and the ticket re-runs (To Do). Unstructured questions
+                # keep the free-text box as before; it also stays as the "Other" fallback.
+                _po = None
+                try:
+                    from . import decisions as _dec
+                    _po = _dec.parse_options(_qfull)
+                except Exception:  # noqa: BLE001
+                    _po = None
+                if _po:
+                    head = html.escape(_po["summary"] or _qfull.splitlines()[0][:200])
+                    btns = ""
+                    for o in _po["options"]:
+                        _cls = "nbtn ok" if o["recommended"] else "nbtn x"
+                        _star = "&#9733; " if o["recommended"] else ""
+                        _lbl = html.escape(o["text"][:110])
+                        _val = html.escape(f"Option {o['n']}: {o['text']}")
+                        btns += (
+                            "<form method=post action=/api/answer style='margin:0'>"
+                            f"<input type=hidden name=ticket value='{tid}'>"
+                            f"<input type=hidden name=app value='{dapp}'>"
+                            f"<input type=hidden name=text value=\"{_val}\">"
+                            f"<button class='{_cls}' title='Ship this option — it lands as a Jira "
+                            f"comment and the ticket re-runs with it'>{_star}{o['n']}. {_lbl}</button></form>")
+                    out.append(
+                        "<div class=ncard>"
+                        f"<div class=q><span class='nbadge dec'>Decision</span>{head}</div>"
+                        f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
+                        f"<div class=nrow>{btns}</div>"
+                        "<form method=post action=/api/answer class=nrow>"
+                        f"<input type=hidden name=ticket value='{tid}'>"
+                        f"<input type=hidden name=app value='{dapp}'>"
+                        "<input type=text name=text placeholder='Other — type your own decision'>"
+                        "<button class='nbtn send'>Ship answer</button></form>"
+                        "<div class=nrow>"
+                        "<form method=post action=/needs/resolve style='margin:0'>"
+                        f"<input type=hidden name=ticket value='{tid}'>"
+                        "<button class='nbtn x'>Dismiss</button></form></div>"
+                        "</div>")
+                    continue
                 why = html.escape(str(d.get("why") or "(no question on file)"))
                 out.append(
                     "<div class=ncard>"

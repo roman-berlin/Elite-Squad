@@ -402,6 +402,57 @@ def to_worklist(cfg, resolved: dict):
 
 
 # --------------------------------------------------------------------------- #
+# 2026-07-19 (Commander order, the EU-337 decision-request format): a Needs-you decision should
+# read as a BRIEF problem + 2-3 numbered options with exactly one (RECOMMENDED). These helpers
+# parse that structure out of a stored question so the cockpit can render one-click option
+# buttons and a Telegram reply can be just the option number. Purely additive: an unstructured
+# question parses to None and every surface falls back to the free-text answer box.
+_OPT_LINE = re.compile(r"^\s*(?:(\d)[\.\)]|[-•*])\s+(.+\S)\s*$")
+_REC_MARK = re.compile(r"\(?\s*recommended\s*\)?", re.IGNORECASE)
+_NUM_REPLY = re.compile(r"^\s*(?:option\s*)?([1-6])\s*[\.\)]?\s*$", re.IGNORECASE)
+
+
+def parse_options(question: str) -> dict | None:
+    """``{"summary": str, "options": [{"n", "text", "recommended"}]}`` — or None when the
+    question doesn't carry a recognizable 2-6 option list (free-text remains the surface)."""
+    opts: list[dict] = []
+    summary: list[str] = []
+    for ln in (question or "").splitlines():
+        m = _OPT_LINE.match(ln)
+        if m and m.group(2):
+            raw = m.group(2).strip()
+            rec = bool(_REC_MARK.search(raw))
+            text = _REC_MARK.sub("", raw).strip(" \t—–-:·")
+            if text:
+                opts.append({"n": len(opts) + 1, "text": text, "recommended": rec})
+        elif not opts:
+            s = ln.strip()
+            if s and not s.rstrip(":").upper().endswith("OPTIONS"):
+                summary.append(s)
+    if not 2 <= len(opts) <= 6:
+        return None
+    # exactly ONE recommended: if the officer marked several (or none), keep flags as parsed —
+    # the UI highlights whatever is marked; multiple marks degrade to multiple highlights.
+    return {"summary": " ".join(summary)[:400], "options": opts}
+
+
+def expand_option_reply(question: str, answer: str) -> str:
+    """A bare '2' / 'option 2' reply against a structured question becomes the full option text
+    (so the Jira comment and the re-run spec carry the decision, not a bare digit). Any other
+    answer — or an unstructured question — passes through unchanged."""
+    m = _NUM_REPLY.match(answer or "")
+    if not m:
+        return answer
+    po = parse_options(question)
+    if not po:
+        return answer
+    n = int(m.group(1))
+    for o in po["options"]:
+        if o["n"] == n:
+            return f"Option {n}: {o['text']}"
+    return answer
+
+
 def parse_reply(text: str) -> tuple[str | None, str]:
     """'AUTO-1: use DD/MM' -> ('AUTO-1', 'use DD/MM'); 'use DD/MM' -> (None, 'use DD/MM')."""
     if ":" in text:
@@ -485,6 +536,16 @@ def handle_reply(cfg, audit, text: str) -> bool:
     pending entry: the question vanished from 'Needs you' and no run was ever coming. Leaving the
     claim in place on the failure paths means the reaper re-offers the question instead."""
     ticket_id, answer = parse_reply(text)
+    # 2026-07-19: a bare option number becomes the full option text (see expand_option_reply) —
+    # looked up against the pending entry's stored question before the answer is committed.
+    if _NUM_REPLY.match(answer or ""):
+        try:
+            for e in load(cfg):
+                if str(e.get("id", "")).split("#", 1)[0] == str(ticket_id or e.get("id", "")).split("#", 1)[0]:
+                    answer = expand_option_reply(str(e.get("question") or ""), answer)
+                    break
+        except Exception:  # noqa: BLE001 - expansion is sugar; the raw reply still resolves
+            pass
     resolved = resolve(cfg, answer, ticket_id, claim=True)
     if not resolved:
         return False
