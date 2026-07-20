@@ -1040,6 +1040,23 @@ def create_app(cfg: Config, port: int = 8787):
                 + _run_form(appq, _checkbox_rows([t for _, t in items]), "Develop selected"))
         return _wrap(f"Choose tickets — {html.escape(appq)}", body)
 
+    @app.post("/api/squad")
+    def squad_api():
+        # 2026-07-19 (Commander order — squad modes): persist WHICH formation builds tickets.
+        # full = the standard pipeline; elite = the small careful trio (step-by-step Builder,
+        # 2.4x turn budget, unchanged gate+review); auto = the sizer routes L/XL → elite.
+        from . import squad_pref
+        sq = (request.form.get("squad") or "").strip().lower()
+        if sq in ("full", "elite", "auto"):
+            squad_pref.set_mode(sq, cfg)
+            get_state(None)["last_msg"] = {
+                "full": "Full squad — the standard pipeline builds every ticket.",
+                "elite": "Elite squad — the careful trio builds every ticket: ordered step plan, "
+                         "one iterative Builder with per-step checks, independent review.",
+                "auto": "Auto — big tickets (L/XL) go to the Elite squad, the rest to the Full squad.",
+            }[sq]
+        return redirect("/")
+
     @app.post("/api/model")
     def model_api():
         # EU-190/EU-223: persist the active model backend — GLOBALLY, or (an optional `app` field)

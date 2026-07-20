@@ -74,6 +74,25 @@ Output ONLY a single JSON object, no prose around it, exactly this shape:
 For ANSWER/CLOSE/REFILE/SPLIT put the reply/reason/sub-ticket list in "answer" and leave the
 build fields empty. Never wrap the JSON in markdown fences; never add commentary after it."""
 
+# 2026-07-19 (Commander order — squad modes): appended to PLANNER_SYSTEM only when squad_pref
+# routes the ticket to the ELITE squad. The Analyst's decompose-first duties: an ordered step
+# plan the Builder executes one-at-a-time, and every assumption/question surfaced NOW — because
+# a mid-build "stop and wait" strands a worktree; questions batch here, at analysis time.
+ELITE_PLAN_ADDENDUM = """
+
+ELITE SQUAD — you are the Analyst for a small elite squad; the Builder will execute your plan
+one step at a time with a check after every step. Two extra duties on a BUILD verdict:
+1. In "steps" (or the plan body), give an ORDERED list of small, independently-checkable steps —
+   each one small enough to implement and verify in one sitting, sequenced so every step leaves
+   the tree green. Name the verification for each step (which test/command proves it).
+2. Surface EVERY material assumption and unclear point NOW, in the plan — the Builder will not
+   stop mid-build to ask. A genuinely CRITICAL unknown that blocks safe work is a needs_human
+   question at this stage, not a guess.
+Also recalibrate SPLIT: the elite Builder carries a 2.4x turn budget and works step-by-step, so
+prefer BUILD-with-step-plan for large-but-coherent work; reserve SPLIT for genuinely unrelated
+asks or repo-wide sweeps that no single careful pass can land.
+"""
+
 
 @dataclass
 class PlannerResult:
@@ -202,9 +221,15 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
         model, _peffort, mreason = models.for_planner(cfg, ticket, effort="high")
         if getattr(cfg, "auto_model", False) or "deep" in mreason:
             print(f"  · planner model: {mreason}", flush=True)
+        try:
+            from . import squad_pref as _squad
+            _elite = _squad.resolve_for_ticket(cfg, ticket)[0] == "elite"
+        except Exception:  # noqa: BLE001 - a pref hiccup must never change a plan
+            _elite = False
         options = ClaudeAgentOptions(
             model=model,
-            system_prompt=memory.preamble() + PLANNER_SYSTEM,
+            system_prompt=memory.preamble() + PLANNER_SYSTEM
+                          + (ELITE_PLAN_ADDENDUM if _elite else ""),
             cwd=app.workdir or app.repo_path,
             permission_mode="bypassPermissions",
             allowed_tools=["Read", "Grep", "Glob"],

@@ -189,6 +189,42 @@ def size_ticket(ticket) -> tuple[str, str, str]:
     return size, eff, "; ".join(reasons) or "no strong signals"
 
 
+# 2026-07-19 (Commander order — squad modes): the ELITE working method, appended to the system
+# prompt only when squad_pref resolves this ticket to the elite squad. It changes HOW the one
+# careful Builder works (iterative, verified, reported), never WHAT verifies the result — the
+# deterministic gate and the independent review run unchanged after it. English rendition of the
+# Commander's iterative-methodology directive.
+ELITE_METHOD = """
+
+ELITE SQUAD METHOD — you are the single careful Builder on a small elite squad. Work in
+small, verified iterations; the goal is a correct, stable, clear result — not a fast one.
+
+For every work cycle:
+1. ANALYZE before touching anything: restate the end goal, the key requirements, the risks and
+   anything unclear. Never make an important assumption silently — write it down.
+2. Work from the ordered step plan (the design brief's steps if present, else derive one).
+   Execute ONLY the next step — never several steps at once.
+3. Before changing any file, READ it and understand the current structure. Prefer a targeted,
+   controlled edit over rewriting a file.
+4. After EVERY step: run the repo's own test/verification command for the touched area. Check —
+   does it meet the requirement? errors? anything missing? duplication? is there a simpler way?
+5. Report each iteration in your running output, exactly this shape:
+     DID: <what was done>   CHECKED: <what was verified and how>   FOUND: <problems, or 'clean'>
+     FIXING: <the correction now, or '—'>   NEXT: <the next step>
+6. Fix problems BEFORE advancing. A significant problem blocks the next step; small non-blocking
+   ones go on an improvements list you carry to the end.
+7. Repeat until the acceptance criteria hold and the suite for the touched area is green.
+
+Hard rules: don't settle for the first solution; don't rush to finish; never claim confidence in
+anything unverified; never invent missing information; never skip the per-step check. Missing
+CRITICAL information is a halt (state exactly what is missing — the pipeline parks it as a
+decision); a non-critical gap is a stated assumption you flag for later. If you find a genuinely
+better approach than the plan, note it in the handoff with trade-offs — finish the current step
+first, don't silently change direction. Your final handoff lists: done / checked / still open /
+recommended next steps, plus the improvements list.
+"""
+
+
 # 2026-07-19 (senior turn-limit loop): per-ticket retry markers for a build that blew the turn
 # ceiling AND couldn't be split smaller (scrum depth cap). loop._exception_report re-queues such a
 # ticket exactly once; the marker is what (a) makes that "once" survive the process (the requeue is
@@ -227,6 +263,18 @@ def mark_turn_retry(cfg, ticket_id: str) -> bool:
         return False
 
 
+def _elite_squad(cfg, ticket) -> bool:
+    """True when squad_pref routes THIS ticket to the elite squad. Fail-safe to False — a broken
+    pref store must never change how a build runs."""
+    if ticket is None:
+        return False
+    try:
+        from . import squad_pref
+        return squad_pref.resolve_for_ticket(cfg, ticket)[0] == "elite"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     """(effort, human-readable reason) for this build pass.
 
@@ -241,6 +289,13 @@ def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     else:
         base = normalize_effort(getattr(cfg, "builder_effort", "high"))
         reason = f"default → {base}"
+    # Elite squad floor: one careful pass replaces retry churn, so the Builder gets the xhigh
+    # turn/task budget up front (2.4x turns) regardless of how small the sizer called the ticket.
+    # Compared by TURN SCALE, not ladder index — xhigh shares a ladder rung with high (it model-
+    # falls-back to high off-Opus) but carries the bigger turn budget, which is what elite needs.
+    if _elite_squad(cfg, ticket) and _TURN_SCALE.get(base, 1.0) < _TURN_SCALE.get("xhigh", 2.4):
+        base = "xhigh"
+        reason += "; elite squad floor → xhigh"
     # Turn-limit requeue boost: a ticket re-queued after blowing the turn ceiling unsplittably
     # (see loop._exception_report) runs one effort level higher so turns_for grants real headroom.
     if ticket is not None and turn_retry_count(cfg, getattr(ticket, "id", "")) > 0:
@@ -574,7 +629,8 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         print(f"  · builder model: {mreason}", flush=True)
     options = ClaudeAgentOptions(
         model=model,                   # the configured ceiling, or auto-chosen <= ceiling
-        system_prompt=_trim_preamble(memory.preamble(), cfg) + BUILDER_SYSTEM,
+        system_prompt=_trim_preamble(memory.preamble(), cfg) + BUILDER_SYSTEM
+                      + (ELITE_METHOD if _elite_squad(cfg, req.ticket) else ""),
         cwd=workdir,                   # the isolated worktree when enabled
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
