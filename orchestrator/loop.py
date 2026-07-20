@@ -107,8 +107,11 @@ def _git_commit_changelog(target: Path, base: str = "dev") -> None:
 
         # (1) Branch guard: only ever commit/push on the base branch. On main, a feature branch, or a
         # detached HEAD we no-op (leaving the append for the normal base-branch land to pick up).
+        # Case-INSENSITIVE (2026-07-20, caught live on the AUTO-59 land): automatixy's configured
+        # base is 'DEV' while git reports 'dev' on this case-insensitive FS — the exact-match guard
+        # skipped the changelog on every one of that repo's lands.
         branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        if branch != base:
+        if branch.lower() != str(base).lower():
             print(f"  changelog commit skipped: on '{branch}', not base '{base}'", flush=True)
             return
 

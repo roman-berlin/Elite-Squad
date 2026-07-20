@@ -138,6 +138,22 @@ chk("off-base branch: write still returns True", out3 is True)
 chk("off-base branch: NO changelog commit was made (guard held)",
     "on a feature branch" not in run(side, "log", "-p").stdout)
 
+# --- 3b) 2026-07-20 (caught live on the AUTO-59 land): the branch guard is case-INSENSITIVE —
+# --- automatixy's configured base is 'DEV' while git reports 'dev'; exact-match skipped every
+# --- one of that repo's lands from the changelog. Same branch, different case → commit happens.
+from dataclasses import replace as _dc_replace
+case_repo = new_repo()
+(case_repo / "README.md").write_text("seed\n", encoding="utf-8")
+run(case_repo, "add", "README.md")
+run(case_repo, "commit", "-q", "-m", "seed")          # HEAD is 'dev' (new_repo forces it)
+app_uc = _dc_replace(app, base_branch="DEV")
+doc_c = case_repo / "Documentation" / "Development_Status.md"
+out3b = loop._record_changelog(Config(apps=[app_uc], audit_path="/tmp/eu335-audit.jsonl", dry_run=False),
+                               tkt, app_uc, "case-insensitive base match", "",
+                               today="2026-07-20", path=str(doc_c))
+chk("case-mismatched base ('dev' vs 'DEV'): the changelog commit IS made",
+    out3b is True and "case-insensitive base match" in run(case_repo, "log", "-p").stdout)
+
 # --- 4) target NOT inside a git repo (arbitrary tmp path, as the eu41 tests use): clean no-op ------
 plain = Path(tempfile.mkdtemp())
 doc_plain = plain / "Documentation" / "Development_Status.md"
