@@ -1601,7 +1601,7 @@ def create_app(cfg: Config, port: int = 8787):
             def _bg():
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
-                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Technical Writer.")
+                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Squad memory updated by the Technical Writer.")
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"scribe failed: {exc}"
                 finally:
@@ -1612,7 +1612,7 @@ def create_app(cfg: Config, port: int = 8787):
     @app.get("/memory")
     def memory_page():
         memory.ensure()
-        top = (_working("The Technical Writer is folding recent lessons into Unit Memory…")
+        top = (_working("The Technical Writer is folding recent lessons into Squad memory…")
                if _state.get("scribing") else "")
         # 2026-07-19 (Commander order): ONE manual action — "Update memory". The old Consolidate
         # button and the "Reviewer keeps rejecting these" panel were removed: consolidation (log
@@ -1639,7 +1639,7 @@ def create_app(cfg: Config, port: int = 8787):
             "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
         body = (banner + act + top
                 + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>Doctrine</h3>"
-                + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
+                + "<pre class=rep>" + html.escape(memory.load() or "(no Squad memory yet)") + "</pre>"
                 + live_html)
         return _wrap("Unit Memory", body)
 
@@ -3526,7 +3526,7 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
     elif notify.configured():
         print(f"  decision listener: OFF — {_why} (cockpit-only on this host)")
-    print(f"★ War Room: http://{host}:{port}   (Ctrl-C to stop)")
+    print(f"\u2b22 Squad HQ: http://{host}:{port}   (Ctrl-C to stop)")
     print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
     # threaded: the SSE stream holds a long-lived request — without this it would block the cockpit.
     app.run(host=host, port=port, threaded=True)

@@ -41,7 +41,7 @@ path here so the doc keeps matching the filesystem.
 
 Repo-root docs: `README.md` (how to run), `ARCHITECTURE.md` (design), `TECHNICAL.md` /
 `TECHNICAL_DESIGN.md`, `DEPLOYMENT.md` / `VPS_DEPLOYMENT.md`, `ROADMAP.md`, `QA_MANUAL.md`,
-`WAR_ROOM.md` (the cockpit / field manual), `ORG.md` (chain of command & roster). The live
+`SQUAD_HQ.md` (the cockpit / field manual — renamed from the old War Room manual in the SQUAD rebrand), `ORG.md` (chain of command & roster). The live
 officer **roster** isn't a committed doc: `orchestrator/roster.py` regenerates it at runtime into
 a gitignored file (`./general roster`), so the checked-in sources are that code plus `ORG.md` — it
 isn't listed above because it won't exist in a fresh checkout.
@@ -53,6 +53,8 @@ Everything under `Documentation/` (these are the only files there — keep this 
   distilled from the 2026-07 direct-build sprint, with the failure ledger and the standing
   guard tests (vacuous-assertion, stub-signature, retired-subsystems) that enforce them.
 - `Documentation/REVIEW_BACKLOG.md` — deferred review findings / tech-debt queue.
+- `Documentation/BRAND.md` — the SQUAD brand guide (2026-07-21): the user-facing terminology map
+  (HQ, [Squad] comments, FOR YOU), voice rules, and what deliberately stays internal.
 - `Documentation/Development_Status.md` — the **feature changelog**: one line per successful
   live land, newest first, written automatically by the Technical Writer (EU-41). Created on the
   first land if absent.

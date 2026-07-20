@@ -263,22 +263,22 @@ class JiraAdapter(BacklogAdapter):
 
     def latest_answer(self, ticket) -> str | None:
         """The most recent HUMAN comment on the ticket — the Commander's answer in a decision
-        round-trip — as plain text, or None. Skips the unit's own '[General]'-prefixed comments so a
+        round-trip — as plain text, or None. Skips the squad's own '[Squad]'/'[General]'-prefixed comments so a
         question the loop just posted is never mistaken for the reply."""
         key = getattr(ticket, "key", ticket)
         for c in reversed(self.comments(key)):
             txt = _adf_to_text(c.get("body"))
-            if txt and not txt.strip().startswith("[General]"):
+            if txt and not txt.strip().startswith(("[Squad]", "[General]")):
                 return txt.strip()
         return None
 
     def latest_builder_comment(self, key: str) -> str | None:
-        """The most recent [General]-prefixed comment posted by the unit — Builder next-step
+        """The most recent squad-prefixed comment ([Squad], legacy [General]) — Builder next-step
         instructions, CI guardrail handoffs, escalation notes. Used by the CTO chat to surface
         the concrete action for the Commander when they ask 'what do I need to do about X?'"""
         for c in reversed(self.comments(key)):
             txt = _adf_to_text(c.get("body"))
-            if txt and txt.strip().startswith("[General]"):
+            if txt and txt.strip().startswith(("[Squad]", "[General]")):
                 return txt.strip()
         return None
 
@@ -326,7 +326,7 @@ class JiraAdapter(BacklogAdapter):
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.
         self.session.post(self._url(f"issue/{ticket.key}/comment"),
-                          json={"body": _adf("[General] " + body)}).raise_for_status()
+                          json={"body": _adf("[Squad] " + body)}).raise_for_status()
 
     def attach_pr(self, ticket: Ticket, pr_url: str) -> None:
         try:
@@ -442,7 +442,7 @@ class JiraAdapter(BacklogAdapter):
             # Add comment if provided
             if comment and comment.strip():
                 self.session.post(self._url(f"issue/{ticket_id}/comment"),
-                                  json={"body": _adf("[General] " + comment)}).raise_for_status()
+                                  json={"body": _adf("[Squad] " + comment)}).raise_for_status()
 
             # Find transition to Done/Closed
             tr = self.session.get(self._url(f"issue/{ticket_id}/transitions"))
@@ -566,7 +566,7 @@ class JiraAdapter(BacklogAdapter):
         feedback = []
         for c in (f.get("comment", {}) or {}).get("comments", []) or []:
             txt = _adf_to_text(c.get("body"))
-            if txt and not txt.strip().startswith("[General]"):
+            if txt and not txt.strip().startswith(("[Squad]", "[General]")):
                 feedback.append(txt.strip())
         if feedback:
             description += ("\n\nCommander's comments (oldest -> newest) — read ALL of these; they "

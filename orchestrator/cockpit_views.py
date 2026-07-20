@@ -919,7 +919,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       {open_logs_html}
       {_btn(f"&#128203; Task log{fr_tasks}", tag="a", attrs=' href="/tasks" title="Every run — Today / week / month scoping, transcripts, Jira links"')}
       {_btn(f"&#128172; Daily{fr_council}", tag="a", attrs=' href="/council" title="The daily muster — DONE / NEXT / NEEDS YOU + failure causes"')}
-      {_btn(f"&#128221; Memory{fr_mem}", tag="a", attrs=' href="/memory" title="Unit memory — doctrine + the living lessons log"')}
+      {_btn(f"&#128221; Memory{fr_mem}", tag="a", attrs=' href="/memory" title="Squad memory — doctrine + the living lessons log"')}
     </div>
   </div>
 

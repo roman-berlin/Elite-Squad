@@ -428,7 +428,7 @@ async def _try_scrum_split(cfg: Config, app: AppConfig, ticket: Ticket, audit: A
         kk = ", ".join(sp["keys"])
         audit.record("scrum_split", ticket_id=ticket.id, reason=split_reason, into=sp["keys"])
         _notify(cfg, f"🧩 {ticket.id} was too big for one pass — the Scrum Master split it into "
-                     f"{kk} and closed the parent. The unit takes the fragments next.")
+                     f"{kk} and closed the parent. The squad takes the fragments next.")
         print(f"  🧩 {ticket.id}: too big → Scrum Master split into {kk}; parent closed.", flush=True)
         return TicketReport(ticket.id, Outcome.REQUEUED, iterations, cost, app.name, branch,
                             notes=f"too big — Scrum Master split into {kk}")
@@ -2589,7 +2589,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             kk = ", ".join(sp["keys"])
             audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="SPLIT", into=sp["keys"])
             _notify(cfg, f"🧩 {ticket.id} was too heavy — the Scrum Master split it into {kk} (on you) and "
-                         "closed the parent. The unit takes the fragments next.")
+                         "closed the parent. The squad takes the fragments next.")
             print(f"  🧩 {ticket.id}: too heavy → Scrum Master split into {kk}; parent closed.", flush=True)
             return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
                                          notes=f"too heavy — Scrum Master split into {kk}"))
@@ -2898,11 +2898,11 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # the keepalive respawns it on this landed code; EU-385 re-arms the drains on boot.
                 from . import autopilot as _ap
                 if _ap.flag_self_update(cfg, ticket.id, sha=merge_sha, audit=audit):
-                    _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restarting automatically "
+                    _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code — restarting automatically "
                                  "once idle (self_update_auto_restart); drains re-arm on the new sha.")
                 else:
                     # The flag did NOT persist — no automatic restart will happen. Never announce one.
-                    _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code but the restart flag "
+                    _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code but the restart flag "
                                  "could not be written — RESTART THE COCKPIT BY HAND or it keeps "
                                  "running the old code.")
         except Exception:  # noqa: BLE001 — the signal is best-effort

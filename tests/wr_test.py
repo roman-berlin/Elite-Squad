@@ -51,7 +51,7 @@ print("AUTO-12 in board_all?", "AUTO-12" in board_all)
 print("AUTO-13 in board_sd?", "AUTO-13" in board_sd)
 print("AUTO-12 in board_sd?", "AUTO-12" in board_sd)
 
-assert "War Room" in page, "title missing"
+assert "SQUAD" in page and "HQ" in page, "brand title missing (SQUAD rebrand 2026-07-21)"
 assert "roster" in page, "roster missing"
 assert "BAR" in page, "control bar not injected"
 assert "Merged" in page, "kpi missing"

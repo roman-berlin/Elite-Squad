@@ -1,4 +1,6 @@
-# The General — an unattended dev unit for your SaaS
+# ⬢ SQUAD — your autonomous dev squad
+
+*(engine codename: “The General”; brand guide: Documentation/BRAND.md)*
 
 You give an order. The **General** (the orchestrator) commands two officers — the
 **Builder** (Claude Code) and the **Reviewer** (a second, read-only Claude) — to

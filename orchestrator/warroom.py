@@ -1818,7 +1818,7 @@ def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: 
 
 _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Elite Unit — War Room</title>
+<title>SQUAD — HQ</title>
 <style>
 /* ── DESIGN TOKENS (EU-39) ───────────────────────────────────────────────────────
    The single source of truth for the cockpit's look. Every surface below — and the
@@ -1831,7 +1831,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;
 --warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;
 --bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;
---info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;
+--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;--brand:#ff7a59;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 /* corner radii */
 --r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;
@@ -1876,7 +1876,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;
 --bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;
 --info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;
---accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;
+--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;--brand:#e8590c;
 --shadow-1:0 1px 2px rgba(23,32,54,.08);
 --shadow-2:0 8px 24px rgba(23,32,54,.12);
 --shadow-3:0 16px 40px rgba(23,32,54,.16);
@@ -1902,7 +1902,8 @@ header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:
 background:linear-gradient(180deg,var(--panel),var(--bg));position:sticky;top:0;z-index:5;flex-wrap:wrap}
 .brand{font-size:15px;font-weight:750;letter-spacing:.4px;white-space:nowrap;text-transform:uppercase}
 .hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
-.brand b{color:var(--accent)}
+.brand b{color:var(--brand)}
+.brand .bmark{color:var(--brand)}
 header select{background:var(--well);border:1px solid var(--line2);color:var(--ink);border-radius:9px;
 padding:8px 12px;font:inherit;cursor:pointer}
 .spacer{flex:1}
@@ -2159,7 +2160,7 @@ font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);bor
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
 </style></head><body>
 <header>
-  <div class=brand>&#9733; Elite Unit <b>·</b> War Room{{HOST}}</div>
+  <div class=brand><span class=bmark>&#x2B22;</span> SQUAD <b>·</b> HQ{{HOST}}</div>
   {{PROJ}}
   <div class=spacer></div>
   {{AUTOPILOT}}
