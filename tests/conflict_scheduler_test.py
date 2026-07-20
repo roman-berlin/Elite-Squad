@@ -73,8 +73,12 @@ chk("(2b) disjoint components (calendar vs leads) → parallel OK",
 chk("(2c) different apps → parallel OK", not loop._tickets_conflict(cal, other_app))
 chk("(2d) app-root citation contains the component → conflict",
     loop._tickets_conflict(approot, leads))
-chk("(2e) unpredictable footprint → conservative conflict",
-    loop._tickets_conflict(nopath, other_app) and loop._tickets_conflict(cal, nopath))
+chk("(2e) unpredictable footprint → conservative conflict (same app)",
+    loop._tickets_conflict(nopath, cal2) and loop._tickets_conflict(cal, nopath))
+other_repo = Ticket(id="B-1", key="B-1", summary="other project work",
+                    description="no paths here either", app="Elite-Unit")
+chk("(2f) DIFFERENT apps never conflict — separate repos cannot collide (even with no paths)",
+    not loop._tickets_conflict(nopath, other_repo))
 
 # (3) picker wiring — the guard, its one-shot audit, and the in-flight cleanup
 src = Path("orchestrator/loop.py").read_text(encoding="utf-8")

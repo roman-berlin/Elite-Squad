@@ -884,10 +884,13 @@ def _ticket_footprint(ticket: Ticket) -> frozenset[str]:
 
 
 def _tickets_conflict(a: Ticket, b: Ticket) -> bool:
-    """True when the two tickets must NOT build concurrently: either footprint is unpredictable
-    (no paths cited — conservative), or any cited directory of one contains/equals one of the
-    other's (apps/x/src/components/calendar vs …/calendar → conflict; …/calendar vs …/leads →
-    parallel; a ticket citing the whole app root conflicts with everything inside it)."""
+    """True when the two tickets must NOT build concurrently. Tickets of DIFFERENT apps live in
+    different repos and physically cannot collide — always parallel. Within one app: either
+    footprint unpredictable (no paths cited — conservative), or any cited directory of one
+    contains/equals one of the other's (apps/x/src/components/calendar vs …/calendar → conflict;
+    …/calendar vs …/leads → parallel; a whole-app-root citation conflicts with everything in it)."""
+    if (a.app or "") and (b.app or "") and a.app != b.app:
+        return False
     fa, fb = _ticket_footprint(a), _ticket_footprint(b)
     if not fa or not fb:
         return True
