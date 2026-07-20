@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-21 · AUTO-219 · automatixy · • Single comment line added directly above the version-comparison branch, matching required wording. • No behavioral change — diff is comment-only. • Doesn't touch onboarding-consent.spec.ts. · 🔗 (no UI — comment-only change in `packages/shared-consent/src/useConsentStatus.ts`; verify via `grep -n AC2 packages/shared-consent/src/useConsentStatus.ts` returning exactly one hit on the line directly above `versionMismatch`, and `cd apps/zelmero-app && bun run test src/test/consent-guard.test.tsx src/test/terms-logic.test.tsx` staying green)
 - 2026-07-21 · AUTO-213 · automatixy · • Validation (isSafePolicyUrl): http(s)+same-origin+exact-path allowlist rejects javascript:/data:/protocol-relative/cross-origin/off-path/malformed — verified. · 🔗 /dashboard (onboarding consent modal — click the Terms of Service / Privacy Policy links)
 - 2026-07-20 · AUTO-80 · automatixy · • Pill styling confirmed verbatim against SettingsPage (container + active/muted trigger classes match). · 🔗 / (עמוד "דשבורד")
 - 2026-07-20 · AUTO-73 · automatixy · • Both requirements met: proposal detail-on-click + tenant-scoped edit/save, and the auto-timestamped memo journal (newest-first). · 🔗 /clients/<client-id> (an individual client card — e.g. open "היסטוריית לידים" → click a lead row, and use "מזכר חדש" in "היסטוריית שיחות")
