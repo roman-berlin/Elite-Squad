@@ -154,9 +154,17 @@ leaked_monologue = """## ANALYSIS
 Reality check on Builder's claim:
 - Documentation/multi_backen…
 """
+# 2026-07-21 production audit P0: rejection used to VOID the park entirely — the ticket stayed
+# ESCALATED with no decision, no Blocked transition, a dead reply-hint, and the drain rebuild-
+# churned it. The contract is now sanitize-and-store: the park always exists, and the stored
+# text is stripped of raw headers and wrapped in a self-describing banner.
 result_leaked = decisions.add(cfg, ticket3, "automatixy", leaked_monologue)
-chk("AC3.2: Leaked internal monologue rejected", result_leaked is None,
-    "Currently accepts leaked monologue - should reject")
+_leaked_entry = next((p for p in decisions.load(cfg) if p.get("id") == result_leaked), None)
+chk("AC3.2: Leaked internal monologue is SANITIZED and parked (never voided)",
+    result_leaked is not None and _leaked_entry is not None
+    and "auto-sanitized" in _leaked_entry.get("question", "")
+    and not _leaked_entry.get("question", "").startswith("## "),
+    "the park must survive; the stored text must carry the sanitized banner")
 
 # Test 3c: Properly formatted question (one-line + options)
 good_question = "Which date format should we use for the UI?"

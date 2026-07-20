@@ -163,8 +163,15 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     # EU-229: Validate question quality before proceeding
     is_valid, error = _validate_question_format(question)
     if not is_valid:
-        # Silently reject — the caller (loop.py escalation path) should regenerate
-        return None
+        if not (question or "").strip():
+            return None   # truly empty — nothing to park
+        # P0 (2026-07-21 production audit): NEVER void a park over formatting. The PM's own
+        # triage briefs legitimately open with markdown headers / 'Based on the…' — the exact
+        # shapes EU-229 rejects. Silently returning None left ESCALATED tickets with no pending
+        # decision, no Blocked transition and a dead Telegram reply-hint, and needs_sync then
+        # un-parked them so the drain rebuild-churned the same ticket. Sanitize and store.
+        cleaned = "\n".join(ln.lstrip("#").strip() for ln in question.strip().splitlines())
+        question = "Decision needed (auto-sanitized from the officer's brief):\n" + cleaned
 
     eid = entry_id or ticket.id
     base_tid = str(ticket.id).split("#", 1)[0]

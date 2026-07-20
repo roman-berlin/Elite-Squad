@@ -7,6 +7,7 @@ bounds, the cost budget, every backlog transition, and the keep-dev-green merge.
 from __future__ import annotations
 
 import asyncio
+import threading
 import copy
 import fcntl
 import os
@@ -114,6 +115,12 @@ def _git_commit_changelog(target: Path, base: str = "dev") -> None:
         if branch.lower() != str(base).lower():
             print(f"  changelog commit skipped: on '{branch}', not base '{base}'", flush=True)
             return
+        # P0 (2026-07-21 production audit): from here on, every origin operation uses the branch
+        # GIT reports — never the caller's `base`, which on a cross-repo land is the PRODUCT app's
+        # branch name ('DEV'): in this repo origin/DEV doesn't exist, so the ff sync silently
+        # no-oped and `push origin DEV` failed — leaving the changelog commit local-only, arming
+        # the exact EU-335 stale-cockpit divergence this function exists to prevent.
+        base = branch
 
         # (2) Sync-before-commit so our commit is a clean descendant of origin, never a divergence.
         has_remote_base = _git("rev-parse", "--verify", "--quiet", f"origin/{base}").returncode == 0
@@ -319,6 +326,19 @@ def _already_landed(app: AppConfig, ticket_id: str) -> str | None:
     except Exception:  # noqa: BLE001
         cl = ""
     changelog_hit = any(f"· {tid} ·" in ln for ln in cl.splitlines() if ln.startswith("- "))
+    # P0 (2026-07-21 production audit): a crash in the seconds between the dev push and the
+    # changelog write leaves the changelog line UNWRITTEN forever — exactly the case this valve
+    # exists for. The durable `land_pushed` audit event (written the moment the push succeeds)
+    # is the equivalent first key; git-log corroboration below stays mandatory either way.
+    if not changelog_hit:
+        try:
+            with open("./state/audit.jsonl", encoding="utf-8") as _fh:
+                for _ln in _fh:
+                    if '"land_pushed"' in _ln and f'"{tid}"' in _ln:
+                        changelog_hit = True
+                        break
+        except OSError:
+            pass
     if not changelog_hit:
         return None
     # Git-log corroboration on origin/<base> in the app repo.
@@ -808,7 +828,20 @@ def _glm_budget_preflight_block(cfg: Config, audit: AuditLog) -> bool:
     cfg.model_backend; deferring to it (the old `active_provider != 'glm'` early-return) opened a
     fail-closed bypass where GLM would dispatch against an exhausted quota while the pref still read
     'claude'. So: block iff the configured backend is GLM and GLM is over/near cap."""
-    if backends.normalize(getattr(cfg, "model_backend", "opus")) != backends.GLM:
+    # P0 (2026-07-21 production audit): in HYBRID mode every BUILD dispatches on the secondary —
+    # GLM — even though the MAIN backend is Claude, so keying this gate off cfg.model_backend
+    # alone left GLM dispatch ungoverned in the live config: an exhausted z.ai quota would
+    # instant-fail every builder pass, accrue error strikes on healthy tickets and park them.
+    # The gate now also arms when hybrid routes builds to a GLM secondary.
+    _main_is_glm = backends.normalize(getattr(cfg, "model_backend", "opus")) == backends.GLM
+    _hybrid_glm = False
+    try:
+        from . import backend_pref as _bp
+        _hybrid_glm = (_bp.get_hybrid(cfg)
+                       and backends.normalize(_bp.get_secondary(cfg) or "") == backends.GLM)
+    except Exception:  # noqa: BLE001 - a pref-store hiccup must not disable the gate's main path
+        pass
+    if not (_main_is_glm or _hybrid_glm):
         return False
     status = usage.dual_provider_budget_status(cfg)
     glm = status.get("glm", {})
@@ -896,6 +929,24 @@ def _tickets_conflict(a: Ticket, b: Ticket) -> bool:
         return True
     return any(p == q or p.startswith(q + "/") or q.startswith(p + "/")
                for p in fa for q in fb)
+
+
+# P0 (2026-07-21 production audit): under the CONCURRENT drain, a long SYNC phase (gate run,
+# the whole land incl. its bounded CI poll) executed inline on the shared event loop froze the
+# SIBLING slot's agent stream — its wall-clock budget kept burning, so multi-million-token passes
+# died as spurious "wall-clock timeout" failures attributed to the WRONG ticket. Off-load such
+# phases to a worker thread when (and only when) more than one builder slot is armed; the serial
+# drain keeps its historic inline path byte-identical. Lands stay strictly serialized via an
+# EXPLICIT lock (previously an accident of the single event loop).
+_LAND_SERIAL_LOCK = threading.Lock()
+
+
+async def _off_loop(cfg, fn, *args, **kwargs):
+    """Run ``fn`` inline (serial drain) or in a worker thread (concurrent drain)."""
+    if int(getattr(cfg, "max_concurrent_builders", 1) or 1) > 1:
+        import asyncio as _aio
+        return await _aio.to_thread(fn, *args, **kwargs)
+    return fn(*args, **kwargs)
 
 
 def _host_free_gb() -> float:
@@ -2125,14 +2176,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # falls back to the repo-wide gate when no per-app config matches the diff.
         # (EU-85 / EU-326: domain-gap classification was removed entirely in the Phase-2
         # collapse; the gate never re-classifies here.)
-        gate = run_gate(app, git.changed_paths())
+        gate = await _off_loop(cfg, run_gate, app, git.changed_paths())
         if not gate.passed:
             # Flake honesty (2026-07-09): a red gate must REPRODUCE before it burns a builder pass.
             # 5 of the last 14 "max passes — PM escalated" strandings were full-suite flakes
             # (EU-129/139/201/204/206 — 4 later merged with ZERO extra fix passes); worse, the same
             # flake twice tripped the fingerprint-stuck breaker. Mirrors the base-gate confirmation
             # re-run in gate.py. Only a reproduced red proceeds to fingerprint/stuck handling.
-            confirm = run_gate(app, git.changed_paths())
+            confirm = await _off_loop(cfg, run_gate, app, git.changed_paths())
             if confirm.passed:
                 audit.record("gate_flake_confirmed_green", ticket_id=ticket.id,
                              iteration=iteration, first_report=(gate.report or "")[:1500])
@@ -2168,7 +2219,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 2.7) DETERMINISTIC CHECKS (§3.3–5): lint → secret scan → lockfile sanity. Scripts, not
         # LLMs — cheap, unhallucinatable, and no reviewer runs until they are green; a failure
         # feeds the Builder as plain text (a free review round).
-        det = run_deterministic_checks(app, git.changed_paths(), git.diff_against_base())
+        det = await _off_loop(cfg, run_deterministic_checks, app, git.changed_paths(), git.diff_against_base())
         audit.record("deterministic_gate", ticket_id=ticket.id, iteration=iteration,
                      passed=det.passed, report=("" if det.passed else extract_failure_evidence(det.report or "")))
         if not det.passed:
@@ -2487,12 +2538,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Reviewer checklist section). A review that ships now lands directly.
             import inspect
             _land_sig = inspect.signature(_land)
-            if "commenter" in _land_sig.parameters:
-                result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review, commenter=commenter)
-            else:
-                result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review)
+
+            def _land_serialized():
+                # explicit land serialization (concurrent drain) — one land at a time, off-loop
+                with _LAND_SERIAL_LOCK:
+                    if "commenter" in _land_sig.parameters:
+                        return _land(ticket, app, cfg, git, backlog, audit, branch, iteration,
+                                     cost, build, review, commenter=commenter)
+                    return _land(ticket, app, cfg, git, backlog, audit, branch, iteration,
+                                 cost, build, review)
+
+            result = await _off_loop(cfg, _land_serialized)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
             return _resolve(result)
@@ -2762,6 +2818,14 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             try:
                 git.land_trial(temp)
                 landed = True
+                # P0 (2026-07-21 production audit): the push above is the IRREVERSIBLE moment, but
+                # everything after it (branch cleanup, base sync, an LLM comment, Jira transition,
+                # changelog) is seconds of network+LLM in which a process death left NO durable
+                # merged-marker — boot resume then re-picked the still-In-Progress ticket and
+                # rebuilt on top of its own merged code (the EU-307 class; AUTO-80 re-billed ~$7
+                # after the 2026-07-20 machine sleep). Record the durable audit event NOW; the
+                # richer post-land event below keeps its fields.
+                audit.record("land_pushed", ticket_id=ticket.id, base=app.base_branch)
                 break
             except LandRaceError as exc:
                 race_detail = str(exc).splitlines()[0][:200]

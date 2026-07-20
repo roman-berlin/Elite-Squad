@@ -53,6 +53,8 @@ Everything under `Documentation/` (these are the only files there — keep this 
   distilled from the 2026-07 direct-build sprint, with the failure ledger and the standing
   guard tests (vacuous-assertion, stub-signature, retired-subsystems) that enforce them.
 - `Documentation/REVIEW_BACKLOG.md` — deferred review findings / tech-debt queue.
+- `Documentation/PRODUCTION_AUDIT_2026-07-21.md` — the 16-agent production-readiness audit
+  (8 dimensions, adversarially verified): 5 P0s fixed same-day, the P1/P2 deferred matrix.
 - `Documentation/BRAND.md` — the SQUAD brand guide (2026-07-21): the user-facing terminology map
   (HQ, [Squad] comments, FOR YOU), voice rules, and what deliberately stays internal.
 - `Documentation/Development_Status.md` — the **feature changelog**: one line per successful
