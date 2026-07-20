@@ -26,7 +26,7 @@ from .audit import AuditLog
 from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
-                       SpecArtifact, Ticket, TicketReport)
+                       SpecArtifact, Ticket, TicketReport, Verdict)
 from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
                    gate_fingerprint, publish_base_green, run_deterministic_checks, run_gate,
                    select_gate_groups)
@@ -429,6 +429,11 @@ async def _try_scrum_split(cfg: Config, app: AppConfig, ticket: Ticket, audit: A
         print(f"  🧩 {ticket.id}: too big → Scrum Master split into {kk}; parent closed.", flush=True)
         return TicketReport(ticket.id, Outcome.REQUEUED, iterations, cost, app.name, branch,
                             notes=f"too big — Scrum Master split into {kk}")
+    # 2026-07-19 audit: the refusal reason (depth cap, splitter decline, an exception) used to
+    # vanish — the Commander got a bare "turn-limit" park telling him to split by hand, with no
+    # mention that auto-split had already run this lineage to its ceiling. Record WHY it refused.
+    audit.record("scrum_split_failed", ticket_id=ticket.id, reason=split_reason,
+                 error=str(sp.get("error") or "splitter declined")[:400])
     return None
 
 
@@ -448,9 +453,30 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
             split_reason="turn-limit")
         if split is not None:
             return split
-        # No split possible → escalate to the Commander as before.
-        note = (f"{ticket.id} ran out of turns before finishing — this ticket is likely too big for "
-                "a single pass. Split it into smaller tickets, or raise the turn budget "
+        # 2026-07-19 Commander order (senior team, not juniors): a depth-capped/declined split does
+        # NOT go straight to the Commander — first re-queue ONCE with a raised turn budget.
+        # builder.effort_plan sees the persisted retry marker and bumps the effort one level, which
+        # scales turns_for (e.g. high 96 → xhigh 144), so the retry genuinely gets more room rather
+        # than repeating the same blow-out. mark_turn_retry persisting the counter is the loop
+        # guard: if it can't be persisted the retry is NOT taken (fail-closed — park instead of
+        # risking an endless requeue); a second blow-out falls through to the park below, and the
+        # still-set marker keeps the boost for any Commander-ordered re-run.
+        if (not ticket.ephemeral and not getattr(cfg, "dry_run", False)
+                and builder_mod.turn_retry_count(cfg, ticket.id) == 0
+                and builder_mod.mark_turn_retry(cfg, ticket.id)):
+            audit.record("turn_limit_retry", ticket_id=ticket.id)
+            _notify(cfg, f"⏳ {ticket.id} ran out of turns and can't be split smaller — retrying once "
+                         "with a raised turn budget before bothering you.")
+            print(f"  ⏳ {ticket.id}: turn-limit at the split depth cap — requeued once with a "
+                  "bigger turn budget.", flush=True)
+            return TicketReport(ticket.id, Outcome.REQUEUED, 0, 0.0, app.name,
+                                notes="turn-limit — requeued once with a raised turn budget")
+        # No split possible and the retry is spent → escalate to the Commander, telling him the
+        # TRUTH: auto-split already ran this lineage to its ceiling and a boosted retry also blew
+        # out — "split it yourself" would be asking him to do what the system just declined.
+        note = (f"{ticket.id} ran out of turns even after a boosted retry, and the Scrum Master "
+                "declined to split it further (depth cap — this lineage was already auto-split as "
+                "far as it goes). Re-scope/simplify the ticket, or raise the turn budget "
                 "(builder_max_turns). Nothing was merged.")
         try:
             decisions.add(cfg, ticket, app.name, note)
@@ -1180,7 +1206,15 @@ async def _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget,
 
     if not cfg.dry_run and not ticket.ephemeral:
         # For a resuming ticket this transitions it out of 'Blocked' and back to 'In Progress' (EU-61).
-        backlog.set_status(ticket, "In Progress")
+        # 2026-07-19 audit: this was the ONLY unguarded set_status of 10 call sites — a transient
+        # Atlassian error here ERRORED the whole run before a single build turn (and burned one of
+        # the autopilot's 3 retry strikes). The board claim is cosmetic; the build is the work.
+        try:
+            backlog.set_status(ticket, "In Progress")
+        except Exception as _texc:  # noqa: BLE001 - a status hiccup must never kill the build
+            audit.record("claim_transition_failed", ticket_id=ticket.id, error=str(_texc)[:300])
+            print(f"  · {ticket.id}: could not mark In Progress ({str(_texc)[:120]}) — building anyway.",
+                  flush=True)
     git.checkout_feature(branch)
     # EU-18: re-pin the (possibly reused) worktree's deps to DEV's bun.lock before any
     # build runs, so a prior ticket's dependency drift can't leak into this one.
@@ -1827,13 +1861,53 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # for turn-limit text — a failed build's summary holds only the last assistant message,
             # never the turn-limit phrase; num_turns is the only reliable signal.
             if build.num_turns >= builder_mod.turns_for(cfg, eff):
+                # 2026-07-19: feed the Scrum Master the attempt's REAL progress, not just "it ran
+                # out" — fragments sliced blind repeated the parent's burn and re-blew the ceiling
+                # (the AUTO-15x lineage). The builder's own summary tells the splitter what is
+                # already done and where it got stuck, so fragments can start from the remainder.
+                _progress = (build.summary or build.raw or "").strip()[:1200]
                 split = await _try_scrum_split(
                     cfg, app, ticket, audit,
-                    recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
+                    recap=(f"{ticket.id} ran out of turns before finishing — too big for a single pass."
+                           + (f"\nWhere the attempt got to (builder's own summary):\n{_progress}"
+                              if _progress else "")),
                     reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.",
                     split_reason="turn-limit", iterations=iteration, cost=cost, branch=branch)
                 if split is not None:
                     return _resolve(split)
+                # Same senior ladder as _exception_report (the two turn-limit paths used to
+                # DIVERGE: this one silently became ERRORED — ticking the EU-219 error counter
+                # toward Blocked for a ticket that was neither broken nor wrong, just big — while
+                # the exception path parked a decision). Unsplittable → re-queue ONCE with a
+                # boosted budget; retry spent → park as a decision with the honest note.
+                if (not ticket.ephemeral and not getattr(cfg, "dry_run", False)
+                        and builder_mod.turn_retry_count(cfg, ticket.id) == 0
+                        and builder_mod.mark_turn_retry(cfg, ticket.id)):
+                    audit.record("turn_limit_retry", ticket_id=ticket.id, iteration=iteration)
+                    _notify(cfg, f"⏳ {ticket.id} ran out of turns and can't be split smaller — "
+                                 "retrying once with a raised turn budget before bothering you.")
+                    print(f"  ⏳ {ticket.id}: turn-limit at the split depth cap — requeued once "
+                          "with a bigger turn budget.", flush=True)
+                    return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, iteration, cost,
+                                                 app.name, branch,
+                                                 notes="turn-limit — requeued once with a raised turn budget"))
+                _note = (f"{ticket.id} ran out of turns even after a boosted retry, and the Scrum "
+                         "Master declined to split it further (depth cap — this lineage was already "
+                         "auto-split as far as it goes). Re-scope/simplify the ticket, or raise the "
+                         "turn budget (builder_max_turns). Nothing was merged.")
+                try:
+                    decisions.add(cfg, ticket, app.name, _note)
+                except Exception:  # noqa: BLE001 - the escalation path must never crash the run
+                    pass
+                audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=_note)
+                _notify(cfg, f"🛑 {ticket.id} — ran out of turns twice and couldn't be split. "
+                             "Re-scope it or raise builder_max_turns.\n\n"
+                             + decisions.reply_hint(ticket.id))
+                print(f"  🛑 {ticket.id}: turn-limit — unsplittable, retry spent; escalated to you.",
+                      flush=True)
+                return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost,
+                                             app.name, branch,
+                                             notes="ran out of turns — too big, unsplittable, retry spent"))
             # EU-153: Post build error comment
             build_comment = commenter.summarize_gate_event(
                 "Build", "ERRORED",
@@ -2056,6 +2130,33 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
               + (f" — {len(review.blocking_issues)} blocking issue(s)" if review.blocking_issues else ""),
               flush=True)
         blockers = [q for q in review.quality_issues if q.severity == "blocker"]
+
+        # 2026-07-19 Commander order ("acceptance criteria were done — so why not put that ticket
+        # to QA?"): reconcile an INCONSISTENT FAIL instead of churning on it. Two rules, both
+        # requiring the reviewer's OWN findings to contradict its verdict:
+        #   (a) any pass — FAIL + spec_met + zero blocker/major findings violates the reviewer's
+        #       written contract ("PASS only if…; otherwise FAIL") — the AUTO-198 case: "criteria
+        #       fully met ✅, two minor concerns (not blocking)" yet verdict FAIL, which burned the
+        #       rebuild pass into the turn limit and parked a DONE deliverable on the Commander.
+        #   (b) the FINAL pass — FAIL + spec_met + majors but no blocker: majors past the last
+        #       rebuild can't drive convergence anymore (EU-174/QW3 corpus: 100% of round-≥2
+        #       objections were NEW), so a criteria-met build ships as PASS-with-findings — the
+        #       advisory_ship path below files every leftover as a backlog ticket and lands → QA —
+        #       instead of escalating a finished change. A blocker or unmet criteria NEVER
+        #       reconciles: those FAILs are the reviewer doing its job.
+        if (review.verdict.value == "FAIL" and review.spec_met and not blockers
+                and not review.needs_human):
+            _final_pass = iteration >= max_passes
+            if not review.blocking_issues or _final_pass:
+                _rec_reason = ("fail-with-minors-only" if not review.blocking_issues
+                               else "final-pass-criteria-met-majors")
+                review.verdict = Verdict.PASS
+                audit.record("review_verdict_reconciled", ticket_id=ticket.id,
+                             iteration=iteration, reason=_rec_reason,
+                             majors=len(review.blocking_issues))
+                print(f"  ⚖ review verdict reconciled FAIL→PASS ({_rec_reason}) — criteria met, "
+                      f"nothing blocking; leftovers ship as advisories", flush=True)
+
         if blockers:
             _notify(cfg, f"🚨 {ticket.id} — Code Reviewer found a critical issue ({blockers[0].area}): "
                          f"{blockers[0].detail}")

@@ -461,9 +461,12 @@ _SYNTH_CLASSES: list[tuple[tuple[str, ...], str, list[tuple[str, bool]]]] = [
      "This ticket parked while base 'dev' was RED (the gate failed on the clean tree).",
      [("Re-queue now — the base is green again, build this ticket as specced", True),
       ("Split it into smaller tickets first", False)]),
+    # 2026-07-19: a turn-limit park now only happens AFTER auto-split declined (depth cap) and a
+    # boosted retry also blew out — so "split it" stopped being an honest recommendation. Re-scope
+    # is the senior move; a raw retry stays as the manual override.
     (("ran out of turns", "too big for a single pass", "iteration limit"),
-     "The build ran out of turns — the ticket is likely too big for one pass.",
-     [("Split this ticket into smaller sub-tickets and build those", True),
+     "The build ran out of turns even after auto-split hit its depth cap and one boosted retry.",
+     [("Re-scope: simplify this ticket's description to the smallest shippable slice, then re-queue", True),
       ("Retry as-is — give it one more full pass", False)]),
     (("max passes", "PM escalated", "Reviewer's required changes"),
      "The build hit max passes — the Reviewer kept demanding changes.",

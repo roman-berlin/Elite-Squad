@@ -199,6 +199,7 @@ chk("'...error result: error_during_execution' is NOT swallowed — it re-raises
 #         (autopilot.py:882-893 only bumps on Outcome.ERRORED) is structurally never touched.
 # ==================================================================================================
 from orchestrator import scrum as _scrum_mod   # noqa: E402
+import orchestrator.builder as _builder_real   # noqa: E402 — real turn-retry persistence for the stubs
 
 
 class _Git:
@@ -223,6 +224,11 @@ class _FakeBuilderTurnLimit:
         return BuildResult(ok=False, summary="ran out of runway mid-refactor", cost_usd=3.5,
                            num_turns=97, raw="(last assistant message — no turn-limit phrase)",
                            tools=[])
+
+    # 2026-07-19 senior ladder: the clean-path turn-limit seam now consults the persisted retry
+    # marker off builder_mod — delegate to the real impl (tmp audit_path keeps it isolated).
+    turn_retry_count = staticmethod(_builder_real.turn_retry_count)
+    mark_turn_retry = staticmethod(_builder_real.mark_turn_retry)
 
 
 class _FakeBuilderRealCrash:
@@ -280,7 +286,9 @@ chk("routes through _try_scrum_split: scrum_split audit event with reason='turn-
 chk("EU-219 consecutive-error counter would NOT be incremented (outcome is not ERRORED)",
     rep.outcome is not Outcome.ERRORED, str(rep.outcome))
 
-# ---- when the Scrum Master declines, the clean path still falls back to ERRORED (no crash) ---- #
+# ---- when the Scrum Master declines: the 2026-07-19 senior ladder — requeue ONCE with a boosted
+# ---- budget, and only the SECOND blow-out parks as a decision (never a bare ERRORED, which would
+# ---- tick the EU-219 counter for a ticket that was neither broken nor wrong, just big). -------- #
 async def _split_no(cfg_, app_name, ticket_, recap="", reason="", **k):
     return {"ok": False, "keys": []}
 
@@ -289,8 +297,17 @@ _scrum_mod.split = _split_no
 au2 = Audit()
 tkt2 = Ticket(id="AUTO-249", key="AUTO-249", summary="s", description="d", ephemeral=False, app="automatixy")
 rep2 = asyncio.run(loop._attempt(tkt2, app, cfg, _Git(), None, au2, loop.Budget(0), "autodev/AUTO-249"))
-chk("unsplittable turn-limit build still falls back to Outcome.ERRORED (no crash)",
-    rep2.outcome == Outcome.ERRORED, str(rep2.outcome))
+chk("unsplittable turn-limit: FIRST blow-out requeues once with a boosted budget (not ERRORED)",
+    rep2.outcome == Outcome.REQUEUED, str(rep2.outcome))
+chk("the requeue is audited as turn_limit_retry",
+    any(e["event"] == "turn_limit_retry" for e in au2.ev), str(au2.ev))
+au2b = Audit()
+rep2b = asyncio.run(loop._attempt(tkt2, app, cfg, _Git(), None, au2b, loop.Budget(0), "autodev/AUTO-249"))
+chk("unsplittable turn-limit: SECOND blow-out parks as a decision (ESCALATED), never ERRORED",
+    rep2b.outcome == Outcome.ESCALATED, str(rep2b.outcome))
+chk("the park records needs_human(reason=turn-limit) with the honest depth-cap note",
+    any(e["event"] == "needs_human" and e.get("reason") == "turn-limit"
+        and "depth cap" in e.get("question", "") for e in au2b.ev), str(au2b.ev))
 
 # ---- a build failing WELL BELOW the turn ceiling is a real crash -> straight to ERRORED, no split ---- #
 async def _split_boom(cfg_, app_name, ticket_, recap="", reason="", **k):

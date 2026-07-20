@@ -313,6 +313,15 @@ class JiraAdapter(BacklogAdapter):
             return
         self.session.post(self._url(f"issue/{ticket.key}/transitions"),
                           json={"transition": {"id": match["id"]}}).raise_for_status()
+        # 2026-07-19 audit: a FALLBACK landing used to be indistinguishable from the real target —
+        # on a board with no QA column, land → QA fell back to Done and the human-QA step vanished
+        # with zero trace. The move still happens (better than stranding the ticket), but now it
+        # says so on the ticket, so a skipped QA hand-off is visible instead of silent.
+        landed = match["to"]["name"]
+        if landed.lower() != str(targets[0]).lower():
+            self.add_comment(ticket, f"[autodev] Board has no '{targets[0]}' column — moved to "
+                                     f"'{landed}' instead (fallback). If '{targets[0]}' matters, "
+                                     "add that column to the board.")
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.

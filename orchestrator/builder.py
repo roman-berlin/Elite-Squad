@@ -189,6 +189,44 @@ def size_ticket(ticket) -> tuple[str, str, str]:
     return size, eff, "; ".join(reasons) or "no strong signals"
 
 
+# 2026-07-19 (senior turn-limit loop): per-ticket retry markers for a build that blew the turn
+# ceiling AND couldn't be split smaller (scrum depth cap). loop._exception_report re-queues such a
+# ticket exactly once; the marker is what (a) makes that "once" survive the process (the requeue is
+# picked up by a LATER drain cycle) and (b) tells effort_plan to bump one effort level so the retry
+# actually gets more turns (turns_for scales with effort). Persisted next to the audit log, atomic
+# via locking.locked_rmw like every other state file.
+def _turn_retry_file(cfg):
+    from pathlib import Path
+    return Path(getattr(cfg, "audit_path", "./state/audit.jsonl")).with_name("turn_retries.json")
+
+
+def turn_retry_count(cfg, ticket_id: str) -> int:
+    """How many turn-limit requeues this ticket has already used (0 = none yet)."""
+    import json
+    try:
+        data = json.loads(_turn_retry_file(cfg).read_text(encoding="utf-8"))
+        return int(data.get(str(ticket_id), 0)) if isinstance(data, dict) else 0
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def mark_turn_retry(cfg, ticket_id: str) -> bool:
+    """Persist one turn-limit requeue for ``ticket_id``. Returns False when the write failed —
+    the caller must then NOT retry (fail-closed), or an unwritable state dir would requeue the
+    same blow-out forever."""
+    from . import locking
+
+    def _mut(d):
+        d = d if isinstance(d, dict) else {}
+        d[str(ticket_id)] = int(d.get(str(ticket_id), 0)) + 1
+        return d
+    try:
+        locking.locked_rmw(_turn_retry_file(cfg), _mut, default={}, corrupt_to_default=True)
+        return True
+    except OSError:
+        return False
+
+
 def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     """(effort, human-readable reason) for this build pass.
 
@@ -203,6 +241,13 @@ def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     else:
         base = normalize_effort(getattr(cfg, "builder_effort", "high"))
         reason = f"default → {base}"
+    # Turn-limit requeue boost: a ticket re-queued after blowing the turn ceiling unsplittably
+    # (see loop._exception_report) runs one effort level higher so turns_for grants real headroom.
+    if ticket is not None and turn_retry_count(cfg, getattr(ticket, "id", "")) > 0:
+        boosted = EFFORT_LADDER[min(effort_step_index(base) + 1, len(EFFORT_LADDER) - 1)]
+        if boosted != base:
+            reason += f"; boosted to {boosted} (turn-limit retry)"
+            base = boosted
     if cfg.escalate_effort_on_retry and iteration > 1:
         bumped = EFFORT_LADDER[min(effort_step_index(base) + (iteration - 1), len(EFFORT_LADDER) - 1)]
         if bumped != base:

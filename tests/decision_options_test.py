@@ -127,9 +127,11 @@ chk("(8b) …with a brief summary, not the wall",
     sp and len(sp["summary"]) < 160 and "RED" in sp["summary"])
 chk("(8c) …re-queue is the recommended option",
     sp and sp["options"][0]["recommended"] and "Re-queue" in sp["options"][0]["text"])
-chk("(8d) turn-limit walls synthesize a split-first recommendation",
+# 2026-07-19: a turn-limit park now only happens AFTER auto-split hit its depth cap and one
+# boosted retry — so the honest recommendation is re-scope, with retry as the manual override.
+chk("(8d) turn-limit walls synthesize a re-scope-first recommendation",
     (decisions.synthesize_options("AUTO-152 ran out of turns before finishing — split it") or
-     {}).get("options", [{}])[0].get("text", "").startswith("Split"))
+     {}).get("options", [{}])[0].get("text", "").startswith("Re-scope"))
 chk("(8e) a genuinely free-form question does NOT synthesize",
     decisions.synthesize_options("Which date format should the dashboard use?") is None)
 chk("(8f) summarize_question cuts command dumps",
