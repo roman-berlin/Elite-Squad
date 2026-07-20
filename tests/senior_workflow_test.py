@@ -272,6 +272,33 @@ chk("(C4) marker persist failure → fail-closed park (no retry loop)",
 
 scrum_mod.split = _orig_split
 
+# =========================================================================== D
+# 2026-07-20 Commander order: a land needing MANUAL testing carries the exact steps and goes to
+# the Blocked column ('Needs Human'), not QA. Pinned on the _manual_test_block helper + source.
+_b_manual = BuildResult(ok=True, cost_usd=0.0, num_turns=1, tools=[], raw="",
+                        summary="did it\n\nMANUAL TEST:\n1. Open /trips on iPhone Safari\n"
+                                "2. Pick a trip May 1-7\n3. Every day 1..7 shows the highlight\n\n"
+                                "TEST: /trips")
+_r_clean = ReviewResult(verdict=Verdict.PASS, spec_met=True, quality_issues=[], summary="ok")
+blk = loop._manual_test_block(_b_manual, _r_clean)
+chk("(D1) the Builder's MANUAL TEST block is extracted verbatim",
+    blk is not None and "iPhone Safari" in blk and "May 1-7" in blk and "TEST: /trips" not in blk, blk)
+_b_clean = BuildResult(ok=True, summary="did it\nTEST: /x", cost_usd=0.0, num_turns=1, raw="", tools=[])
+_r_gaps = ReviewResult(verdict=Verdict.PASS, spec_met=True, quality_issues=[], summary="ok",
+                       unverifiable_gaps=["Mobile Safari matrix not runnable by the gate"])
+blk2 = loop._manual_test_block(_b_clean, _r_gaps)
+chk("(D2) unverifiable review gaps synthesize a numbered manual checklist",
+    blk2 is not None and "1. Verify by hand" in blk2 and "Mobile Safari" in blk2, blk2)
+chk("(D3) a fully-verified land has NO manual block (stays on the QA path)",
+    loop._manual_test_block(_b_clean, _r_clean) is None)
+_lsrc2 = Path("orchestrator/loop.py").read_text(encoding="utf-8")
+chk("(D4) the land reroutes manual-test tickets to 'Needs Human' (the Blocked column) with the steps",
+    'backlog.set_status(ticket, "Needs Human")' in _lsrc2
+    and "MANUAL TEST STEPS:" in _lsrc2 and 'audit.record("manual_test_required"' in _lsrc2)
+_bsrc2 = Path("orchestrator/builder.py").read_text(encoding="utf-8")
+chk("(D5) the Builder contract demands exact numbered steps for anything it could not verify",
+    "MANUAL TEST contract" in _bsrc2 and "NUMBERED, exact steps" in _bsrc2)
+
 print("\n========== SENIOR WORKFLOW QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

@@ -131,6 +131,12 @@ lsrc = Path("orchestrator/loop.py").read_text(encoding="utf-8")
 chk("(7) _attempt audits squad_selected for elite runs",
     'audit.record("squad_selected"' in lsrc and "resolve_for_ticket(cfg, ticket)" in lsrc)
 
+# (8) the iteration reports reach the LIVE console stream (2026-07-20 live-fire finding: text
+# only reached the transcript, so the Commander could not watch the methodology working)
+asrc = Path("orchestrator/agent.py").read_text(encoding="utf-8")
+chk("(8) agent streams DID/CHECKED/FOUND/FIXING/NEXT lines to the console",
+    '"DID:", "CHECKED:", "FOUND:"' in asrc and '"FIXING:", "NEXT:"' in asrc)
+
 print("\n========== SQUAD MODES QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

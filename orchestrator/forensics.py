@@ -243,6 +243,27 @@ def signature_key(text: str) -> str:
     return " ".join(s.lower().split())[:160]
 
 
+def _self_app(cfg) -> object | None:
+    """The configured app whose repo IS this orchestrator itself (the Elite-Unit / EU project),
+    else None. 2026-07-20 (live-fire finding): infra signatures — turn-limit, control-request
+    timeout, max-passes — are failure classes of the UNIT, so their tickets belong in the unit's
+    own backlog. Filing them into the app whose tickets happened to crash (AUTO-200/201/202) put
+    unbuildable meta-tickets in the Commander's product queue, where a drain would pick one up and
+    burn a real build trying to 'implement' a crash signature inside the product repo."""
+    from pathlib import Path
+    try:
+        me = Path(__file__).resolve().parents[1]
+    except OSError:
+        return None
+    for a in getattr(cfg, "apps", None) or []:
+        try:
+            if Path(a.repo_path).resolve() == me:
+                return a
+        except OSError:
+            continue
+    return None
+
+
 def _resolve_app(cfg, rows) -> object | None:
     """The first row whose app name resolves to a configured app (rows given newest-first), or None.
     An unresolvable app (renamed/removed from config) skips filing rather than raising."""
@@ -344,7 +365,11 @@ def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
             tickets = {r.get("ticket_id") or "?" for r in rows}
             if len(rows) < _SIG_MIN_OCCURRENCES or len(tickets) < _SIG_MIN_TICKETS:
                 continue
-            app_cfg = _resolve_app(cfg, rows)
+            # Infra signatures are the UNIT's own defects — file them on the orchestrator's
+            # project (EU) when it is a configured app, not into the product backlog whose
+            # tickets happened to be the victims. Fall back to the old victim-app routing only
+            # when the unit isn't registered as an app (evidence lines still name the victims).
+            app_cfg = _self_app(cfg) or _resolve_app(cfg, rows)
             if app_cfg is None:
                 continue
             evidence = "\n".join(

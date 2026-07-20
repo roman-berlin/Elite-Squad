@@ -103,6 +103,14 @@ Any brief prose detail may follow the bullets. End with a line EXACTLY in this f
   TEST: <the single page/route to verify this on DEV, e.g. /leads — or a full URL>
 so the Commander knows exactly where to check. If the change has no UI (pure backend/config),
 write 'TEST: (no UI — <how to verify, e.g. an endpoint/command>)'.
+
+MANUAL TEST contract (2026-07-20 Commander order): if ANY acceptance criterion could NOT be
+verified by you — missing env/credentials, a device/browser matrix you cannot run, a visual
+check needing human eyes — your summary MUST include a section starting exactly 'MANUAL TEST:'
+with NUMBERED, exact steps for each unverified item: where to go (page/route), what to do
+(clicks/input), and precisely what the Commander must see to pass it. The pipeline lands such a
+ticket into the Blocked column with your steps as the hand-off comment, so vague steps = a stuck
+ticket. Omit the section entirely when you verified everything yourself.
 """
 
 

@@ -2578,6 +2578,30 @@ def _commit_message(ticket, build) -> str:
     return "\n\n".join(parts)
 
 
+def _manual_test_block(build, review) -> str | None:
+    """The manual-test hand-off text when this land needs the Commander's hands, else None
+    (2026-07-20 Commander order: 'if need manual testing they need to write in the comments the
+    exact test steps and put in Blocked').
+
+    Two deterministic signals, either suffices:
+      · the Builder's own 'MANUAL TEST:' section (the prompt contract obliges it whenever an AC
+        could not be verified — missing env, device/browser matrix, visual checks). Used VERBATIM:
+        the Builder knows the exact steps.
+      · review.unverifiable_gaps — the escalate-once demotions (exec-gate / EU-351): claims nobody
+        mechanical could verify. Rendered as a numbered checklist when the Builder wrote no block.
+    """
+    summary = (getattr(build, "summary", "") or getattr(build, "raw", "") or "")
+    m = re.search(r"MANUAL TEST:\s*\n?(.*?)(?:\n\s*\n[A-Z]{2,}|\nTEST:|\Z)", summary, re.S)
+    block = (m.group(1).strip() if m else "")
+    gaps = list(getattr(review, "unverifiable_gaps", None) or [])
+    if block:
+        return block
+    if gaps:
+        steps = "\n".join(f"{i + 1}. Verify by hand: {g}" for i, g in enumerate(gaps))
+        return "The unit could not verify these itself:\n" + steps
+    return None
+
+
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
           commenter=None) -> TicketReport:
     if commenter is None:
@@ -2719,15 +2743,31 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         if not ticket.ephemeral:
             from . import dashboard as _D
             whatdone = _D.bullets(review.summary or build.summary, limit=3, width=200)
-            head = "marked Done" if cfg.mark_done_on_merge else "moved to QA"
+            # 2026-07-20 Commander order: a land whose verification needs HUMAN hands (an AC the
+            # unit could not run itself) goes to the Blocked column with the EXACT manual test
+            # steps as the hand-off comment — not to QA as if it were fully machine-verified.
+            # ('Needs Human' is the logical status the boards map to their Blocked column.)
+            manual = None if cfg.mark_done_on_merge else _manual_test_block(build, review)
+            head = ("marked Done" if cfg.mark_done_on_merge
+                    else "moved to Blocked — manual test needed" if manual else "moved to QA")
             # Best-effort: the code IS merged at this point — a Jira hiccup here must degrade to a
             # log line, not propagate to _exception_report and mislabel a successful land as a
             # ticket_exception (which would strand the already-merged ticket In Progress).
             try:
-                backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
-                backlog.add_comment(
-                    ticket,
-                    f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
+                if manual:
+                    backlog.set_status(ticket, "Needs Human")
+                    backlog.add_comment(
+                        ticket,
+                        f"🧪 Merged to {app.base_branch} — needs YOUR manual test before sign-off.\n\n"
+                        f"MANUAL TEST STEPS:\n{manual}{test_line}\n\n"
+                        f"Pass → move to Done. Fail → comment what broke and move it back to To Do.")
+                    audit.record("manual_test_required", ticket_id=ticket.id,
+                                 gaps=list(getattr(review, "unverifiable_gaps", None) or [])[:8])
+                else:
+                    backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
+                    backlog.add_comment(
+                        ticket,
+                        f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
             except Exception as exc:  # noqa: BLE001 — tracker trouble never un-lands a merge
                 # EU-310: a lost post-merge transition strands the ticket In Progress, so the drain
                 # re-picks and rebuilds already-merged code (EU-307, 2026-07-14). Record it as an
@@ -2739,7 +2779,12 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             # is already Done/QA, close the Epic itself — otherwise auto-split Epics accumulate
             # open forever. Best-effort inside the helper: never un-lands the merge.
             _maybe_close_epic(backlog, ticket, audit)
-        done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
+        _manual_tail = (not ticket.ephemeral and not cfg.mark_done_on_merge
+                        and _manual_test_block(build, review))
+        done = "" if ticket.ephemeral else (
+            " · marked Done" if cfg.mark_done_on_merge
+            else " · moved to Blocked — exact manual test steps are on the ticket" if _manual_tail
+            else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,
                      done=cfg.mark_done_on_merge)
