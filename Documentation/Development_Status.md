@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-21 · AUTO-213 · automatixy · • Validation (isSafePolicyUrl): http(s)+same-origin+exact-path allowlist rejects javascript:/data:/protocol-relative/cross-origin/off-path/malformed — verified. · 🔗 /dashboard (onboarding consent modal — click the Terms of Service / Privacy Policy links)
 - 2026-07-20 · AUTO-80 · automatixy · • Pill styling confirmed verbatim against SettingsPage (container + active/muted trigger classes match). · 🔗 / (עמוד "דשבורד")
 - 2026-07-20 · AUTO-73 · automatixy · • Both requirements met: proposal detail-on-click + tenant-scoped edit/save, and the auto-timestamped memo journal (newest-first). · 🔗 /clients/<client-id> (an individual client card — e.g. open "היסטוריית לידים" → click a lead row, and use "מזכר חדש" in "היסטוריית שיחות")
 - 2026-07-20 · AUTO-59 · automatixy · • Spec met: every sub-AA text-muted-foreground/NN and text-foreground/NN≤80 removed across zelmero-app; only intentional /85 and /90 remain (grep-verified). · 🔗 /trips (open any trip — verify the event time `--:--` placeholder, event location row, expand chevron, expenses settlement-currency note, weather local-time line, and budget summary currency all render in readable muted text at full opacity; no overly-faint text remains in light mode)
