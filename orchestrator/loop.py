@@ -859,6 +859,66 @@ def _split_lineage(ticket: Ticket) -> str | None:
     return m.group(1) if m else None
 
 
+# 2026-07-20 (Commander order — "develop 2 different tickets so there will not be conflicts"):
+# conflict-aware co-scheduling for the concurrent drain. Two tickets may build in parallel ONLY
+# when their predicted code footprints are disjoint; overlapping or unpredictable footprints
+# serialize. The footprint comes from the ticket TEXT — this unit's tickets consistently cite
+# their paths ("Where: apps/x/src/components/calendar/…"), which is exactly the signal a senior
+# lead uses when handing two tasks to two developers.
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@-]+(?:/[A-Za-z0-9_.@\[\]{}*-]+)+")
+
+
+def _ticket_footprint(ticket: Ticket) -> frozenset[str]:
+    """The set of DIRECTORY paths this ticket's text names (trailing filename stripped, lowered).
+    Empty = the ticket names no paths, so its footprint is unpredictable."""
+    text = " ".join([ticket.summary or "", ticket.description or "",
+                     " ".join(ticket.acceptance_criteria or [])])
+    dirs: set[str] = set()
+    for m in _PATH_TOKEN_RE.finditer(text):
+        parts = [p for p in m.group(0).strip("`'\".,()").split("/") if p and p not in (".", "..")]
+        if parts and "." in parts[-1]:      # drop a trailing FILE so dirs compare with dirs
+            parts = parts[:-1]
+        if len(parts) >= 2:                 # a single bare segment ('src') is too weak a signal
+            dirs.add("/".join(parts).lower())
+    return frozenset(dirs)
+
+
+def _tickets_conflict(a: Ticket, b: Ticket) -> bool:
+    """True when the two tickets must NOT build concurrently: either footprint is unpredictable
+    (no paths cited — conservative), or any cited directory of one contains/equals one of the
+    other's (apps/x/src/components/calendar vs …/calendar → conflict; …/calendar vs …/leads →
+    parallel; a ticket citing the whole app root conflicts with everything inside it)."""
+    fa, fb = _ticket_footprint(a), _ticket_footprint(b)
+    if not fa or not fb:
+        return True
+    return any(p == q or p.startswith(q + "/") or q.startswith(p + "/")
+               for p in fa for q in fb)
+
+
+def _host_free_gb() -> float:
+    """Available host memory in GB (free+inactive+speculative via vm_stat on macOS,
+    MemAvailable on Linux). inf when unmeasurable — the guard then never blocks.
+    2026-07-17 incident this exists for: two concurrent builder contexts exhausted the 24GB box
+    (~72MB free), macOS SIGTERM-killed BOTH slots at once (exit-143 x2) — losing two builds is
+    strictly worse than briefly running serial."""
+    import subprocess as _sp
+    try:
+        if os.path.exists("/proc/meminfo"):
+            for line in open("/proc/meminfo", encoding="utf-8"):
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1e6      # kB → GB
+            return float("inf")
+        out = _sp.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        page = 16384 if "page size of 16384" in out else 4096
+        pages = 0
+        for line in out.splitlines():
+            if line.startswith(("Pages free:", "Pages inactive:", "Pages speculative:")):
+                pages += int(line.split()[-1].rstrip("."))
+        return pages * page / 1e9
+    except Exception:  # noqa: BLE001 — an unmeasurable host must not stall the drain
+        return float("inf")
+
+
 async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                                 audit: AuditLog, stop_event, stop_between_tickets,
                                 n: int) -> list[TicketReport]:
@@ -885,6 +945,8 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
     base_halted: set[str] = set()
     in_flight_lineage: set[str] = set()
     in_flight_ids: set[str] = set()
+    in_flight_tickets: dict[str, Ticket] = {}   # id → Ticket, for the footprint-conflict guard
+    conflict_audited: set[tuple[str, str]] = set()
     locks = ExitStack()
     slot_busy: set[tuple[str, int]] = set()
 
@@ -906,11 +968,39 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
                     (ticket.id in in_flight_lineage):
                 queue.append((app, ticket))   # a sibling (or its parent) is mid-build — defer
                 continue
+            # 2026-07-20: footprint-conflict guard — never co-build two tickets whose cited
+            # paths overlap (or whose footprint is unpredictable). Deferred to the tail; the
+            # audit event fires once per (ticket, in-flight) pair, not on every poll.
+            clash = next((t for t in in_flight_tickets.values()
+                          if _tickets_conflict(ticket, t)), None)
+            if clash is not None:
+                if (ticket.id, clash.id) not in conflict_audited:
+                    conflict_audited.add((ticket.id, clash.id))
+                    audit.record("conflict_deferred", ticket_id=ticket.id, against=clash.id)
+                    print(f"  ⇄ {ticket.id}: overlaps in-flight {clash.id} — deferred so the "
+                          "two builders never touch the same code.", flush=True)
+                queue.append((app, ticket))
+                continue
             return app, ticket
         return None
 
+    _mem_floor = float(getattr(cfg, "concurrent_min_free_gb", 6.0) or 0)
+    _mem_deferred_logged: set[int] = set()
+
     async def _worker(slot: int) -> None:
         while not _stopped() and not budget.exceeded():
+            # Memory floor (2026-07-17 OOM revert lesson): only slot 0 works unconditionally.
+            # Extra slots stand down while host memory is below the floor — the drain degrades
+            # to serial under pressure instead of macOS SIGTERM-killing every build at once.
+            if slot > 0 and _mem_floor > 0 and _host_free_gb() < _mem_floor:
+                if slot not in _mem_deferred_logged:
+                    _mem_deferred_logged.add(slot)
+                    audit.record("memory_deferred", slot=slot, floor_gb=_mem_floor)
+                    print(f"  ⏸ slot {slot}: host memory below {_mem_floor}GB — running serial "
+                          "until pressure clears.", flush=True)
+                await asyncio.sleep(30)
+                continue
+            _mem_deferred_logged.discard(slot)
             picked = _pick()
             if picked is None:
                 if not queue or not in_flight_ids:
@@ -920,6 +1010,7 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
             app, ticket = picked
             lineage = _split_lineage(ticket)
             in_flight_ids.add(ticket.id)
+            in_flight_tickets[ticket.id] = ticket
             if lineage:
                 in_flight_lineage.add(lineage)
             try:
@@ -982,6 +1073,7 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
                     pass
             finally:
                 in_flight_ids.discard(ticket.id)
+                in_flight_tickets.pop(ticket.id, None)
                 if lineage:
                     in_flight_lineage.discard(lineage)
 

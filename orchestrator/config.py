@@ -198,6 +198,10 @@ class Config:
     # race-absorbed by EU-379's in-process re-trial. Measured envelope: N=2 ≈ 1.7x throughput,
     # N=3 ≈ 2.9x; N≥5 collides with the observed 235M-token/5h plan ceiling — don't.
     max_concurrent_builders: int = 1
+    # 2026-07-20 (re-arm N=2 after the 2026-07-17 OOM revert): extra builder slots stand down
+    # while host free memory is below this floor (GB) — the drain degrades to SERIAL under
+    # pressure instead of macOS SIGTERM-killing every concurrent build at once. 0 disables.
+    concurrent_min_free_gb: float = 6.0
     # EU-387 (closes the EU-224/EU-384 epic): after a live land to the unit's OWN repo, exit the
     # process cleanly at the next fully-idle drain cycle (exit 75) so the keepalive respawns it on
     # the new code, and EU-385's boot resume re-arms the drains. Refuses on a dirty tree (EU-386).
