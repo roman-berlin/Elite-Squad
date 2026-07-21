@@ -324,6 +324,23 @@ class JiraAdapter(BacklogAdapter):
         except requests.RequestException:
             return None
 
+    def status_category(self, key: str) -> str | None:
+        """The issue's statusCategory key ('new' | 'indeterminate' | 'done'), or None when it can't be
+        determined (unreachable board, unknown issue, auth-blind 200, bad JSON). Used by the
+        branch-retirement sweep (EU-426), which prunes an unmerged autodev/<KEY>-* branch ONLY when
+        this is 'done' — so a None here means 'do not prune' (fail closed: an unknown status must
+        never authorise a delete). statusCategory is read straight off the status object Jira returns
+        (same shape epic_children already decodes), so it is robust to board-specific status NAMES
+        (Done / Closed / Resolved / Shipped all carry category 'done')."""
+        try:
+            r = self.session.get(self._url(f"issue/{key}"), params={"fields": "status"})
+            r.raise_for_status()
+            self._raise_if_unauthenticated(r)   # a 200-empty here can mean 'bad token', not 'no issue'
+            status = (r.json().get("fields", {}) or {}).get("status", {}) or {}
+            return ((status.get("statusCategory") or {}).get("key")) or None
+        except (requests.RequestException, RuntimeError, ValueError):
+            return None
+
     def set_status(self, ticket: Ticket, status: str) -> None:
         # Candidates: the mapped target, then its per-board fallbacks (e.g. QA → Done/Closed for a
         # board that has no QA column). Without the chain, a missing target silently stranded the
