@@ -381,7 +381,9 @@ async def scribe(cfg) -> str:
         r = consolidate.run(cfg)
         bits = []
         if r.get("added"):
-            bits.append(f"+{len(r['added'])} rejection lesson(s)")
+            # EU-399: `added` now also carries recurrence lessons (needs_human / exception / gate
+            # signatures), not just reviewer-rejection themes — so the label says "lesson(s)".
+            bits.append(f"+{len(r['added'])} lesson(s)")
         if r.get("removed_dupes"):
             bits.append(f"−{r['removed_dupes']} dup(s)")
         if r.get("pruned"):
