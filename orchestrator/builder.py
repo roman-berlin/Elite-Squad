@@ -5,7 +5,7 @@ import re
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory
+from . import backends, memory
 from .agent import run_agent, run_agent_with_fallback
 from .config import (AppConfig, Config, EFFORT_LADDER, effort_step_index,
                      normalize_effort)
@@ -328,16 +328,49 @@ def effort_for(cfg: Config, iteration: int, ticket=None) -> str:
 # ticket doesn't error out at the turn cap mid-implementation (e.g. base 60 -> high 96 -> max 144).
 _TURN_SCALE = {"low": 1.0, "medium": 1.0, "high": 1.6, "xhigh": 2.4, "max": 2.4}
 
+# EU-393: a weak (GLM) backend burns roughly ONE tool call per turn (vs. several for Opus), so a
+# turn/task-budget ceiling sized for Opus starves it before it even clears exploration — splitting
+# the ticket doesn't help, every fragment just inherits the same too-small-for-GLM ceiling. 2.0 is
+# inside the ticket's 2-2.5x band.
+_BACKEND_TURN_SCALE = 2.0
+
+
+def _backend_turn_scale(cfg: Config | None = None) -> float:
+    """The turn/task-budget multiplier for THIS build pass's EFFECTIVE backend.
+
+    Per-run and hybrid-aware: :func:`backends.current_for_tag` routes a ``'builder'`` call to the
+    pinned hybrid secondary when hybrid mode is on, falling back to the run-pinned
+    :func:`backends.current` otherwise — so the scale tracks the backend the Builder is ACTUALLY
+    routed to, not the fleet default. Only when no hybrid secondary is pinned at all does it also
+    consult ``cfg.model_backend`` (mirroring :func:`backends.is_glm`'s dual check), so a direct
+    call with a cfg but no run context (tests, ``run_agent_with_fallback`` paths) still classifies
+    correctly — a resolved run pin (even to NATIVE) always wins over the fleet-default cfg value.
+
+    'Weak' uses the SAME signal ``loop.py`` uses for ``HARD_MAX_PASSES_WEAK``:
+    ``backends.normalize(effective) != backends.NATIVE`` — unknown/registry ids normalize safely
+    to NATIVE, never silently to GLM."""
+    effective = backends.current_for_tag("builder")
+    if (backends.normalize(effective) == backends.NATIVE
+            and backends.hybrid_secondary() is None and cfg is not None):
+        effective = getattr(cfg, "model_backend", backends.NATIVE)
+    return _BACKEND_TURN_SCALE if backends.normalize(effective) != backends.NATIVE else 1.0
+
 
 def turns_for(cfg: Config, effort: str) -> int:
-    """Max build turns for this effort: the configured base, scaled up for high/max."""
+    """Max build turns for this effort: the configured base, scaled up for high/max, and again
+    (EU-393) for a weak/GLM backend — it burns ~1 tool call/turn, so the same ceiling starves it
+    before exploration finishes. NATIVE resolves to a 1.0 backend scale, so Anthropic-tier values
+    are unchanged."""
     base = int(getattr(cfg, "builder_max_turns", 60) or 60)
-    return max(base, int(base * _TURN_SCALE.get(effort, 1.0)))
+    return max(base, int(base * _TURN_SCALE.get(effort, 1.0) * _backend_turn_scale(cfg)))
 
 
 def budget_for(cfg: Config, effort: str) -> int:
     """EU-377: the pass's task_budget (tokens of NEW content — model output + tool results read),
-    scaled by effort like turns_for. 0 disables (no budget sent).
+    scaled by effort like turns_for, and (EU-393) by the same backend factor — a weak/GLM pass
+    still needs the classification seam and registry-routed weak backends get the wider budget,
+    even though GLM itself currently skips task_budget (see the call site, builder.py ~659: the
+    backend won't honour the beta header). 0 disables (no budget sent).
 
     Why this and not max_turns alone: the builder's cost is quadratic in turns (fitted over 319
     passes: in_tok ≈ 728·N² + 26,491·N, a 36x replay multiple), and 70% of the 1,455-tok/turn
@@ -349,7 +382,7 @@ def budget_for(cfg: Config, effort: str) -> int:
     if base <= 0:
         return 0
     # The SDK floor is 20,000; anything lower would be rejected.
-    return max(20_000, int(base * _TURN_SCALE.get(effort, 1.0)))
+    return max(20_000, int(base * _TURN_SCALE.get(effort, 1.0) * _backend_turn_scale(cfg)))
 
 
 # EU-38: prior_issues/feedback is the single biggest input-token contributor on retries — it grows

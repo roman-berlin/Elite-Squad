@@ -168,6 +168,13 @@ def current_for_tag(tag: str | None) -> str:
     return current()
 
 
+def hybrid_secondary() -> str | None:
+    """The pinned hybrid secondary for this run context, or None if hybrid mode is off (EU-393:
+    lets a caller tell "no hybrid secondary pinned -> fall back to some other weak-backend signal"
+    apart from "a secondary IS pinned, even to NATIVE" -> that resolved pin should win outright)."""
+    return _HYBRID_SECONDARY.get(None)
+
+
 def set_backend(value: str | None, registry=None):
     """Pin the backend for the current run context. Returns a token for :func:`reset_backend`.
 
