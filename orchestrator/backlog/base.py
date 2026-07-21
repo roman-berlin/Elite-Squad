@@ -45,6 +45,13 @@ class BacklogAdapter(ABC):
         """Optional: find an open ticket with this summary, for de-dup. Default: None."""
         return None
 
+    def find_open_by_label(self, label: str) -> Optional[str]:
+        """Optional: find an open ticket carrying ``label`` — the SUBJECT-level de-dup key
+        (2026-07-21). Exact-title matching alone let six differently-worded reports of one
+        problem through (EU-409..414); filing now stamps a subject fingerprint label and looks
+        THAT up first. Default: not supported (callers fall back to the title match)."""
+        return None
+
     def comments(self, key: str) -> list:
         """Optional: all human-visible comments on a ticket, oldest -> newest. The read half of a
         decision round-trip (the loop posts a question, the Commander answers in a comment).

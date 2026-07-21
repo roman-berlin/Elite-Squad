@@ -98,6 +98,35 @@ def parse_tickets(report: str) -> tuple[list[dict], str]:
     return [d for d in data if isinstance(d, dict) and str(d.get("title", "")).strip()], clean
 
 
+_ANCHOR_RE = re.compile(r"[A-Za-z0-9_]+(?:[./][A-Za-z0-9_]+)+|[a-z0-9]+(?:_[a-z0-9]+){2,}")
+
+
+def subject_fingerprint(title: str, body: str = "") -> str | None:
+    """A stable de-dup label for a finding's SUBJECT (2026-07-21). Six differently-worded reports
+    of one failing test (EU-409..414) sailed past the exact-title match — but every one of them
+    named the same code anchors (`eu255_env_minimization_test.py`). Extract the path-like /
+    snake_case identifiers, keep the 3 most distinctive (longest), and hash them into a Jira-safe
+    label. Prose-only findings (no anchors) return None — the title match stays their only key."""
+    text = f"{title or ''}\n{body or ''}"
+    anchors: set[str] = set()
+    for m in _ANCHOR_RE.finditer(text):
+        a = m.group(0).lower().rstrip(".").rsplit("/", 1)[-1]     # basename — path prefixes vary
+        for ext in (".py", ".ts", ".tsx", ".js", ".sh", ".md", ".yaml", ".yml", ".json"):
+            if a.endswith(ext):
+                a = a[: -len(ext)]
+                break
+        if len(a) >= 8 and not a.replace(".", "").replace("_", "").isdigit():
+            anchors.add(a)
+    if not anchors:
+        return None
+    # ONE key: the single most distinctive (longest) anchor. Two findings that orbit the same
+    # file/identifier are the same SUBJECT for de-dup purposes — that is exactly the EU-409..414
+    # class (six phrasings, one failing test).
+    top = sorted(sorted(anchors), key=len, reverse=True)[0]
+    import hashlib
+    return "fp-" + hashlib.sha1(top.encode("utf-8")).hexdigest()[:12]
+
+
 def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResult:
     """Create a ticket per proposed finding (de-duped). Returns the REAL per-finding outcome
     (filed / deduped / failed) plus the human result lines — so callers report what actually
@@ -113,14 +142,23 @@ def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResu
             continue
         severity = str(p.get("severity", "") or "").strip().upper()
         priority = _SEVERITY_TO_PRIORITY.get(severity)
+        body = str(p.get("body", ""))
+        fp = subject_fingerprint(title, body)
         try:
-            existing = backlog.find_open_by_summary(title)
+            # Subject-level de-dup FIRST (2026-07-21): the fingerprint label survives rewording,
+            # the exact-title match stays as the fallback (and the only key for prose findings).
+            # getattr-guarded like _with_default_timeout: bare test stubs and older adapters
+            # without the method just skip straight to the title match.
+            _by_label = getattr(backlog, "find_open_by_label", None)
+            existing = _by_label(fp) if (fp and callable(_by_label)) else None
+            if not existing:
+                existing = backlog.find_open_by_summary(title)
             if existing:
                 res.deduped.append(existing)
                 res.lines.append(f"↺ {existing} already open — {title}")
                 continue
-            key = backlog.create_task(title, str(p.get("body", "")),
-                                      labels=[officer_label, "autofiled"],
+            key = backlog.create_task(title, body,
+                                      labels=[officer_label, "autofiled"] + ([fp] if fp else []),
                                       issue_type=str(p.get("type", "Task")) or "Task",
                                       priority=priority)
             if key:

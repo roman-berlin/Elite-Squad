@@ -431,6 +431,26 @@ class JiraAdapter(BacklogAdapter):
                 return it.get("key")
         return None
 
+    def find_open_by_label(self, label: str) -> str | None:
+        """Return an OPEN ticket carrying ``label``, else None. The subject-level de-dup key
+        (2026-07-21): filing stamps a fingerprint label derived from the finding's code anchors,
+        so six differently-worded reports of ONE problem (EU-409..414) collapse to one ticket.
+        Raises BacklogSearchError when the search can't run — same fail-closed contract as
+        find_open_by_summary (EU-365): an outage must never read as "no duplicate"."""
+        lab = "".join(ch for ch in (label or "") if ch.isalnum() or ch in "-_")[:60]
+        if not lab:
+            return None
+        try:
+            r = self.session.post(self._url("search/jql"), json={
+                "jql": f'project = "{self.project}" AND statusCategory != Done AND labels = "{lab}"',
+                "maxResults": 1, "fields": ["summary"]})
+            r.raise_for_status()
+            issues = r.json().get("issues", [])
+        except requests.RequestException as exc:
+            raise BacklogSearchError(
+                f"label de-dup search failed for project '{self.project}': {exc}") from exc
+        return issues[0].get("key") if issues else None
+
     # -- Senior PM operations: close & transition -------------------------------- #
     def close_ticket(self, ticket_id: str, comment: str = "", audit=None) -> bool:
         """Close a ticket with an optional comment. Returns True on success.
