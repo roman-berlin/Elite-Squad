@@ -356,6 +356,46 @@ def _file_postmortem_ticket(cfg, ticket_id: str, audit=None) -> str | None:
     return key
 
 
+def _sig_state_file(cfg) -> Path:
+    return Path(getattr(cfg, "audit_path", "./state/audit.jsonl")).with_name("signature_filed.json")
+
+
+def _sig_last_filed(cfg) -> dict:
+    """{normalized signature: unix ts of the last ticket we filed for it}. Empty on any read
+    problem — an unreadable ledger must never suppress a genuine new pattern (fail OPEN here:
+    the cost of a duplicate ticket is noise; the cost of silence is a missed crash class)."""
+    import json as _json
+    try:
+        data = _json.loads(_sig_state_file(cfg).read_text(encoding="utf-8"))
+        return {str(k): float(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _mark_sig_filed(cfg, sig: str, when: float) -> None:
+    """Record that this signature's evidence up to ``when`` has been surfaced. Best-effort."""
+    from . import locking
+
+    def _mut(d):
+        d = d if isinstance(d, dict) else {}
+        d[str(sig)] = float(when)
+        return d
+    try:
+        locking.locked_rmw(_sig_state_file(cfg), _mut, default={}, corrupt_to_default=True)
+    except OSError:
+        pass
+
+
+def _row_ts(row: dict) -> float:
+    """A failed-run row's start time as a unix ts (0.0 when undatable — such a row can never be
+    'newer than the last filing', so it stays out of a re-open decision)."""
+    started = row.get("started")
+    try:
+        return float(started.timestamp()) if started is not None else 0.0
+    except (AttributeError, OSError, OverflowError, ValueError):
+        return 0.0
+
+
 def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
     """EU-231b — cross-ticket crash-signature aggregator: scan the last 7 days of failed runs and,
     when the SAME normalized signature appears >= 3 times across >= 2 distinct tickets, auto-file
@@ -386,7 +426,16 @@ def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
                 continue
             groups.setdefault(sig, []).append(r)
         filed: list[str] = []
+        # 2026-07-21: only count evidence the Commander has NOT already been shown. Closing a
+        # tracker used to guarantee its return: the 7-day window still held the same old failures,
+        # so the very next sweep re-filed the identical signature (EU-415/416/401 → EU-422/423/424
+        # within two hours of being closed). A filed ticket ACKNOWLEDGES the rows that existed at
+        # filing time; only genuinely NEW recurrences may re-open the class.
+        seen_before = _sig_last_filed(cfg)
         for sig, rows in groups.items():
+            since = seen_before.get(sig, 0.0)
+            if since:
+                rows = [r for r in rows if _row_ts(r) > since]
             tickets = {r.get("ticket_id") or "?" for r in rows}
             if len(rows) < _SIG_MIN_OCCURRENCES or len(tickets) < _SIG_MIN_TICKETS:
                 continue
@@ -412,6 +461,10 @@ def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
                             {"title": title, "type": "Bug", "severity": "HIGH", "body": body})
             if key:
                 filed.append(key)
+                # Acknowledge exactly the evidence this ticket carries: a later sweep counts only
+                # rows NEWER than the newest row we just reported, so closing the ticket cannot
+                # resurrect it from the same failures.
+                _mark_sig_filed(cfg, sig, max((_row_ts(r) for r in rows), default=time.time()))
                 if audit is not None:
                     audit.record("crash_signature_filed", filed=key, occurrences=len(rows),
                                  tickets=sorted(tickets), signature=sig[:160])
