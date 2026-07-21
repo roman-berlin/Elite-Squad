@@ -824,6 +824,40 @@ def save_blocked(cfg: Config, blocked: set[str]) -> None:
             time.sleep(0.05)
 
 
+def remove_blocked(cfg: Config, ids) -> set[str]:
+    """EU-406: remove EXACTLY ``ids`` from blocked_tickets.json in one locked read-modify-write
+    against the CURRENT store — never a snapshot overwrite.
+
+    ``save_blocked`` takes a full set and writes it back under the lock, which is correct for a
+    caller that has just built the whole set itself (the in-drain park path reloads right before
+    writing). But a caller that snapshotted the set, went away to do minutes of work (e.g.
+    needs_sync.reconcile's Jira scan), and then wrote its stale snapshot back would silently
+    erase every park a concurrent drain made in the meantime (the EU-218 "came back from the
+    dead" lost-park class). This primitive closes that window: it reads the store INSIDE the lock
+    and subtracts only the ids the caller actually decided to clear, so concurrent add/remove
+    (a /unblock, a fresh error-park) survive.
+
+    Idempotent: an id already absent is a no-op. Best-effort on I/O (mirrors ``save_blocked``):
+    one bounded retry, then a best-effort swallow — a dropped write leaves the park set stale,
+    never crashes the caller. Returns the resulting parked set (re-read after the write) so the
+    caller can report what survived."""
+    remove = {str(i) for i in (ids or []) if i}
+    if not remove:
+        return load_blocked(cfg)
+    for attempt in (0, 1):
+        try:
+            locking.locked_rmw(_blocked_file(cfg),
+                               lambda cur: sorted(set(cur or []) - remove), default=[])
+            break
+        except (OSError, ValueError) as exc:
+            if attempt:
+                print(f"  ⚠ blocked_tickets.json remove failed twice ({exc}) — park set may be "
+                      "stale", flush=True)
+                break
+            time.sleep(0.05)
+    return load_blocked(cfg)
+
+
 # ── EU-385 (EU-224a): persisted drain-arm intent → serve-boot auto-resume ────────────────────
 # The live gap (2026-07-17): a 13:11 crash-respawn left a drain dead for 66+ minutes because
 # nothing remembered it was RUNNING. A continuous LIVE drain persists its arm here
