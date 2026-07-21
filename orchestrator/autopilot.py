@@ -1638,10 +1638,13 @@ def _apply_toolchain_holds(cfg: Config, audit: "AuditLog", worklist, held: froze
 
 
 def _learn_from_cycle(cfg: Config, reports, audit) -> dict:
-    """After a productive cycle, fold any new recurring rejection-lessons into Unit Memory and prune it
+    """After a productive cycle, fold any new recurring lessons into Unit Memory and prune it
     — FREE + deterministic (no model call), so memory compounds every cycle instead of only at the
-    06:30 council. The full model-Technical Writer stays on the council cadence. Best-effort: memory hygiene must
-    never break the loop. Returns the consolidate report ({} when there was nothing to learn from)."""
+    06:30 council. Two lesson sources run through the same path (EU-399 widened it past the 8
+    reviewer-rejection keywords): rejection themes AND recurrence lessons (needs_human reasons,
+    ticket_exception signatures, stuck gate fingerprints). The full model-Technical Writer stays on the
+    council cadence. Best-effort: memory hygiene must never break the loop. Returns the consolidate
+    report ({} when there was nothing to learn from)."""
     if not reports:
         return {}
     try:
