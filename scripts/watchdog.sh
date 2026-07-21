@@ -54,8 +54,13 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 # environment. We never source the whole file — the watchdog stays side-effect-free.
 _env_val() {
   [[ -f "$GENERAL_DIR/.env" ]] || return 0
-  grep -E "^$1=" "$GENERAL_DIR/.env" 2>/dev/null | tail -n 1 \
-    | sed "s/^$1=//" | sed "s/^\"//; s/\"$//; s/^'//; s/'$//" || true
+  # 2026-07-21: accept the `export KEY=value` form too. The live .env declares every secret with
+  # an `export ` prefix (it is sourced by the `general` wrapper), so the bare `^KEY=` pattern
+  # matched nothing and the watchdog installed MUTE — it detected the outage, crossed the
+  # threshold, set alerted=1, then printed "TELEGRAM_* unset — alert not sent". An alarm that
+  # cannot ring is worse than no alarm, because it is trusted.
+  grep -E "^(export[[:space:]]+)?$1=" "$GENERAL_DIR/.env" 2>/dev/null | tail -n 1 \
+    | sed -E "s/^(export[[:space:]]+)?$1=//" | sed "s/^\"//; s/\"$//; s/^'//; s/'$//" || true
 }
 : "${TELEGRAM_BOT_TOKEN:=$(_env_val TELEGRAM_BOT_TOKEN)}"
 : "${TELEGRAM_CHAT_ID:=$(_env_val TELEGRAM_CHAT_ID)}"
