@@ -28,7 +28,7 @@ from . import gate as gate_mod
 from . import auth_probe, infra_classify, intake, locking, notify, usage
 from .audit import AuditLog
 from .config import Config
-from .contracts import PARKED, Outcome
+from .contracts import AUDIT_EVENT_OUTCOME, PARKED, Outcome
 from .loop import _BASE_LEVEL_PREFIXES
 from .loop import run as run_loop
 
@@ -872,6 +872,212 @@ def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str
         return resumed
     except Exception:  # noqa: BLE001 — boot must proceed no matter what
         return resumed
+
+
+# ── EU-398 (2026-07-19 senior-workflow): boot reconcile of In Progress tickets ────────────────
+# A killed/crashed serve process (the AUTO-177 kill, 2026-07-19) leaves its ticket In Progress
+# with no comment, no transition, no audit — the board shows work happening on a DEAD run, and
+# recovery relied on the next drain happening to resume In Progress first via queue_statuses.
+# At serve boot we now list In Progress tickets; any with NO active run AND no terminal audit
+# event after their last `ticket_start` get a "resumed after an unclean stop" comment + a
+# re-queue (or an honest park on recurrence), audited as `boot_reconcile`.
+
+# The single source of truth for "did this run reach a terminal outcome?" is the audit event the
+# Outcome enum records through contracts.AUDIT_EVENT_OUTCOME (merged / pr_opened / needs_human /
+# ticket_exception / dryrun_land / pm_triage + the no_changes / escalated / scrum_split aliases).
+# A `ticket_start` with none of these after it is a run that never closed — the kill signature.
+_BOOT_RESUME_COMMENT = (
+    "🔁 Resumed after an unclean stop — the previous run on this ticket was interrupted (process "
+    "killed/crashed with no terminal outcome); re-queuing so the drain picks it up again (EU-398)."
+)
+_BOOT_PARK_COMMENT = (
+    "⛔ Parked after repeated unclean stops — this ticket was left mid-run more than once, so the "
+    "board was showing phantom progress. Moved to Blocked; reply /unblock {tid} or move it back to "
+    "To Do to retry (EU-398)."
+)
+
+
+def _dangling_in_progress(in_progress_ids, audit_rows, active_ids) -> list[str]:
+    """EU-398 core: which In Progress tickets were left dangling by a killed/crashed run.
+
+    A ticket is DANGLING iff ALL hold:
+      - it is In Progress on the board now (``in`` in_progress_ids),
+      - the audit shows a ``ticket_start`` for it (the drain once began it),
+      - its most-recent ``ticket_start`` has NO terminal audit event at/after it — the run never
+        reached a terminal outcome (the ``AUDIT_EVENT_OUTCOME`` keys are the single source of
+        truth; a terminal AT/AFTER the last start means the run closed, not a kill),
+      - it is not in ``active_ids`` (a run is genuinely in flight for it right now — leave it).
+
+    Pure + order-independent: pass ``audit_rows`` as any iterable of parsed event dicts (a ts the
+    audit's own ``%Y-%m-%dT%H:%M:%S%z`` stamp can't parse counts as 0 — conservative: an unreadable
+    terminal is treated as older than a readable start, so it can't mask a kill). Returns the sorted
+    dangling ids. This is the boot-reconcile seam's one testable core — fail-first pinned by
+    tests/eu398_boot_reconcile_test.py §1."""
+    terminal = set(AUDIT_EVENT_OUTCOME.keys())
+    last_start: dict[str, float] = {}
+    last_terminal: dict[str, float] = {}
+    for ev in audit_rows:
+        tid = str((ev or {}).get("ticket_id") or "")
+        if not tid:
+            continue
+        kind = (ev or {}).get("event")
+        if not kind:
+            continue
+        ts = _parse_audit_ts((ev or {}).get("ts")) or 0.0
+        if kind == "ticket_start":
+            if ts >= last_start.get(tid, -1.0):
+                last_start[tid] = ts
+        elif kind in terminal:
+            if ts >= last_terminal.get(tid, -1.0):
+                last_terminal[tid] = ts
+    out: list[str] = []
+    for tid in in_progress_ids:
+        if tid in active_ids:
+            continue                       # a live run is working it — untouched
+        start = last_start.get(tid)
+        if start is None:
+            continue                       # never started in the visible window → can't classify
+        if last_terminal.get(tid, -1.0) >= start:
+            continue                       # a terminal closed the run at/after its last start
+        out.append(tid)
+    return sorted(out)
+
+
+def _read_audit_rows(audit_path) -> list[dict]:
+    """Every line of the audit log parsed into event dicts (file order, oldest→newest).
+
+    Best-effort: a missing/garbled file or line is skipped, never raised. Boot-time, once per
+    boot — rotation (EU-363) keeps the live file bounded, so this is a bounded read."""
+    try:
+        text = Path(audit_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rows: list[dict] = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            ev = json.loads(ln)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(ev, dict):
+            rows.append(ev)
+    return rows
+
+
+def _prior_resumed_ids(audit_rows) -> set[str]:
+    """EU-398 recurrence trigger: ticket ids a PREVIOUS ``boot_reconcile`` already resumed.
+
+    Re-queueing a ticket that already came back from one unclean stop and got killed AGAIN would
+    just loop the kill — so the reconcile honest-PARKs a recurring id instead of resuming it.
+    Sourced from the SAME audit read as the dangling core (no second file parse)."""
+    out: set[str] = set()
+    for ev in audit_rows:
+        if (ev or {}).get("event") != "boot_reconcile":
+            continue
+        for tid in (ev.get("resumed") or []):
+            out.add(str(tid))
+    return out
+
+
+def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
+                   active_apps: set[str] | None = None) -> dict:
+    """EU-398: at serve boot, reconcile In Progress tickets left dangling by a killed/crashed run.
+
+    Lists In Progress tickets across every jira-backed app (via the same ``get_ready_tasks`` →
+    ``_jql_for_status('In Progress')`` path the drain resumes through), and for each that has NO
+    active run and NO terminal audit event after its last ``ticket_start`` (see
+    ``_dangling_in_progress``): posts a "resumed after an unclean stop" comment and RE-QUEUES it
+    (leaves it In Progress so the next drain cycle resumes it). A RECURRING dangle — a prior boot
+    already resumed the same id and it is STILL dangling — is HONESTLY PARKED instead (Blocked +
+    comment) so a recurring kill can't loop the board into phantom progress forever.
+
+    ``active_apps`` overrides the live run-state check (tests); the default derives from
+    ``cockpit_state.active_runs()`` so a ticket an in-flight drain is working right now is untouched.
+    Records one ``boot_reconcile`` audit event with the resumed / parked / skipped_active ids.
+    Returns ``{resumed, parked, skipped_active, dangling}``. Never raises — the boot proceeds."""
+    from .backlog.base import make_backlog
+
+    summary = {"resumed": [], "parked": [], "skipped_active": [], "dangling": []}
+    try:
+        audit = audit or AuditLog(cfg.audit_path)
+        dry = bool(getattr(cfg, "dry_run", False))
+
+        # 1) gather In Progress tickets across jira-backed apps (cache one adapter per app)
+        adapters: dict[str, object] = {}
+
+        def _bl(app):
+            if app.name not in adapters:
+                adapters[app.name] = make_backlog(app)
+            return adapters[app.name]
+
+        in_progress: list[tuple] = []
+        for app in getattr(cfg, "apps", None) or []:
+            if getattr(app, "backlog_backend", "none") == "none":
+                continue
+            try:
+                for t in _bl(app).get_ready_tasks(100):
+                    if "progress" in (getattr(t, "status", "") or "").lower():
+                        in_progress.append((app, t))
+            except Exception:  # noqa: BLE001 — one unreachable board must not abort the pass
+                continue
+        ip_ids = {t.id for _, t in in_progress}
+        by_id = {t.id: (app, t) for app, t in in_progress}
+
+        # 2) a live run's tickets are genuinely running — untouched
+        if active_apps is None:
+            try:
+                from . import cockpit_state
+                active_apps = {str(a) for a in cockpit_state.active_runs()}
+            except Exception:  # noqa: BLE001 — fall back to "nothing active" on any probe failure
+                active_apps = set()
+        active_ids = {t.id for app, t in in_progress if app.name in (active_apps or set())}
+
+        # 3) one audit read → dangling core + the recurrence set
+        rows = _read_audit_rows(cfg.audit_path)
+        dangling = _dangling_in_progress(ip_ids, rows, active_ids)
+        prior_resumed = _prior_resumed_ids(rows)
+
+        # 4) re-queue (default) or honest-park (recurrence); skip side-effects in dry-run
+        resumed: list[str] = []
+        parked: list[str] = []
+        for tid in dangling:
+            hit = by_id.get(tid)
+            if hit is None:
+                continue
+            app, t = hit
+            if tid in prior_resumed:
+                parked.append(tid)
+            else:
+                resumed.append(tid)
+            if dry or getattr(t, "ephemeral", False):
+                continue                       # dry-run: compute only, no board writes
+            try:
+                bl = _bl(app)
+                if tid in prior_resumed:
+                    bl.set_status(t, "Blocked")
+                    bl.add_comment(t, _BOOT_PARK_COMMENT.format(tid=tid))
+                else:
+                    bl.add_comment(t, _BOOT_RESUME_COMMENT)
+            except Exception:  # noqa: BLE001 — a board hiccup on one ticket must not abort the pass
+                continue
+
+        # 5) one audit event with the affected ids (only when something was touched)
+        skipped_active = sorted(active_ids & ip_ids)
+        if resumed or parked:
+            try:
+                audit.record("boot_reconcile", resumed=sorted(resumed), parked=sorted(parked),
+                             skipped_active=skipped_active)
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"  · boot reconcile: resumed {sorted(resumed)}; parked {sorted(parked)}; "
+                  f"untouched {skipped_active} (active)", flush=True)
+        summary = {"resumed": sorted(resumed), "parked": sorted(parked),
+                   "skipped_active": skipped_active, "dangling": sorted(dangling)}
+        return summary
+    except Exception:  # noqa: BLE001 — the boot must proceed no matter what
+        return summary
 
 
 def _error_counts_file(cfg: Config) -> Path:
