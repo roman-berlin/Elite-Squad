@@ -56,6 +56,15 @@ matching exactly this schema:
 Rules for the verdict:
 - PASS only if spec_conformance.met is true AND there are no blocker or major issues.
 - Otherwise FAIL, and required_changes must be specific enough to act on directly.
+- Severity calibration (2026-07-19 Commander order — review like a SENIOR lead, not a gatekeeper):
+  "blocker"/"major" are reserved for defects that violate an acceptance criterion, break
+  behaviour/security/data, or make the change unreleasable. Broader test coverage than the
+  criteria demand, robustness/selector hardening, refactor preferences, docs polish and other
+  beyond-the-ticket wishes are "minor" — minors are auto-filed as follow-up tickets on ship, so
+  recording them as minor LOSES NOTHING and failing the build over them blocks a done deliverable.
+- NEVER emit FAIL when spec_conformance.met is true and no blocker or major issue exists — that
+  state IS a PASS (with advisory findings). A FAIL that contradicts your own findings is treated
+  as inconsistent and reconciled to PASS mechanically.
 - Set "needs_human": true with a clear "question" ONLY when the work is blocked on a
   product/scope DECISION the Commander must make (ambiguous requirement, a trade-off, a
   missing acceptance criterion) — not for ordinary code fixes. When needs_human is true,
@@ -332,8 +341,14 @@ def _has_execution_evidence(build_artifact: BuildArtifact | None, diff: str | No
     return any(_EXECUTION_EVIDENCE_RE.search(text) for text in fields if text)
 
 
+# The fixed prefix every execution-gate spec gap starts with — the recognizer both
+# collect_unverifiable_fingerprints and the escalate-once demotion below key on.
+_EXEC_GATE_GAP_PREFIX = "AC requires test execution but no passing test log"
+
+
 def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact: BuildArtifact | None,
-                            diff: str, *, gate_evidence: str = "") -> ReviewResult:
+                            diff: str, *, gate_evidence: str = "",
+                            already_bounced: set[str] | None = None) -> ReviewResult:
     """EU-268: force spec_met=False + FAIL (with a named spec gap) when the ticket has an
     execution-dependent acceptance criterion and the handoff/diff carries no execution evidence —
     even if the LLM verdict said spec_met=true. Does NOT grant the Reviewer any new capability
@@ -345,7 +360,8 @@ def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact
     ran green immediately before this review (loop._gate_execution_evidence — a subprocess exit
     code, not Builder prose). Without it, every ticket whose AC matches "all tests pass" was forced
     to FAIL on every pass DESPITE the gate having just run those tests, burned all max_passes, then
-    escalated (_enforce_bounce_once never relieves an execution-gate gap — reviewer.py, EU-351).
+    escalated. (_enforce_bounce_once never relieves an execution-gate gap; since 2026-07-19 the
+    relief lives HERE — a repeat of the same gap in `already_bounced` demotes, see below.)
     Scoped per _gate_evidence_covers: generic test-pass ACs are satisfied; browser/device-matrix
     ACs still force FAIL unless the gate itself ran that matrix. Defaults to '' (direct callers /
     older stubs), which keeps the EU-268 conservative behaviour byte-identical."""
@@ -355,13 +371,30 @@ def _enforce_execution_gate(result: ReviewResult, ticket: Ticket, build_artifact
     unverified = [ac for ac in exec_acs if not _gate_evidence_covers(ac, gate_evidence)]
     if not unverified:
         return result
+    # Escalate-once (2026-07-19, the AUTO-198 class): this gate used to be the ONE permanent FAIL
+    # no rebuild could ever clear — an AC naming a browser/device matrix the repo's gate doesn't run
+    # (e.g. "passes on Mobile Safari") re-FAILed every pass even when the LLM reviewer confirmed the
+    # criteria met, burned max_passes, then parked a done deliverable on the Commander. A read-only
+    # reviewer can NEVER produce the missing run, so the gap follows the EU-351 contract instead:
+    # the FIRST raise still forces FAIL (the Builder gets one pass to actually run the suite and
+    # attach the log); a REPEAT of the same gap demotes to `unverifiable_gaps` — surfaced, never
+    # blocking — and the LLM's own verdict stands.
+    bounced = already_bounced or set()
+    fresh: list[str] = []
     for ac in unverified:
-        gap = (f"AC requires test execution but no passing test log/gate report attached — "
+        gap = (f"{_EXEC_GATE_GAP_PREFIX}/gate report attached — "
                f"unverified: \"{ac}\"")
+        if _finding_fingerprint("exec-gate", gap) in bounced:
+            if gap not in result.unverifiable_gaps:
+                result.unverifiable_gaps = list(result.unverifiable_gaps) + [gap]
+            continue
+        fresh.append(gap)
+    for gap in fresh:
         if gap not in result.spec_gaps:
             result.spec_gaps = list(result.spec_gaps) + [gap]
-    result.spec_met = False
-    result.verdict = Verdict.FAIL
+    if fresh:
+        result.spec_met = False
+        result.verdict = Verdict.FAIL
     return result
 
 
@@ -511,6 +544,13 @@ def collect_unverifiable_fingerprints(result: ReviewResult) -> set[str]:
         lens = _classify_unverifiable_finding(gap)
         if lens is not None:
             fps.add(_finding_fingerprint(lens, gap))
+    # Execution-gate gaps (recognized by their fixed prefix) carry the "exec-gate" lens so the
+    # NEXT pass's _enforce_execution_gate sees a repeat in `already_bounced` and demotes it
+    # (escalate-once) instead of re-forcing a FAIL the Builder can never clear. Scanned in both
+    # channels: spec_gaps (a first-time raise this pass) and unverifiable_gaps (already demoted).
+    for gap in list(result.spec_gaps) + list(result.unverifiable_gaps):
+        if gap.startswith(_EXEC_GATE_GAP_PREFIX):
+            fps.add(_finding_fingerprint("exec-gate", gap))
     return fps
 
 
@@ -640,7 +680,8 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
     # EU-268 deterministic backstop; EU-265 threads the loop's real green-gate proof into it.
     result = _enforce_execution_gate(result, ticket, build_artifact, diff,
-                                     gate_evidence=gate_evidence)
+                                     gate_evidence=gate_evidence,
+                                     already_bounced=already_bounced or set())
     result = _enforce_bounce_once(result, already_bounced or set())   # EU-351 deterministic backstop
     result.cost_usd = run.cost_usd
     result.raw = run.final

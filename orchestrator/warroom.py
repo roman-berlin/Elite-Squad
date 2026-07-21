@@ -343,9 +343,21 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
     # opens the forensics view scoped to the security-block findings that produced the number.
     # EU-150: "Merged total" card is retired — use "Merged → DEV today". EU-159: it now links to the
     # dedicated /merge-stats page (today's aggregated numbers) instead of the flat /tasks?filter=merged log.
+    # 2026-07-19 (Commander order): the "Needs you" KPI card RETURNS — it was removed in 5a882a6
+    # (2026-07-01) in favour of the side panel, but the Commander wants the number in the big KPI
+    # row. Clicking opens /needs, where answering a decision comments the Jira ticket and sends it
+    # back to To Do (the EU-337 structured-decision flow).
+    try:
+        from . import needs as _needs
+        _needs_n = _needs.count(cfg, app)
+    except Exception:  # noqa: BLE001
+        _needs_n = 0
     cards = [
         {"label": "Merged → DEV today", "value": len(merged_today), "hint": "shipped to QA",
          "href": "/merge-stats", "sparkline": merges_series},  # EU-159: deep-link to the merge-stats page
+        {"label": "Needs you", "value": _needs_n, "hint": "decisions · errored · parked",
+         "tone": "warn" if _needs_n else None,
+         "href": f"/needs?app={app}" if app else "/needs"},
         {"label": "Security blocks", "value": sec_block_count, "hint": "Security Engineer gate",
          "tone": "bad" if sec_block_count else None, "href": "/forensics?cat=security_block",
          # EU-145 passes the findings themselves so the card can render an interactive response
@@ -738,8 +750,16 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     reached = 0
     if has_build:          # build done → the Gate runs next
         reached = GATE
-    if has_review:         # reviewed → Build, Gate and Review are all behind it; Land runs next
-        reached = LAND
+    if has_review:
+        # 2026-07-19 (Commander order — "show me the EXACT status always"): only a PASSING
+        # review advances to Land. A live run whose latest verdict is FAIL is REBUILDING
+        # (pass N+1) — the old `reached = LAND` showed "Working · Land" next to "verdict FAIL",
+        # a display lie (AUTO-198). FAIL → the bar goes back to Build for the retry pass.
+        _v = (t.get("verdict") or "").upper()
+        if "FAIL" in _v or "REJECT" in _v:
+            reached = BUILD if live else REVIEW
+        else:
+            reached = LAND     # passing review → Land runs next
     if merged:             # reviewed and landed → every phase complete
         reached = len(PHASES)
     # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
@@ -1076,8 +1096,18 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             'no merge, nothing left half-applied.\')">'
             '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
             '</form>') if (run["live"] and manual) else ""
-    verdict = (f'<span class=meta>verdict <b>{_esc(run["verdict"])}</b></span>'
-               if run["verdict"] else "")
+    # 2026-07-19 (Commander order): the verdict must tell the CURRENT story, not a stale fact —
+    # a live run whose latest review FAILED is rebuilding with the feedback, so say exactly that.
+    _v = str(run.get("verdict") or "")
+    if _v and run.get("live") and ("FAIL" in _v.upper() or "REJECT" in _v.upper()):
+        try:
+            _next_pass = int(run.get("passes") or 1) + 1
+        except (TypeError, ValueError):
+            _next_pass = 2
+        verdict = (f'<span class=meta>review pass {_esc(run["passes"])} <b>FAIL</b> '
+                   f'&#8594; rebuilding with the feedback (pass {_next_pass})</span>')
+    else:
+        verdict = (f'<span class=meta>verdict <b>{_esc(_v)}</b></span>' if _v else "")
     extra = ""
     if run["live"] and elapsed:
         extra += f'<span class=meta>elapsed <b>{_esc(elapsed)}</b></span>'
@@ -1202,11 +1232,14 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     # Rendered as a small anchor right after the phase bar so it's near the run context.
     log_link = ""
     if log_path:
+        # 2026-07-19: fetch(), never navigate — the same fix as the toolbar Open-logs button;
+        # as a plain link this replaced the cockpit tab with the endpoint's raw JSON.
         log_link = (
             f'<div style="margin-top:9px;padding-bottom:2px">'
             f'<a href="/api/open-logs?path={quote(str(log_path))}" '
+            f'onclick="fetch(this.href);return false" '
             f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
-            f'title="Open run log in Finder">&#128194; open log</a></div>'
+            f'title="Open this run log in Finder">&#128194; open log</a></div>'
         )
 
     # Build the phase bar and metadata based on whether we're in triage or normal run
@@ -1785,7 +1818,7 @@ def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: 
 
 _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Elite Unit — War Room</title>
+<title>SQUAD — HQ</title>
 <style>
 /* ── DESIGN TOKENS (EU-39) ───────────────────────────────────────────────────────
    The single source of truth for the cockpit's look. Every surface below — and the
@@ -1798,7 +1831,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;
 --warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;
 --bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;
---info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;
+--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;--brand:#ff7a59;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 /* corner radii */
 --r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;
@@ -1843,7 +1876,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;
 --bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;
 --info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;
---accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;
+--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;--brand:#e8590c;
 --shadow-1:0 1px 2px rgba(23,32,54,.08);
 --shadow-2:0 8px 24px rgba(23,32,54,.12);
 --shadow-3:0 16px 40px rgba(23,32,54,.16);
@@ -1869,7 +1902,8 @@ header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:
 background:linear-gradient(180deg,var(--panel),var(--bg));position:sticky;top:0;z-index:5;flex-wrap:wrap}
 .brand{font-size:15px;font-weight:750;letter-spacing:.4px;white-space:nowrap;text-transform:uppercase}
 .hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
-.brand b{color:var(--accent)}
+.brand b{color:var(--brand)}
+.brand .bmark{color:var(--brand)}
 header select{background:var(--well);border:1px solid var(--line2);color:var(--ink);border-radius:9px;
 padding:8px 12px;font:inherit;cursor:pointer}
 .spacer{flex:1}
@@ -2126,7 +2160,7 @@ font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);bor
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
 </style></head><body>
 <header>
-  <div class=brand>&#9733; Elite Unit <b>·</b> War Room{{HOST}}</div>
+  <div class=brand><span class=bmark>&#x2B22;</span> SQUAD <b>·</b> HQ{{HOST}}</div>
   {{PROJ}}
   <div class=spacer></div>
   {{AUTOPILOT}}

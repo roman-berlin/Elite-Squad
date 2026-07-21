@@ -7,6 +7,7 @@ bounds, the cost budget, every backlog transition, and the keep-dev-green merge.
 from __future__ import annotations
 
 import asyncio
+import threading
 import copy
 import fcntl
 import os
@@ -26,7 +27,7 @@ from .audit import AuditLog
 from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
-                       SpecArtifact, Ticket, TicketReport)
+                       SpecArtifact, Ticket, TicketReport, Verdict)
 from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
                    gate_fingerprint, publish_base_green, run_deterministic_checks, run_gate,
                    select_gate_groups)
@@ -107,10 +108,19 @@ def _git_commit_changelog(target: Path, base: str = "dev") -> None:
 
         # (1) Branch guard: only ever commit/push on the base branch. On main, a feature branch, or a
         # detached HEAD we no-op (leaving the append for the normal base-branch land to pick up).
+        # Case-INSENSITIVE (2026-07-20, caught live on the AUTO-59 land): automatixy's configured
+        # base is 'DEV' while git reports 'dev' on this case-insensitive FS — the exact-match guard
+        # skipped the changelog on every one of that repo's lands.
         branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        if branch != base:
+        if branch.lower() != str(base).lower():
             print(f"  changelog commit skipped: on '{branch}', not base '{base}'", flush=True)
             return
+        # P0 (2026-07-21 production audit): from here on, every origin operation uses the branch
+        # GIT reports — never the caller's `base`, which on a cross-repo land is the PRODUCT app's
+        # branch name ('DEV'): in this repo origin/DEV doesn't exist, so the ff sync silently
+        # no-oped and `push origin DEV` failed — leaving the changelog commit local-only, arming
+        # the exact EU-335 stale-cockpit divergence this function exists to prevent.
+        base = branch
 
         # (2) Sync-before-commit so our commit is a clean descendant of origin, never a divergence.
         has_remote_base = _git("rev-parse", "--verify", "--quiet", f"origin/{base}").returncode == 0
@@ -316,6 +326,19 @@ def _already_landed(app: AppConfig, ticket_id: str) -> str | None:
     except Exception:  # noqa: BLE001
         cl = ""
     changelog_hit = any(f"· {tid} ·" in ln for ln in cl.splitlines() if ln.startswith("- "))
+    # P0 (2026-07-21 production audit): a crash in the seconds between the dev push and the
+    # changelog write leaves the changelog line UNWRITTEN forever — exactly the case this valve
+    # exists for. The durable `land_pushed` audit event (written the moment the push succeeds)
+    # is the equivalent first key; git-log corroboration below stays mandatory either way.
+    if not changelog_hit:
+        try:
+            with open("./state/audit.jsonl", encoding="utf-8") as _fh:
+                for _ln in _fh:
+                    if '"land_pushed"' in _ln and f'"{tid}"' in _ln:
+                        changelog_hit = True
+                        break
+        except OSError:
+            pass
     if not changelog_hit:
         return None
     # Git-log corroboration on origin/<base> in the app repo.
@@ -425,10 +448,15 @@ async def _try_scrum_split(cfg: Config, app: AppConfig, ticket: Ticket, audit: A
         kk = ", ".join(sp["keys"])
         audit.record("scrum_split", ticket_id=ticket.id, reason=split_reason, into=sp["keys"])
         _notify(cfg, f"🧩 {ticket.id} was too big for one pass — the Scrum Master split it into "
-                     f"{kk} and closed the parent. The unit takes the fragments next.")
+                     f"{kk} and closed the parent. The squad takes the fragments next.")
         print(f"  🧩 {ticket.id}: too big → Scrum Master split into {kk}; parent closed.", flush=True)
         return TicketReport(ticket.id, Outcome.REQUEUED, iterations, cost, app.name, branch,
                             notes=f"too big — Scrum Master split into {kk}")
+    # 2026-07-19 audit: the refusal reason (depth cap, splitter decline, an exception) used to
+    # vanish — the Commander got a bare "turn-limit" park telling him to split by hand, with no
+    # mention that auto-split had already run this lineage to its ceiling. Record WHY it refused.
+    audit.record("scrum_split_failed", ticket_id=ticket.id, reason=split_reason,
+                 error=str(sp.get("error") or "splitter declined")[:400])
     return None
 
 
@@ -448,9 +476,30 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
             split_reason="turn-limit")
         if split is not None:
             return split
-        # No split possible → escalate to the Commander as before.
-        note = (f"{ticket.id} ran out of turns before finishing — this ticket is likely too big for "
-                "a single pass. Split it into smaller tickets, or raise the turn budget "
+        # 2026-07-19 Commander order (senior team, not juniors): a depth-capped/declined split does
+        # NOT go straight to the Commander — first re-queue ONCE with a raised turn budget.
+        # builder.effort_plan sees the persisted retry marker and bumps the effort one level, which
+        # scales turns_for (e.g. high 96 → xhigh 144), so the retry genuinely gets more room rather
+        # than repeating the same blow-out. mark_turn_retry persisting the counter is the loop
+        # guard: if it can't be persisted the retry is NOT taken (fail-closed — park instead of
+        # risking an endless requeue); a second blow-out falls through to the park below, and the
+        # still-set marker keeps the boost for any Commander-ordered re-run.
+        if (not ticket.ephemeral and not getattr(cfg, "dry_run", False)
+                and builder_mod.turn_retry_count(cfg, ticket.id) == 0
+                and builder_mod.mark_turn_retry(cfg, ticket.id)):
+            audit.record("turn_limit_retry", ticket_id=ticket.id)
+            _notify(cfg, f"⏳ {ticket.id} ran out of turns and can't be split smaller — retrying once "
+                         "with a raised turn budget before bothering you.")
+            print(f"  ⏳ {ticket.id}: turn-limit at the split depth cap — requeued once with a "
+                  "bigger turn budget.", flush=True)
+            return TicketReport(ticket.id, Outcome.REQUEUED, 0, 0.0, app.name,
+                                notes="turn-limit — requeued once with a raised turn budget")
+        # No split possible and the retry is spent → escalate to the Commander, telling him the
+        # TRUTH: auto-split already ran this lineage to its ceiling and a boosted retry also blew
+        # out — "split it yourself" would be asking him to do what the system just declined.
+        note = (f"{ticket.id} ran out of turns even after a boosted retry, and the Scrum Master "
+                "declined to split it further (depth cap — this lineage was already auto-split as "
+                "far as it goes). Re-scope/simplify the ticket, or raise the turn budget "
                 "(builder_max_turns). Nothing was merged.")
         try:
             decisions.add(cfg, ticket, app.name, note)
@@ -730,9 +779,25 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
         from . import backend_pref as _bp
         _hy_sec = _bp.get_secondary(cfg) if _bp.get_hybrid(cfg) else None
         if _hy_sec and _hy_sec != getattr(cfg, "model_backend", None):
-            _hy_token = backends.set_hybrid(_hy_sec)
-            audit.record("hybrid_mode", builder_backend=_hy_sec,
-                         main_backend=getattr(cfg, "model_backend", backends.NATIVE))
+            # 2026-07-21 (Commander): SYMMETRIC limit fallback. The main→secondary direction has
+            # existed since EU-118 (plan limit → secondary absorbs); this is the reverse — when the
+            # SECONDARY (GLM) is out of quota, hybrid stands down for the run and builds go back to
+            # the Main model, loudly, instead of dispatching against an exhausted endpoint.
+            _sec_over = False
+            if backends.normalize(_hy_sec) == backends.GLM:
+                try:
+                    _gst = usage.dual_provider_budget_status(cfg).get("glm", {})
+                    _sec_over = bool(_gst.get("over") or _gst.get("bad"))
+                except Exception:  # noqa: BLE001 - an unreadable ledger must not change routing
+                    _sec_over = False
+            if _sec_over:
+                audit.record("hybrid_fallback_main", reason="secondary GLM quota over/near cap")
+                _notify(cfg, "⚠️ Secondary (GLM) is out of quota — hybrid stands down; builds run "
+                             "on the Main model for this run (pricier, but nothing stalls).")
+            else:
+                _hy_token = backends.set_hybrid(_hy_sec)
+                audit.record("hybrid_mode", builder_backend=_hy_sec,
+                             main_backend=getattr(cfg, "model_backend", backends.NATIVE))
     except Exception:  # noqa: BLE001
         _hy_token = None
     try:
@@ -779,6 +844,11 @@ def _glm_budget_preflight_block(cfg: Config, audit: AuditLog) -> bool:
     cfg.model_backend; deferring to it (the old `active_provider != 'glm'` early-return) opened a
     fail-closed bypass where GLM would dispatch against an exhausted quota while the pref still read
     'claude'. So: block iff the configured backend is GLM and GLM is over/near cap."""
+    # P0 (2026-07-21 production audit, refined same day): in HYBRID mode every BUILD dispatches on
+    # the GLM secondary, which used to be ungoverned here. Governance is now split by whether a
+    # fallback exists: hybrid-GLM-over is handled at the ARM SITE (hybrid stands down, builds run
+    # on the Main — see the symmetric-fallback block in run_worklist), so the run proceeds; this
+    # gate BLOCKS only when the MAIN backend itself is GLM — there is nothing left to fall back to.
     if backends.normalize(getattr(cfg, "model_backend", "opus")) != backends.GLM:
         return False
     status = usage.dual_provider_budget_status(cfg)
@@ -830,6 +900,87 @@ def _split_lineage(ticket: Ticket) -> str | None:
     return m.group(1) if m else None
 
 
+# 2026-07-20 (Commander order — "develop 2 different tickets so there will not be conflicts"):
+# conflict-aware co-scheduling for the concurrent drain. Two tickets may build in parallel ONLY
+# when their predicted code footprints are disjoint; overlapping or unpredictable footprints
+# serialize. The footprint comes from the ticket TEXT — this unit's tickets consistently cite
+# their paths ("Where: apps/x/src/components/calendar/…"), which is exactly the signal a senior
+# lead uses when handing two tasks to two developers.
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@-]+(?:/[A-Za-z0-9_.@\[\]{}*-]+)+")
+
+
+def _ticket_footprint(ticket: Ticket) -> frozenset[str]:
+    """The set of DIRECTORY paths this ticket's text names (trailing filename stripped, lowered).
+    Empty = the ticket names no paths, so its footprint is unpredictable."""
+    text = " ".join([ticket.summary or "", ticket.description or "",
+                     " ".join(ticket.acceptance_criteria or [])])
+    dirs: set[str] = set()
+    for m in _PATH_TOKEN_RE.finditer(text):
+        parts = [p for p in m.group(0).strip("`'\".,()").split("/") if p and p not in (".", "..")]
+        if parts and "." in parts[-1]:      # drop a trailing FILE so dirs compare with dirs
+            parts = parts[:-1]
+        if len(parts) >= 2:                 # a single bare segment ('src') is too weak a signal
+            dirs.add("/".join(parts).lower())
+    return frozenset(dirs)
+
+
+def _tickets_conflict(a: Ticket, b: Ticket) -> bool:
+    """True when the two tickets must NOT build concurrently. Tickets of DIFFERENT apps live in
+    different repos and physically cannot collide — always parallel. Within one app: either
+    footprint unpredictable (no paths cited — conservative), or any cited directory of one
+    contains/equals one of the other's (apps/x/src/components/calendar vs …/calendar → conflict;
+    …/calendar vs …/leads → parallel; a whole-app-root citation conflicts with everything in it)."""
+    if (a.app or "") and (b.app or "") and a.app != b.app:
+        return False
+    fa, fb = _ticket_footprint(a), _ticket_footprint(b)
+    if not fa or not fb:
+        return True
+    return any(p == q or p.startswith(q + "/") or q.startswith(p + "/")
+               for p in fa for q in fb)
+
+
+# P0 (2026-07-21 production audit): under the CONCURRENT drain, a long SYNC phase (gate run,
+# the whole land incl. its bounded CI poll) executed inline on the shared event loop froze the
+# SIBLING slot's agent stream — its wall-clock budget kept burning, so multi-million-token passes
+# died as spurious "wall-clock timeout" failures attributed to the WRONG ticket. Off-load such
+# phases to a worker thread when (and only when) more than one builder slot is armed; the serial
+# drain keeps its historic inline path byte-identical. Lands stay strictly serialized via an
+# EXPLICIT lock (previously an accident of the single event loop).
+_LAND_SERIAL_LOCK = threading.Lock()
+
+
+async def _off_loop(cfg, fn, *args, **kwargs):
+    """Run ``fn`` inline (serial drain) or in a worker thread (concurrent drain)."""
+    if int(getattr(cfg, "max_concurrent_builders", 1) or 1) > 1:
+        import asyncio as _aio
+        return await _aio.to_thread(fn, *args, **kwargs)
+    return fn(*args, **kwargs)
+
+
+def _host_free_gb() -> float:
+    """Available host memory in GB (free+inactive+speculative via vm_stat on macOS,
+    MemAvailable on Linux). inf when unmeasurable — the guard then never blocks.
+    2026-07-17 incident this exists for: two concurrent builder contexts exhausted the 24GB box
+    (~72MB free), macOS SIGTERM-killed BOTH slots at once (exit-143 x2) — losing two builds is
+    strictly worse than briefly running serial."""
+    import subprocess as _sp
+    try:
+        if os.path.exists("/proc/meminfo"):
+            for line in open("/proc/meminfo", encoding="utf-8"):
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1e6      # kB → GB
+            return float("inf")
+        out = _sp.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        page = 16384 if "page size of 16384" in out else 4096
+        pages = 0
+        for line in out.splitlines():
+            if line.startswith(("Pages free:", "Pages inactive:", "Pages speculative:")):
+                pages += int(line.split()[-1].rstrip("."))
+        return pages * page / 1e9
+    except Exception:  # noqa: BLE001 — an unmeasurable host must not stall the drain
+        return float("inf")
+
+
 async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
                                 audit: AuditLog, stop_event, stop_between_tickets,
                                 n: int) -> list[TicketReport]:
@@ -856,6 +1007,8 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
     base_halted: set[str] = set()
     in_flight_lineage: set[str] = set()
     in_flight_ids: set[str] = set()
+    in_flight_tickets: dict[str, Ticket] = {}   # id → Ticket, for the footprint-conflict guard
+    conflict_audited: set[tuple[str, str]] = set()
     locks = ExitStack()
     slot_busy: set[tuple[str, int]] = set()
 
@@ -877,11 +1030,39 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
                     (ticket.id in in_flight_lineage):
                 queue.append((app, ticket))   # a sibling (or its parent) is mid-build — defer
                 continue
+            # 2026-07-20: footprint-conflict guard — never co-build two tickets whose cited
+            # paths overlap (or whose footprint is unpredictable). Deferred to the tail; the
+            # audit event fires once per (ticket, in-flight) pair, not on every poll.
+            clash = next((t for t in in_flight_tickets.values()
+                          if _tickets_conflict(ticket, t)), None)
+            if clash is not None:
+                if (ticket.id, clash.id) not in conflict_audited:
+                    conflict_audited.add((ticket.id, clash.id))
+                    audit.record("conflict_deferred", ticket_id=ticket.id, against=clash.id)
+                    print(f"  ⇄ {ticket.id}: overlaps in-flight {clash.id} — deferred so the "
+                          "two builders never touch the same code.", flush=True)
+                queue.append((app, ticket))
+                continue
             return app, ticket
         return None
 
+    _mem_floor = float(getattr(cfg, "concurrent_min_free_gb", 6.0) or 0)
+    _mem_deferred_logged: set[int] = set()
+
     async def _worker(slot: int) -> None:
         while not _stopped() and not budget.exceeded():
+            # Memory floor (2026-07-17 OOM revert lesson): only slot 0 works unconditionally.
+            # Extra slots stand down while host memory is below the floor — the drain degrades
+            # to serial under pressure instead of macOS SIGTERM-killing every build at once.
+            if slot > 0 and _mem_floor > 0 and _host_free_gb() < _mem_floor:
+                if slot not in _mem_deferred_logged:
+                    _mem_deferred_logged.add(slot)
+                    audit.record("memory_deferred", slot=slot, floor_gb=_mem_floor)
+                    print(f"  ⏸ slot {slot}: host memory below {_mem_floor}GB — running serial "
+                          "until pressure clears.", flush=True)
+                await asyncio.sleep(30)
+                continue
+            _mem_deferred_logged.discard(slot)
             picked = _pick()
             if picked is None:
                 if not queue or not in_flight_ids:
@@ -891,6 +1072,7 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
             app, ticket = picked
             lineage = _split_lineage(ticket)
             in_flight_ids.add(ticket.id)
+            in_flight_tickets[ticket.id] = ticket
             if lineage:
                 in_flight_lineage.add(lineage)
             try:
@@ -953,6 +1135,7 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
                     pass
             finally:
                 in_flight_ids.discard(ticket.id)
+                in_flight_tickets.pop(ticket.id, None)
                 if lineage:
                     in_flight_lineage.discard(lineage)
 
@@ -1180,7 +1363,15 @@ async def _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget,
 
     if not cfg.dry_run and not ticket.ephemeral:
         # For a resuming ticket this transitions it out of 'Blocked' and back to 'In Progress' (EU-61).
-        backlog.set_status(ticket, "In Progress")
+        # 2026-07-19 audit: this was the ONLY unguarded set_status of 10 call sites — a transient
+        # Atlassian error here ERRORED the whole run before a single build turn (and burned one of
+        # the autopilot's 3 retry strikes). The board claim is cosmetic; the build is the work.
+        try:
+            backlog.set_status(ticket, "In Progress")
+        except Exception as _texc:  # noqa: BLE001 - a status hiccup must never kill the build
+            audit.record("claim_transition_failed", ticket_id=ticket.id, error=str(_texc)[:300])
+            print(f"  · {ticket.id}: could not mark In Progress ({str(_texc)[:120]}) — building anyway.",
+                  flush=True)
     git.checkout_feature(branch)
     # EU-18: re-pin the (possibly reused) worktree's deps to DEV's bun.lock before any
     # build runs, so a prior ticket's dependency drift can't leak into this one.
@@ -1431,6 +1622,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             dry_run=cfg.dry_run,
             no_comment=getattr(cfg, "no_comments", False)
         )
+    # 2026-07-19 squad modes: record WHICH formation builds this ticket. Only the elite squad is
+    # audited ('full' is the default and would be noise); the same resolver drives the Planner
+    # addendum and the Builder's method layer + effort floor, so this one event names them all.
+    try:
+        from . import squad_pref as _squad
+        _sq_mode, _sq_why = _squad.resolve_for_ticket(cfg, ticket)
+        if _sq_mode == "elite":
+            audit.record("squad_selected", ticket_id=ticket.id, mode="elite", reason=_sq_why)
+            print(f"  🎖️ elite squad — {_sq_why}", flush=True)
+    except Exception:  # noqa: BLE001 - visibility only, never blocks a build
+        pass
     cost = 0.0
     # EU-353: last review binding this attempt saw — may stay None if every pass broke before
     # reaching the review step. Read (guarded) at the max-passes escalation site below to surface
@@ -1827,13 +2029,53 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # for turn-limit text — a failed build's summary holds only the last assistant message,
             # never the turn-limit phrase; num_turns is the only reliable signal.
             if build.num_turns >= builder_mod.turns_for(cfg, eff):
+                # 2026-07-19: feed the Scrum Master the attempt's REAL progress, not just "it ran
+                # out" — fragments sliced blind repeated the parent's burn and re-blew the ceiling
+                # (the AUTO-15x lineage). The builder's own summary tells the splitter what is
+                # already done and where it got stuck, so fragments can start from the remainder.
+                _progress = (build.summary or build.raw or "").strip()[:1200]
                 split = await _try_scrum_split(
                     cfg, app, ticket, audit,
-                    recap=f"{ticket.id} ran out of turns before finishing — too big for a single pass.",
+                    recap=(f"{ticket.id} ran out of turns before finishing — too big for a single pass."
+                           + (f"\nWhere the attempt got to (builder's own summary):\n{_progress}"
+                              if _progress else "")),
                     reason="Builder hit the turn limit — split into smaller, independently-shippable tickets.",
                     split_reason="turn-limit", iterations=iteration, cost=cost, branch=branch)
                 if split is not None:
                     return _resolve(split)
+                # Same senior ladder as _exception_report (the two turn-limit paths used to
+                # DIVERGE: this one silently became ERRORED — ticking the EU-219 error counter
+                # toward Blocked for a ticket that was neither broken nor wrong, just big — while
+                # the exception path parked a decision). Unsplittable → re-queue ONCE with a
+                # boosted budget; retry spent → park as a decision with the honest note.
+                if (not ticket.ephemeral and not getattr(cfg, "dry_run", False)
+                        and builder_mod.turn_retry_count(cfg, ticket.id) == 0
+                        and builder_mod.mark_turn_retry(cfg, ticket.id)):
+                    audit.record("turn_limit_retry", ticket_id=ticket.id, iteration=iteration)
+                    _notify(cfg, f"⏳ {ticket.id} ran out of turns and can't be split smaller — "
+                                 "retrying once with a raised turn budget before bothering you.")
+                    print(f"  ⏳ {ticket.id}: turn-limit at the split depth cap — requeued once "
+                          "with a bigger turn budget.", flush=True)
+                    return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, iteration, cost,
+                                                 app.name, branch,
+                                                 notes="turn-limit — requeued once with a raised turn budget"))
+                _note = (f"{ticket.id} ran out of turns even after a boosted retry, and the Scrum "
+                         "Master declined to split it further (depth cap — this lineage was already "
+                         "auto-split as far as it goes). Re-scope/simplify the ticket, or raise the "
+                         "turn budget (builder_max_turns). Nothing was merged.")
+                try:
+                    decisions.add(cfg, ticket, app.name, _note)
+                except Exception:  # noqa: BLE001 - the escalation path must never crash the run
+                    pass
+                audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=_note)
+                _notify(cfg, f"🛑 {ticket.id} — ran out of turns twice and couldn't be split. "
+                             "Re-scope it or raise builder_max_turns.\n\n"
+                             + decisions.reply_hint(ticket.id))
+                print(f"  🛑 {ticket.id}: turn-limit — unsplittable, retry spent; escalated to you.",
+                      flush=True)
+                return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost,
+                                             app.name, branch,
+                                             notes="ran out of turns — too big, unsplittable, retry spent"))
             # EU-153: Post build error comment
             build_comment = commenter.summarize_gate_event(
                 "Build", "ERRORED",
@@ -1942,14 +2184,14 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # falls back to the repo-wide gate when no per-app config matches the diff.
         # (EU-85 / EU-326: domain-gap classification was removed entirely in the Phase-2
         # collapse; the gate never re-classifies here.)
-        gate = run_gate(app, git.changed_paths())
+        gate = await _off_loop(cfg, run_gate, app, git.changed_paths())
         if not gate.passed:
             # Flake honesty (2026-07-09): a red gate must REPRODUCE before it burns a builder pass.
             # 5 of the last 14 "max passes — PM escalated" strandings were full-suite flakes
             # (EU-129/139/201/204/206 — 4 later merged with ZERO extra fix passes); worse, the same
             # flake twice tripped the fingerprint-stuck breaker. Mirrors the base-gate confirmation
             # re-run in gate.py. Only a reproduced red proceeds to fingerprint/stuck handling.
-            confirm = run_gate(app, git.changed_paths())
+            confirm = await _off_loop(cfg, run_gate, app, git.changed_paths())
             if confirm.passed:
                 audit.record("gate_flake_confirmed_green", ticket_id=ticket.id,
                              iteration=iteration, first_report=(gate.report or "")[:1500])
@@ -1985,7 +2227,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # 2.7) DETERMINISTIC CHECKS (§3.3–5): lint → secret scan → lockfile sanity. Scripts, not
         # LLMs — cheap, unhallucinatable, and no reviewer runs until they are green; a failure
         # feeds the Builder as plain text (a free review round).
-        det = run_deterministic_checks(app, git.changed_paths(), git.diff_against_base())
+        det = await _off_loop(cfg, run_deterministic_checks, app, git.changed_paths(), git.diff_against_base())
         audit.record("deterministic_gate", ticket_id=ticket.id, iteration=iteration,
                      passed=det.passed, report=("" if det.passed else extract_failure_evidence(det.report or "")))
         if not det.passed:
@@ -2056,6 +2298,37 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
               + (f" — {len(review.blocking_issues)} blocking issue(s)" if review.blocking_issues else ""),
               flush=True)
         blockers = [q for q in review.quality_issues if q.severity == "blocker"]
+
+        # 2026-07-19 Commander order ("acceptance criteria were done — so why not put that ticket
+        # to QA?"): reconcile an INCONSISTENT FAIL instead of churning on it. Two rules, both
+        # requiring the reviewer's OWN findings to contradict its verdict:
+        #   (a) any pass — FAIL + spec_met + zero blocker/major findings violates the reviewer's
+        #       written contract ("PASS only if…; otherwise FAIL") — the AUTO-198 case: "criteria
+        #       fully met ✅, two minor concerns (not blocking)" yet verdict FAIL, which burned the
+        #       rebuild pass into the turn limit and parked a DONE deliverable on the Commander.
+        #   (b) the FINAL pass — FAIL + spec_met + majors but no blocker: majors past the last
+        #       rebuild can't drive convergence anymore (EU-174/QW3 corpus: 100% of round-≥2
+        #       objections were NEW), so a criteria-met build ships as PASS-with-findings — the
+        #       advisory_ship path below files every leftover as a backlog ticket and lands → QA —
+        #       instead of escalating a finished change. A blocker or unmet criteria NEVER
+        #       reconciles: those FAILs are the reviewer doing its job.
+        # P1 (2026-07-21 production audit): reconciliation demands the reviewer's WHOLE output be
+        # inconsistent with FAIL — not just issue severities. A FAIL carrying spec_gaps or concrete
+        # required_changes is the reviewer asking for real work and must never be overridden.
+        if (review.verdict.value == "FAIL" and review.spec_met and not blockers
+                and not review.needs_human and not review.spec_gaps
+                and not review.required_changes):
+            _final_pass = iteration >= max_passes
+            if not review.blocking_issues or _final_pass:
+                _rec_reason = ("fail-with-minors-only" if not review.blocking_issues
+                               else "final-pass-criteria-met-majors")
+                review.verdict = Verdict.PASS
+                audit.record("review_verdict_reconciled", ticket_id=ticket.id,
+                             iteration=iteration, reason=_rec_reason,
+                             majors=len(review.blocking_issues))
+                print(f"  ⚖ review verdict reconciled FAIL→PASS ({_rec_reason}) — criteria met, "
+                      f"nothing blocking; leftovers ship as advisories", flush=True)
+
         if blockers:
             _notify(cfg, f"🚨 {ticket.id} — Code Reviewer found a critical issue ({blockers[0].area}): "
                          f"{blockers[0].detail}")
@@ -2277,12 +2550,17 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Reviewer checklist section). A review that ships now lands directly.
             import inspect
             _land_sig = inspect.signature(_land)
-            if "commenter" in _land_sig.parameters:
-                result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review, commenter=commenter)
-            else:
-                result = _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
-                               review)
+
+            def _land_serialized():
+                # explicit land serialization (concurrent drain) — one land at a time, off-loop
+                with _LAND_SERIAL_LOCK:
+                    if "commenter" in _land_sig.parameters:
+                        return _land(ticket, app, cfg, git, backlog, audit, branch, iteration,
+                                     cost, build, review, commenter=commenter)
+                    return _land(ticket, app, cfg, git, backlog, audit, branch, iteration,
+                                 cost, build, review)
+
+            result = await _off_loop(cfg, _land_serialized)
             if getattr(cfg, "scout_after_merge", False) and result.outcome == Outcome.MERGED:
                 await _after_merge_scout(cfg, app, ticket, audit)
             return _resolve(result)
@@ -2379,7 +2657,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             kk = ", ".join(sp["keys"])
             audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="SPLIT", into=sp["keys"])
             _notify(cfg, f"🧩 {ticket.id} was too heavy — the Scrum Master split it into {kk} (on you) and "
-                         "closed the parent. The unit takes the fragments next.")
+                         "closed the parent. The squad takes the fragments next.")
             print(f"  🧩 {ticket.id}: too heavy → Scrum Master split into {kk}; parent closed.", flush=True)
             return _resolve(TicketReport(ticket.id, Outcome.REQUEUED, max_passes, cost, app.name, branch,
                                          notes=f"too heavy — Scrum Master split into {kk}"))
@@ -2466,6 +2744,30 @@ def _commit_message(ticket, build) -> str:
     return "\n\n".join(parts)
 
 
+def _manual_test_block(build, review) -> str | None:
+    """The manual-test hand-off text when this land needs the Commander's hands, else None
+    (2026-07-20 Commander order: 'if need manual testing they need to write in the comments the
+    exact test steps and put in Blocked').
+
+    Two deterministic signals, either suffices:
+      · the Builder's own 'MANUAL TEST:' section (the prompt contract obliges it whenever an AC
+        could not be verified — missing env, device/browser matrix, visual checks). Used VERBATIM:
+        the Builder knows the exact steps.
+      · review.unverifiable_gaps — the escalate-once demotions (exec-gate / EU-351): claims nobody
+        mechanical could verify. Rendered as a numbered checklist when the Builder wrote no block.
+    """
+    summary = (getattr(build, "summary", "") or getattr(build, "raw", "") or "")
+    m = re.search(r"MANUAL TEST:\s*\n?(.*?)(?:\n\s*\n[A-Z]{2,}|\nTEST:|\Z)", summary, re.S)
+    block = (m.group(1).strip() if m else "")
+    gaps = list(getattr(review, "unverifiable_gaps", None) or [])
+    if block:
+        return block
+    if gaps:
+        steps = "\n".join(f"{i + 1}. Verify by hand: {g}" for i, g in enumerate(gaps))
+        return "The unit could not verify these itself:\n" + steps
+    return None
+
+
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
           commenter=None) -> TicketReport:
     if commenter is None:
@@ -2528,6 +2830,14 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             try:
                 git.land_trial(temp)
                 landed = True
+                # P0 (2026-07-21 production audit): the push above is the IRREVERSIBLE moment, but
+                # everything after it (branch cleanup, base sync, an LLM comment, Jira transition,
+                # changelog) is seconds of network+LLM in which a process death left NO durable
+                # merged-marker — boot resume then re-picked the still-In-Progress ticket and
+                # rebuilt on top of its own merged code (the EU-307 class; AUTO-80 re-billed ~$7
+                # after the 2026-07-20 machine sleep). Record the durable audit event NOW; the
+                # richer post-land event below keeps its fields.
+                audit.record("land_pushed", ticket_id=ticket.id, base=app.base_branch)
                 break
             except LandRaceError as exc:
                 race_detail = str(exc).splitlines()[0][:200]
@@ -2607,15 +2917,31 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         if not ticket.ephemeral:
             from . import dashboard as _D
             whatdone = _D.bullets(review.summary or build.summary, limit=3, width=200)
-            head = "marked Done" if cfg.mark_done_on_merge else "moved to QA"
+            # 2026-07-20 Commander order: a land whose verification needs HUMAN hands (an AC the
+            # unit could not run itself) goes to the Blocked column with the EXACT manual test
+            # steps as the hand-off comment — not to QA as if it were fully machine-verified.
+            # ('Needs Human' is the logical status the boards map to their Blocked column.)
+            manual = None if cfg.mark_done_on_merge else _manual_test_block(build, review)
+            head = ("marked Done" if cfg.mark_done_on_merge
+                    else "moved to Blocked — manual test needed" if manual else "moved to QA")
             # Best-effort: the code IS merged at this point — a Jira hiccup here must degrade to a
             # log line, not propagate to _exception_report and mislabel a successful land as a
             # ticket_exception (which would strand the already-merged ticket In Progress).
             try:
-                backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
-                backlog.add_comment(
-                    ticket,
-                    f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
+                if manual:
+                    backlog.set_status(ticket, "Needs Human")
+                    backlog.add_comment(
+                        ticket,
+                        f"🧪 Merged to {app.base_branch} — needs YOUR manual test before sign-off.\n\n"
+                        f"MANUAL TEST STEPS:\n{manual}{test_line}\n\n"
+                        f"Pass → move to Done. Fail → comment what broke and move it back to To Do.")
+                    audit.record("manual_test_required", ticket_id=ticket.id,
+                                 gaps=list(getattr(review, "unverifiable_gaps", None) or [])[:8])
+                else:
+                    backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
+                    backlog.add_comment(
+                        ticket,
+                        f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
             except Exception as exc:  # noqa: BLE001 — tracker trouble never un-lands a merge
                 # EU-310: a lost post-merge transition strands the ticket In Progress, so the drain
                 # re-picks and rebuilds already-merged code (EU-307, 2026-07-14). Record it as an
@@ -2627,7 +2953,12 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             # is already Done/QA, close the Epic itself — otherwise auto-split Epics accumulate
             # open forever. Best-effort inside the helper: never un-lands the merge.
             _maybe_close_epic(backlog, ticket, audit)
-        done = "" if ticket.ephemeral else (" · marked Done" if cfg.mark_done_on_merge else " · moved to QA")
+        _manual_tail = (not ticket.ephemeral and not cfg.mark_done_on_merge
+                        and _manual_test_block(build, review))
+        done = "" if ticket.ephemeral else (
+            " · marked Done" if cfg.mark_done_on_merge
+            else " · moved to Blocked — exact manual test steps are on the ticket" if _manual_tail
+            else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,
                      done=cfg.mark_done_on_merge)
@@ -2643,11 +2974,11 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # the keepalive respawns it on this landed code; EU-385 re-arms the drains on boot.
                 from . import autopilot as _ap
                 if _ap.flag_self_update(cfg, ticket.id, sha=merge_sha, audit=audit):
-                    _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code — restarting automatically "
+                    _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code — restarting automatically "
                                  "once idle (self_update_auto_restart); drains re-arm on the new sha.")
                 else:
                     # The flag did NOT persist — no automatic restart will happen. Never announce one.
-                    _notify(cfg, f"⚠️ {ticket.id} changed the unit's own code but the restart flag "
+                    _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code but the restart flag "
                                  "could not be written — RESTART THE COCKPIT BY HAND or it keeps "
                                  "running the old code.")
         except Exception:  # noqa: BLE001 — the signal is best-effort

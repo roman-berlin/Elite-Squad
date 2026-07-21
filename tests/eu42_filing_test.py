@@ -93,6 +93,40 @@ filing.make_backlog = lambda a: stub3
 res3 = filing.file_findings(app, "out-of-scope", "just a plain report, no block")
 chk("no block -> nothing filed", res3.filed_n == 0 and len(stub3.created) == 0)
 
+# ── 2026-07-21: subject-fingerprint de-dup (the EU-409..414 class) ──────────────────────────
+from orchestrator.filing import subject_fingerprint
+
+_w1 = subject_fingerprint("Fix eu255_env_minimization NATIVE run mislabelled", "tests/eu255_env_minimization_test.py fails")
+_w2 = subject_fingerprint("[BLOCKER/tests] gate is RED", "eu255_env_minimization_test.py fails per EU-249")
+chk("fingerprint: rewordings of one subject share a key", _w1 is not None and _w1 == _w2, f"{_w1} vs {_w2}")
+chk("fingerprint: different subjects differ",
+      subject_fingerprint("CI deploy", "scripts/deploy-edge-functions.sh on merge") != _w1)
+chk("fingerprint: prose-only findings have none (title match stays their key)",
+      subject_fingerprint("Improve the error copy", "friendlier") is None)
+
+class LabelStub(StubBacklog):
+    def __init__(s, hit):
+        super().__init__(); s._hit = hit; s.label_lookups = []
+    def find_open_by_label(s, label):
+        s.label_lookups.append(label); return s._hit
+
+_report = "===TICKETS===\n" + __import__("json").dumps(
+    [{"title": "Totally new words here", "type": "Bug", "severity": "HIGH",
+      "body": "but tests/eu255_env_minimization_test.py is the same subject"}]) + "\n===END==="
+_lstub = LabelStub("EU-777")
+filing.make_backlog = lambda a: _lstub
+_res = filing.file_findings(app, "review", _report)
+chk("label de-dup fires BEFORE title match — reworded duplicate never files",
+      _res.deduped == ["EU-777"] and not _res.filed and _lstub.label_lookups, str(_res.deduped))
+
+_lstub2 = LabelStub(None)
+filing.make_backlog = lambda a: _lstub2
+_res2 = filing.file_findings(app, "review", _report)
+chk("no label hit → files, stamping the fingerprint label on the new ticket",
+      len(_res2.filed) == 1 and any(str(l).startswith("fp-") for l in _lstub2.created[-1][1]),
+      str(_lstub2.created[-1] if _lstub2.created else None))
+
+
 passed = sum(1 for _, c, _ in results if c)
 for n, c, d in results:
     print(f"  {'✓' if c else '✗'} {n}" + (f"  [{d}]" if (not c and d) else ""))

@@ -138,7 +138,8 @@ if dec:
           body.startswith("Looking at the evidence"), repr(body))
 check("no later paragraph leaks anywhere into the brief",
       "Recommendation" not in su and "Alternatively" not in su, su[-260:])
-check("a clipped decision section points at the full text (cockpit → /needs)",
+check("the decision section points at the /needs inbox (2026-07-19: always — answering "
+      "happens there, so the affordance is standing, not clip-conditional)",
       "/needs" in header, repr(header))
 
 # A SHORT question must render verbatim — no gratuitous marker, no clipping.
@@ -150,8 +151,8 @@ su = dashboard.standup(cfg)
 header, dec = _decision_section(su)
 check("a SHORT question renders verbatim with no truncation marker",
       len(dec) == 1 and dec[0].strip() == "• EU-140: Ship the paid tier now?", str(dec))
-check("an UNCLIPPED decision section carries no gratuitous '/needs' affordance",
-      "/needs" not in header, repr(header))
+check("the /needs answer-pointer is standing even for a short question (2026-07-19 order)",
+      "/needs" in header, repr(header))
 
 # The stored decision text is untouched — this is render-side only (the split EU-337/77c2216 drew).
 from orchestrator import decisions

@@ -11,7 +11,6 @@ from __future__ import annotations
 import html
 import os
 from pathlib import Path
-from urllib.parse import quote
 
 from . import dashboard as D
 from .cockpit_state import _state, get_autopilot_status
@@ -505,6 +504,7 @@ def backend_control(cfg, app_name: str | None = None) -> str:
     #                     (Claude plan limit, GLM token missing). None = pause instead (old world).
     #   ＋ Add model    — the /models registry page (add a backend + API key, test connection).
     secondary = backend_pref.get_secondary(cfg)
+    mode = backend_pref.get_mode(cfg)   # 'hybrid' | 'backup' — only shown when a Secondary is set
     sec_opts = f"<option value='none' {'selected' if not secondary else ''}>None</option>"
     for _entry in _bk.list_backends(registry=ModelRegistry(cfg)):
         _bid = _entry["id"]
@@ -537,15 +537,63 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         '<span class=tbsel-label>Secondary</span>'
         f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
         f'</form>{fb_note}'
-        # 2026-07-19 (Commander order): NO Mode select — two models configured = hybrid,
-        # automatically (heavy thinking on Main, building on Secondary); one model = single.
-        + ('<span class="tbnote dim" title="Two models configured → hybrid automatically: the '
-           'Main model does the heavy thinking (plan/PRD, review, debug judgment); the Secondary '
-           'does the regular building. Clear the Secondary to go back to one model.">'
-           '&#9878; hybrid: plan on main &middot; build on secondary</span>'
+        # 2026-07-19 (Commander order): with TWO models, choose HOW they work — Hybrid (both,
+        # per task: heavy thinking on Main, building on Secondary) or Backup (everything on the
+        # Main; the Secondary wakes only when the Main hits its limit / breaks). The selector
+        # appears only when a Secondary exists; one model = nothing to choose.
+        + (('<form method=post action=/api/model class=tbf '
+            'title="Hybrid — both models work per task: plan/PRD, review and debug judgment on '
+            'the Main; regular building on the Secondary. '
+            'Backup — everything runs on the Main; the Secondary takes over only when the Main '
+            'can&#39;t run (plan limit hit, key broken).">'
+            '<span class=tbsel-label>Mode</span>'
+            '<select name=mode onchange="this.form.submit()" style="font-size:13px">'
+            f"<option value='hybrid' {'selected' if mode == 'hybrid' else ''}>Hybrid — both, per task</option>"
+            f"<option value='backup' {'selected' if mode == 'backup' else ''}>Backup — if main runs out</option>"
+            '</select></form>'
+            + ('<span class="tbnote dim" title="Plan/PRD, review and judgment on the Main model; '
+               'regular building on the Secondary.">&#9878; plan on main &middot; build on secondary</span>'
+               if mode == 'hybrid' else
+               '<span class="tbnote dim" title="Everything runs on the Main model; the Secondary '
+               'only takes over when the Main hits its limit or breaks.">'
+               '&#128737; standby: takes over at the limit</span>'))
            if secondary else "")
         + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
-        'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>')
+        'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>'
+        # 2026-07-19 (Commander order — squad modes): WHICH formation builds. Full squad = the
+        # standard pipeline; Elite = the small careful trio (Analyst step-plan → one iterative
+        # Builder with per-step checks and a 2.4x turn budget → the unchanged gate + review);
+        # Auto = the ticket sizer routes L/XL to Elite, S/M to Full.
+        + _squad_selector(cfg))
+
+
+def _squad_selector(cfg) -> str:
+    from . import squad_pref
+    sq = squad_pref.get_mode(cfg)
+    notes = {
+        "full": '<span class="tbnote dim" title="The standard pipeline: Planner &#8594; Builder '
+                '&#8594; Gate &#8594; Review &#8594; Land, with PM/Scrum ceremony.">'
+                '&#128101; standard pipeline</span>',
+        "elite": '<span class="tbnote dim" title="Small careful trio: the Analyst lays out ordered '
+                 'steps and surfaces assumptions up front; one Builder executes step-by-step, '
+                 'running the repo&#39;s tests after every step, with a 2.4x turn budget; the '
+                 'deterministic gate + one independent review verify.">'
+                 '&#127894; careful step-by-step loop</span>',
+        "auto": '<span class="tbnote dim" title="The ticket sizer routes each ticket: large/risky '
+                '(L/XL) &#8594; Elite squad; small/medium &#8594; Full squad.">'
+                '&#9878; sizer picks per ticket</span>',
+    }
+    return (
+        '<form method=post action=/api/squad class=tbf '
+        'title="Squad — which formation builds a ticket. Full squad: the standard pipeline. '
+        'Elite squad: a small careful trio working step-by-step with checks after every step. '
+        'Auto: big tickets go Elite, small ones Full.">'
+        '<span class=tbsel-label>Squad</span>'
+        '<select name=squad onchange="this.form.submit()" style="font-size:13px">'
+        f"<option value='full' {'selected' if sq == 'full' else ''}>Full squad</option>"
+        f"<option value='elite' {'selected' if sq == 'elite' else ''}>Elite squad — careful &amp; iterative</option>"
+        f"<option value='auto' {'selected' if sq == 'auto' else ''}>Auto — by ticket size</option>"
+        '</select></form>' + notes[sq])
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,
@@ -613,21 +661,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     fr_standup = _fresh(_wr._mtime(_base.with_name("last-standup.md")))
     try:
         from . import memory as _mem
-        fr_mem = _fresh(_wr._mtime(_mem.UNIT_PATH))
+        # 2026-07-19: "Update memory" (the scribe) writes the LIVING log (UNIT.live.md), not the
+        # Commander doctrine (UNIT.md) — the stamp read only the doctrine, so it stayed "22d ago"
+        # after every update. Show the NEWER of the two so the stamp tracks either write.
+        _mt = [d for d in (_wr._mtime(_mem.UNIT_PATH), _wr._mtime(_mem.LIVE_PATH)) if d]
+        fr_mem = _fresh(max(_mt)) if _mt else ""
     except Exception:  # noqa: BLE001
         fr_mem = ""
-    try:
-        from . import usage as _usg
-        _u = _usg.today_tokens(cfg)
-        fr_usage = f" · {_u // 1000}k today" if _u >= 1000 else (f" · {_u} today" if _u else "")
-    except Exception:  # noqa: BLE001
-        fr_usage = ""
-    try:
-        from . import forensics as _fx
-        _nf = sum(t["count"] for t in _fx.taxonomy(cfg))
-        fr_fx = f" · {_nf}" if _nf else ""
-    except Exception:  # noqa: BLE001
-        fr_fx = ""
 
     # Deploy progress: while a unit-promote or app-ship runs in the background, show a live bar that
     # polls /api/deploy-status and reloads when it finishes — so the button never looks dead (the push
@@ -693,25 +733,20 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         # Autopilot off: offer two start modes that genuinely differ (EU-103 iter-2).
         #  · 'Choose tickets' opens the per-ticket picker (pick specific tickets, then run them).
         #  · 'Resume implementing' picks up pending work (In-Progress first, then To-Do) on the active backend.
-        _conf_choose = (f"return confirm('Open the ticket picker for "
-                        f"{html.escape(app0 or '')} to choose specific tickets to develop?')")
-        _conf_drain = (f"return confirm('Resume implementing for "
-                       f"{html.escape(app0 or '')}? "
-                       f"The unit will work In-Progress tickets first, then To-Do, until the queue is empty or you press Stop.')")
+        # 2026-07-19 (Commander order): NO confirm popups — these are explicit clicks with
+        # visible, stoppable outcomes (the picker is pure navigation; a drain has a Stop button).
         ap_html = (
             '<div class="tbap off">'
             '<span class="apdot-sm off"></span>'
             '<span class=tbaplabel>Autopilot</span>'
-            f'<form method=post action=/api/autopilot class=tbf '
-            f'onsubmit="{_conf_choose}">'
+            f'<form method=post action=/api/autopilot class=tbf>'
             f'<input type=hidden name=action value=start>'
             f'<input type=hidden name=app value="{ap_appq}">'
             '<input type=hidden name=mode value=choose>'
             f'<button class="aptbtn start" {ap_dis} '
             'title="Pick specific tickets to develop (opens the ticket picker)">'
             '&#127915;&nbsp;Choose tickets</button></form>'
-            f'<form method=post action=/api/autopilot class=tbf '
-            f'onsubmit="{_conf_drain}">'
+            f'<form method=post action=/api/autopilot class=tbf>'
             f'<input type=hidden name=action value=start>'
             f'<input type=hidden name=app value="{ap_appq}">'
             '<input type=hidden name=mode value=drain>'
@@ -724,11 +759,15 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # Calls /api/open-logs with the configured log folder so a single click reveals ALL run logs.
     open_logs_html = ""
     if is_mac:
-        log_folder = str(getattr(cfg, "log_folder", None) or "logs/")
+        # 2026-07-19: fetch() instead of navigating (a plain link replaced the cockpit tab with
+        # the endpoint's raw JSON), and NO path param — the endpoint derives the log root itself
+        # (the button used to pass the raw "logs/" string, which the audit-anchored guard
+        # rejected with a 403: the button was 403-ing its own endpoint).
         open_logs_html = _btn(
             "&#128194; Open logs", tag="a",
-            attrs=(f' href="/api/open-logs?path={html.escape(quote(log_folder))}" '
-                   f'title="Open the run-logs folder in Finder"'))
+            attrs=(' href="/api/open-logs" '
+                   'onclick="fetch(this.href);return false" '
+                   'title="Open the run-logs folder in Finder"'))
 
     # Render plan-limit banner BEFORE the control bar (if active)
     plan_banner = _plan_limit_banner(_state, cfg)
@@ -763,7 +802,12 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar{{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:var(--s-3);align-items:stretch;padding:var(--s-3) 26px;border-bottom:1px solid var(--line);background:var(--panel)}}
 /* Row 1: run | build (stretches to absorb slack) | QA.  Row 2: the nav strip, full width —
    so both rows run edge-to-edge and nothing floats in dead space. */
-.tbar>.tclu:nth-of-type(4){{grid-column:1 / -1;flex-direction:row;align-items:center;justify-content:flex-start;gap:var(--s-3)}}
+.tbar>.tclu:nth-of-type(4){{grid-column:1 / -1;flex-direction:row;align-items:center;gap:var(--s-3)}}
+/* 2026-07-19: the NAV row stretches its buttons edge-to-edge so it fills the width like the
+   action row above — no dead space to the right. The label stays natural-width; the button row
+   grows, and each button shares the space evenly. */
+.tbar>.tclu:nth-of-type(4)>.tcrow{{flex:1;flex-wrap:nowrap}}
+.tbar>.tclu:nth-of-type(4)>.tcrow>.btn{{flex:1;justify-content:center}}
 .tbar>.tbnote{{grid-column:1 / -1}}
 .tbar>.grow{{display:none}}
 /* 2026-07-19 redesign: each cluster is a quiet card — label as an overline INSIDE the group —
@@ -863,7 +907,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <div class=tclu>
     <span class=tclabel>QA</span>
     <div class=tcrow>
-      <form method=post action=/api/qa class=tbf onsubmit="return confirm('Run QA for {html.escape(app0)}? QA + Security + Release officers inspect DEV and FILE findings as Jira tickets, then deliver a DEV\\u2192MAIN readiness verdict (posted here and to Telegram).')"><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
+      <form method=post action=/api/qa class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
     </div>
   </div>
 
@@ -873,16 +917,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
       {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
       <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
       {open_logs_html}
-      <details class=menu>
-        {_btn("&#128202; Reports", tag="summary")}
-        <div class="panel right">
-          <a href="/tasks">&#128203; Task log{fr_tasks}</a>
-          <a href="/council">&#128172; Daily muster &amp; meetings{fr_council}</a>
-          <a href="/memory">&#128221; Unit memory{fr_mem}</a>
-          <a href="/usage">&#128202; Usage &amp; budget{fr_usage}</a>
-          <a href="/forensics">&#129513; Failure forensics{fr_fx}</a>
-        </div>
-      </details>
+      {_btn(f"&#128203; Task log{fr_tasks}", tag="a", attrs=' href="/tasks" title="Every run — Today / week / month scoping, transcripts, Jira links"')}
+      {_btn(f"&#128172; Daily{fr_council}", tag="a", attrs=' href="/council" title="The daily muster — DONE / NEXT / NEEDS YOU + failure causes"')}
+      {_btn(f"&#128221; Memory{fr_mem}", tag="a", attrs=' href="/memory" title="Squad memory — doctrine + the living lessons log"')}
     </div>
   </div>
 

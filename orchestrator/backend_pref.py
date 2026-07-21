@@ -173,11 +173,35 @@ def set_secondary(bk: str | None, cfg=None) -> None:
         pass
 
 
+def get_mode(cfg=None) -> str:
+    """2026-07-19 (Commander order): when a Secondary is configured, HOW the two models work —
+    'hybrid' (both run per-task: heavy thinking on Main, building on Secondary) or 'backup'
+    (the Secondary only wakes when the Main can't run — plan limit / key missing). Only
+    meaningful with a Secondary set; defaults to 'hybrid'."""
+    m = str(_load(cfg).get("mode") or "").strip().lower()
+    return m if m in ("hybrid", "backup") else "hybrid"
+
+
+def set_mode(mode: str, cfg=None) -> None:
+    """Persist the two-model mode ('hybrid' | 'backup'). Best-effort; ignores anything else."""
+    def _mutate(current: dict) -> dict:
+        data = dict(current) if isinstance(current, dict) else {}
+        m = str(mode or "").strip().lower()
+        if m in ("hybrid", "backup"):
+            data["mode"] = m
+        return data
+
+    try:
+        locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
+    except (OSError, ValueError):
+        pass
+
+
 def get_hybrid(cfg=None) -> bool:
-    """2026-07-19 (Commander order): hybrid is DERIVED, not a stored mode — two models
-    configured means hybrid (heavy thinking on Main, building on Secondary), one model means
-    single. There is nothing to toggle: clear the Secondary to go back to single."""
-    return bool(get_secondary(cfg))
+    """Whether HYBRID per-task routing is active: a Secondary is configured AND the mode is
+    'hybrid'. In 'backup' mode this is False — the Secondary is a fallback only (resolve_for_run),
+    never per-tag routing — so the whole run stays on the Main model until it can't run."""
+    return bool(get_secondary(cfg)) and get_mode(cfg) == "hybrid"
 
 
 def active(cfg=None, app_name: str | None = None) -> str:

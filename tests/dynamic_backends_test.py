@@ -37,6 +37,12 @@ class _D:
 sdk.__getattr__ = lambda n: _D
 sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
+# Hermetic GLM env (2026-07-21): the serve-spawned base gate inherits .env, where
+# GLM_MODEL=glm-5.2 — the literal glm-4.6 pins below pin the DEFAULT, so clear the
+# overrides or this harness passes in a bare shell and fails in production.
+import os as _os
+_os.environ.pop("GLM_MODEL", None)
+_os.environ.pop("GLM_MODEL_MID", None)
 
 from orchestrator import backends                       # noqa: E402
 from orchestrator import cockpit_views                  # noqa: E402

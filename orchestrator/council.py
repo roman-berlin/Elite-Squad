@@ -53,7 +53,7 @@ _OFFICER_RULES = (
     "concrete recommendation for today. Solve technical and process problems YOURSELVES; "
     "escalate to the Commander ONLY when the call is genuinely his — product direction, "
     "business/strategy, or an irreversible decision with no safe default. When (and only when) "
-    "such a decision truly exists, put it on its own line prefixed exactly 'FOR THE COMMANDER:'. "
+    "such a decision truly exists, put it on its own line prefixed exactly 'FOR YOU:'. "
     "Most days there is none. Do not write or edit files.\n"
     "This is a real round-table: in later rounds you will see what your fellow officers said — "
     "RESPOND to them, by name, when it touches your lens: agree and build, or push back with a "
@@ -112,7 +112,7 @@ _CHAIR_SYSTEM = (
     "**SITREP** — at most 2 short lines on recent operations from the record.\n\n"
     "**ORDERS** — at most 3 short bullets: the concrete actions the unit will take (who does what). "
     "Fold in the officers' best recommendations; resolve conflicts.\n\n"
-    "**FOR THE COMMANDER** — ONLY decisions that are genuinely Roman's: product direction, "
+    "**FOR YOU** — ONLY decisions that are genuinely Roman's: product direction, "
     "business/strategy, or an irreversible call with no safe default. NOT technical or process "
     "choices the unit should make itself. Hold a high bar — most days this is 'None.' One "
     "question per line ending in '?', or write 'None.' Never invent questions to fill space."
@@ -128,7 +128,7 @@ _DAILY_SYSTEM = (
     "Output exactly this markdown and nothing else:\n\n"
     "**FOCUS** — one line: the single most important thing the unit should push TODAY (a ticket or "
     "action), grounded in what is open/needs-you right now.\n\n"
-    "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product direction, business/"
+    "**FOR YOU** — ONLY a decision that is genuinely Roman's (product direction, business/"
     "strategy, or an irreversible call with no safe default); NOT a technical/process choice the unit "
     "should make itself. Hold a HIGH bar — most days this is 'None.' One question per line ending in "
     "'?', or write 'None.' Never invent a question to fill space."
@@ -144,7 +144,7 @@ _MEETING_CHAIR_SYSTEM = (
     "and take a clear position; do not fence-sit.\n\n"
     "**ACTIONS** — 1–3 bullets: concrete next steps (file a ticket, propose a drill, add a "
     "check, draft a hire). Name the officer who owns each.\n\n"
-    "**FOR THE COMMANDER** — ONLY a decision that is genuinely Roman's (product / strategy / "
+    "**FOR YOU** — ONLY a decision that is genuinely Roman's (product / strategy / "
     "irreversible, no safe default). One question per line ending in '?', else 'None.'"
 )
 
@@ -157,7 +157,7 @@ _SHIP_REVIEW_CHAIR_SYSTEM = (
     "**BLOCKERS** — bullets: anything that must be fixed before prod (build, types, migrations, "
     "deps, env/secrets, security, known defects). Write 'None' only if truly clean.\n\n"
     "**PRE-FLIGHT** — bullets: what the Commander should verify or run before promoting.\n\n"
-    "**FOR THE COMMANDER** — end with the go/no-go, framed as his decision: 'Promote DEV→MAIN? "
+    "**FOR YOU** — end with the go/no-go, framed as his decision: 'Promote DEV→MAIN? "
     "Your call.' (Only you promote to prod.)"
 )
 
@@ -239,6 +239,47 @@ def chat_transcript(cfg: Config, lines: int = 400) -> str:
     if not p.exists():
         return recent_commander_notes(cfg, lines=min(lines, 240))
     return "\n".join(p.read_text(encoding="utf-8").splitlines()[-lines:]).strip()
+
+
+def _honest_commander_section(cfg: Config, text: str) -> str:
+    """2026-07-19 (Commander order): '**FOR YOU** — None' while decisions sit in /needs
+    is a lie the model kept telling. Deterministic truth: when the briefing says None/— but
+    pending decisions exist, splice in the top 3 (one line each) + the count pointer."""
+    import re as _re
+    m = _re.search(r"\*\*FOR YOU\*\*\s*[—:-]\s*(None|—|-|\(none\))\.?", text, _re.I)
+    if not m:
+        return text
+    try:
+        from . import decisions as _dec
+        pending = _dec.load(cfg)
+    except Exception:  # noqa: BLE001
+        pending = []
+    if not pending:
+        return text
+    def _one(q: str) -> str:
+        q = " ".join(str(q or "").split())
+        return (q[:110] + "…") if len(q) > 110 else q
+    top = "\n".join(f"  • {p['id']}: {_one(p.get('question', ''))}" for p in pending[:3])
+    more = len(pending) - min(3, len(pending))
+    tail = f"\n  …and {more} more — answer in cockpit → /needs" if more > 0 else \
+           "\n  Answer in cockpit → /needs"
+    return text[:m.start()] + (f"**FOR YOU** — {len(pending)} decision(s) waiting:\n"
+                               + top + tail) + text[m.end():]
+
+
+def latest_focus(cfg: Config) -> str:
+    """The FOCUS line of the most recent council/daily — grounds the group room in today's
+    priority. '' when no transcript or no FOCUS line exists."""
+    import re as _re
+    try:
+        for rec in history(cfg, limit=3):
+            body = transcript_text(cfg, rec.get("file", ""))
+            m = _re.search(r"\*\*FOCUS\*\*\s*[—:-]\s*(.+)", body)
+            if m:
+                return " ".join(m.group(1).split())[:200]
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def history(cfg: Config, limit: int = 20) -> list[dict]:
@@ -389,7 +430,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
     briefing, spawn_note = _autospawn_tickets(cfg, briefing_raw, audit,
                                               source=("muster: " + topic) if topic else "council/daily",
                                               officer_label="council")
-    briefing = (briefing + spawn_note).strip()
+    briefing = _honest_commander_section(cfg, (briefing + spawn_note).strip())
 
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
@@ -1002,7 +1043,9 @@ def _match_officers(picks: list[str]) -> list[tuple[str, str, str]]:
 def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         model=cfg.discussion_model,           # Sonnet — a group brainstorm is many cheap turns
-        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}",
+        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}"
+        + ((f"\n\nToday's daily FOCUS (ground your takes in it): {latest_focus(cfg)}")
+           if latest_focus(cfg) else ""),
         cwd=cwd, permission_mode="bypassPermissions",
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
@@ -1212,7 +1255,7 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
-    synth = (run.final or run.text or "").strip()
+    synth = _honest_commander_section(cfg, (run.final or run.text or "").strip())
     questions = _commander_questions(synth)
 
     # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine
@@ -1271,7 +1314,7 @@ def _save_transcript(cfg: Config, topic, digest, said, briefing) -> Path:
 
 
 def _commander_questions(briefing: str) -> list[str]:
-    """Pull the questions under the 'FOR THE COMMANDER' heading."""
+    """Pull the questions under the 'FOR YOU' heading."""
     out, capturing = [], False
     for raw in briefing.splitlines():
         line = raw.strip()

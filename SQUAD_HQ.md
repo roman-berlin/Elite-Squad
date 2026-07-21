@@ -1,6 +1,8 @@
-# War Room — field manual
+# Squad HQ — field manual
 
-The Elite Unit's command cockpit. One screen to see what the unit is doing, drive it,
+*(formerly WAR_ROOM.md — renamed in the 2026-07-21 SQUAD rebrand; see Documentation/BRAND.md)*
+
+SQUAD's cockpit. One screen to see what the squad is doing, drive it,
 and switch between your Jira projects.
 
 ## Open it

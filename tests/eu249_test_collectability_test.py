@@ -164,6 +164,22 @@ prob_unconfigured = gate_mod.test_collectability_problems(app(), ["apps/unknown-
 chk("collectability: an app with no vitest.config.ts is skipped (nothing to validate against)",
     prob_unconfigured == [], str(prob_unconfigured))
 
+# 2026-07-20 (AUTO-182 live-fire): a PLAYWRIGHT e2e spec is collected by playwright, never vitest —
+# it must not be condemned by vitest include globs (both elite passes died on this false FAIL).
+(ZC / "playwright.config.ts").write_text(
+    "import { defineConfig } from '@playwright/test'\n"
+    "export default defineConfig({ testDir: './tests/e2e' })\n", encoding="utf-8")
+E2E_PATH = "apps/zeltivo-crm/tests/e2e/calendar-trip-highlight.spec.ts"
+prob_e2e = gate_mod.test_collectability_problems(app(), [E2E_PATH], str(REPO))
+chk("collectability: a spec under the app's playwright testDir is NEVER flagged by vitest globs",
+    prob_e2e == [], str(prob_e2e))
+prob_rogue = gate_mod.test_collectability_problems(app(), [OUTSIDE_INCLUDE_PATH], str(REPO))
+chk("collectability: a rogue NON-playwright file is still flagged after the playwright exemption",
+    len(prob_rogue) == 1, str(prob_rogue))
+chk("collectability: _playwright_testdir parses the declared testDir",
+    gate_mod._playwright_testdir(str(REPO), "apps/zeltivo-crm") == "tests/e2e")
+(ZC / "playwright.config.ts").unlink()   # leave the shared fixture exactly as the later sections expect
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. test_collectability_gate — end to end, config-gated
 # ══════════════════════════════════════════════════════════════════════════════

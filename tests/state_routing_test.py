@@ -78,7 +78,11 @@ a = _adapter("In Progress", ["To Do", "Done"])
 jira.JiraAdapter.set_status(a, tk, "QA")
 chk("QA falls back to Done when the QA column is absent",
     a.session.posts and a.session.posts[0][1]["transition"]["id"] == "2", a.session.posts)
-chk("no manual-move comment when a fallback lands", not a._comments, a._comments)
+# 2026-07-19 audit: a fallback landing must be VISIBLE — on a board with no QA column the land
+# used to close straight to Done and the human-QA step vanished silently. Exactly one comment.
+chk("a fallback landing leaves exactly one visible comment naming both columns",
+    len(a._comments) == 1 and "no 'QA' column" in a._comments[0] and "'Done'" in a._comments[0],
+    a._comments)
 
 # 3) already in a candidate column → strict no-op (never bounce Done → QA)
 a = _adapter("Done", ["To Do", "QA"])

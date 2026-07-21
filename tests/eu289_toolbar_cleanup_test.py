@@ -128,29 +128,16 @@ chk("the Reports menu no longer duplicates the top-level Roster button "
     f"found {bar.count('/roster-doc')} /roster-doc references — the Reports 'Unit roster' "
     f"item still duplicates the top-level Roster button")
 
-chk("Token usage + Budget monitor are merged into ONE usage/budget report entry",
-    bar.count('href="/usage"') == 1 and bar.count('href="/budget"') == 0,
-    f"found {bar.count('href=\"/usage\"')} /usage and {bar.count('href=\"/budget\"')} /budget "
-    f"links — the two overlapping usage/budget items are still listed separately")
-
-# The /usage freshness stamp is fed by usage.today_tokens(), which the temp fixture has no data
-# for (it renders ""). Stub it so this pins the RENDER path — "each remaining item shows its
-# freshness" (AC) — rather than the emptiness of the fixture.
-import orchestrator.usage as _usage_mod
-_orig_today = _usage_mod.today_tokens
-_usage_mod.today_tokens = lambda _c: 12_000
-try:
-    bar_fresh = V._control_bar(_cfg, "automatixy", healthy=True, is_mac=True)
-finally:
-    _usage_mod.today_tokens = _orig_today
-
-chk("the merged usage/budget entry keeps its freshness stamp",
-    re.search(r'href="/usage">[^<]*12k today', bar_fresh) is not None,
-    "the merged /usage entry lost its ' · 12k today' freshness stamp")
-
-# Surviving Reports items must all still be present and each listed exactly once.
-for _href in ("/tasks", "/council", "/memory", "/forensics"):
-    chk(f"Reports menu link preserved exactly once: {_href}",
+# 2026-07-19 (Commander order): the Reports dropdown was FLATTENED and /usage + /forensics left
+# the nav entirely — the Tokens KPI deep-links /usage, the Security-blocks KPI deep-links
+# /forensics, and the failure-cause summary now rides IN the daily. The old merged-entry and
+# freshness pins retired with the dropdown; what survives is the flat button set, each once.
+chk("no /usage or /budget link anywhere in the bar (Tokens KPI is the route)",
+    bar.count('href="/usage"') == 0 and bar.count('href="/budget"') == 0)
+chk("no /forensics link in the bar (its summary rides in the daily; the KPI deep-links)",
+    bar.count('href="/forensics"') == 0)
+for _href in ("/tasks", "/council", "/memory"):
+    chk(f"flattened nav button present exactly once: {_href}",
         bar.count(f'href="{_href}"') == 1,
         f"found {bar.count(f'href=&quot;{_href}&quot;')} occurrences")
 

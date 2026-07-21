@@ -493,16 +493,23 @@ def create_app(cfg: Config, port: int = 8787):
         if platform.system() != "Darwin":
             return Response("This endpoint is only available on macOS.", status=403,
                             mimetype="text/plain")
-        path_param = (request.args.get("path") or "").strip()
-        if not path_param:
-            return Response("'path' query parameter is required.", status=400,
-                            mimetype="text/plain")
+        # 2026-07-19: ``path`` is OPTIONAL — no param opens the log root itself. The button used
+        # to pass the raw cfg.log_folder string ("logs/"), which resolves against the CWD while
+        # the guard's root is audit-path-anchored (state/logs) — so the button 403'd its own
+        # endpoint forever. One derivation now: the endpoint anchors, callers don't.
         from . import run_logger as _rl
         root = _rl.log_root(cfg)
-        try:
-            requested = Path(path_param).resolve()
-        except Exception:
-            return Response("Invalid path.", status=400, mimetype="text/plain")
+        path_param = (request.args.get("path") or "").strip()
+        if not path_param:
+            requested = root
+        else:
+            try:
+                # a RELATIVE path is resolved under the log root (never the CWD); absolute paths
+                # keep the strict under-root check below.
+                requested = (Path(path_param) if Path(path_param).is_absolute()
+                             else root / path_param).resolve()
+            except Exception:
+                return Response("Invalid path.", status=400, mimetype="text/plain")
         # Path traversal guard: the resolved path must sit under the log root.
         try:
             requested.relative_to(root)
@@ -763,7 +770,17 @@ def create_app(cfg: Config, port: int = 8787):
 
         def gen():
             appkey = appq or None
+            # 2026-07-19: WAIT for the log instead of closing — the panel connects at page load,
+            # often seconds BEFORE the run's open_run_log sets log_path; the old instant
+            # "No active run log" + close left the panel on "Waiting for run output…" through
+            # EventSource reconnect flicker. Poll the state until a path appears (or ~60s idle).
             log_path = st.get("log_path")
+            waited = 0.0
+            while not log_path and waited < 60.0:
+                yield ": waiting-for-log\n\n"
+                time.sleep(1.0)
+                waited += 1.0
+                log_path = get_state(appkey).get("log_path")
             if not log_path:
                 yield _sse("log", "No active run log to stream.")
                 return
@@ -846,10 +863,14 @@ def create_app(cfg: Config, port: int = 8787):
             _needs_cnt = _needs_mod.count(cfg, _appq)
         except Exception:  # noqa: BLE001
             _needs_cnt = None
-        page = D.render_html(D.load_tasks(cfg.audit_path), show_cost=_charged(),
+        # 2026-07-19 (Commander order): Today / This week / This month / Total scoping — the
+        # period filters the run set BEFORE rendering, so the KPI cards and the rows agree.
+        _since = (request.args.get("since") or "all").strip().lower()
+        _all_tasks = D.load_tasks(cfg.audit_path)
+        page = D.render_html(D.filter_tasks_since(_all_tasks, _since), show_cost=_charged(),
                              dismissed=D.load_dismissed(cfg.audit_path),
                              active_filter=flt, blocked=blocked, needs_count=_needs_cnt,
-                             cfg=cfg, app_name=_appq)
+                             cfg=cfg, app_name=_appq, period=_since)
         # Header injected after the template's </header>: a back button + a per-project chip row.
         # 2026-07-19: this used to append the FULL cockpit control bar (model selector, autopilot,
         # resume buttons) — none of which belongs on a log page — and its back-button CSS was
@@ -952,16 +973,22 @@ def create_app(cfg: Config, port: int = 8787):
         # this page always lists exactly one app's backlog. ``_scope`` resolves (and focuses) that tab.
         appq = _scope(request.args.get("app"))
         name = appq or None
-        style = ("<style>.tlist{margin:10px 0;border:1px solid #232936;border-radius:10px;overflow:hidden}"
-                 ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid #1a1f29;cursor:pointer}"
-                 ".trow:first-child{border-top:0}.trow:hover{background:#151a23}"
-                 ".trow input{margin-top:3px}.tkey{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6aa9ff;white-space:nowrap}"
-                 ".tsum{color:#e8eaed}.trun{display:flex;gap:14px;align-items:center;margin-top:14px;flex-wrap:wrap}"
-                 ".trun button{background:#2b5cff;border:0;color:#fff;border-radius:8px;padding:9px 18px;font-weight:650;cursor:pointer}"
-                 ".hint{color:#8a909c;font-size:13px}"
-                 ".tapp{margin-left:auto;font-size:11px;color:#8a909c;background:#161b24;border:1px solid #232936;border-radius:999px;padding:1px 9px;white-space:nowrap}"
-                 ".tgrp{font-size:12px;color:#c4c9d2;font-weight:700;margin:16px 0 6px}"
-                 ".tall{background:#10141b;font-weight:650}</style>")
+        # 2026-07-19 (Commander order): the run bar is STICKY — pick tickets anywhere in a 40-row
+        # list and "Develop selected" stays in view, with a live (N) count and disabled-at-zero.
+        style = ("<style>.tlist{margin:10px 0;border:1px solid var(--line2);border-radius:10px;overflow:hidden}"
+                 ".trow{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-top:1px solid var(--line);cursor:pointer}"
+                 ".trow:first-child{border-top:0}.trow:hover{background:var(--panel2)}"
+                 ".trow input{margin-top:3px}.tkey{font-family:var(--mono);font-size:12px;color:var(--info);white-space:nowrap}"
+                 ".tsum{color:var(--ink)}"
+                 ".trun{position:sticky;bottom:0;z-index:20;display:flex;gap:14px;align-items:center;flex-wrap:wrap;"
+                 "background:var(--panel);border:1px solid var(--line);border-radius:12px;"
+                 "padding:12px 16px;margin:14px 0 4px;box-shadow:var(--shadow-2)}"
+                 ".trun button{background:var(--accent);border:0;color:#fff;border-radius:8px;padding:10px 18px;font-weight:650;cursor:pointer}"
+                 ".trun button:disabled{background:var(--line);color:var(--faint);cursor:not-allowed}"
+                 ".hint{color:var(--dim);font-size:13px}"
+                 ".tapp{margin-left:auto;font-size:11px;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:1px 9px;white-space:nowrap}"
+                 ".tgrp{font-size:12px;color:var(--ink);font-weight:700;margin:16px 0 6px}"
+                 ".tall{background:var(--well);font-weight:650}</style>")
         try:
             items = intake.from_drain(cfg, name, 40)
         except Exception as exc:  # noqa: BLE001
@@ -991,22 +1018,44 @@ def create_app(cfg: Config, port: int = 8787):
 
         def _run_form(target_app: str, rows_html: str, btn_label: str) -> str:
             # One run form = one app/Jira. Multiple ticket checkboxes are fine — they're all this app.
-            return ('<form method=post action=/api/run-selected '
-                    'onsubmit="return this.dryrun.checked||confirm(\'Build and merge to DEV. Continue?\')">'
+            return ('<form method=post action=/api/run-selected>'
                     f'<input type=hidden name=app value="{html.escape(target_app)}">'
                     f'<div class=tlist>{_select_all}{rows_html}</div>'
                     '<div class=trun>'
                     '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
                     f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
-                    f'<button>&#9654; {html.escape(btn_label)}</button>'
+                    f'<button id=devbtn disabled>&#9654; {html.escape(btn_label)} <span id=devcount></span></button>'
                     '<span class=hint>default builds + merges to DEV — tick "dry run" to build only</span>'
-                    '</div></form>')
+                    '</div></form>'
+                    # live count + disabled-at-zero: updates on every checkbox flip (incl. Select all)
+                    '<script>(function(){var f=document.querySelector("form[action=\'/api/run-selected\']")'
+                    '||document.forms[0];if(!f)return;var b=f.querySelector("#devbtn"),'
+                    'c=f.querySelector("#devcount");function upd(){var n=f.querySelectorAll('
+                    '"input[name=ticket]:checked").length;if(b)b.disabled=n===0;'
+                    'if(c)c.textContent=n?"("+n+")":"";}f.addEventListener("change",upd);upd();})();</script>')
 
         body = (style
                 + f'<p class=hint>{len(items)} ticket(s) assigned to you, in board-priority order. '
                   "Tick the ones to develop, then Run.</p>"
                 + _run_form(appq, _checkbox_rows([t for _, t in items]), "Develop selected"))
         return _wrap(f"Choose tickets — {html.escape(appq)}", body)
+
+    @app.post("/api/squad")
+    def squad_api():
+        # 2026-07-19 (Commander order — squad modes): persist WHICH formation builds tickets.
+        # full = the standard pipeline; elite = the small careful trio (step-by-step Builder,
+        # 2.4x turn budget, unchanged gate+review); auto = the sizer routes L/XL → elite.
+        from . import squad_pref
+        sq = (request.form.get("squad") or "").strip().lower()
+        if sq in ("full", "elite", "auto"):
+            squad_pref.set_mode(sq, cfg)
+            get_state(None)["last_msg"] = {
+                "full": "Full squad — the standard pipeline builds every ticket.",
+                "elite": "Elite squad — the careful trio builds every ticket: ordered step plan, "
+                         "one iterative Builder with per-step checks, independent review.",
+                "auto": "Auto — big tickets (L/XL) go to the Elite squad, the rest to the Full squad.",
+            }[sq]
+        return redirect("/")
 
     @app.post("/api/model")
     def model_api():
@@ -1016,6 +1065,19 @@ def create_app(cfg: Config, port: int = 8787):
         # (missing/incorrect token, wrong URL) surfaces a clear, actionable alert ("what to fix, or
         # re-onboard") in the cockpit instead of failing mid-run. No silent fallback; never stores
         # or echoes the token — only the backend id.
+        # 2026-07-19: the Mode selector posts mode=hybrid|backup (only meaningful with a Secondary).
+        mode_raw = (request.form.get("mode") or "").strip().lower()
+        if mode_raw in ("hybrid", "backup"):
+            if not backend_pref.get_secondary(cfg):
+                get_state(None)["last_msg"] = "Set a Secondary model first, then pick Hybrid or Backup."
+            else:
+                backend_pref.set_mode(mode_raw, cfg)
+                get_state(None)["last_msg"] = (
+                    "Hybrid — both models work per task: plan/review on the Main, building on the "
+                    "Secondary." if mode_raw == "hybrid" else
+                    "Backup — everything runs on the Main; the Secondary only takes over if the "
+                    "Main hits its limit.")
+            return redirect("/")
         # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
         sec_raw = (request.form.get("secondary") or "").strip()
         if sec_raw:
@@ -1026,9 +1088,9 @@ def create_app(cfg: Config, port: int = 8787):
                 from .model_registry import ModelRegistry as _MR
                 _sbk = backends.resolve_selection(sec_raw, _MR(cfg))
                 backend_pref.set_secondary(_sbk, cfg)
-                get_state(None)["last_msg"] = (f"Secondary model set to {_sbk} — hybrid is on: "
-                                               "plan/review on the Main model, building on the "
-                                               "Secondary (and it covers the Main as fallback).")
+                get_state(None)["last_msg"] = (
+                    f"Secondary model set to {_sbk}. Pick how they work: Hybrid (both, per task) "
+                    "or Backup (Secondary only if the Main hits its limit).")
             return redirect("/")
         raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
@@ -1539,7 +1601,7 @@ def create_app(cfg: Config, port: int = 8787):
             def _bg():
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
-                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Unit Memory updated by the Technical Writer.")
+                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Squad memory updated by the Technical Writer.")
                 except Exception as exc:  # noqa: BLE001
                     _state["last_msg"] = f"scribe failed: {exc}"
                 finally:
@@ -1550,7 +1612,7 @@ def create_app(cfg: Config, port: int = 8787):
     @app.get("/memory")
     def memory_page():
         memory.ensure()
-        top = (_working("The Technical Writer is folding recent lessons into Unit Memory…")
+        top = (_working("The Technical Writer is folding recent lessons into Squad memory…")
                if _state.get("scribing") else "")
         # 2026-07-19 (Commander order): ONE manual action — "Update memory". The old Consolidate
         # button and the "Reviewer keeps rejecting these" panel were removed: consolidation (log
@@ -1577,7 +1639,7 @@ def create_app(cfg: Config, port: int = 8787):
             "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
         body = (banner + act + top
                 + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>Doctrine</h3>"
-                + "<pre class=rep>" + html.escape(memory.load() or "(no Unit Memory yet)") + "</pre>"
+                + "<pre class=rep>" + html.escape(memory.load() or "(no Squad memory yet)") + "</pre>"
                 + live_html)
         return _wrap("Unit Memory", body)
 
@@ -1869,6 +1931,22 @@ def create_app(cfg: Config, port: int = 8787):
                 _state["last_msg"] = "Proposal batch denied — nothing filed."
         return redirect("/needs")
 
+    @app.post("/api/needs-sync")
+    def needs_sync_api():
+        """2026-07-19 (Commander order): reconcile Needs-you against live Jira NOW — clears
+        parked/decision/errored entries whose tickets the Commander already moved (Done/QA) or
+        re-queued (To Do) in Jira. Synchronous: the click waits for the truth."""
+        from . import needs_sync
+        r = needs_sync.reconcile(cfg, audit, force=True)
+        n = len(r.get("cleared", []))
+        get_state(None)["last_msg"] = (
+            f"✓ Synced with Jira — cleared {n} item(s): "
+            + ", ".join(t for t, _ in r.get("cleared", [])[:8])
+            + ("…" if n > 8 else "") if n else
+            f"✓ Synced with Jira — everything in Needs-you is still genuinely waiting "
+            f"({r.get('checked', 0)} checked).")
+        return redirect("/needs")
+
     @app.get("/needs")
     def needs_page():
         """Unified Commander inbox — decisions, errored runs, parked tickets, open PRs.
@@ -1883,54 +1961,67 @@ def create_app(cfg: Config, port: int = 8787):
         """
         from . import needs as _needs
         appq = _board_project(request.args.get("app"))   # EU-129: scope to active project
+        # 2026-07-19: throttled background Jira reconcile on every load — answers/status changes
+        # made IN JIRA clear their Needs-you entries without waiting for a drain (5-min TTL; the
+        # ↻ button below forces it synchronously).
+        try:
+            from . import needs_sync as _nsync
+            threading.Thread(target=_nsync.reconcile, args=(cfg, audit),
+                             kwargs={"ttl_s": 300.0}, daemon=True).start()
+        except Exception:  # noqa: BLE001
+            pass
         s = _needs.summary(cfg, appq)
         style = (
             "<style>"
             ".nsec{margin:4px 0 24px}.nsec h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;"
-            "color:#8a929f;margin:0 0 10px;font-weight:700}"
-            ".ncard{background:#12161f;border:1px solid #232936;border-radius:11px;padding:13px 15px;margin:9px 0}"
-            ".ncard .q{color:#e9ecf1;margin-bottom:6px}.ncard .meta{color:#6b7480;font-size:12px;"
+            "color:var(--dim);margin:0 0 10px;font-weight:700}"
+            ".ncard{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px;margin:9px 0}"
+            ".ncard .q{color:var(--ink);margin-bottom:6px}.ncard .meta{color:var(--faint);font-size:12px;"
             "font-family:ui-monospace,Menlo,monospace}"
             ".nrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}"
-            ".nrow input[type=text]{flex:1;min-width:200px;background:#0d1119;border:1px solid #2a3343;"
-            "color:#e9ecf1;border-radius:8px;padding:8px 10px;font:inherit}"
+            ".nrow input[type=text]{flex:1;min-width:200px;background:var(--bg);border:1px solid var(--line2);"
+            "color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit}"
             ".nbtn{border:0;border-radius:8px;padding:8px 13px;font-weight:650;cursor:pointer;font:inherit;"
             "text-decoration:none;display:inline-block}"
-            ".nbtn.ok{background:#10371f;border:1px solid #1c5238;color:#56d98a}.nbtn.send{background:#3b6cff;color:#fff}"
-            ".nbtn.no{background:#23191a;border:1px solid #3a2f12;color:#f0676b}"
-            ".nbtn.x{background:#1a1f2a;border:1px solid #2a3343;color:#8a929f}"
-            ".ncard details>summary{cursor:pointer;color:#e9ecf1;list-style:none;display:flex;"
+            ".nbtn.ok{background:var(--okbg);border:1px solid var(--okline);color:var(--ok)}.nbtn.send{background:var(--accent);color:#fff}"
+            ".nbtn.no{background:var(--badbg);border:1px solid var(--badline);color:var(--bad)}"
+            ".nbtn.x{background:var(--panel2);border:1px solid var(--line2);color:var(--dim)}"
+            ".ncard details>summary{cursor:pointer;color:var(--dim);font-size:12.5px;list-style:none;display:flex;"
             "align-items:center;gap:8px;outline:none}"
             ".ncard details>summary::-webkit-details-marker{display:none}"
-            ".ncard details>summary::before{content:'\\25B8';color:#6b7480;font-size:11px;transition:transform .15s}"
+            ".ncard details>summary::before{content:'\\25B8';color:var(--faint);font-size:11px;transition:transform .15s}"
             ".ncard details[open]>summary::before{transform:rotate(90deg)}"
-            ".ncard .ndetail{margin:11px 0 2px;padding:11px 13px;background:#0d1119;border:1px solid #222a38;"
+            ".ncard .ndetail{margin:11px 0 2px;padding:11px 13px;background:var(--well);border:1px solid var(--line);"
             "border-radius:8px}"
-            ".ncard .ndt{color:#c3cad6;font-size:13px;line-height:1.5;margin:5px 0}"
-            ".ncard .ndt.sub{color:#8a929f;padding-left:8px}.ncard .ndt.muted{color:#6b7480}"
-            ".ncard .ndt b{color:#e9ecf1;font-weight:650}"
-            ".nbanner{background:#0f2740;border:1px solid #1c4a78;color:#9cc9ff;border-radius:9px;"
+            ".ncard .ndt{color:var(--ink);font-size:13px;line-height:1.5;margin:5px 0}"
+            ".ncard .ndt.sub{color:var(--dim);padding-left:8px}.ncard .ndt.muted{color:var(--faint)}"
+            ".ncard .ndt b{color:var(--ink);font-weight:650}"
+            ".nbanner{background:var(--accentbg);border:1px solid var(--accentline);color:var(--info);border-radius:9px;"
             "padding:11px 14px;margin:0 0 16px;font-size:13.5px;font-weight:600}"
             ".ncard label.pcheck{display:flex;gap:8px;align-items:flex-start;margin:7px 0;"
-            "color:#c3cad6;font-size:13.5px;cursor:pointer}"
+            "color:var(--ink);font-size:13.5px;cursor:pointer}"
             ".ncard label.pcheck input{margin-top:3px}"
-            ".ncard .psev{color:#fbbf24;font-weight:650}.ncard .ptype{color:#6b7480;font-size:12px}"
-            ".nempty{color:#56d98a;padding:30px;text-align:center;font-size:15px}"
+            ".ncard .psev{color:var(--warn);font-weight:650}.ncard .ptype{color:var(--faint);font-size:12px}"
+            ".nempty{color:var(--ok);padding:30px;text-align:center;font-size:15px}"
             # EU-102 — colour-coded category badges for the unified inbox
             ".nbadge{display:inline-block;border-radius:5px;padding:2px 7px;font-size:11px;"
             "font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-right:6px}"
-            ".nbadge.dec{background:#1e1450;color:#a78bfa}"    # decision   — purple
-            ".nbadge.err{background:#2a1010;color:#f87171}"    # errored    — red
-            ".nbadge.prk{background:#1f1600;color:#fbbf24}"    # parked     — amber
-            ".nbadge.opr{background:#0c1f20;color:#34d399}"    # open PR    — teal
+            ".nbadge.dec{background:var(--accentbg);color:var(--accent)}"    # decision   — purple
+            ".nbadge.err{background:var(--badbg);color:var(--bad)}"    # errored    — red
+            ".nbadge.prk{background:var(--warnbg);color:var(--warn)}"    # parked     — amber
+            ".nbadge.opr{background:var(--okbg);color:var(--ok)}"    # open PR    — teal
             "</style>")
         # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
         _m = _state.pop("last_msg", "") or ""
         banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if _m else ""
+        sync_btn = ("<form method=post action=/api/needs-sync style='margin:0 0 14px'>"
+                    "<button class='nbtn x' title='Check every item against live Jira NOW — items "
+                    "whose ticket you already moved (Done/QA) or re-queued (To Do) in Jira are "
+                    "cleared'>&#8635; Sync with Jira</button></form>")
         if not s.get("total"):
-            return _wrap("Needs you", style + banner
+            return _wrap("Needs you", style + banner + sync_btn
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
-        out = [style, banner]
+        out = [style, banner, sync_btn]
 
         # ── Unified inbox rows — grouped by category (EU-102) ────────────────
         from urllib.parse import quote
@@ -1969,11 +2060,18 @@ def create_app(cfg: Config, port: int = 8787):
                 _po = None
                 try:
                     from . import decisions as _dec
-                    _po = _dec.parse_options(_qfull)
+                    _po = _dec.parse_options(_qfull) or _dec.synthesize_options(_qfull)
                 except Exception:  # noqa: BLE001
                     _po = None
                 if _po:
-                    head = html.escape(_po["summary"] or _qfull.splitlines()[0][:200])
+                    head = html.escape(_po["summary"]
+                                       or _dec.summarize_question(_qfull))
+                    # a synthesized card keeps the original text reachable — briefly headlined,
+                    # fully inspectable (2026-07-19: "unclear walls" order)
+                    _ctx = ("<details><summary>Full context</summary>"
+                            f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
+                            "</div></div></details>"
+                            if _po.get("synthesized") else "")
                     btns = ""
                     for o in _po["options"]:
                         _cls = "nbtn ok" if o["recommended"] else "nbtn x"
@@ -1991,6 +2089,7 @@ def create_app(cfg: Config, port: int = 8787):
                         "<div class=ncard>"
                         f"<div class=q><span class='nbadge dec'>Decision</span>{head}</div>"
                         f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
+                        f"{_ctx}"
                         f"<div class=nrow>{btns}</div>"
                         "<form method=post action=/api/answer class=nrow>"
                         f"<input type=hidden name=ticket value='{tid}'>"
@@ -2003,11 +2102,17 @@ def create_app(cfg: Config, port: int = 8787):
                         "<button class='nbtn x'>Dismiss</button></form></div>"
                         "</div>")
                     continue
-                why = html.escape(str(d.get("why") or "(no question on file)"))
+                _brief = html.escape(_dec.summarize_question(_qfull)
+                                     or str(d.get("why") or "(no question on file)"))
+                _full = ("<details><summary>Full context</summary>"
+                         f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
+                         "</div></div></details>"
+                         if len(_qfull) > 160 else "")
                 out.append(
                     "<div class=ncard>"
-                    f"<div class=q><span class='nbadge dec'>Decision</span>{why}</div>"
+                    f"<div class=q><span class='nbadge dec'>Decision</span>{_brief}</div>"
                     f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
+                    f"{_full}"
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     f"<input type=hidden name=app value='{dapp}'>"
@@ -2083,7 +2188,7 @@ def create_app(cfg: Config, port: int = 8787):
                 why = html.escape(str(t.get("why") or "PR opened — review needed"))
                 pr_url = str(t.get("pr_url") or "")
                 pr_link = (f" &middot; <a href='{html.escape(pr_url)}' target=_blank "
-                           f"style='color:#34d399'>{html.escape(pr_url)}</a>") if pr_url else ""
+                           f"style='color:var(--ok)'>{html.escape(pr_url)}</a>") if pr_url else ""
                 review_btn = (f"<a class='nbtn ok' href='{html.escape(pr_url)}' target=_blank>"
                               "Review PR</a>") if pr_url else ""
                 out.append(
@@ -2436,10 +2541,18 @@ def create_app(cfg: Config, port: int = 8787):
         # of a permanent wall of boxes. Saved connections render only when there ARE any; a
         # not-connected project keeps the form open (there is nothing to hide behind).
         _connected = "jactive off" not in active_html
+        # 2026-07-19 (Commander order): MULTI-JIRA is first-class — one project on Jira X,
+        # another on Jira Y. The same form both edits and ADDS (a new name + site = a new saved
+        # connection; the checkbox binds it to the project selected above), and every saved
+        # connection card carries a "Use for <project>" button.
         edit_box = ("<details class=jeditbox" + ("" if _connected else " open") + ">"
                     "<summary><span class=jbtn>&#9998; "
-                    + ("Edit connection" if _connected else "Connect a Jira")
-                    + "</span></summary>" + form + "</details>")
+                    + ("Edit &middot; &#65291; Add another Jira" if _connected else "Connect a Jira")
+                    + "</span></summary>"
+                    "<p class=jhint style='margin:10px 0 8px'>Each project can use its OWN Jira — "
+                    "pick the project above, then connect (or assign a saved connection). A new "
+                    "name + site here saves as an additional connection.</p>"
+                    + form + "</details>")
         body = (style + "<div class=jbar>" + switcher + "</div>" + active_html
                 + (("<h3>Saved Jira connections</h3>" + conns_html) if conns else "")
                 + edit_box)
@@ -3413,7 +3526,7 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
     elif notify.configured():
         print(f"  decision listener: OFF — {_why} (cockpit-only on this host)")
-    print(f"★ War Room: http://{host}:{port}   (Ctrl-C to stop)")
+    print(f"\u2b22 Squad HQ: http://{host}:{port}   (Ctrl-C to stop)")
     print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
     # threaded: the SSE stream holds a long-lived request — without this it would block the cockpit.
     app.run(host=host, port=port, threaded=True)

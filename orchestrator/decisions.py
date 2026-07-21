@@ -70,6 +70,15 @@ def _save(cfg, items: list[dict]) -> None:
     locking.locked_rmw(_store(cfg), lambda _current: items, default=[])
 
 
+def _strip_banner_lines(text: str) -> str:
+    """Drop leaked officer banner lines (the RULE-0 model/effort announcement — '\U0001f916 Model:',
+    '\u2699\ufe0f Effort:') from a question. 2026-07-21: AUTO-215's decision card literally read
+    '\U0001f916 Model: Opus\u2026' in the daily — a park must carry the ask, never the header."""
+    kept = [ln for ln in (text or "").splitlines()
+            if not ln.strip().startswith(("\U0001f916", "\u2699"))]
+    return "\n".join(kept).strip()
+
+
 def _validate_question_format(question: str) -> tuple[bool, str]:
     """EU-229: validate ask quality — reject empty/garbage questions.
 
@@ -163,8 +172,16 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
     # EU-229: Validate question quality before proceeding
     is_valid, error = _validate_question_format(question)
     if not is_valid:
-        # Silently reject — the caller (loop.py escalation path) should regenerate
-        return None
+        if not (question or "").strip():
+            return None   # truly empty — nothing to park
+        # P0 (2026-07-21 production audit): NEVER void a park over formatting. The PM's own
+        # triage briefs legitimately open with markdown headers / 'Based on the…' — the exact
+        # shapes EU-229 rejects. Silently returning None left ESCALATED tickets with no pending
+        # decision, no Blocked transition and a dead Telegram reply-hint, and needs_sync then
+        # un-parked them so the drain rebuild-churned the same ticket. Sanitize and store.
+        cleaned = "\n".join(ln.lstrip("#").strip()
+                             for ln in _strip_banner_lines(question).splitlines())
+        question = "Decision needed (auto-sanitized from the officer's brief):\n" + cleaned
 
     eid = entry_id or ticket.id
     base_tid = str(ticket.id).split("#", 1)[0]
@@ -434,6 +451,58 @@ def parse_options(question: str) -> dict | None:
     # exactly ONE recommended: if the officer marked several (or none), keep flags as parsed —
     # the UI highlights whatever is marked; multiple marks degrade to multiple highlights.
     return {"summary": " ".join(summary)[:400], "options": opts}
+
+
+def summarize_question(question: str, limit: int = 140) -> str:
+    """A one-line brief of a stored decision question: the first meaningful sentence, with
+    command dumps / test walls cut off. For the cockpit card headline — the full text stays
+    available behind the details fold."""
+    q = " ".join(_strip_banner_lines(str(question or "")).split())
+    for cut in (" $ /", " $ python", "``` ", " (exit "):
+        i = q.find(cut)
+        if i > 20:
+            q = q[:i]
+    for end in (". ", "? ", "! "):
+        i = q.find(end)
+        if 30 <= i <= limit:
+            return q[:i + 1].strip()
+    return (q[:limit].rstrip() + "…") if len(q) > limit else q
+
+
+# The known UNSTRUCTURED question classes (stored before the EU-337 format, or produced by
+# deterministic loop paths) → a brief + 1-3 synthesized options, one recommended. The option
+# text is written as an actionable instruction, because choosing it ships through /api/answer:
+# a Jira comment + the ticket back to To Do with the instruction baked into the re-run.
+_SYNTH_CLASSES: list[tuple[tuple[str, ...], str, list[tuple[str, bool]]]] = [
+    (("is RED before any build", "gate fails on the clean base"),
+     "This ticket parked while base 'dev' was RED (the gate failed on the clean tree).",
+     [("Re-queue now — the base is green again, build this ticket as specced", True),
+      ("Split it into smaller tickets first", False)]),
+    # 2026-07-19: a turn-limit park now only happens AFTER auto-split declined (depth cap) and a
+    # boosted retry also blew out — so "split it" stopped being an honest recommendation. Re-scope
+    # is the senior move; a raw retry stays as the manual override.
+    (("ran out of turns", "too big for a single pass", "iteration limit"),
+     "The build ran out of turns even after auto-split hit its depth cap and one boosted retry.",
+     [("Re-scope: simplify this ticket's description to the smallest shippable slice, then re-queue", True),
+      ("Retry as-is — give it one more full pass", False)]),
+    (("max passes", "PM escalated", "Reviewer's required changes"),
+     "The build hit max passes — the Reviewer kept demanding changes.",
+     [("Retry with the Reviewer's required changes as the spec", True),
+      ("Split this ticket into smaller sub-tickets and build those", False)]),
+]
+
+
+def synthesize_options(question: str) -> dict | None:
+    """parse_options-shaped dict for a KNOWN unstructured question class, else None. Gives the
+    pre-format decision backlog the same brief + one-click recommended options the new
+    escalations carry natively."""
+    q = str(question or "")
+    for needles, brief, opts in _SYNTH_CLASSES:
+        if any(n.lower() in q.lower() for n in needles):
+            return {"summary": brief, "synthesized": True,
+                    "options": [{"n": i + 1, "text": text, "recommended": rec}
+                                for i, (text, rec) in enumerate(opts)]}
+    return None
 
 
 def expand_option_reply(question: str, answer: str) -> str:

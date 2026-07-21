@@ -58,16 +58,25 @@ check("split is audited (scrum_split, reason=turn-limit, into=[...])",
       any(e == "scrum_split" and kw.get("reason") == "turn-limit" and kw.get("into") for e, kw in aA.events), str(aA.events))
 check("a successful split does NOT escalate to you", not any(e == "needs_human" for e, _ in aA.events))
 
-# (b) the splitter DECLINES (can't split further) -> fall back to escalating to the Commander
+# (b) the splitter DECLINES (can't split further) -> 2026-07-19 senior ladder: requeue ONCE with
+# a boosted turn budget; only the SECOND blow-out escalates to the Commander with the honest note.
 async def _split_no(*a, **k): return {"ok": False, "keys": []}
 _scrum_mod.split = _split_no
 tkB = Ticket(id="AUTO-14", key="AUTO-14", summary="atomic but heavy", description="d", app="automatixy")
 aB = FakeAudit()
 repB = asyncio.run(loop._exception_report(cfg, tkB, app, TURN_ERR, aB))
-check("unsplittable too-big ticket -> ESCALATED (needs you), not ERRORED", repB.outcome == Outcome.ESCALATED, str(repB.outcome))
+check("unsplittable too-big ticket -> FIRST blow-out requeues once (boosted budget), not ESCALATED",
+      repB.outcome == Outcome.REQUEUED, str(repB.outcome))
+check("the requeue is audited as turn_limit_retry",
+      any(e == "turn_limit_retry" for e, _ in aB.events), str(aB.events))
+check("the split refusal is audited (scrum_split_failed)",
+      any(e == "scrum_split_failed" for e, _ in aB.events), str(aB.events))
+aB2 = FakeAudit()
+repB2 = asyncio.run(loop._exception_report(cfg, tkB, app, TURN_ERR, aB2))
+check("SECOND blow-out -> ESCALATED (needs you), not ERRORED", repB2.outcome == Outcome.ESCALATED, str(repB2.outcome))
 check("escalation records needs_human(reason=turn-limit)",
-      any(e == "needs_human" and kw.get("reason") == "turn-limit" for e, kw in aB.events), str(aB.events))
-check("turn-limit is never a plain 'ticket_exception'", not any(e == "ticket_exception" for e, _ in aB.events))
+      any(e == "needs_human" and kw.get("reason") == "turn-limit" for e, kw in aB2.events), str(aB2.events))
+check("turn-limit is never a plain 'ticket_exception'", not any(e == "ticket_exception" for e, _ in aB2.events))
 check("escalation files a decision card for you", any(p.get("id") == "AUTO-14" for p in decisions.load(cfg)), "no card")
 
 # (c) an EPHEMERAL ticket has no backlog to file sub-tickets into -> skip the split, escalate directly

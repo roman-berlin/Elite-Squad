@@ -1866,6 +1866,13 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             blocked = _auto_clear_merged_ghosts(cfg, blocked, audit)
             # EU-229: auto-clear ghost pending decisions whose base ticket already merged
             _auto_clear_decision_ghosts(cfg, audit)
+            # 2026-07-19: reconcile the needs stores against LIVE Jira statuses (throttled) — a
+            # ticket the Commander moved to Done/QA or re-queued in Jira clears everywhere.
+            try:
+                from . import needs_sync as _nsync
+                _nsync.reconcile(cfg, audit, ttl_s=600.0)
+            except Exception:  # noqa: BLE001
+                pass
             # EU-61: a parked ticket the Commander answered directly on Jira auto-resumes — lift it out
             # of the skip-set and put it at the FRONT of the queue (resume before taking new work).
             resumed = _resumable_answered(cfg, app_name, blocked)

@@ -55,8 +55,10 @@ chk("Parked card is gone (retired by EU-102)", "Parked" not in cards, str(list(c
 # EU-150: the standalone Merged total card is retired — use "Merged → DEV today" which links to /tasks?filter=merged
 chk("Merged total card is gone (retired by EU-150)", "Merged total" not in cards, str(list(cards.keys())))
 chk("Merged → DEV today card -> /merge-stats", cards.get("Merged → DEV today") == "/merge-stats", str(cards.get("Merged → DEV today")))
-# 5a882a6: the Needs-you card itself was removed from the board — /needs remains the inbox route.
-chk("Needs you card is gone (removed by 5a882a6)", "Needs you" not in cards, str(list(cards.keys())))
+# 2026-07-19 (Commander order): the Needs-you card RETURNED to the KPI row (reversing 5a882a6)
+# and deep-links to the /needs inbox where answers comment the Jira ticket + move it to To Do.
+chk("Needs you card is back and deep-links to /needs",
+    str(cards.get("Needs you", "")).startswith("/needs"), str(cards.get("Needs you")))
 chk("Security blocks card -> security-scoped forensics",
     cards.get("Security blocks") == "/forensics?cat=security_block", str(cards.get("Security blocks")))
 chk("Security blocks no longer points at /council", cards.get("Security blocks") != "/council")

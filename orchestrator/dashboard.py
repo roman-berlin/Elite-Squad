@@ -627,9 +627,39 @@ def _jira_link(base: str, ticket_id: Any, *, stop_prop: bool = False) -> str:
             f'rel=noopener{onclick} title="Open {html.escape(tid)} in Jira">Jira &#8599;</a>')
 
 
+_PERIOD_LABEL = {"today": "Today", "week": "This week", "month": "This month", "all": "Total"}
+
+
+def filter_tasks_since(tasks: list, period: str) -> list:
+    """2026-07-19 (Commander order): scope the task log to Today / This week / This month / Total.
+    'week' = the last 7 days, 'month' = the last 30 — rolling windows, deterministic, no TZ
+    gymnastics. Unknown/blank periods return the list untouched (Total)."""
+    period = (period or "all").strip().lower()
+    if period not in ("today", "week", "month"):
+        return tasks
+    from datetime import timedelta
+    now = datetime.now()
+    if period == "today":
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "week":
+        cutoff = now - timedelta(days=7)
+    else:
+        cutoff = now - timedelta(days=30)
+    out = []
+    for t in tasks:
+        ts = t.get("ended") or t.get("started")
+        try:
+            if ts is not None and ts.replace(tzinfo=None) >= cutoff:
+                out.append(t)
+        except (TypeError, AttributeError):
+            continue
+    return out
+
+
 def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
-                needs_count: int | None = None, cfg=None, app_name: str | None = None) -> str:
+                needs_count: int | None = None, cfg=None, app_name: str | None = None,
+                period: str = "all") -> str:
     # 2026-07-19 (Commander order): the task log is PER-PROJECT — everything on the page (cards,
     # filters, table) is scoped to the chosen project. Rows with no app stamp (e.g. ghost-parked
     # stubs) are kept so their Unblock action never disappears behind a scope.
@@ -744,6 +774,16 @@ def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: 
         (f'<div class="card clk" onclick="kfilter(\'{kind}\')">' if kind else '<div class=card>')
         + f'<div class=k>{html.escape(str(v))}</div><div class=l>{html.escape(l)}</div></div>'
         for l, v, kind in cards)
+    # 2026-07-19: the Today / This week / This month / Total segmented control — scopes the cards
+    # AND the rows (tasks arrive pre-filtered from tasks_page; the chips just re-request).
+    _p = (period or "all").strip().lower()
+    if _p not in _PERIOD_LABEL:
+        _p = "all"
+    _appq = f"&app={html.escape(app_name)}" if app_name else ""
+    chips = "".join(
+        f'<a class="pseg{" on" if key == _p else ""}" href="/tasks?since={key}{_appq}">{label}</a>'
+        for key, label in _PERIOD_LABEL.items())
+    cards_html = f'<div class=psegs>{chips}</div>' + cards_html
     banner = ""
     _appq = f"&app={html.escape(app_name)}" if app_name else ""
     if flt:
@@ -779,7 +819,12 @@ _TEMPLATE = """<!doctype html><html><head><meta charset=utf-8>
 body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
 header{padding:22px 30px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel),var(--bg))}
 h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:var(--dim);font-size:12px;margin-top:5px}
-.cards{display:flex;gap:14px;padding:20px 30px 6px;flex-wrap:wrap}
+.cards{display:flex;gap:14px;padding:12px 30px 6px;flex-wrap:wrap;align-items:center}
+.psegs{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+padding:3px;gap:2px;flex-basis:100%;width:max-content;margin-bottom:4px}
+.pseg{padding:7px 16px;border-radius:8px;font-size:13px;font-weight:600;color:var(--dim);text-decoration:none}
+.pseg:hover{color:var(--ink)}
+.pseg.on{background:var(--accent);color:#fff}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 20px;min-width:120px}
 .card .k{font-size:24px;font-weight:650}.card .l{color:var(--dim);font-size:12px;margin-top:2px}
 .card.clk{cursor:pointer;transition:border-color .15s}.card.clk:hover{border-color:var(--accent)}
@@ -790,13 +835,15 @@ h1{margin:0;font-size:19px;letter-spacing:.2px}.sub{color:var(--dim);font-size:1
 .dismiss{margin:0}.x{background:none;border:1px solid var(--warnline);color:var(--dim);border-radius:6px;padding:0 8px;cursor:pointer;font-size:12px;line-height:1.7}.x:hover{background:var(--badbg);color:var(--bad)}
 .wrap{padding:8px 30px 50px}
 input{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 13px;width:280px;margin:6px 0 14px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line)}
-th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
-.row{cursor:pointer}.row:hover{background:var(--panel2)}.tw{color:var(--faint);width:14px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13.5px;background:var(--panel);
+border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--line)}
+tbody tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;background:var(--panel2)}
+.row{cursor:pointer;transition:background .12s}.row:hover{background:var(--panel2)}.tw{color:var(--faint);width:14px}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
-.b{padding:2px 9px;border-radius:99px;font-size:11px;font-weight:650;white-space:nowrap}
+.b{display:inline-block;padding:3px 11px;border-radius:99px;font-size:11px;font-weight:700;white-space:nowrap;letter-spacing:.02em}
 .ok{background:var(--okbg);color:var(--ok)}.warn{background:var(--warnbg);color:var(--warn)}
 .bad{background:var(--badbg);color:var(--bad)}.muted{background:var(--line);color:var(--dim)}
 .dry{color:var(--dim);font-size:11px}a{color:var(--info);text-decoration:none}
@@ -1025,11 +1072,26 @@ def standup(cfg) -> str:
         # EU-336: one capped line per item — never the officer's raw multi-paragraph text. The
         # "(cockpit → /needs)" pointer rides the header only when something was actually clipped,
         # mirroring the "…and N more (cockpit → /needs)" overflow idiom on the Needs-you line above.
-        rendered = [(p["id"], _one_line(p.get("question", ""))) for p in pending]
-        clipped = any(q.endswith("…") for _, q in rendered)
-        lines.append("❓ Awaiting your decision:"
-                     + (" (full text: cockpit → /needs)" if clipped else ""))
+        # 2026-07-19 (Commander order): PRACTICAL, not a wall — top 5 one-liners, the rest is a
+        # count + the /needs pointer (the inbox is where answering actually happens).
+        # 2026-07-21 (Commander: the daily showed a leaked officer banner as a "question"):
+        # bullets go through the same brief pipeline the /needs cards use — structured summary
+        # when the question carries options, else the banner-stripped one-line summarizer.
+        from . import decisions as _dec
+
+        def _q_brief(q):
+            try:
+                po = _dec.parse_options(q) or _dec.synthesize_options(q)
+                return _one_line((po or {}).get("summary") or _dec.summarize_question(q))
+            except Exception:  # noqa: BLE001 - a brief failure must never sink the daily
+                return _one_line(q)
+        rendered = [(p["id"], _q_brief(p.get("question", ""))) for p in pending[:5]]
+        more = len(pending) - len(rendered)
+        lines.append("❓ Awaiting your decision" + (f" ({len(pending)})" if more > 0 else "")
+                     + ": (answer: cockpit → /needs)")
         lines += [f"   • {pid}: {q}" for pid, q in rendered]
+        if more > 0:
+            lines.append(f"   …and {more} more (cockpit → /needs)")
     else:
         lines.append("❓ Awaiting your decision: —")
     if stale_base_red:
@@ -1037,6 +1099,31 @@ def standup(cfg) -> str:
         # the base recovered and where the tickets wait, without re-arming the blocker headline.
         lines.append(f"♻️ Base went green again — {len(stale_base_red)} stale base-red decision(s) "
                      "left out of this brief; re-queue those tickets from cockpit → /needs")
+    # 2026-07-19 (Commander order): the daily answers DONE / TO DO / NEXT. "Next up" peeks at the
+    # top of each board queue (best-effort — an unreachable Jira just drops the line), and the
+    # failure-cause summary moves INTO the daily (the forensics nav link left the cockpit bar).
+    try:
+        from . import intake as _intake
+        nxt = []
+        for _app in (getattr(cfg, "apps", None) or [])[:3]:
+            try:
+                for _a, _tk in _intake.from_drain(cfg, _app.name, 3):
+                    nxt.append(f"{_tk.id}")
+            except Exception:  # noqa: BLE001 - one unreachable board must not kill the daily
+                continue
+        if nxt:
+            lines.append("🔜 Next up (top of the queue): " + ", ".join(nxt[:6]))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import forensics as _fx
+        _tax = _fx.taxonomy(cfg)[:3]
+        if _tax:
+            lines.append("🧩 Failure causes (top): "
+                         + " · ".join(f"{r['label']} ×{r['count']}" for r in _tax)
+                         + " (details: cockpit → /forensics)")
+    except Exception:  # noqa: BLE001
+        pass
     return "\n".join(lines)
 
 

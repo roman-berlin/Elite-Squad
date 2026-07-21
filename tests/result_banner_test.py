@@ -60,8 +60,8 @@ server._state.pop("last_msg", None)
 # --- no result -> no banner, page renders fine ---
 server._state.pop("last_result", None)
 hn = client.get("/").get_data(as_text=True)
-# EU-289 removed "+ New task" from the toolbar — sentinel on the surviving Reports menu.
-chk("no result -> page renders without the banner", "Reports" in hn)
+# EU-289 removed "+ New task"; 2026-07-19 flattened the Reports menu — sentinel on Task log.
+chk("no result -> page renders without the banner", "Task log" in hn)
 
 # --- deploy-status reports the dedicated result line ---
 server._state["last_result"] = "Deployed 2 commit(s) DEV → main — the server self-updates within ~15 min."

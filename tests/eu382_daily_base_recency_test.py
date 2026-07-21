@@ -111,8 +111,10 @@ check("a red_base_block NEWER than every green signal DOES headline (⛔ base-re
 check("the ⛔ line counts the tickets blocked in the CURRENT red episode (2 here)",
       "2 ticket(s)" in line, repr(line))
 check("the ⛔ line names the latest blocked ticket", "EU-375" in line, repr(line))
+# 2026-07-21: daily bullets render the BRIEF pipeline's summary (synthesized for the red-base
+# class), not the raw question wall — the pin follows the wording, the behavior is unchanged.
 check("with an ACTIVE base-red the red-base decision stays IN the brief",
-      "RED before any build" in su, su)
+      "parked while base" in su or "RED before any build" in su, su)
 check("no bogus 'green again' note while the base is red", "green again" not in su, su)
 
 # ── 3. dev_gate passed=true is a green signal; passed=false is NOT ────────────────────────────────

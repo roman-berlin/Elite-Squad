@@ -105,8 +105,14 @@ chk("Open logs link preserved (is_mac=True)", "&#128194; Open logs" in bar and "
 # EU-289 de-duped this menu: "Budget monitor" (/budget) merged into "Usage & budget" (/usage),
 # and the duplicate "Unit roster" item went (the top-level Roster btn above still covers
 # /roster-doc). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
-for _href in ("/tasks", "/council", "/memory", "/usage", "/forensics", "/roster-doc"):
-    chk(f"Reports menu link preserved: {_href}", f'href="{_href}"' in bar)
+# 2026-07-19 (Commander order): the Reports dropdown is FLATTENED — Task log / Daily / Memory
+# are top-level nav buttons; Usage left the bar (the Tokens KPI deep-links /usage) and Forensics
+# left too (its summary rides in the daily; the Security-blocks KPI deep-links /forensics).
+for _href in ("/tasks", "/council", "/memory", "/roster-doc"):
+    chk(f"nav link preserved as a top-level button: {_href}", f'href="{_href}"' in bar)
+for _gone in ("/usage", "/forensics"):
+    chk(f"{_gone} left the nav bar (KPI deep-links remain the route)", f'href="{_gone}"' not in bar)
+chk("the Reports dropdown itself is gone", "Reports" not in bar)
 
 # ---------------------------------------------------------------------------
 # 3. Buttons render through the _btn partial — no new hand-rolled button CSS

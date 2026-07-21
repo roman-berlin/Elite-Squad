@@ -377,6 +377,18 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                     for b in message.content:
                         if isinstance(b, TextBlock):
                             parts.append(b.text)
+                            # 2026-07-20 (squad modes): the elite Builder reports every iteration
+                            # as DID/CHECKED/FOUND/FIXING/NEXT lines — surface EXACTLY those in
+                            # the live console/run log (tool briefs already print; narrative text
+                            # only reaches the transcript, so without this the Commander can't
+                            # watch the methodology working). Keyword-guarded: non-elite officers
+                            # emit no such lines, so nothing else gets noisier.
+                            if tag:
+                                for _ln in b.text.splitlines():
+                                    _s = _ln.strip()
+                                    if _s.startswith(("DID:", "CHECKED:", "FOUND:",
+                                                      "FIXING:", "NEXT:")):
+                                        print(f"      · {tag} · {_s[:200]}", flush=True)
                             # EU-197: write officer reasoning to transcript
                             try:
                                 from . import transcript

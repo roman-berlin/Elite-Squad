@@ -191,6 +191,27 @@ props, clean = filing.parse_tickets("prefix\n" + blk)
 chk("make_block round-trips through parse_tickets",
     len(props) == 1 and props[0]["title"] == "T" and clean == "prefix", f"{props} {clean!r}")
 
+# --- 9) 2026-07-20: infra signatures file to the UNIT's own project when it is a configured --- #
+# --- app (repo_path == this orchestrator repo), not into the victim product backlog.        --- #
+self_repo = str(Path(forensics.__file__).resolve().parents[1])
+unit_app = AppConfig(name="Elite-Unit", repo_path=self_repo, base_branch="dev",
+                     protected_branch="main", backlog_backend="jira",
+                     backlog={"project_key": "EU", "base_url": "https://x.atlassian.net"})
+audit_self = tmp / "audit_self.jsonl"
+cfg_self = Config(apps=[unit_app, app], audit_path=str(audit_self), postmortem_after=3)
+stub_by_app: dict[str, StubBacklog] = {}
+filing.make_backlog = lambda a: stub_by_app.setdefault(a.name, StubBacklog())
+run("SGA-1", "ticket_exception", path=audit_self, error=CRASH_A)
+run("SGA-2", "ticket_exception", path=audit_self, error=CRASH_A2)
+run("SGB-1", "ticket_exception", path=audit_self, error=CRASH_B)
+forensics.maybe_postmortem(cfg_self, ns(ticket_id="SGB-1", outcome=Outcome.ERRORED), fake_audit)
+_unit_created = stub_by_app.get("Elite-Unit", StubBacklog()).created
+_prod_created = [c for c in stub_by_app.get("automatixy", StubBacklog()).created
+                 if "[infra-signature]" in c[0]]
+chk("infra signature files on the UNIT's project, not the victim product backlog",
+    any("[infra-signature]" in c[0] for c in _unit_created) and not _prod_created,
+    f"unit={[c[0] for c in _unit_created]} prod={_prod_created}")
+
 print("\n=========== EU-231 POSTMORTEM FILING QA ===========")
 passed = sum(1 for _, ok_, _ in results if ok_)
 for n, ok_, det in results:

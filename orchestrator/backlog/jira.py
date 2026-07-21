@@ -263,22 +263,22 @@ class JiraAdapter(BacklogAdapter):
 
     def latest_answer(self, ticket) -> str | None:
         """The most recent HUMAN comment on the ticket — the Commander's answer in a decision
-        round-trip — as plain text, or None. Skips the unit's own '[General]'-prefixed comments so a
+        round-trip — as plain text, or None. Skips the squad's own '[Squad]'/'[General]'-prefixed comments so a
         question the loop just posted is never mistaken for the reply."""
         key = getattr(ticket, "key", ticket)
         for c in reversed(self.comments(key)):
             txt = _adf_to_text(c.get("body"))
-            if txt and not txt.strip().startswith("[General]"):
+            if txt and not txt.strip().startswith(("[Squad]", "[General]")):
                 return txt.strip()
         return None
 
     def latest_builder_comment(self, key: str) -> str | None:
-        """The most recent [General]-prefixed comment posted by the unit — Builder next-step
+        """The most recent squad-prefixed comment ([Squad], legacy [General]) — Builder next-step
         instructions, CI guardrail handoffs, escalation notes. Used by the CTO chat to surface
         the concrete action for the Commander when they ask 'what do I need to do about X?'"""
         for c in reversed(self.comments(key)):
             txt = _adf_to_text(c.get("body"))
-            if txt and txt.strip().startswith("[General]"):
+            if txt and txt.strip().startswith(("[Squad]", "[General]")):
                 return txt.strip()
         return None
 
@@ -313,11 +313,20 @@ class JiraAdapter(BacklogAdapter):
             return
         self.session.post(self._url(f"issue/{ticket.key}/transitions"),
                           json={"transition": {"id": match["id"]}}).raise_for_status()
+        # 2026-07-19 audit: a FALLBACK landing used to be indistinguishable from the real target —
+        # on a board with no QA column, land → QA fell back to Done and the human-QA step vanished
+        # with zero trace. The move still happens (better than stranding the ticket), but now it
+        # says so on the ticket, so a skipped QA hand-off is visible instead of silent.
+        landed = match["to"]["name"]
+        if landed.lower() != str(targets[0]).lower():
+            self.add_comment(ticket, f"[autodev] Board has no '{targets[0]}' column — moved to "
+                                     f"'{landed}' instead (fallback). If '{targets[0]}' matters, "
+                                     "add that column to the board.")
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.
         self.session.post(self._url(f"issue/{ticket.key}/comment"),
-                          json={"body": _adf("[General] " + body)}).raise_for_status()
+                          json={"body": _adf("[Squad] " + body)}).raise_for_status()
 
     def attach_pr(self, ticket: Ticket, pr_url: str) -> None:
         try:
@@ -422,6 +431,26 @@ class JiraAdapter(BacklogAdapter):
                 return it.get("key")
         return None
 
+    def find_open_by_label(self, label: str) -> str | None:
+        """Return an OPEN ticket carrying ``label``, else None. The subject-level de-dup key
+        (2026-07-21): filing stamps a fingerprint label derived from the finding's code anchors,
+        so six differently-worded reports of ONE problem (EU-409..414) collapse to one ticket.
+        Raises BacklogSearchError when the search can't run — same fail-closed contract as
+        find_open_by_summary (EU-365): an outage must never read as "no duplicate"."""
+        lab = "".join(ch for ch in (label or "") if ch.isalnum() or ch in "-_")[:60]
+        if not lab:
+            return None
+        try:
+            r = self.session.post(self._url("search/jql"), json={
+                "jql": f'project = "{self.project}" AND statusCategory != Done AND labels = "{lab}"',
+                "maxResults": 1, "fields": ["summary"]})
+            r.raise_for_status()
+            issues = r.json().get("issues", [])
+        except requests.RequestException as exc:
+            raise BacklogSearchError(
+                f"label de-dup search failed for project '{self.project}': {exc}") from exc
+        return issues[0].get("key") if issues else None
+
     # -- Senior PM operations: close & transition -------------------------------- #
     def close_ticket(self, ticket_id: str, comment: str = "", audit=None) -> bool:
         """Close a ticket with an optional comment. Returns True on success.
@@ -433,7 +462,7 @@ class JiraAdapter(BacklogAdapter):
             # Add comment if provided
             if comment and comment.strip():
                 self.session.post(self._url(f"issue/{ticket_id}/comment"),
-                                  json={"body": _adf("[General] " + comment)}).raise_for_status()
+                                  json={"body": _adf("[Squad] " + comment)}).raise_for_status()
 
             # Find transition to Done/Closed
             tr = self.session.get(self._url(f"issue/{ticket_id}/transitions"))
@@ -557,7 +586,7 @@ class JiraAdapter(BacklogAdapter):
         feedback = []
         for c in (f.get("comment", {}) or {}).get("comments", []) or []:
             txt = _adf_to_text(c.get("body"))
-            if txt and not txt.strip().startswith("[General]"):
+            if txt and not txt.strip().startswith(("[Squad]", "[General]")):
                 feedback.append(txt.strip())
         if feedback:
             description += ("\n\nCommander's comments (oldest -> newest) — read ALL of these; they "

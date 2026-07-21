@@ -617,10 +617,35 @@ def _vitest_includes(repo_root: str, app_root: str) -> list[str] | None:
     return None
 
 
+_PLAYWRIGHT_CONFIG_NAMES = ("playwright.config.ts", "playwright.config.mts",
+                            "playwright.config.js", "playwright.config.mjs")
+
+
+def _playwright_testdir(repo_root: str, app_root: str) -> str | None:
+    """The Playwright ``testDir`` declared for ``app_root`` (Playwright's own default 'tests' when
+    a config exists without an explicit testDir), or None when the app has no playwright config.
+    2026-07-20 (AUTO-182 live-fire): an e2e spec is collected by PLAYWRIGHT, not vitest — judging
+    it by vitest include globs produced a deterministic false FAIL no rebuild could ever fix (both
+    elite passes died at this gate without an LLM review, then max-passes escalated)."""
+    for name in _PLAYWRIGHT_CONFIG_NAMES:
+        p = Path(repo_root) / app_root / name
+        if not p.exists():
+            continue
+        try:
+            m = re.search(r"testDir\s*:\s*[\"']([^\"']+)[\"']", p.read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        d = (m.group(1) if m else "tests").strip().lstrip("./")
+        return d.rstrip("/") or "tests"
+    return None
+
+
 def test_collectability_problems(app: AppConfig, test_files: list[str], repo_root: str) -> list[str]:
     """Human-readable collectability problems ([] = clean) for ADDED/RENAMED test files: a
     phantom duplicated-app-root path, or a path matching none of its owning app's vitest ``include``
-    globs. A file whose owning app has no vitest config (nothing to validate against) is skipped."""
+    globs. A file whose owning app has no vitest config (nothing to validate against) is skipped —
+    and so is a file under the app's Playwright ``testDir`` (an e2e spec is Playwright's to collect,
+    never vitest's)."""
     problems: list[str] = []
     for f in test_files:
         if phantom_nested_test_paths([f]):
@@ -630,10 +655,13 @@ def test_collectability_problems(app: AppConfig, test_files: list[str], repo_roo
         root = _owning_app_root(f)
         if root is None:
             continue
+        relpath = f[len(root) + 1:] if f.startswith(root + "/") else f
+        pw_dir = _playwright_testdir(repo_root, root)
+        if pw_dir is not None and (relpath == pw_dir or relpath.startswith(pw_dir + "/")):
+            continue
         includes = _vitest_includes(repo_root, root)
         if includes is None:
             continue
-        relpath = f[len(root) + 1:] if f.startswith(root + "/") else f
         if not any(glob_matches(pat, relpath) for pat in includes):
             problems.append(f"{f}: matches none of {root}'s vitest include globs {includes} "
                             f"(checked as '{relpath}' relative to {root}) — the test runner will never collect it")
@@ -690,19 +718,38 @@ def test_collectability_gate(app: AppConfig, changed_paths: list[str], diff: str
     if problems:
         return GateResult(passed=False, report="\n".join(f"  · {p}" for p in problems))
     collectable = [f for f in test_files if not phantom_nested_test_paths([f])]
+    # 2026-07-20 (AUTO-182): a Playwright e2e spec must not be fed to the scoped VITEST run either
+    # — it is the app's playwright runner's job. Excluded but REPORTED (same honesty rule as the
+    # unowned skips below), so an e2e spec never silently bypasses all verification.
+    pw_skipped: list[str] = []
+    non_pw: list[str] = []
+    for f in collectable:
+        _root = _owning_app_root(f)
+        _pw = _playwright_testdir(repo_root, _root) if _root else None
+        _rel = f[len(_root) + 1:] if _root and f.startswith(_root + "/") else f
+        if _pw is not None and (_rel == _pw or _rel.startswith(_pw + "/")):
+            pw_skipped.append(f)
+        else:
+            non_pw.append(f)
     # EU-263: only apps/<x>-owned files are runnable — the scoped run cwd's into the owning app, and
     # an unowned path has no config there to run against (see run_scoped_vitest). Skipping is the
     # honest outcome, but it is REPORTED rather than silent: a Deno/supabase test quietly never
     # running is the same invisibility class this gate exists to catch.
-    runnable = [f for f in collectable if _owning_app_root(f) is not None]
-    skipped = [f for f in collectable if _owning_app_root(f) is None]
+    runnable = [f for f in non_pw if _owning_app_root(f) is not None]
+    skipped = [f for f in non_pw if _owning_app_root(f) is None]
     res = run_scoped_vitest(app, runnable, repo_root)
-    if not skipped:
+    notes: list[str] = []
+    if pw_skipped:
+        notes.append("Playwright e2e spec(s) — collected/run by the app's playwright runner, not "
+                     "the scoped vitest (the Builder's own gate run covers them):\n"
+                     + "\n".join(f"  · {s}" for s in pw_skipped))
+    if skipped:
+        notes.append("not run by the scoped vitest — no owning 'apps/<x>', so no vitest config to "
+                     "run against (check this file's own runner):\n"
+                     + "\n".join(f"  · {s}" for s in skipped))
+    if not notes:
         return res
-    note = ("not run by the scoped vitest — no owning 'apps/<x>', so no vitest config to run "
-            "against (check this file's own runner):\n"
-            + "\n".join(f"  · {s}" for s in skipped))
-    return GateResult(passed=res.passed, report=f"{res.report}\n{note}")
+    return GateResult(passed=res.passed, report="\n".join([res.report] + notes))
 
 
 def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str) -> GateResult:

@@ -55,14 +55,15 @@ all_items = (s.get("decisions", []) + s.get("proposals", []) + s.get("tasks", []
 check("EU-93: count() == len(panel items)", needs.count(cfg) == len(all_items),
       f"count={needs.count(cfg)} items={len(all_items)}")
 
-# The 'Needs you' KPI card was deliberately removed from the board in 5a882a6 ("refactor: remove
-# Needs you dashboard and UI components", 2026-07-01) — the /needs inbox and the side panel remain
-# the surfaces for needs. Pin the removal so the card doesn't half-return without a decision.
+# 2026-07-19 (Commander order): the 'Needs you' KPI card RETURNS to the big KPI row (reversing
+# the 5a882a6 removal) — the number up top, linking to /needs where answering a decision
+# comments the Jira ticket and moves it back to To Do.
 from orchestrator import dashboard as _dash
 kpi_cards = warroom.kpis(cfg, _dash.load_tasks(cfg.audit_path), None)
 needs_card = next((c for c in kpi_cards if c["label"] == "Needs you"), None)
-check("KPI 'Needs you' card stays removed (5a882a6); /needs inbox is the surface",
-      needs_card is None, str(needs_card))
+check("KPI 'Needs you' card is back (Commander order 2026-07-19)", needs_card is not None)
+check("Needs-you card links to the /needs inbox", (needs_card or {}).get("href", "").startswith("/needs"))
+check("Needs-you card count matches needs.count()", (needs_card or {}).get("value") == needs.count(cfg))
 
 # --- hero (live run headline) ---
 run = {"live": True, "ticket": "AUTO-7", "app": "automatixy", "passes": 2, "cost": 0, "verdict": "",
