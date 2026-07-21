@@ -1549,6 +1549,19 @@ def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
     return set()
 
 
+def _format_no_changes_findings(findings: list[dict]) -> str:
+    """Render the EU-396 verify-pass per-AC findings as one line per criterion, satisfied/gap
+    marked, evidence cited — so a human (or the escalation comment) reads it as one look, not an
+    investigation. Empty input -> empty string (the caller then omits the section entirely)."""
+    lines = []
+    for f in findings or []:
+        mark = "✅" if f.get("satisfied") else "❌"
+        crit = (f.get("criterion") or "").strip() or "(unlabeled criterion)"
+        ev = (f.get("evidence") or "").strip()
+        lines.append(f"{mark} {crit}" + (f" — {ev}" if ev else ""))
+    return "\n".join(lines)
+
+
 # EU-395: cross-run memory. A ticket that errors, parks (needs_human) or fails review keeps NO
 # memory of that once the process/run ends — the next pick re-plans and re-builds blind, often
 # burning its 3 error strikes / 2 review passes rediscovering the same dead approach the audit log
@@ -2231,11 +2244,63 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                       flush=True)
                 return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                              notes="parked — Commander product decision needed"))
+            # EU-396: before parking an UNVERIFIED "already satisfied" claim on the Commander, run
+            # the Reviewer read-only against the UNCHANGED tree (no diff — nothing to review) with
+            # the ticket's ACs: "are these ACs already satisfied — cite file:line per AC". A senior
+            # teammate checks the claim first, instead of "verify and close it yourself" (the exact
+            # senior_pm-style mistake §2 was retired for). Confident PASS with per-AC evidence closes
+            # to QA (reversible, never Done) and is separately audited (no_changes_autoclose);
+            # anything less than confident falls straight through to today's escalation below, with
+            # the Reviewer's per-AC findings attached to it.
+            verify_findings_text = ""
+            if getattr(cfg, "verify_no_changes_enabled", True) and not ticket.ephemeral and not cfg.dry_run:
+                try:
+                    with _officer_transcript_context(app, ticket, "reviewer", cfg):
+                        vr = await reviewer_mod.verify_no_changes(ticket, app, cfg, report)
+                except Exception as exc:  # noqa: BLE001 — a verify crash must fall through to escalation, never break the run
+                    vr = {"confident": False, "findings": [], "summary": f"verify call crashed: {exc}",
+                          "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
+                cost += vr.get("cost_usd", 0.0) or 0.0
+                budget.add(vr.get("cost_usd", 0.0) or 0.0)
+                _burn("reviewer", vr.get("input_tokens", 0) or 0, vr.get("output_tokens", 0) or 0)
+                verify_findings_text = _format_no_changes_findings(vr.get("findings"))
+                audit.record("no_changes_verify", ticket_id=ticket.id, iteration=iteration,
+                             confident=bool(vr.get("confident")), findings=vr.get("findings", []),
+                             summary=(vr.get("summary") or "")[:1000], cost_usd=vr.get("cost_usd", 0.0))
+                if vr.get("confident"):
+                    evidence = verify_findings_text or (vr.get("summary") or "").strip()
+                    if not cfg.dry_run and not ticket.ephemeral:
+                        try:
+                            backlog.set_status(ticket, "QA")
+                            backlog.add_comment(
+                                ticket, "✅ Auto-verified to QA (EU-396) — the Builder made no changes "
+                                        "and the Reviewer independently audited the UNCHANGED tree and "
+                                        "confirmed every acceptance criterion is already met:\n\n"
+                                        + evidence[:1500]
+                                        + "\n\nReversible — reopen to To Do to force a rebuild if this "
+                                          "is wrong.")
+                        except Exception as _exc:  # noqa: BLE001 — a board hiccup must not block reporting
+                            print(f"  · no-changes auto-close: board update failed ({_exc}); reported anyway.",
+                                  flush=True)
+                    audit.record("no_changes_autoclose", ticket_id=ticket.id, iteration=iteration,
+                                 evidence=evidence[:1500])
+                    print(f"  ✅ {ticket.id}: no-changes claim Reviewer-verified (per-AC evidence) — "
+                          "closed to QA, not parked.", flush=True)
+                    return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name,
+                                                 branch, notes="no changes — Reviewer-verified already satisfied, closed to QA"))
+                print(f"  · {ticket.id}: no-changes claim not confidently verified — escalating with "
+                      "the Reviewer's per-AC findings attached.", flush=True)
             # EU-116: a no-changes build leaves the ticket stuck In Progress and the drain re-runs it.
             # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
             # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
             # EU-153: Post no-changes comment
             note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
+            if verify_findings_text:
+                # EU-396: attach the Reviewer's per-AC findings so the Commander's check is one
+                # look, not an investigation — even though it wasn't confident enough to auto-close.
+                note += ("\n\nThe Reviewer independently checked the unchanged tree against each AC "
+                         "(not confident enough to auto-close — verify before agreeing):\n"
+                         + verify_findings_text[:1200])
             no_change_comment = commenter.summarize_gate_event(
                 "Build", "NO_CHANGES",
                 note,
