@@ -3123,13 +3123,25 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # the keepalive respawns it on this landed code; EU-385 re-arms the drains on boot.
                 from . import autopilot as _ap
                 if _ap.flag_self_update(cfg, ticket.id, sha=merge_sha, audit=audit):
-                    _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code — restarting automatically "
-                                 "once idle (self_update_auto_restart); drains re-arm on the new sha.")
+                    # EU-405: the promise of an automatic restart is now TRUE even for a manual run —
+                    # the serve-level self-restart watcher (autopilot.ensure_self_restart_watcher,
+                    # started from server.serve) consumes the flag at an idle boundary whether or not a
+                    # drain is armed. But it is still conditional on the knob: with
+                    # self_update_auto_restart OFF the watcher clears the flag and never exits, so
+                    # announcing "restarting automatically" would be the announce-lie that stranded
+                    # the unit on old code for 11h. Tell the truth either way.
+                    if getattr(cfg, "self_update_auto_restart", True):
+                        _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code — restarting automatically "
+                                     "once idle (self_update_auto_restart); drains re-arm on the new sha.")
+                    else:
+                        _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code. "
+                                     "self_update_auto_restart is OFF, so the cockpit keeps running the "
+                                     "OLD code until you restart it by hand (./general deploy).")
                 else:
                     # The flag did NOT persist — no automatic restart will happen. Never announce one.
                     _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code but the restart flag "
-                                 "could not be written — RESTART THE COCKPIT BY HAND or it keeps "
-                                 "running the old code.")
+                                 "could not be written — RESTART THE COCKPIT BY HAND (./general deploy) "
+                                 "or it keeps running the old code.")
         except Exception:  # noqa: BLE001 — the signal is best-effort
             pass
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).

@@ -193,6 +193,85 @@ def _maybe_self_restart(cfg: Config, audit) -> None:
     os._exit(SELF_RESTART_EXIT_CODE)
 
 
+# EU-405 AC2 — the serve-level consumer of the EU-387 self-restart flag.
+#
+# _maybe_self_restart was consumed ONLY at a drain cycle boundary (the call at the bottom of the
+# autopilot cycle). A self-repo land from a MANUAL cockpit run (no drain armed — a normal workflow
+# per the drive-unit-via-cockpit practice) sets the flag, Telegram promises "restarting automatically
+# once idle", and then nothing ever consumes it: the serve process keeps executing the OLD code from
+# memory indefinitely — the exact stale-process class that ran pre-EU-201 code for 11h. This watcher
+# is the idle-boundary consumer that fires whether or not a drain is armed.
+_SELF_RESTART_POLL_S = 30.0          # the watcher's idle-boundary period (a drain cycle is the fast path)
+_self_restart_thread: "threading.Thread | None" = None
+_self_restart_lock = threading.Lock()
+
+
+def _self_restart_tick(cfg: Config, audit) -> bool:
+    """EU-405 AC2: one idle-boundary tick of the serve-level self-restart watcher.
+
+    Returns True when it called ``_maybe_self_restart`` (the cockpit was idle: no run in flight for
+    ANY app), False when it skipped because a run is active somewhere (the very condition that makes a
+    restart a mid-build kill — never do it). The heavy lifting — flag presence, the crash-loop guard,
+    the knob, the dirty-tree refusal, the exit itself — all lives in ``_maybe_self_restart``; this is
+    only the gate that decides WHEN to consult it. Extracted from the loop so the watcher's one
+    testable decision is pinnable without driving a real background thread."""
+    from . import cockpit_state as _cs
+    if _cs.active_run_count() > 0:
+        return False                      # something is mid-build somewhere — defer to the next tick
+    _maybe_self_restart(cfg, audit)
+    return True
+
+
+def self_restart_watcher(cfg: Config, audit, *, interval_s: float = _SELF_RESTART_POLL_S,
+                         stop_event: threading.Event | None = None) -> None:
+    """EU-405 AC2: the background loop started from ``server.serve`` that consumes the self-restart
+    flag at an idle boundary even when no drain is armed.
+
+    Pairs with the drain-cycle call (the fast path — restarts within seconds at the next cycle); this
+    is the backstop that covers manual cockpit runs. Both gate on ``active_run_count()==0`` so neither
+    can kill a live build. The exit itself (``os._exit(75)``) lives in ``_maybe_self_restart``; on it,
+    the whole process — this thread included — goes away, and the keepalive respawns on the new sha.
+
+    Never raises on a single tick: a watcher thread must not die on one bad iteration (the next idle
+    boundary would then never come). ``stop_event`` (the serve test seam) stands it down cleanly."""
+    global _self_restart_thread
+    me = threading.current_thread()
+    try:
+        while not (stop_event is not None and stop_event.is_set()):
+            try:
+                _self_restart_tick(cfg, audit)
+            except Exception:  # noqa: BLE001 — never let the watcher die on one tick
+                pass
+            if stop_event is not None:
+                stop_event.wait(interval_s)
+            else:
+                time.sleep(interval_s)
+    finally:
+        with _self_restart_lock:
+            if _self_restart_thread is me:
+                _self_restart_thread = None
+
+
+def ensure_self_restart_watcher(cfg: Config, audit, *, interval_s: float = _SELF_RESTART_POLL_S,
+                                stop_event: threading.Event | None = None) -> threading.Thread | None:
+    """Start the ONE serve-level self-restart watcher, or no-op if one is already live.
+
+    Mirrors ``decisions.ensure_poll_loop``'s singleton shape: under ``_self_restart_lock`` return the
+    live thread if one exists, else start + register a new daemon thread named
+    ``"self-restart-watcher"``. Safe to call unconditionally — ``server.serve`` calls it exactly once
+    per boot; a second call (e.g. a test, or a future second spawn site) reuses the live thread."""
+    global _self_restart_thread
+    with _self_restart_lock:
+        if _self_restart_thread is not None and _self_restart_thread.is_alive():
+            return _self_restart_thread
+        t = threading.Thread(target=self_restart_watcher, args=(cfg, audit),
+                             kwargs={"interval_s": interval_s, "stop_event": stop_event},
+                             name="self-restart-watcher", daemon=True)
+        _self_restart_thread = t
+        t.start()
+        return t
+
+
 # EU-404: the repo root this module lives in — the checkout a self-repo land just changed, and the
 # tree boot_smoke probes. Derived from __file__ so it is correct in any checkout (Mac, VPS, tests).
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1116,6 +1195,62 @@ def _dangling_in_progress(in_progress_ids, audit_rows, active_ids) -> list[str]:
             continue                       # a terminal closed the run at/after its last start
         out.append(tid)
     return sorted(out)
+
+
+def in_flight_builds(cfg: Config, audit_rows=None, *,
+                     since_s: float | None = 2 * 3600) -> list[dict]:
+    """EU-405 AC1: which tickets look mid-build RIGHT NOW — the cross-process safety signal
+    ``./general deploy`` refuses to restart against, so an operator never kickstarts a live build
+    (the AUTO-177 class, 2026-07-19).
+
+    A ticket is IN FLIGHT iff its most-recent ``ticket_start`` has NO terminal audit event at/after
+    it — the SAME ``AUDIT_EVENT_OUTCOME`` truth ``_dangling_in_progress`` uses, but answering a
+    different question ("is a build running right now?", not "is a ticket In Progress on the board?").
+    Cross-process safe: a CLI ``./general deploy`` reads the audit tail the SERVE process writes, so
+    it sees the builds the in-memory ``cockpit_state.active_run_count()`` (serve-only) cannot share
+    with a separate process. ``./general deploy`` ALSO probes the cockpit's live
+    ``active_run_count`` when reachable — that is authoritative; this audit signal is the fallback for
+    when the cockpit is unreachable and the backstop that names WHICH tickets are running.
+
+    ``since_s`` bounds staleness (default 2h): a ``ticket_start`` older than that with no terminal is
+    almost certainly a killed-and-stranded ticket (a real build hits the ~90min per-ticket cap and
+    records a terminal), so it does NOT block a deploy forever. Pass ``None`` for the strictest rule
+    (refuse on ANY open start). Returns ``[{ticket_id, app, started_s_ago}]`` newest-first. Pure +
+    best-effort: a missing/garbled audit reads as "nothing in flight"."""
+    if audit_rows is None:
+        audit_rows = _read_audit_rows(cfg.audit_path)
+    terminal = set(AUDIT_EVENT_OUTCOME.keys())
+    last_start: dict[str, float] = {}
+    start_app: dict[str, str] = {}
+    last_terminal: dict[str, float] = {}
+    for ev in audit_rows:
+        ev = ev or {}
+        tid = str(ev.get("ticket_id") or "")
+        if not tid:
+            continue
+        kind = ev.get("event")
+        if not kind:
+            continue
+        ts = _parse_audit_ts(ev.get("ts"))
+        if ts is None:
+            continue
+        if kind == "ticket_start":
+            if ts >= last_start.get(tid, -1.0):
+                last_start[tid] = ts
+                start_app[tid] = str(ev.get("app") or "")
+        elif kind in terminal and ts >= last_terminal.get(tid, -1.0):
+            last_terminal[tid] = ts
+    now = time.time()
+    out: list[dict] = []
+    for tid, start in last_start.items():
+        if last_terminal.get(tid, -1.0) >= start:
+            continue                       # a terminal closed the run at/after its last start
+        if since_s is not None and (now - start) > since_s:
+            continue                       # stale — killed-and-stranded, not a live build
+        out.append({"ticket_id": tid, "app": start_app.get(tid, ""),
+                    "started_s_ago": max(0.0, now - start)})
+    out.sort(key=lambda d: d["started_s_ago"])   # newest (smallest age) first
+    return out
 
 
 def _read_audit_rows(audit_path) -> list[dict]:
