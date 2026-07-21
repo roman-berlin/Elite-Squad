@@ -455,15 +455,31 @@ async def _main(argv: list[str]) -> int:
         # EU-387: if THIS boot is the respawn a self-update exit asked for, record the completion
         # and clear the one-shot flag (a second boot must not re-consume it).
         from .audit import AuditLog as _AL
+        _boot_audit = _AL(cfg.audit_path)
+        _self_restart = None
         try:
-            _ap.consume_self_restart_flag(cfg, _AL(cfg.audit_path))
+            _self_restart = _ap.consume_self_restart_flag(cfg, _boot_audit)
         except Exception:  # noqa: BLE001 — boot bookkeeping must never block serving
             pass
+        # EU-404 AC3: after a self-repo land, smoke the just-landed code BEFORE the drain resumes
+        # onto it — a land that passes the worktree gate but fails at boot (import cycle, schema
+        # change, missing dep) otherwise launchd-crash-loops forever with no alert. Red smoke holds
+        # the drain resume (intent kept); the cockpit still serves because serving is downstream.
+        _resume_block = None
+        if _self_restart is not None:
+            try:
+                _ok, _detail = _ap.boot_smoke(cfg, audit=_boot_audit,
+                                              ticket=_self_restart.get("ticket"))
+                if not _ok:
+                    _resume_block = f"boot-smoke-failed: {_detail}"
+            except Exception:  # noqa: BLE001 — boot must proceed; treat an unrunnable smoke as green
+                pass                          # (the import in THIS process already succeeded)
         # EU-385 (EU-224a): auto-resume drains persisted as RUNNING when the previous process
         # died — the crash-respawn recovery that closed the 66-minute dead-drain gap. A drain the
         # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and
-        # the EU-356 autopilot_stop_requested audit trail are the discriminators). Never raises.
-        _ap.resume_armed_drains(cfg)
+        # the EU-356 autopilot_stop_requested audit trail are the discriminators). EU-404 adds the
+        # crash-loop breaker (per-app) and the boot-smoke hold (global via block_reason). Never raises.
+        _ap.resume_armed_drains(cfg, block_reason=_resume_block)
         # EU-398: reconcile In Progress tickets left dangling by a killed/crashed previous run
         # (AUTO-177, 2026-07-19) — resume or honestly park each so the board never shows work
         # happening on a dead run. Runs AFTER resume_armed_drains so a ticket an in-flight drain

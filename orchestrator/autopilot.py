@@ -193,6 +193,96 @@ def _maybe_self_restart(cfg: Config, audit) -> None:
     os._exit(SELF_RESTART_EXIT_CODE)
 
 
+# EU-404: the repo root this module lives in — the checkout a self-repo land just changed, and the
+# tree boot_smoke probes. Derived from __file__ so it is correct in any checkout (Mac, VPS, tests).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# A generous ceiling on each smoke subprocess — the import + the 3-harness subset normally finish
+# in a couple of seconds; this only bounds a wedged run so the boot cannot hang on a bad land.
+_BOOT_SMOKE_TIMEOUT_S = 120
+
+
+def _boot_smoke_fail(cfg: Config, audit, ticket, what: str, detail: str) -> None:
+    """EU-404: record one boot_smoke_fail audit event + one Telegram alert for a red smoke phase.
+
+    Never raises — the smoke's own reporting must not corrupt the boot it is trying to protect."""
+    snippet = (detail or "").strip()[-800:]
+    try:
+        audit.record("boot_smoke_fail", ticket_id=ticket, what=what, detail=snippet)
+    except Exception:  # noqa: BLE001
+        pass
+    notify.send(f"🚨 EU-404 boot smoke FAILED after a self-repo land ({what}) — the unit just landed "
+                "code that fails its own smoke. Drain auto-resume is HELD; the cockpit still serves. "
+                f"Roll back or fix, then restart.\n\n{snippet}")
+    print(f"  🚨 boot smoke FAILED ({what}) — drain auto-resume HELD; cockpit still serves "
+          "(EU-404)", flush=True)
+
+
+def boot_smoke(cfg: Config, audit: "AuditLog | None" = None, *, ticket: str | None = None,
+               repo_root: Path | str | None = None, timeout_s: float = _BOOT_SMOKE_TIMEOUT_S
+               ) -> tuple[bool, str]:
+    """EU-404 AC3: a fast boot smoke run AFTER a self-repo land (the respawn ``consume_self_restart_flag``
+    announced), BEFORE the drain auto-resumes onto the new code. Catches the class where a land
+    passes the worktree gate but fails at serve boot — an import cycle, a config-schema change, a
+    missing dep in the main venv — which otherwise launchd-crash-loops forever with no smoke, no
+    alert, no rollback.
+
+    Two phases, both subprocesses (a fresh interpreter is the point — the running process already
+    imported the old code in memory): (1) ``python -c 'import orchestrator.server'`` — the import
+    canary; (2) ``python tests/run_all.py --smoke`` — the suite's curated 3-fastest-harness subset
+    (defined in run_all.py, reusing its honest verdict logic). Green → ``(True, note)`` and the
+    caller clears the drain to resume; red → ``(False, reason)`` with one ``boot_smoke_fail`` audit
+    event + one Telegram alert, and the caller holds the resume (cockpit still serves downstream).
+
+    Never raises: the boot proceeds no matter what — a smoke that can't even run returns red (the
+    safe direction: hold the resume) rather than escaping into the boot path."""
+    import subprocess
+    import sys
+
+    audit = audit or AuditLog(cfg.audit_path)
+    root = Path(repo_root) if repo_root else _REPO_ROOT
+    what_import = "import orchestrator.server"
+    try:
+        r = subprocess.run([sys.executable, "-c", "import orchestrator.server"],
+                           cwd=str(root), capture_output=True, text=True, errors="replace",
+                           timeout=timeout_s)
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "(no output)")
+            _boot_smoke_fail(cfg, audit, ticket, what_import, detail)
+            return False, f"{what_import} failed (exit {r.returncode})"
+    except subprocess.TimeoutExpired:
+        _boot_smoke_fail(cfg, audit, ticket, what_import, f"timed out after {timeout_s:.0f}s")
+        return False, f"{what_import} timed out"
+    except Exception as exc:  # noqa: BLE001 — a smoke that can't start IS red
+        _boot_smoke_fail(cfg, audit, ticket, what_import, f"could not run: {exc}")
+        return False, f"{what_import} could not run: {exc}"
+
+    smoke_script = root / "tests" / "run_all.py"
+    what_harness = "run_all.py --smoke (3 fastest harnesses)"
+    try:
+        r = subprocess.run([sys.executable, str(smoke_script), "--smoke"],
+                           cwd=str(root), capture_output=True, text=True, errors="replace",
+                           timeout=timeout_s)
+        if r.returncode != 0:
+            tail = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()[-1200:]
+            _boot_smoke_fail(cfg, audit, ticket, what_harness, tail)
+            return False, f"harness smoke failed (exit {r.returncode})"
+    except subprocess.TimeoutExpired:
+        _boot_smoke_fail(cfg, audit, ticket, what_harness, f"timed out after {timeout_s:.0f}s")
+        return False, f"{what_harness} timed out"
+    except Exception as exc:  # noqa: BLE001
+        _boot_smoke_fail(cfg, audit, ticket, what_harness, f"could not run: {exc}")
+        return False, f"{what_harness} could not run: {exc}"
+
+    try:
+        audit.record("boot_smoke_pass", ticket_id=ticket)
+    except Exception:  # noqa: BLE001
+        pass
+    print("  💨 boot smoke green (import + 3 fastest harnesses) — drain resume cleared (EU-404)",
+          flush=True)
+    return True, "boot smoke green"
+
+
 # 2026-07-21: which UNTRACKED files can actually "activate un-gated code" on a respawn. A stray
 # .py/.sh inside the tree can be imported or executed; a leftover .md/.bak/.log cannot. Only the
 # former may block a self-update restart — see respawn_blocking_paths.
@@ -768,7 +858,55 @@ def _commander_stopped_since(cfg: Config, app_key: str, armed_ts: float) -> bool
     return False
 
 
-def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str]:
+# EU-404: crash-loop breaker tunables. A repeatable mid-build process kill (macOS OOM class) used to
+# loop respawn→auto-resume→rebuild→kill with no strike and no park, burning a full planner+builder
+# spend per cycle. After this many autopilot_resume events for the SAME app within the window, the
+# resume is held (intent kept) and the Commander is paged — the window clears on its own, or a
+# manual cockpit Start bypasses the breaker.
+_RESUME_CRASH_LOOP_MAX = 3
+_RESUME_CRASH_LOOP_WINDOW_S = 2 * 3600.0
+
+
+def _recent_resume_count(cfg: Config, app_key: str, *, now: float | None = None,
+                         window_s: float = _RESUME_CRASH_LOOP_WINDOW_S) -> int:
+    """EU-404: how many ``autopilot_resume`` events the audit shows for ``app_key`` within the last
+    ``window_s`` seconds. The crash-loop breaker's one signal — reads only the audit tail (the same
+    bounded tail ``_commander_stopped_since`` reads; EU-363 owns whole-history hygiene), is pure, and
+    never raises. ``app_key == ""`` counts only unit-wide resumes (matching how they're recorded)."""
+    now = time.time() if now is None else float(now)
+    p = Path(cfg.audit_path)
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > _RESUME_AUDIT_TAIL_BYTES:
+                f.seek(size - _RESUME_AUDIT_TAIL_BYTES)
+                f.readline()          # drop the partial line the seek landed in
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return 0
+    cutoff = now - float(window_s)
+    count = 0
+    for ln in raw.splitlines():
+        if '"autopilot_resume"' not in ln:
+            continue
+        try:
+            row = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if row.get("event") != "autopilot_resume":
+            continue
+        if (row.get("app") or "") != app_key:
+            continue
+        ts = _parse_audit_ts(row.get("ts"))
+        if ts is None:
+            continue
+        if ts >= cutoff:
+            count += 1
+    return count
+
+
+def resume_armed_drains(cfg: Config, *, wait_s: float | None = None,
+                        block_reason: str | None = None) -> list[str]:
     """EU-385: serve-boot auto-resume of drains persisted as RUNNING by a previous process.
 
     Called from main.py's serve path — the one line every cockpit boot (CLI and launchd daemon
@@ -779,7 +917,17 @@ def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str
     owning the queue, an unhealthy unit (intent kept for the next boot), a Commander stop order
     in the audit (intent retired — never resurrect), a vanished app, an unrunnable GLM pick
     (EU-190: no silent fallback), a held run slot. ``wait_s`` joins the spawned threads (tests).
-    Never raises: the boot must proceed no matter what."""
+    Never raises: the boot must proceed no matter what.
+
+    EU-404 adds two hold points (intent KEPT in both, so the next clean boot re-evaluates):
+      * ``block_reason`` — a GLOBAL hold (used when the boot smoke refused the resume after a
+        self-repo land): every armed drain is skipped + one audit event. (boot_smoke owns the
+        Telegram alert; this path does not re-page, so one smoke failure = one alert.)
+      * the crash-loop breaker — a PER-APP hold: ``≥ _RESUME_CRASH_LOOP_MAX`` recent
+        ``autopilot_resume`` events for the app within ``_RESUME_CRASH_LOOP_WINDOW_S`` means a
+        repeatably-fatal build is loop-killing the process; the resume is held (audit + Telegram)
+        so it stops burning a full planner+builder spend per cycle, and the window clears on its
+        own (or a manual cockpit Start bypasses the breaker — the Start route does not come here)."""
     import asyncio
     import copy
 
@@ -805,6 +953,17 @@ def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str
                   flush=True)
             return []
         audit = AuditLog(cfg.audit_path)
+        if block_reason:
+            # EU-404 AC3: a boot smoke that went red after a self-repo land. Hold EVERY resume —
+            # the landed code failed its own smoke, so re-arming a drain onto it would loop-burn
+            # spend. Intent is KEPT (the next clean boot, after a fix/rollback, re-evaluates); the
+            # cockpit still serves because serving is downstream of this call. The Telegram ALERT
+            # is the smoke's job (boot_smoke has the failure detail); this path only refuses + audits
+            # so the Commander gets exactly one page per smoke failure, not two.
+            audit.record("autopilot_resume_skipped", reason=block_reason)
+            print(f"↻ auto-resume skipped — {block_reason} (intent kept; cockpit still serves)",
+                  flush=True)
+            return []
         for key, rec in armed:
             try:
                 # "" sorts first: a resumed unit-wide drain already covers every app, and the
@@ -826,6 +985,22 @@ def resume_armed_drains(cfg: Config, *, wait_s: float | None = None) -> list[str
                         clear_drain_intent(cfg, app_name, "app-gone")
                         audit.record("autopilot_resume_skipped", app=key, reason="app-gone")
                         continue
+                # EU-404 AC1: crash-loop breaker. Too many recent resumes for this app = a
+                # repeatably-fatal build loop-killing the process; hold the resume (intent kept)
+                # so it stops burning spend, and page the Commander. The window clears on its own.
+                recent = _recent_resume_count(cfg, key)
+                if recent >= _RESUME_CRASH_LOOP_MAX:
+                    audit.record("autopilot_resume_skipped", app=key, reason="crash-loop",
+                                 recent_resumes=recent)
+                    notify.send(f"⛔ Crash-loop breaker: NOT auto-resuming the "
+                                f"{key or 'unit-wide'} drain — {recent} resumes in the last "
+                                f"{int(_RESUME_CRASH_LOOP_WINDOW_S // 3600)}h (a build is "
+                                "repeatably killing the process). Intent kept; the window clears "
+                                "on its own, or start the drain by hand from the cockpit to override.")
+                    print(f"↻ auto-resume: NOT resuming {key or 'unit-wide'} — crash-loop suspected "
+                          f"({recent} recent resumes); held for the Commander (intent kept)",
+                          flush=True)
+                    continue
                 ap_cfg = copy.copy(cfg)
                 ap_cfg.dry_run = False   # a resumed drain is live by definition (mirrors Start)
                 # EU-190/EU-223 sticky pick + 2026-07-19 MAIN/SECONDARY resolution
@@ -1042,6 +1217,7 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
         # 4) re-queue (default) or honest-park (recurrence); skip side-effects in dry-run
         resumed: list[str] = []
         parked: list[str] = []
+        struck: list[str] = []
         for tid in dangling:
             hit = by_id.get(tid)
             if hit is None:
@@ -1051,6 +1227,16 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
                 parked.append(tid)
             else:
                 resumed.append(tid)
+            # EU-404: a dangling ticket is a run that died mid-build with NO terminal outcome —
+            # charge it one durable strike (exactly what an ERRORED report would cost) so the
+            # 3-strike park works across crashes instead of churning respawn→resume→rebuild→kill.
+            # State write, so skipped in dry-run alongside the board writes below.
+            if not (dry or getattr(t, "ephemeral", False)):
+                try:
+                    bump_error_strike(cfg, tid)
+                    struck.append(tid)
+                except Exception:  # noqa: BLE001 — a strike bookkeeping failure must not abort the pass
+                    pass
             if dry or getattr(t, "ephemeral", False):
                 continue                       # dry-run: compute only, no board writes
             try:
@@ -1068,13 +1254,14 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
         if resumed or parked:
             try:
                 audit.record("boot_reconcile", resumed=sorted(resumed), parked=sorted(parked),
-                             skipped_active=skipped_active)
+                             struck=sorted(struck), skipped_active=skipped_active)
             except Exception:  # noqa: BLE001
                 pass
             print(f"  · boot reconcile: resumed {sorted(resumed)}; parked {sorted(parked)}; "
-                  f"untouched {skipped_active} (active)", flush=True)
+                  f"struck {sorted(struck)}; untouched {skipped_active} (active)", flush=True)
         summary = {"resumed": sorted(resumed), "parked": sorted(parked),
-                   "skipped_active": skipped_active, "dangling": sorted(dangling)}
+                   "struck": sorted(struck), "skipped_active": skipped_active,
+                   "dangling": sorted(dangling)}
         return summary
     except Exception:  # noqa: BLE001 — the boot must proceed no matter what
         return summary
@@ -1212,6 +1399,46 @@ def save_error_counts(cfg: Config, counts: dict[str, int]) -> None:
         with _error_counts_seen_lock:
             _error_counts_seen[cache_key] = dict(counts)
         return
+
+
+def bump_error_strike(cfg: Config, ticket_id: str, by: int = 1) -> int:
+    """EU-404: charge one durable consecutive-error strike to ``ticket_id`` (a true read-modify-write
+    increment on ``error_counts.json``), so the 3-strike park survives a CRASH.
+
+    The gap: ``_tally_errored`` only bumps the counter on an Outcome.ERRORED *report*, but a process
+    killed mid-build (the macOS OOM class) writes NO terminal outcome — the run simply vanishes. Across
+    repeated crash→respawn→resume→rebuild→kill cycles the counter stayed at 0 and the 3-strike park
+    never armed, so a repeatably-fatal build burned a full planner+builder spend per cycle with no
+    park. ``boot_reconcile`` calls this for every dangling ticket (a ``ticket_start`` with no terminal
+    event at the next boot = a run that died mid-build), charging exactly one strike per crash-death —
+    the same increment an ERRORED report would have cost.
+
+    True RMW (``locked_rmw``): reads the live file under the lock, adds to whatever a concurrent drain
+    left there, and never touches another project's key (the EU-274 invariant). Returns the new count;
+    never raises (a corrupt/missing store fails safe at the pre-bump value)."""
+    if by == 0:
+        try:
+            return int((load_error_counts(cfg)).get(ticket_id, 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _inc(cur):
+        cur = cur if isinstance(cur, dict) else {}
+        n = int(cur.get(ticket_id, 0) or 0) + by
+        if n <= 0:
+            cur.pop(ticket_id, None)
+        else:
+            cur[ticket_id] = n
+        return cur
+
+    try:
+        locking.locked_rmw(_error_counts_file(cfg), _inc, default={})
+    except (OSError, ValueError):
+        pass                       # best-effort: a dropped strike can't crash the boot
+    try:
+        return int(load_error_counts(cfg).get(ticket_id, 0))
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _auto_clear_merged_ghosts(cfg: Config, blocked: set[str], audit: "AuditLog") -> set[str]:
