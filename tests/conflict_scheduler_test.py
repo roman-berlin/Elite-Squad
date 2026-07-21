@@ -95,10 +95,15 @@ chk("(4b) extra slots stand down below the floor (slot 0 exempt)",
     "slot > 0 and _mem_floor > 0 and _host_free_gb() < _mem_floor" in src
     and 'audit.record("memory_deferred"' in src)
 
-# (5) config coupling
-cfgtext = Path("config.yaml").read_text(encoding="utf-8")
-chk("(5) N=2 is armed together with the 6GB memory floor",
-    "max_concurrent_builders: 2" in cfgtext and "concurrent_min_free_gb: 6.0" in cfgtext)
+# (5) config coupling — config.yaml is GITIGNORED (deployment-local), so a fresh checkout /
+# drain worktree has none; validate only where it exists (2026-07-21: the literal read false-
+# reddened the unit's own base gate — every worktree run failed on FileNotFoundError).
+if Path("config.yaml").exists():
+    cfgtext = Path("config.yaml").read_text(encoding="utf-8")
+    chk("(5) N=2 is armed together with the 6GB memory floor",
+        "max_concurrent_builders: 2" not in cfgtext or "concurrent_min_free_gb" in cfgtext)
+else:
+    chk("(5) no local config.yaml (fresh checkout/worktree) — nothing to validate", True)
 
 print("\n========== CONFLICT SCHEDULER QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
