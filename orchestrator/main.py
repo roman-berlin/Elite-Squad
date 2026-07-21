@@ -75,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="print a quick task table in the terminal")
     srv = sub.add_parser("serve", help="run the control panel web app (your cockpit)")
     srv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    # EU-405: the SAFE restart wrapper — THE way to restart the cockpit. Refuses while a build is in
+    # flight so an operator never kickstarts a live build (the AUTO-177 class, 2026-07-19). Raw
+    # `launchctl kickstart` is break-glass only — it skips this guard.
+    dep = sub.add_parser("deploy",
+                         help="safely restart the cockpit — THE way to restart (kickstart is break-glass)")
+    dep.add_argument("--port", type=int, default=8787, help="cockpit port to probe (default 8787)")
+    dep.add_argument("--force", action="store_true",
+                     help="restart even if a build appears in flight (break-glass — may kill live work)")
     st = sub.add_parser("standup", help="daily-meeting report (shipped / needs-you / decisions)")
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
     sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
@@ -377,6 +385,126 @@ def _doctor(cfg_path: str) -> int:
     return 0 if s["healthy"] else 1
 
 
+# EU-405 AC1 — the SAFE restart wrapper. `./general deploy` is THE way to restart the cockpit; raw
+# `launchctl kickstart` (which kills whatever is running) is break-glass only. See DEPLOYMENT.md.
+_MAC_COCKPIT_LABEL = "com.roman.general.cockpit"
+_VPS_SERVICE = "general.service"
+
+
+def _deploy(args) -> int:
+    """EU-405: refuse to restart while a build is in flight, then restart via the host's supervisor.
+
+    The guard closes the AUTO-177 class (2026-07-19: a kickstart killed a live build mid-edit,
+    orphaning its worktree). Two signals, OR'd: (1) the cockpit's LIVE ``active_run_count`` —
+    authoritative, probed over HTTP when the cockpit is reachable; (2) the cross-process audit tail
+    (``autopilot.in_flight_builds`` — a ``ticket_start`` with no terminal event), the fallback that
+    also names WHICH tickets are running and covers a cockpit that is down. Either non-zero and no
+    ``--force`` → refuse with the exact break-glass command. Safe → kickstart/systemd/manual restart.
+    """
+    from . import autopilot as _ap
+    from .config import Config as _Config
+
+    cfg = _Config.load(args.config)
+    port = getattr(args, "port", 8787) or 8787
+    force = bool(getattr(args, "force", False))
+
+    # 1) Authoritative live signal: ask the running cockpit how many runs are active. None when the
+    #    cockpit is unreachable (down, or wedged) — then fall back to the audit signal alone.
+    live_active = _probe_active_run_count(port)
+    # 2) Cross-process audit signal: any open ticket_start the serve process wrote.
+    in_flight = _ap.in_flight_builds(cfg)
+
+    blocking: list[str] = []
+    if live_active is not None and live_active > 0:
+        blocking.append(f"the cockpit reports {live_active} active run(s) (live probe)")
+    if in_flight:
+        detail = ", ".join(f"{b['ticket_id']} (started {int(b['started_s_ago'] // 60)}m ago)"
+                           for b in in_flight[:5])
+        blocking.append(f"open build(s) with no terminal outcome: {detail}")
+
+    if blocking and not force:
+        print("⛔ Refusing to restart — a build appears to be in flight:")
+        for b in blocking:
+            print(f"    · {b}")
+        print("\n  This is the AUTO-177 guard: a restart now would kill live work mid-build.")
+        print("  Wait for it to finish (watch `./general status` or the cockpit), then re-run.")
+        print("  `./general deploy` is THE way to restart. If you are CERTAIN the signature is stale")
+        print("  (a killed run the audit never closed), re-run with --force.")
+        print("  Break-glass — restart NOW regardless, killing any in-flight work:")
+        print(f"    launchctl kickstart -k gui/$(id -u)/{_MAC_COCKPIT_LABEL}   "
+              f"(Mac)   ·   sudo systemctl restart {_VPS_SERVICE}   (VPS)")
+        return 1
+
+    note = " (--force — a possibly-stale build signature was ignored)" if force and blocking else ""
+    return _restart_cockpit(note)
+
+
+def _probe_active_run_count(port: int) -> int | None:
+    """EU-405: the cockpit's live ``active_run_count`` over HTTP, or None if unreachable.
+
+    A best-effort enrichment of the audit signal: when the cockpit is up, this is the AUTHORITATIVE
+    'is a build running?' answer (the in-memory truth the audit tail only approximates). When the
+    cockpit is down or wedged, None → the caller falls back to ``in_flight_builds``."""
+    import json as _json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as r:
+            return int(_json.loads(r.read().decode("utf-8")).get("active_run_count", -1))
+    except Exception:  # noqa: BLE001 — unreachable/wedged/old-build cockpit → fall back to the audit
+        return None
+
+
+def _restart_cockpit(note: str = "") -> int:
+    """EU-405: perform the actual restart via whichever supervisor owns the cockpit.
+
+    Auto-detects launchd (Mac), systemd (VPS), or a foreground `./general serve` (no supervisor).
+    Never restarts a second copy onto an occupied port — launchd/systemd handle that themselves."""
+    import subprocess as _sp
+    plist = os.path.expanduser(f"~/Library/LaunchAgents/{_MAC_COCKPIT_LABEL}.plist")
+    if os.path.exists(plist):
+        cmd = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{_MAC_COCKPIT_LABEL}"]
+        print(f"♻️  Restarting the cockpit via launchd{note}")
+        print(f"    $ {' '.join(cmd)}")
+        r = _sp.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print("  ✓ kickstarted — the cockpit respawns on the current code within ~5s.")
+            print("    cockpit: http://127.0.0.1:8787")
+            return 0
+        print(f"  ✗ kickstart failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()}")
+        return 1
+    if _systemd_has_service(_VPS_SERVICE):
+        cmd = ["sudo", "-n", "systemctl", "restart", _VPS_SERVICE]
+        print(f"♻️  Restarting the cockpit via systemd{note}")
+        print(f"    $ {' '.join(cmd)}")
+        r = _sp.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"  ✓ restarted {_VPS_SERVICE} — it loads the current code.")
+            return 0
+        print(f"  ✗ systemctl failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()}")
+        print("    (passwordless sudo for `systemctl restart general.service` must be configured —")
+        print("     see VPS_DEPLOYMENT.md.)")
+        return 1
+    print("ℹ️  The cockpit is not under launchd or systemd — it runs as a foreground `./general serve`.")
+    print("    Restart it by hand: stop that process (Ctrl-C) and re-run `./general serve`.")
+    print("    No build was in flight, so this is safe. (EU-405)")
+    return 0
+
+
+def _systemd_has_service(name: str) -> bool:
+    """EU-405: True when a systemd unit file for ``name`` is installed on this host."""
+    import subprocess as _sp
+    for unit_dir in ("/etc/systemd/system", "/lib/systemd/system",
+                     os.path.expanduser("~/.config/systemd/user")):
+        if os.path.exists(os.path.join(unit_dir, name)):
+            return True
+    # Fall back to asking systemctl (covers units from elsewhere / a user manager).
+    try:
+        r = _sp.run(["systemctl", "cat", name], capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001 — no systemd (Mac) → not a systemd host
+        return False
+
+
 def _which(cmd: str) -> bool:
     from shutil import which
     return which(cmd) is not None
@@ -402,6 +530,8 @@ async def _main(argv: list[str]) -> int:
         return _onboard(args)
     if args.command == "doctor":
         return _doctor(args.config)
+    if args.command == "deploy":
+        return _deploy(args)
     if args.command == "ping":
         from . import notify
         if not notify.configured():

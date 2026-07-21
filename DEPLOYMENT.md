@@ -49,6 +49,27 @@ Keep the Mac on and run the cockpit (this also starts the Telegram listener):
 ```bash
 ./general serve      # cockpit at http://localhost:8787
 ```
+
+**Restarting the cockpit safely (EU-405).** `./general deploy` is **THE way to restart** the cockpit
+onto the current code. It refuses to restart while a build is in flight — it probes the cockpit's live
+active-run count AND scans the audit tail for an open `ticket_start` with no terminal event — so an
+operator can never kickstart a live build mid-edit (the AUTO-177 incident, 2026-07-19, killed a build
+exactly this way). When the coast is clear it restarts via your supervisor (launchd on the Mac,
+systemd on the VPS):
+```bash
+./general deploy              # restarts now if no build is running; refuses otherwise
+./general deploy --force      # break-glass: restart even if a build appears in flight (may kill it)
+```
+A raw restart of your supervisor directly is **break-glass only** — it skips the in-flight guard and
+kills whatever is running. On the VPS: `sudo systemctl restart general.service`. On the Mac, the
+keepalive agent's label and the exact command live in `scripts/install-mac-cockpit-daemon.sh` (the
+canonical source — `./general deploy` runs them for you, safely). Use `./general deploy` instead.
+
+A self-repo land (the unit lands a change to its own code) restarts **automatically** once idle: the
+land flags a pending restart and a serve-level watcher consumes it at the next idle boundary — no
+manual step, and never mid-build. (If `self_update_auto_restart` is off, the land tells you to run
+`./general deploy` by hand instead.)
+
 From your phone (Telegram): `/standup`, `/status`, `/run automatixy <what> --live`, reply
 `AUTO-1: <decision>`. Optional — reach the cockpit remotely:
 ```bash

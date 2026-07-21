@@ -37,6 +37,7 @@ from .cockpit_state import _LOG, _Tee, _run_lock, _sse, _state, recent_log  # no
 # via these helpers so distinct projects run (and stream) truly in parallel, while a second run on
 # the SAME project is still refused (the per-app TOCTOU guard inside ``claim_run``).
 from .cockpit_state import (  # noqa: F401
+    active_run_count,
     active_runs,
     claim_run,
     get_autopilot_status,
@@ -471,7 +472,12 @@ def create_app(cfg: Config, port: int = 8787):
         import platform
         from flask import jsonify
         # EU-106: include is_mac so the UI layer can decide whether to show "Open logs" buttons.
-        return jsonify({**health.summary(cfg), "is_mac": platform.system() == "Darwin"})
+        # EU-405: include active_run_count so `./general deploy` — a SEPARATE process that can't see
+        # the serve process's in-memory cockpit_state — can probe the authoritative "is a build
+        # running?" signal before it restarts. This is the live counterpart to
+        # autopilot.in_flight_builds' audit-tail signal.
+        return jsonify({**health.summary(cfg), "is_mac": platform.system() == "Darwin",
+                        "active_run_count": active_run_count()})
 
     @app.get("/api/open-logs")
     def open_logs_api():
@@ -3526,6 +3532,13 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
     elif notify.configured():
         print(f"  decision listener: OFF — {_why} (cockpit-only on this host)")
+    # EU-405 AC2: the serve-level self-restart watcher. Consumes the EU-387 flag at an idle boundary
+    # EVEN WHEN NO DRAIN IS ARMED — closing the manual-cockpit-run gap where a self-repo land announced
+    # "restarting automatically once idle" and then never did (the stale-process class that ran old
+    # code 11h). Gated on active_run_count()==0, so it can never kill a live build; the drain-cycle
+    # call remains the fast path. Singleton, so a re-entry never stacks a second thread.
+    from . import autopilot as _ap
+    _ap.ensure_self_restart_watcher(cfg, AuditLog(cfg.audit_path))
     print(f"\u2b22 Squad HQ: http://{host}:{port}   (Ctrl-C to stop)")
     print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
     # threaded: the SSE stream holds a long-lived request — without this it would block the cockpit.
