@@ -25,6 +25,7 @@ from typing import Any
 
 import requests
 
+from ..audit import AuditLog
 from ..contracts import Ticket
 from .base import BacklogAdapter
 
@@ -49,6 +50,28 @@ _SUMMARY_MAX = 240
 # adapter call runs inline in the autopilot cycle (same reasoning as _HTTP_TIMEOUT above).
 _COMMENT_PAGE = 100
 _COMMENT_MAX_PAGES = 20
+
+# EU-397: 133 merges, ZERO audited transitions — only the post-merge call site logged anything
+# (merge_transition_failed), so board-vs-Jira drift was undiagnosable everywhere else. Instrumented
+# HERE, at the adapter's one write choke-point, instead of at each of set_status's many call sites.
+# JiraAdapter is built from `app` alone (see base.make_backlog) — no `cfg` ever reaches it — so this
+# lazily opens its own sink against Config's own audit_path default (audit_path has no per-app
+# override, so this always matches the live process's real ledger). Tests substitute this module
+# attribute directly with a fake sink (`jira._AUDIT_LOG = fake`) — the guard below short-circuits
+# before any real file touches disk.
+_AUDIT_LOG: AuditLog | None = None
+
+
+def _audit() -> AuditLog:
+    global _AUDIT_LOG
+    if _AUDIT_LOG is None:
+        try:
+            from ..config import Config
+            path = Config.audit_path
+        except Exception:  # noqa: BLE001 - the ledger must never block a transition
+            path = "./state/audit.jsonl"
+        _AUDIT_LOG = AuditLog(path)
+    return _AUDIT_LOG
 
 
 class BacklogSearchError(RuntimeError):
@@ -297,31 +320,49 @@ class JiraAdapter(BacklogAdapter):
         # column incident: every land had been TRYING "QA" and no-oping before the column existed.
         targets = [self.status_map.get(status, status)]
         targets += [self.status_map.get(f, f) for f in self.status_fallbacks.get(status, [])]
-        # Already in ANY candidate column (e.g. resuming an In Progress ticket, or a ticket the
-        # Commander already moved to Done)? No-op, no comment — never bounce a ticket backwards.
-        current = self._current_status(ticket.key)
-        if current and any(current.lower() == t.lower() for t in targets):
-            return
-        tr = self.session.get(self._url(f"issue/{ticket.key}/transitions"))
-        tr.raise_for_status()
-        available = tr.json().get("transitions", [])
-        match = next((t for tgt in targets for t in available
-                      if t["to"]["name"].lower() == tgt.lower()), None)
-        if not match:
-            self.add_comment(ticket, f"[autodev] No transition to '{targets[0]}' available "
-                                     f"from '{current or 'current status'}'; please move it manually.")
-            return
-        self.session.post(self._url(f"issue/{ticket.key}/transitions"),
-                          json={"transition": {"id": match["id"]}}).raise_for_status()
-        # 2026-07-19 audit: a FALLBACK landing used to be indistinguishable from the real target —
-        # on a board with no QA column, land → QA fell back to Done and the human-QA step vanished
-        # with zero trace. The move still happens (better than stranding the ticket), but now it
-        # says so on the ticket, so a skipped QA hand-off is visible instead of silent.
-        landed = match["to"]["name"]
-        if landed.lower() != str(targets[0]).lower():
-            self.add_comment(ticket, f"[autodev] Board has no '{targets[0]}' column — moved to "
-                                     f"'{landed}' instead (fallback). If '{targets[0]}' matters, "
-                                     "add that column to the board.")
+        # EU-397: the Jira status name we were actually trying to land on — paired with `landed` in
+        # every audit event below, whichever of the four outcomes it takes.
+        wanted = targets[0]
+        try:
+            # Already in ANY candidate column (e.g. resuming an In Progress ticket, or a ticket the
+            # Commander already moved to Done)? No-op, no comment — never bounce a ticket backwards.
+            current = self._current_status(ticket.key)
+            if current and any(current.lower() == t.lower() for t in targets):
+                _audit().record("ticket_transition", ticket_id=ticket.id, wanted=wanted,
+                                 landed=current, outcome="no-op")
+                return
+            tr = self.session.get(self._url(f"issue/{ticket.key}/transitions"))
+            tr.raise_for_status()
+            available = tr.json().get("transitions", [])
+            match = next((t for tgt in targets for t in available
+                          if t["to"]["name"].lower() == tgt.lower()), None)
+            if not match:
+                self.add_comment(ticket, f"[autodev] No transition to '{targets[0]}' available "
+                                         f"from '{current or 'current status'}'; please move it manually.")
+                _audit().record("ticket_transition", ticket_id=ticket.id, wanted=wanted,
+                                 landed=current, outcome="no-transition")
+                return
+            self.session.post(self._url(f"issue/{ticket.key}/transitions"),
+                              json={"transition": {"id": match["id"]}}).raise_for_status()
+            # 2026-07-19 audit: a FALLBACK landing used to be indistinguishable from the real target —
+            # on a board with no QA column, land → QA fell back to Done and the human-QA step vanished
+            # with zero trace. The move still happens (better than stranding the ticket), but now it
+            # says so on the ticket, so a skipped QA hand-off is visible instead of silent.
+            landed = match["to"]["name"]
+            if landed.lower() != str(targets[0]).lower():
+                self.add_comment(ticket, f"[autodev] Board has no '{targets[0]}' column — moved to "
+                                         f"'{landed}' instead (fallback). If '{targets[0]}' matters, "
+                                         "add that column to the board.")
+                _audit().record("ticket_transition", ticket_id=ticket.id, wanted=wanted,
+                                 landed=landed, outcome="fallback")
+            else:
+                _audit().record("ticket_transition", ticket_id=ticket.id, wanted=wanted,
+                                 landed=landed, outcome="matched")
+        except Exception as exc:  # noqa: BLE001 - audited, then re-raised unchanged (six call sites
+            # still fail-soft around this call exactly as before; this is what makes each miss visible)
+            _audit().record("ticket_transition_failed", ticket_id=ticket.id, wanted=wanted,
+                             error=str(exc)[:300])
+            raise
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.
