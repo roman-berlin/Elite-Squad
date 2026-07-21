@@ -232,6 +232,26 @@ _SIG_MIN_TICKETS = 2      # ... across >=2 distinct tickets
 # worktree_busy is an EXPECTED transient (another run held the tree, auto-retried) — aggregating it
 # would file an "infra" ticket for normal contention.
 _SIG_SKIP_CATEGORIES = {"worktree_busy"}
+# EU-400 — DESIGNED human-handoffs to skip at the SWEEP level (NOT in classify()). 'max passes — PM
+# escalated' is the reason loop.py:2685-2686 writes when a run exhausts its pass budget: the ticket is
+# ALREADY parked for the Commander via the needs_human event + Telegram notify + Blocked park
+# (loop.py:2674-2686). Aggregating it here would auto-file a meta-ticket for the honest escalation
+# path — the very outcome that produced this ticket (EU-400). Mirror the worktree_busy rationale: an
+# EXPECTED terminal outcome, not a crash. Kept as a sweep-level signature skip so the /forensics
+# taxonomy still shows these rows unchanged (classify()/taxonomy() are not touched) and the skip
+# cannot mask a genuine crash category. Substring match catches minor wording variants ('PM escalated
+# FAIL', 'PM escalated', etc.) without broadening to any real crash text.
+_SIG_SKIP_SIGNATURES = ("max passes — pm escalated",)
+_SIG_SKIP_SIG_SUBSTRINGS = ("pm escalated",)
+
+
+def _is_designed_handoff(sig: str) -> bool:
+    """True if a normalized failure signature is an EXPECTED designed handoff (already surfaced to
+    the Commander per-ticket), not a crash worth aggregating. EU-400."""
+    s = sig or ""
+    if s in _SIG_SKIP_SIGNATURES:
+        return True
+    return any(sub in s for sub in _SIG_SKIP_SIG_SUBSTRINGS)
 
 
 def signature_key(text: str) -> str:
@@ -358,8 +378,13 @@ def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
             if not raw:
                 continue   # nothing to fingerprint
             sig = signature_key(raw)
-            if sig:
-                groups.setdefault(sig, []).append(r)
+            if not sig:
+                continue
+            # EU-400: skip the designed 'max passes — PM escalated' handoff — it is already surfaced
+            # to the Commander per-ticket (needs_human + Telegram + Blocked park), not a crash.
+            if _is_designed_handoff(sig):
+                continue
+            groups.setdefault(sig, []).append(r)
         filed: list[str] = []
         for sig, rows in groups.items():
             tickets = {r.get("ticket_id") or "?" for r in rows}

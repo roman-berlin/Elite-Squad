@@ -94,7 +94,7 @@ _KEEP_PLANTED = {
     "ANTHROPIC_API_KEY": "anthropic-test-key-eu255",
 }
 _SAVED = {k: os.environ.get(k) for k in list(_SENSITIVE_PLANTED) + list(_KEEP_PLANTED)
-          + ["GLM_AUTH_TOKEN"]}
+          + ["GLM_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]}
 
 
 def _plant():
@@ -102,6 +102,12 @@ def _plant():
         os.environ[k] = v
     for k, v in _KEEP_PLANTED.items():
         os.environ[k] = v
+    # EU-400: clear any ambient ANTHROPIC_BASE_URL the dev machine has pinned (e.g. a process-wide
+    # z.ai URL). provider.get_provider_info() falls back to sniffing it for a NATIVE call, which
+    # would mislabel this opus run as "GLM" purely from env noise — unrelated to the creds this
+    # test asserts. GLM's z.ai URL is injected per-call via options.env by backends.apply(), NOT
+    # via os.environ, so clearing it here does not affect the GLM block below.
+    os.environ.pop("ANTHROPIC_BASE_URL", None)
 
 
 def _restore():
