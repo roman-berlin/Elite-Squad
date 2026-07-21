@@ -53,8 +53,13 @@ chk("(2) origin ops use the changelog repo's own branch", "base = branch" in src
 # (3) durable land marker
 chk("(3a) land_pushed recorded at the push", 'audit.record("land_pushed", ticket_id=ticket.id' in src)
 chk("(3b) _already_landed accepts the land_pushed key", '\'"land_pushed"\' in _ln' in src)
-# (4) hybrid GLM gate
-chk("(4) preflight arms for hybrid-GLM builds", "_hybrid_glm" in src and "_main_is_glm or _hybrid_glm" in src)
+# (4) hybrid GLM governance — refined same day into the SYMMETRIC fallback: an exhausted GLM
+# secondary makes hybrid stand down (builds on the Main, run proceeds); the hard preflight block
+# remains only when the MAIN itself is GLM (nothing left to fall back to).
+chk("(4a) exhausted GLM secondary → hybrid stands down to the Main (audited + notified)",
+    'audit.record("hybrid_fallback_main"' in src and "hybrid stands down" in src)
+chk("(4b) the hard block stays for a GLM MAIN only",
+    'backends.normalize(getattr(cfg, "model_backend", "opus")) != backends.GLM' in src)
 # (5) off-loop
 chk("(5a) gate runs off-loop under concurrency", src.count("_off_loop(cfg, run_gate") == 2)
 chk("(5b) the land is lock-serialized and off-loop",

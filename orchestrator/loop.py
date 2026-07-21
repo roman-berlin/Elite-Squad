@@ -779,9 +779,25 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
         from . import backend_pref as _bp
         _hy_sec = _bp.get_secondary(cfg) if _bp.get_hybrid(cfg) else None
         if _hy_sec and _hy_sec != getattr(cfg, "model_backend", None):
-            _hy_token = backends.set_hybrid(_hy_sec)
-            audit.record("hybrid_mode", builder_backend=_hy_sec,
-                         main_backend=getattr(cfg, "model_backend", backends.NATIVE))
+            # 2026-07-21 (Commander): SYMMETRIC limit fallback. The main→secondary direction has
+            # existed since EU-118 (plan limit → secondary absorbs); this is the reverse — when the
+            # SECONDARY (GLM) is out of quota, hybrid stands down for the run and builds go back to
+            # the Main model, loudly, instead of dispatching against an exhausted endpoint.
+            _sec_over = False
+            if backends.normalize(_hy_sec) == backends.GLM:
+                try:
+                    _gst = usage.dual_provider_budget_status(cfg).get("glm", {})
+                    _sec_over = bool(_gst.get("over") or _gst.get("bad"))
+                except Exception:  # noqa: BLE001 - an unreadable ledger must not change routing
+                    _sec_over = False
+            if _sec_over:
+                audit.record("hybrid_fallback_main", reason="secondary GLM quota over/near cap")
+                _notify(cfg, "⚠️ Secondary (GLM) is out of quota — hybrid stands down; builds run "
+                             "on the Main model for this run (pricier, but nothing stalls).")
+            else:
+                _hy_token = backends.set_hybrid(_hy_sec)
+                audit.record("hybrid_mode", builder_backend=_hy_sec,
+                             main_backend=getattr(cfg, "model_backend", backends.NATIVE))
     except Exception:  # noqa: BLE001
         _hy_token = None
     try:
@@ -828,20 +844,12 @@ def _glm_budget_preflight_block(cfg: Config, audit: AuditLog) -> bool:
     cfg.model_backend; deferring to it (the old `active_provider != 'glm'` early-return) opened a
     fail-closed bypass where GLM would dispatch against an exhausted quota while the pref still read
     'claude'. So: block iff the configured backend is GLM and GLM is over/near cap."""
-    # P0 (2026-07-21 production audit): in HYBRID mode every BUILD dispatches on the secondary —
-    # GLM — even though the MAIN backend is Claude, so keying this gate off cfg.model_backend
-    # alone left GLM dispatch ungoverned in the live config: an exhausted z.ai quota would
-    # instant-fail every builder pass, accrue error strikes on healthy tickets and park them.
-    # The gate now also arms when hybrid routes builds to a GLM secondary.
-    _main_is_glm = backends.normalize(getattr(cfg, "model_backend", "opus")) == backends.GLM
-    _hybrid_glm = False
-    try:
-        from . import backend_pref as _bp
-        _hybrid_glm = (_bp.get_hybrid(cfg)
-                       and backends.normalize(_bp.get_secondary(cfg) or "") == backends.GLM)
-    except Exception:  # noqa: BLE001 - a pref-store hiccup must not disable the gate's main path
-        pass
-    if not (_main_is_glm or _hybrid_glm):
+    # P0 (2026-07-21 production audit, refined same day): in HYBRID mode every BUILD dispatches on
+    # the GLM secondary, which used to be ungoverned here. Governance is now split by whether a
+    # fallback exists: hybrid-GLM-over is handled at the ARM SITE (hybrid stands down, builds run
+    # on the Main — see the symmetric-fallback block in run_worklist), so the run proceeds; this
+    # gate BLOCKS only when the MAIN backend itself is GLM — there is nothing left to fall back to.
+    if backends.normalize(getattr(cfg, "model_backend", "opus")) != backends.GLM:
         return False
     status = usage.dual_provider_budget_status(cfg)
     glm = status.get("glm", {})
