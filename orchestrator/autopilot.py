@@ -2160,6 +2160,30 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         from .git_ops import reap_stale_worktrees
         reap_stale_worktrees(cfg)
 
+        # EU-426: retire abandoned autodev/* branches whose ticket is now Done (statusCategory done).
+        # This is the SAME idle boundary (startup, before any ticket is picked — never mid-run): a
+        # ticket that never merged (escalated / Planner-CLOSE-parked / killed run) keeps its branch
+        # forever, so once the ticket itself closes this sweep tags the unmerged tip to attic/<KEY>-<sha>
+        # and deletes the local + remote ref. Fail-closed by design (an unreachable board or an
+        # unknown status prunes nothing). Skipped in dry-run (it deletes refs — a side effect dry-run
+        # promises not to have). Best-effort at the sweep level: a build-free housekeeping step must
+        # never block or crash an autopilot start.
+        if not getattr(cfg, "dry_run", False):
+            try:
+                from .backlog.base import make_backlog as _make_backlog
+                from .git_ops import reap_closed_branches as _reap_closed_branches
+                _retire_backlogs = {}
+                for _a in getattr(cfg, "apps", []) or []:
+                    try:
+                        _bl = _make_backlog(_a)
+                    except Exception:  # noqa: BLE001 — a cred-less/misconfigured app can't be status-checked
+                        continue         # → its branches fail closed (left alone); never block the sweep
+                    if _bl is not None:
+                        _retire_backlogs[_a.name] = _bl
+                _reap_closed_branches(cfg, _retire_backlogs, audit)
+            except Exception as _exc:  # noqa: BLE001 — housekeeping; never block an autopilot start
+                print(f"  · branch-retirement sweep skipped ({_exc})", flush=True)
+
         blocked = load_blocked(cfg)
         error_counts = load_error_counts(cfg)   # per-ticket consecutive-ERROR tally (retry-before-park)
         # EU-128: Track tickets previewed in dry-run mode to prevent re-picking them in continuous mode
