@@ -126,6 +126,16 @@ def _validate_git_repo(app: AppConfig) -> bool:
     return True
 
 
+def is_tracker_ticket(ticket) -> bool:
+    """True for meta/tracker tickets that must never enter the build queue: the forensics
+    watchdog's [infra-signature] pattern reports (labelled at filing time; the title prefix is
+    the fallback for boards where labels were stripped)."""
+    labels = [str(l).lower() for l in (getattr(ticket, "labels", None) or [])]
+    if "infra-signature" in labels:
+        return True
+    return str(getattr(ticket, "summary", "") or "").lstrip().lower().startswith("[infra-signature]")
+
+
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
     """Pull ready tickets. With ``app_name=None`` this spans EVERY app that has a backlog — i.e. all
     connected Jiras — so Autopilot works across several Jira accounts at once. One connection failing
@@ -143,6 +153,12 @@ def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
         try:
             backlog = make_backlog(app)
             for ticket in backlog.get_ready_tasks(limit):
+                if is_tracker_ticket(ticket):
+                    # 2026-07-21 (Commander: "401 invalid?"): [infra-signature] tickets are
+                    # PATTERN TRACKERS the watchdog files — never buildable work. Skipping them
+                    # here keeps them out of the drain AND the daily's "Next up" (same choke
+                    # point), instead of burning a planner call per tracker to learn CLOSE.
+                    continue
                 items.append((app, ticket))
             LAST_DRAIN_ERRORS.pop(app.name, None)   # a clean fetch clears any prior error
         except Exception as exc:  # noqa: BLE001 - one Jira/connection must not abort the others

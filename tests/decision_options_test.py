@@ -134,6 +134,12 @@ chk("(8d) turn-limit walls synthesize a re-scope-first recommendation",
      {}).get("options", [{}])[0].get("text", "").startswith("Re-scope"))
 chk("(8e) a genuinely free-form question does NOT synthesize",
     decisions.synthesize_options("Which date format should the dashboard use?") is None)
+# 2026-07-21: leaked RULE-0 officer banners never reach a brief or a stored park
+chk("(8g) summarize_question strips leaked officer banner lines",
+    "Model: Opus" not in decisions.summarize_question(
+        "\U0001f916 Model: Opus\n\u2699\ufe0f Effort: MAX — deep\nWhich store should hold the flag?")
+    and "Which store should hold the flag?" in decisions.summarize_question(
+        "\U0001f916 Model: Opus\nWhich store should hold the flag?"))
 chk("(8f) summarize_question cuts command dumps",
     "$" not in decisions.summarize_question(WALL) and len(decisions.summarize_question(WALL)) <= 141)
 

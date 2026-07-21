@@ -1074,7 +1074,18 @@ def standup(cfg) -> str:
         # mirroring the "…and N more (cockpit → /needs)" overflow idiom on the Needs-you line above.
         # 2026-07-19 (Commander order): PRACTICAL, not a wall — top 5 one-liners, the rest is a
         # count + the /needs pointer (the inbox is where answering actually happens).
-        rendered = [(p["id"], _one_line(p.get("question", ""))) for p in pending[:5]]
+        # 2026-07-21 (Commander: the daily showed a leaked officer banner as a "question"):
+        # bullets go through the same brief pipeline the /needs cards use — structured summary
+        # when the question carries options, else the banner-stripped one-line summarizer.
+        from . import decisions as _dec
+
+        def _q_brief(q):
+            try:
+                po = _dec.parse_options(q) or _dec.synthesize_options(q)
+                return _one_line((po or {}).get("summary") or _dec.summarize_question(q))
+            except Exception:  # noqa: BLE001 - a brief failure must never sink the daily
+                return _one_line(q)
+        rendered = [(p["id"], _q_brief(p.get("question", ""))) for p in pending[:5]]
         more = len(pending) - len(rendered)
         lines.append("❓ Awaiting your decision" + (f" ({len(pending)})" if more > 0 else "")
                      + ": (answer: cockpit → /needs)")
