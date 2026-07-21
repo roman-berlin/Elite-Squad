@@ -2124,8 +2124,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Outcome.ERRORED — which would wrongly tick the EU-219 consecutive-error counter toward
             # Blocked and park a ticket that just needed to be split. Do NOT grep build.summary/raw
             # for turn-limit text — a failed build's summary holds only the last assistant message,
-            # never the turn-limit phrase; num_turns is the only reliable signal.
-            if build.num_turns >= builder_mod.turns_for(cfg, eff):
+            # never the turn-limit phrase; num_turns is the only reliable signal. EU-408: a GLM pass
+            # cut off by the per-pass token ceiling sets build.is_turn_limit directly — it can burn
+            # few-but-huge turns (a giant tool-result read) so num_turns alone would miss it and drop
+            # a clean cutoff into the ERRORED fallthrough. is_turn_limit is the one reliable signal
+            # shared by BOTH blow-out classes (max-turns and the GLM token ceiling).
+            if build.is_turn_limit or build.num_turns >= builder_mod.turns_for(cfg, eff):
                 # 2026-07-19: feed the Scrum Master the attempt's REAL progress, not just "it ran
                 # out" — fragments sliced blind repeated the parent's burn and re-blew the ceiling
                 # (the AUTO-15x lineage). The builder's own summary tells the splitter what is
