@@ -70,6 +70,21 @@ _CHILD_ENV["GENERAL_PID_FILE"] = str(Path(_PID_FILE_DIR) / "autopilot.pid")
 # out to it). Generous: the known-heavy harnesses top out ~19s. Override with GENERAL_TEST_TIMEOUT.
 _HARNESS_TIMEOUT_S = int(os.environ.get("GENERAL_TEST_TIMEOUT", "300") or 300)
 
+# EU-404: the boot-smoke subset — the 3 fastest harnesses, run after a self-repo land to prove the
+# just-landed code still loads and its basic invariants hold BEFORE the drain auto-resumes onto it
+# (see orchestrator/autopilot.py → boot_smoke). Picked for wall-clock (each < 0.1s of work) AND for
+# covering distinct boot-critical surfaces: the contracts→audit-event mapping the whole outcome
+# surface depends on, config-schema validation (boot loads config first), and the CLAUDE.md /
+# docs path-reality grep. Each is a tiny, stable, pure harness — not a heavy subprocess-spawning
+# one — so the smoke stays a fast canary, not a second suite. ``--smoke`` runs exactly these via the
+# same _run_harness + _verdict + honest exit code as a full run (no soft-tally sail-through).
+SMOKE_HARNESSES = (
+    "outcome_audit_mapping_test.py",   # contracts.Outcome → audit event mapping
+    "config_unknown_keys_test.py",     # config accepted/unknown key validation
+    "eu43_docs_reality_test.py",       # CLAUDE.md / Documentation path-reality grep
+)
+
+
 # EU-218: the gate that runs this suite (config.example.yaml's per-app `gate_commands`, default
 # `AppConfig.gate_timeout_sec`) has a 1800s hard cap — locking_test's 12 heavy child processes were
 # the dominant wall-clock contributor pushing full-suite runtime toward it (EU-201 hit it twice).
@@ -170,8 +185,15 @@ def main() -> int:
     passed = failed = total_checks = 0
     red: list[str] = []
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    smoke = "--smoke" in sys.argv
     _t0 = time.monotonic()
-    for t in TESTS:
+    # EU-404: --smoke runs only the curated fast subset (boot-smoke canary); else the whole suite.
+    if smoke:
+        smoke_set = {ROOT / "tests" / name for name in SMOKE_HARNESSES}
+        harnesses = [p for p in TESTS if p in smoke_set]
+    else:
+        harnesses = TESTS
+    for t in harnesses:
         stdout, stderr, returncode, timed_out = _run_harness(t)
         if timed_out:
             # A timeout is an unconditional FAIL regardless of any partial tally the harness printed
@@ -196,12 +218,18 @@ def main() -> int:
     elapsed = time.monotonic() - _t0
     budget = _GATE_TIMEOUT_SEC * _WALLCLOCK_MARGIN
     print("=" * 64)
-    print(f"  HARNESSES: {passed} passed / {passed + failed}     TOTAL CHECKS: {total_checks}")
-    print(f"  WALL-CLOCK: {elapsed:.1f}s  (gate timeout {_GATE_TIMEOUT_SEC}s, "
-          f"{_WALLCLOCK_MARGIN:.0%} margin budget {budget:.0f}s)")
+    label = "SMOKE HARNESS" if smoke else "HARNESSES"
+    print(f"  {label}: {passed} passed / {passed + failed}     TOTAL CHECKS: {total_checks}")
+    if smoke:
+        # --smoke is a boot canary, not the gate suite — the gate-timeout wall-clock budget is
+        # irrelevant for a 3-harness subset, so report only the elapsed time.
+        print(f"  WALL-CLOCK: {elapsed:.1f}s  (boot-smoke subset of {len(SMOKE_HARNESSES)})")
+    else:
+        print(f"  WALL-CLOCK: {elapsed:.1f}s  (gate timeout {_GATE_TIMEOUT_SEC}s, "
+              f"{_WALLCLOCK_MARGIN:.0%} margin budget {budget:.0f}s)")
     if red:
         print("  FAILED:", " ".join(red))
-    elif elapsed > budget:
+    elif not smoke and elapsed > budget:
         # EU-218: still ALL GREEN, but flag the creeping wall-clock loudly — this is the early-warning
         # signal for the EU-201 class (the gate itself timing out mid-run) before it recurs.
         print(f"  ⚠ WALL-CLOCK WARNING: {elapsed:.1f}s exceeds the {_WALLCLOCK_MARGIN:.0%} safety "
