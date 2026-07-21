@@ -323,7 +323,11 @@ class Config:
                                             # until midnight). Resumes after midnight or when the ceiling is raised.
     budget_alert_pct: float = 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
     budget_bad_threshold: float = 0.95      # Low-watermark: stop starting new tickets when any provider is at this utilization
-    glm_quota_tokens: int = 100_000_000     # GLM (Z.ai) token quota ceiling; 0 = disabled
+    # GLM (Z.ai) LOCAL token ceiling; 0 = disabled. CALIBRATED 2026-07-21: the ledger counts every
+    # replayed context token (~36x multiple), so 96M local-counted tokens measured as just 21% on
+    # Z.ai's own Usage page — the old 100M default cried wolf and false-triggered the hybrid
+    # fallback onto the (pricier) main model. 400M local ≈ ~85-90% of the real quota at that ratio.
+    glm_quota_tokens: int = 400_000_000
 
     # --- EU-122: dual-provider budget monitor (Claude + GLM) ---
     # GLM daily token ceiling (default: 1B tokens). GLM doesn't have a Max-like subscription,

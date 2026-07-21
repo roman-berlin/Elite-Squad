@@ -787,7 +787,10 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
             if backends.normalize(_hy_sec) == backends.GLM:
                 try:
                     _gst = usage.dual_provider_budget_status(cfg).get("glm", {})
-                    _sec_over = bool(_gst.get("over") or _gst.get("bad"))
+                    # OVER only (2026-07-21): "bad" is a >=95% threshold on a LOCAL guess —
+                    # it false-fired the fallback at Z.ai-real 21%. Re-route on hard
+                    # evidence; a bad-threshold estimate is a Telegram warning at most.
+                    _sec_over = bool(_gst.get("over"))
                 except Exception:  # noqa: BLE001 - an unreadable ledger must not change routing
                     _sec_over = False
             if _sec_over:
@@ -853,8 +856,9 @@ def _glm_budget_preflight_block(cfg: Config, audit: AuditLog) -> bool:
         return False
     status = usage.dual_provider_budget_status(cfg)
     glm = status.get("glm", {})
-    if not (glm.get("over") or glm.get("bad")):
-        return False
+    if not glm.get("over"):   # OVER only (2026-07-21) — "bad" is a local-guess threshold,
+        return False          # alert-worthy, never a dispatch blocker
+
     msg = (f"GLM budget pre-flight: run blocked before dispatch — GLM quota is "
            f"{'over cap' if glm.get('over') else 'near cap (>=95%)'} ({glm})")
     audit.record("glm_budget_preflight_block", glm_status=glm)
