@@ -39,7 +39,7 @@ path here so the doc keeps matching the filesystem.
 
 ## Documentation index
 
-Repo-root docs: `README.md` (how to run), `ARCHITECTURE.md` (design), `TECHNICAL.md` /
+Repo-root docs: `README.md` (how to run), `ARCHITECTURE.md` (design), `config.server.example.yaml` (the SERVER host's canonical config shape — diff the live VPS file against it to catch drift), `TECHNICAL.md` /
 `TECHNICAL_DESIGN.md`, `DEPLOYMENT.md` / `VPS_DEPLOYMENT.md`, `ROADMAP.md`, `QA_MANUAL.md`,
 `SQUAD_HQ.md` (the cockpit / field manual — renamed from the old War Room manual in the SQUAD rebrand), `ORG.md` (chain of command & roster). The live
 officer **roster** isn't a committed doc: `orchestrator/roster.py` regenerates it at runtime into
