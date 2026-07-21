@@ -5,7 +5,12 @@ __pycache__/
 config.yaml
 # Config backups carry the SAME secrets as config.yaml (Jira/Supabase creds) — never track them.
 config.yaml.bak
+# 2026-07-21: timestamped backups (config.yaml.bak-1783537662) do NOT match '*.bak' — the
+# narrow pattern left them untracked on the VPS, which tripped the dirty-tree guard and
+# silently DISABLED self-update restarts there (the EU-335 stale-code class).
 *.bak
+*.bak-*
+*.bak.*
 audit.jsonl
 # SWE-bench benchmark trend (EU-71) — runtime-appended one line per run; never version it so the
 # trend starts clean and test runs / local gauges don't pollute the committed history.

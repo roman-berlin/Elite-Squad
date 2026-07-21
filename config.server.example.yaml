@@ -1,0 +1,55 @@
+# SQUAD — SERVER config TEMPLATE (committed; the live file is deployment-local + gitignored).
+#
+# WHY THIS EXISTS (2026-07-21): the server's live config drifted to a July-8 shape — 5 keys, the
+# pre-QW2 `audit_path: ./audit.jsonl` that scattered state across the repo root, and no declared
+# host role. It kept working (the brain-stem needs little), so nobody noticed for two weeks. A
+# committed template makes the intended shape reviewable in git and diffable against the box.
+#
+# HOW TO USE
+#   · New server:      copy to <checkout>/config.yaml, fill the placeholders, start the service.
+#   · Drift check:     ssh <host> 'cat ~/General/config.yaml' | diff - config.server.example.yaml
+#     (differences in paths/ids are expected; differences in KEYS mean the box is behind.)
+#
+# ROLE: this host runs the Telegram poller, the council and the daily brief. It NEVER drains or
+# builds — no gate_commands, no worktree, no concurrency knobs. Builds live on the Mac, which has
+# the RAM for them (this box has ~1GB). To change the role, migrate the Mac's full config shape.
+
+# QW2 state root — every sidecar (Telegram offset, ledgers, chat, decisions) resolves beside
+# this file. Migrated 2026-07-21 off the legacy "./audit.jsonl" root-scatter; the existing
+# files were moved into state/ in the same step.
+audit_path: "./state/audit.jsonl"
+
+# Single-consumer Telegram poller (EU-185): THIS host owns it; the Mac stays cockpit-only.
+telegram_poller_host: "server"
+dry_run: false
+notify_verbose: false
+
+apps:
+  - name: Elite-Unit
+    repo_path: "<absolute path to this host's checkout>"
+    base_branch: "dev"
+    protected_branch: "main"
+    backlog_backend: "jira"
+    backlog:
+      base_url: "https://toibis.atlassian.net"
+      project_key: "EU"
+      ready_status: "To Do"
+      queue_statuses: ["In Progress", "To Do"]
+      assignee: "<your-atlassian-accountId>"
+  - name: automatixy
+    repo_path: "<absolute path to this host's checkout>"     # placeholder — the server discusses, it doesn't build
+    base_branch: "dev"
+    protected_branch: "main"
+    backlog_backend: "jira"
+    backlog:
+      base_url: "https://toibis.atlassian.net"
+      project_key: "AUTO"
+      ready_status: "To Do"
+      queue_statuses: ["In Progress", "To Do"]
+      assignee: "<your-atlassian-accountId>"
+      status_map:
+        In Progress: "In Progress"
+        QA: "QA"
+        Done: "Done"
+        Needs Human: "In Progress"
+planner_enabled: true

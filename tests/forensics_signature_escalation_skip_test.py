@@ -74,6 +74,13 @@ def fresh_audit_log():
         audit_path.unlink()
     except FileNotFoundError:
         pass
+    # 2026-07-21: the sweep now records which evidence it has already reported
+    # (signature_filed.json, beside the audit) so a CLOSED tracker can't be resurrected by the
+    # same old rows. A per-criterion clean slate has to clear that acknowledgement too.
+    try:
+        audit_path.with_name("signature_filed.json").unlink()
+    except FileNotFoundError:
+        pass
 
 
 # ============================================================ #

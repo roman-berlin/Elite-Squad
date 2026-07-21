@@ -168,13 +168,17 @@ def _maybe_self_restart(cfg: Config, audit) -> None:
     from . import cockpit_state as _cs
     if _cs.active_run_count() > 0:
         return                              # something is mid-build somewhere — defer, re-check next cycle
-    dirty, paths = tree_forensics()
-    if dirty:
+    # 2026-07-21: refuse on WIP that could actually change behaviour — tracked modifications, or
+    # untracked EXECUTABLE files. Inert leftovers (a .bak, a stray .md) are reported by the boot
+    # warning but must never pin the host to old code (that turned EU-386's safety guard into the
+    # EU-335 stale-code bug on the VPS).
+    paths = respawn_blocking_paths()
+    if paths:
         try:
             p.unlink()
         except OSError:
             pass
-        notify.send("⚠️ Self-update restart REFUSED — the working tree is dirty "
+        notify.send("⚠️ Self-update restart REFUSED — the working tree carries un-gated changes "
                     f"({', '.join(paths[:5])}{'…' if len(paths) > 5 else ''}). A respawn would "
                     "activate un-gated WIP (EU-386). Falling back to notify-only; restart by hand "
                     "after committing/stashing.")
@@ -189,29 +193,71 @@ def _maybe_self_restart(cfg: Config, audit) -> None:
     os._exit(SELF_RESTART_EXIT_CODE)
 
 
+# 2026-07-21: which UNTRACKED files can actually "activate un-gated code" on a respawn. A stray
+# .py/.sh inside the tree can be imported or executed; a leftover .md/.bak/.log cannot. Only the
+# former may block a self-update restart — see respawn_blocking_paths.
+_EXECUTABLE_SUFFIXES = (".py", ".pyc", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts")
+
+
 def tree_forensics() -> tuple[bool, list[str]]:
     """Whether the working tree is dirty, and which paths — from ``git status --porcelain``.
 
     Returns ``(False, [])`` on any probe failure (no git, timeout, not a repo): an unknowable
     tree state must never block or spam a boot. The path list is capped at ``_DIRTY_PATHS_CAP``
-    entries; ``dirty`` stays truthful regardless of the cap."""
+    entries; ``dirty`` stays truthful regardless of the cap.
+
+    REPORTING view — every entry, tracked or not (the boot warning must stay honest). The
+    narrower RESPAWN-BLOCKING view lives in ``respawn_blocking_paths``."""
+    return _tree_status()[:2]
+
+
+def _tree_status() -> tuple[bool, list[str], list[tuple[str, str]]]:
+    """(dirty, paths, [(status, path), …]) from ``git status --porcelain``. Fail-soft to
+    ``(False, [], [])`` — an unknowable tree must never block or spam a boot."""
     import subprocess
 
     try:
         r = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
                            text=True, timeout=5)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return False, []
+        return False, [], []
     if r.returncode != 0:
-        return False, []
+        return False, [], []
     paths: list[str] = []
+    entries: list[tuple[str, str]] = []
     for ln in r.stdout.splitlines():
         ln = ln.rstrip()
         if not ln:
             continue
         # porcelain v1: two status chars + a space + the path ("R  old -> new" kept whole)
-        paths.append(ln[3:].strip() if len(ln) > 3 else ln.strip())
-    return bool(paths), paths[:_DIRTY_PATHS_CAP]
+        path = ln[3:].strip() if len(ln) > 3 else ln.strip()
+        paths.append(path)
+        entries.append((ln[:2], path))
+    return bool(paths), paths[:_DIRTY_PATHS_CAP], entries
+
+
+def respawn_blocking_paths() -> list[str]:
+    """The subset of a dirty tree that must REFUSE a self-update respawn (2026-07-21).
+
+    EU-386 exists to stop a respawn from silently activating un-gated WIP — that means TRACKED
+    modifications (M/A/D/R/C, staged or not): code the unit never built or gated. An UNTRACKED
+    file ('??') is only dangerous when it could execute (see _EXECUTABLE_SUFFIXES); a leftover
+    .md/.bak/.log cannot change behaviour.
+
+    Why the distinction matters: on the VPS two harmless leftovers (a timestamped config backup
+    and a pre-rename officer charter) made every self-update restart refuse — so the server was
+    pinned to old code indefinitely with only a warning, resurrecting the exact EU-335
+    stale-cockpit class the self-update feature exists to prevent. Junk must be reported, never
+    load-bearing."""
+    _dirty, _paths, entries = _tree_status()
+    blocking: list[str] = []
+    for status, path in entries:
+        if status.strip() == "??":
+            if any(path.lower().endswith(sfx) for sfx in _EXECUTABLE_SUFFIXES):
+                blocking.append(path)
+            continue
+        blocking.append(path)      # any TRACKED modification is real WIP
+    return blocking[:_DIRTY_PATHS_CAP]
 
 
 def warn_dirty_tree(cfg: Config, role: str, forensics: tuple[bool, list[str]] | None = None,

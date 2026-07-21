@@ -787,7 +787,10 @@ async def run(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
             if backends.normalize(_hy_sec) == backends.GLM:
                 try:
                     _gst = usage.dual_provider_budget_status(cfg).get("glm", {})
-                    _sec_over = bool(_gst.get("over") or _gst.get("bad"))
+                    # OVER only (2026-07-21): "bad" is a >=95% threshold on a LOCAL guess —
+                    # it false-fired the fallback at Z.ai-real 21%. Re-route on hard
+                    # evidence; a bad-threshold estimate is a Telegram warning at most.
+                    _sec_over = bool(_gst.get("over"))
                 except Exception:  # noqa: BLE001 - an unreadable ledger must not change routing
                     _sec_over = False
             if _sec_over:
@@ -853,8 +856,9 @@ def _glm_budget_preflight_block(cfg: Config, audit: AuditLog) -> bool:
         return False
     status = usage.dual_provider_budget_status(cfg)
     glm = status.get("glm", {})
-    if not (glm.get("over") or glm.get("bad")):
-        return False
+    if not glm.get("over"):   # OVER only (2026-07-21) — "bad" is a local-guess threshold,
+        return False          # alert-worthy, never a dispatch blocker
+
     msg = (f"GLM budget pre-flight: run blocked before dispatch — GLM quota is "
            f"{'over cap' if glm.get('over') else 'near cap (>=95%)'} ({glm})")
     audit.record("glm_budget_preflight_block", glm_status=glm)
@@ -1360,6 +1364,9 @@ async def _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget,
     # question + answer into the builder's context and clear the park. (A Telegram answer is already baked
     # into the description by decisions.to_worklist, so this only fires for the Jira-native path.)
     ticket = _resume_from_jira_answer(cfg, ticket, backlog, audit)
+    # EU-395: cross-run memory — a re-picked ticket carries a digest of its own past failures
+    # (errored/parked/review-FAIL) into the Planner/Builder context instead of rebuilding blind.
+    ticket = _inject_prior_attempts(cfg, ticket, audit)
 
     if not cfg.dry_run and not ticket.ephemeral:
         # For a resuming ticket this transitions it out of 'Blocked' and back to 'In Progress' (EU-61).
@@ -1540,6 +1547,96 @@ def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
     except Exception:  # noqa: BLE001
         pass
     return set()
+
+
+def _format_no_changes_findings(findings: list[dict]) -> str:
+    """Render the EU-396 verify-pass per-AC findings as one line per criterion, satisfied/gap
+    marked, evidence cited — so a human (or the escalation comment) reads it as one look, not an
+    investigation. Empty input -> empty string (the caller then omits the section entirely)."""
+    lines = []
+    for f in findings or []:
+        mark = "✅" if f.get("satisfied") else "❌"
+        crit = (f.get("criterion") or "").strip() or "(unlabeled criterion)"
+        ev = (f.get("evidence") or "").strip()
+        lines.append(f"{mark} {crit}" + (f" — {ev}" if ev else ""))
+    return "\n".join(lines)
+
+
+# EU-395: cross-run memory. A ticket that errors, parks (needs_human) or fails review keeps NO
+# memory of that once the process/run ends — the next pick re-plans and re-builds blind, often
+# burning its 3 error strikes / 2 review passes rediscovering the same dead approach the audit log
+# already recorded. These events, in this order of relevance, feed the digest:
+_PRIOR_ATTEMPT_EVENTS = {"ticket_exception", "needs_human"}   # Outcome.ERRORED / Outcome.ESCALATED
+# Deliberately tighter than builder._FEEDBACK_MAX_ITEMS/_FEEDBACK_MAX_CHARS (EU-38): this digest is
+# a short "don't repeat this" pointer for the Planner/Builder, not the full retry feedback stream —
+# same discipline (cap items, then chars, keep newest, mark elisions), smaller ceiling.
+_PRIOR_ATTEMPTS_MAX_ITEMS = 4
+_PRIOR_ATTEMPTS_MAX_CHARS = 1600
+
+
+def _prior_attempts_digest(cfg, ticket_id: str) -> str | None:
+    """A bounded 'what was tried, why it failed' digest of ticket_id's PAST attempts, built from the
+    audit log: prior errors (ticket_exception), parks (needs_human), and review FAIL verdicts.
+
+    Returns None on a first attempt (no such events found yet) or on any read failure — fails
+    toward 'no digest' exactly like `_already_pm_triaged`: an unreadable audit log must never block
+    or corrupt a build, it just costs the re-pick the memory this ticket exists to add. Capped in
+    both items and chars via `builder._cap_feedback`'s own trimming (EU-38 discipline) so a ticket
+    with a long, thrashy history can never blow the Planner/Builder input budget."""
+    try:
+        import json
+        from . import dashboard as _D
+        rows: list[tuple[str, str]] = []   # (ts, rendered line) — sorted oldest->newest below
+        for line in _D.audit_lines(getattr(cfg, "audit_path", "./state/audit.jsonl")):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("ticket_id") != ticket_id:
+                continue
+            ev = e.get("event")
+            ts = str(e.get("ts", ""))
+            if ev in _PRIOR_ATTEMPT_EVENTS:
+                reason = e.get("reason") or e.get("question") or e.get("error") or e.get("notes") or ""
+                reason = str(reason).strip()
+                if reason:
+                    rows.append((ts, f"- [{ev}] {reason}"))
+            elif ev == "review" and str(e.get("verdict", "")).upper() == "FAIL":
+                detail = str(e.get("summary") or "").strip()
+                changes = e.get("required_changes") or []
+                if changes:
+                    req = "; ".join(str(c) for c in changes[:3])
+                    detail = f"{detail} — required: {req}" if detail else f"required: {req}"
+                if detail:
+                    rows.append((ts, f"- [review FAIL] {detail}"))
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r[0])   # chronological — _cap_feedback below keeps the NEWEST
+        capped = builder_mod._cap_feedback(
+            [line for _, line in rows],
+            max_items=_PRIOR_ATTEMPTS_MAX_ITEMS, max_chars=_PRIOR_ATTEMPTS_MAX_CHARS)
+        return "\n".join(capped) if capped else None
+    except Exception as exc:  # noqa: BLE001 — audit-log trouble must never block a build
+        print(f"  · prior-attempts digest skipped for {ticket_id}: {exc}", flush=True)
+        return None
+
+
+def _inject_prior_attempts(cfg, ticket, audit):
+    """Fold `_prior_attempts_digest` into the ticket description BEFORE the Planner/Builder run
+    (EU-395), the same channel `_resume_from_jira_answer` uses to inject a resolved decision — both
+    the Planner (planner.plan) and the Builder (builder.build) already read ticket.description
+    verbatim, so this is the one seam that reaches both without touching either contract. A no-op
+    (returns ticket unchanged) on a first attempt or any digest-read failure."""
+    digest = _prior_attempts_digest(cfg, ticket.id)
+    if not digest:
+        return ticket
+    from dataclasses import replace
+    desc = (ticket.description or "") + (
+        "\n\n---\nPrior attempts on this ticket (from the audit log — what was tried and why it "
+        "failed; do not repeat a dead approach without addressing why it failed):\n" + digest)
+    audit.record("prior_attempts_injected", ticket_id=ticket.id, chars=len(digest))
+    print(f"  ↺ {ticket.id}: prior-attempts digest injected ({len(digest)} chars)", flush=True)
+    return replace(ticket, description=desc)
 
 
 def _planner_verdict_parked_before(cfg: Config, ticket_id: str) -> bool:
@@ -2147,11 +2244,63 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                       flush=True)
                 return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                              notes="parked — Commander product decision needed"))
+            # EU-396: before parking an UNVERIFIED "already satisfied" claim on the Commander, run
+            # the Reviewer read-only against the UNCHANGED tree (no diff — nothing to review) with
+            # the ticket's ACs: "are these ACs already satisfied — cite file:line per AC". A senior
+            # teammate checks the claim first, instead of "verify and close it yourself" (the exact
+            # senior_pm-style mistake §2 was retired for). Confident PASS with per-AC evidence closes
+            # to QA (reversible, never Done) and is separately audited (no_changes_autoclose);
+            # anything less than confident falls straight through to today's escalation below, with
+            # the Reviewer's per-AC findings attached to it.
+            verify_findings_text = ""
+            if getattr(cfg, "verify_no_changes_enabled", True) and not ticket.ephemeral and not cfg.dry_run:
+                try:
+                    with _officer_transcript_context(app, ticket, "reviewer", cfg):
+                        vr = await reviewer_mod.verify_no_changes(ticket, app, cfg, report)
+                except Exception as exc:  # noqa: BLE001 — a verify crash must fall through to escalation, never break the run
+                    vr = {"confident": False, "findings": [], "summary": f"verify call crashed: {exc}",
+                          "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
+                cost += vr.get("cost_usd", 0.0) or 0.0
+                budget.add(vr.get("cost_usd", 0.0) or 0.0)
+                _burn("reviewer", vr.get("input_tokens", 0) or 0, vr.get("output_tokens", 0) or 0)
+                verify_findings_text = _format_no_changes_findings(vr.get("findings"))
+                audit.record("no_changes_verify", ticket_id=ticket.id, iteration=iteration,
+                             confident=bool(vr.get("confident")), findings=vr.get("findings", []),
+                             summary=(vr.get("summary") or "")[:1000], cost_usd=vr.get("cost_usd", 0.0))
+                if vr.get("confident"):
+                    evidence = verify_findings_text or (vr.get("summary") or "").strip()
+                    if not cfg.dry_run and not ticket.ephemeral:
+                        try:
+                            backlog.set_status(ticket, "QA")
+                            backlog.add_comment(
+                                ticket, "✅ Auto-verified to QA (EU-396) — the Builder made no changes "
+                                        "and the Reviewer independently audited the UNCHANGED tree and "
+                                        "confirmed every acceptance criterion is already met:\n\n"
+                                        + evidence[:1500]
+                                        + "\n\nReversible — reopen to To Do to force a rebuild if this "
+                                          "is wrong.")
+                        except Exception as _exc:  # noqa: BLE001 — a board hiccup must not block reporting
+                            print(f"  · no-changes auto-close: board update failed ({_exc}); reported anyway.",
+                                  flush=True)
+                    audit.record("no_changes_autoclose", ticket_id=ticket.id, iteration=iteration,
+                                 evidence=evidence[:1500])
+                    print(f"  ✅ {ticket.id}: no-changes claim Reviewer-verified (per-AC evidence) — "
+                          "closed to QA, not parked.", flush=True)
+                    return _resolve(TicketReport(ticket.id, Outcome.SKIPPED, iteration, cost, app.name,
+                                                 branch, notes="no changes — Reviewer-verified already satisfied, closed to QA"))
+                print(f"  · {ticket.id}: no-changes claim not confidently verified — escalating with "
+                      "the Reviewer's per-AC findings attached.", flush=True)
             # EU-116: a no-changes build leaves the ticket stuck In Progress and the drain re-runs it.
             # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
             # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
             # EU-153: Post no-changes comment
             note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
+            if verify_findings_text:
+                # EU-396: attach the Reviewer's per-AC findings so the Commander's check is one
+                # look, not an investigation — even though it wasn't confident enough to auto-close.
+                note += ("\n\nThe Reviewer independently checked the unchanged tree against each AC "
+                         "(not confident enough to auto-close — verify before agreeing):\n"
+                         + verify_findings_text[:1200])
             no_change_comment = commenter.summarize_gate_event(
                 "Build", "NO_CHANGES",
                 note,

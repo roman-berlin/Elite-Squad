@@ -293,6 +293,14 @@ class Config:
     # EXISTING forensics.classify/attempts — no new memory store. Set False to disable.
     retry_forensics_enabled: bool = True
 
+    # EU-396: before a Builder no-changes claim ("the ACs are already satisfied") escalates to the
+    # Commander unverified, run the Reviewer read-only against the UNCHANGED tree with the ticket's
+    # ACs — a senior teammate checks the claim first, instead of "verify and close it yourself".
+    # Confident PASS with per-AC file:line evidence -> QA (reversible, never Done), audited. Anything
+    # less than confident -> escalate as before, with the Reviewer's per-AC findings attached so the
+    # Commander's check is one look, not an investigation. Set False to restore the pre-EU-396 behaviour.
+    verify_no_changes_enabled: bool = True
+
     # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
     #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
     #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as
@@ -323,7 +331,11 @@ class Config:
                                             # until midnight). Resumes after midnight or when the ceiling is raised.
     budget_alert_pct: float = 0.8           # Telegram heads-up once today's burn crosses this fraction of the ceiling
     budget_bad_threshold: float = 0.95      # Low-watermark: stop starting new tickets when any provider is at this utilization
-    glm_quota_tokens: int = 100_000_000     # GLM (Z.ai) token quota ceiling; 0 = disabled
+    # GLM (Z.ai) LOCAL token ceiling; 0 = disabled. CALIBRATED 2026-07-21: the ledger counts every
+    # replayed context token (~36x multiple), so 96M local-counted tokens measured as just 21% on
+    # Z.ai's own Usage page — the old 100M default cried wolf and false-triggered the hybrid
+    # fallback onto the (pricier) main model. 400M local ≈ ~85-90% of the real quota at that ratio.
+    glm_quota_tokens: int = 400_000_000
 
     # --- EU-122: dual-provider budget monitor (Claude + GLM) ---
     # GLM daily token ceiling (default: 1B tokens). GLM doesn't have a Max-like subscription,

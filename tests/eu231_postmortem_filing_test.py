@@ -212,6 +212,33 @@ chk("infra signature files on the UNIT's project, not the victim product backlog
     any("[infra-signature]" in c[0] for c in _unit_created) and not _prod_created,
     f"unit={[c[0] for c in _unit_created]} prod={_prod_created}")
 
+# --- 10) 2026-07-21: a CLOSED tracker must not be resurrected by the SAME old evidence ------- #
+# (Live loop: EU-415/416/401 were closed, and the very next sweep re-filed them as EU-422/423/424
+# from the identical 7-day window. A filed ticket acknowledges the rows it carried.)
+audit_res = tmp / "audit_resurrect.jsonl"
+cfg_res = Config(apps=[app], audit_path=str(audit_res), postmortem_after=3)
+stub_res = StubBacklog()
+filing.make_backlog = lambda a: stub_res
+run("RS-1", "ticket_exception", path=audit_res, error=CRASH_A)
+run("RS-2", "ticket_exception", path=audit_res, error=CRASH_A2)
+run("RS-3", "ticket_exception", path=audit_res, error=CRASH_B)
+first = forensics.signature_sweep(cfg_res, fake_audit)
+chk("resurrect-guard: the first sweep files the signature", len(first) >= 1, str(first))
+
+# the SAME evidence must not file again even with the ticket gone from the board (closed)
+stub_res.created.clear()
+stub_res._open = {}   # the Commander CLOSED it — the board no longer dedupes; only our guard can
+again = forensics.signature_sweep(cfg_res, fake_audit)
+chk("resurrect-guard: closing the ticket does NOT re-file from the same old rows",
+    again == [] and not stub_res.created, f"{again} {stub_res.created}")
+
+# a genuinely NEW recurrence still re-opens the class
+run("RS-4", "ticket_exception", path=audit_res, error=CRASH_A)
+run("RS-5", "ticket_exception", path=audit_res, error=CRASH_A2)
+run("RS-6", "ticket_exception", path=audit_res, error=CRASH_B)
+fresh = forensics.signature_sweep(cfg_res, fake_audit)
+chk("resurrect-guard: NEW occurrences after the filing DO re-open it", len(fresh) >= 1, str(fresh))
+
 print("\n=========== EU-231 POSTMORTEM FILING QA ===========")
 passed = sum(1 for _, ok_, _ in results if ok_)
 for n, ok_, det in results:

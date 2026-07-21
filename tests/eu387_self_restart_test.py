@@ -78,6 +78,8 @@ def drive(cfg, *, active=0, dirty=False):
          patch.object(autopilot, "_remove_pid", lambda: pids_removed.append(1)), \
          patch.object(autopilot.notify, "send", lambda m: notes.append(m)), \
          patch.object(autopilot, "tree_forensics", lambda: (dirty, ["orchestrator/x.py"] if dirty else [])), \
+         patch.object(autopilot, "respawn_blocking_paths",
+                      lambda: ["orchestrator/x.py"] if dirty else []), \
          patch("orchestrator.cockpit_state.active_run_count", lambda: active):
         autopilot._maybe_self_restart(cfg, au)
     return au
