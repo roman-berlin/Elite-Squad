@@ -65,6 +65,16 @@ _CHILD_ENV["GENERAL_AUTH_PROBE"] = "0"
 _PID_FILE_DIR = tempfile.mkdtemp(prefix="general-test-pid-")
 _CHILD_ENV["GENERAL_PID_FILE"] = str(Path(_PID_FILE_DIR) / "autopilot.pid")
 
+# 2026-07-21: same isolation for the AUDIT ledger. jira._audit() lazily opens Config.audit_path —
+# the LIVE state/audit.jsonl — so any harness that reaches a real set_status() writes fabricated
+# rows into the operational record. state_routing_test.py did exactly that: every full gate run
+# appended 5 fake AUTO-73 ticket_transition rows (15 of the 29 on record, one claiming the ticket
+# landed in a German column "Fertig" that exists on no board), and forensics, the dashboard and the
+# daily brief all read that file. The old contract was "each harness remembers to stub _AUDIT_LOG";
+# this makes it structural, so no future harness has to remember.
+_AUDIT_DIR = tempfile.mkdtemp(prefix="general-test-audit-")
+_CHILD_ENV["GENERAL_AUDIT_PATH"] = str(Path(_AUDIT_DIR) / "audit.jsonl")
+
 # EU-360: a per-harness wall-clock ceiling so one hung harness can no longer stall the whole suite
 # (subprocess.run had NO timeout — a wedged harness froze run_all, and with it any gate that shells
 # out to it). Generous: the known-heavy harnesses top out ~19s. Override with GENERAL_TEST_TIMEOUT.

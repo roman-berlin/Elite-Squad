@@ -65,11 +65,22 @@ _AUDIT_LOG: AuditLog | None = None
 def _audit() -> AuditLog:
     global _AUDIT_LOG
     if _AUDIT_LOG is None:
-        try:
-            from ..config import Config
-            path = Config.audit_path
-        except Exception:  # noqa: BLE001 - the ledger must never block a transition
-            path = "./state/audit.jsonl"
+        # GENERAL_AUDIT_PATH wins over the config default. Same contract as GENERAL_PID_FILE
+        # (EU-355): run_all points it at a per-run temp file so NO harness can write to the live
+        # ledger, whether or not it remembered to stub `_AUDIT_LOG`. state_routing_test.py did not,
+        # and every `python3 tests/run_all.py` appended 5 fabricated AUTO-73 ticket_transition rows
+        # to the operational audit — 15 of the 29 rows on record were test fixtures, including a
+        # `landed: Fertig` from a German-column case that never existed on any real board. The
+        # dashboard, forensics and the daily brief all read that file.
+        env_path = os.environ.get("GENERAL_AUDIT_PATH", "").strip()
+        if env_path:
+            path: str = env_path
+        else:
+            try:
+                from ..config import Config
+                path = Config.audit_path
+            except Exception:  # noqa: BLE001 - the ledger must never block a transition
+                path = "./state/audit.jsonl"
         _AUDIT_LOG = AuditLog(path)
     return _AUDIT_LOG
 
