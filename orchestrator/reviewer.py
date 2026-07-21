@@ -753,3 +753,129 @@ def _extract_json(text: str) -> dict | None:
         except json.JSONDecodeError:
             continue
     return None
+
+
+# EU-396: when the Builder makes NO changes and claims the ticket's acceptance criteria are already
+# satisfied, that claim used to go straight to the Commander unverified ("verify and close it
+# yourself" — the exact senior_pm-style mistake §2 was retired for). This mode runs the Reviewer
+# read-only against the UNCHANGED tree (there is no diff) to check the claim itself before anyone
+# escalates: per acceptance criterion, is it genuinely already met, cited to file:line?
+NO_CHANGES_VERIFY_SYSTEM = """\
+You are the Reviewer in an automated dev pipeline, called in a special AUDIT mode: the Builder made
+NO code changes this pass and claims every acceptance criterion of this ticket is ALREADY satisfied
+by the existing code. There is no diff to review — you are auditing the CURRENT (unchanged) tree.
+
+You are deliberately adversarial: do not take the Builder's word for it. For EACH acceptance
+criterion, read the actual code (Read/Grep/Glob) and decide whether it is genuinely already
+satisfied, citing exact file:line evidence for what you saw.
+
+This verdict can send the ticket straight to QA with NO further human review, so be conservative:
+"confident": true is ONLY for the case where you have concrete file:line evidence that EVERY single
+criterion is met. A criterion that is unproven, partially met, ambiguous, or needs a manual/visual/
+runtime check you cannot perform from reading code means "confident": false — that is the safe,
+common outcome; do not stretch for confidence.
+
+You may read files in the repo for context, but you cannot modify anything.
+
+You MUST end your response with a single fenced ```json block, and nothing after it, matching
+exactly this schema:
+
+```json
+{
+  "confident": true | false,
+  "findings": [
+    {
+      "criterion": "<the acceptance criterion, verbatim or tightly summarized>",
+      "satisfied": true | false,
+      "evidence": "<file:line and a one-line explanation of what you saw there, or — if not satisfied — the gap>"
+    }
+  ],
+  "summary": "≤5 tight bullets, one per criterion, each ending in its file:line citation or its gap"
+}
+```
+"""
+
+
+def _no_changes_prompt(ticket: Ticket, report: str) -> str:
+    acs = list(ticket.acceptance_criteria or [])
+    ac_block = "\n".join(f"{i}. {c}" for i, c in enumerate(acs, 1)) if acs else \
+        "(none listed on the ticket — treat the description below as the acceptance criteria)"
+    return (
+        f"TICKET {ticket.id}: {ticket.summary}\n\n"
+        f"DESCRIPTION:\n{(ticket.description or '(none)').strip()[:3000]}\n\n"
+        f"ACCEPTANCE CRITERIA:\n{ac_block}\n\n"
+        "THE BUILDER'S REPORT for why it made no changes:\n"
+        f"{(report or '(no report given)').strip()[:2000]}\n\n"
+        "Audit the CURRENT tree (there is no diff) and answer, per acceptance criterion: are these "
+        "ACs already satisfied — cite file:line per AC."
+    )
+
+
+def _parse_no_changes_verdict(text: str) -> dict:
+    """Pure parse of the AUDIT-mode reply. Fails CLOSED (confident=False) on anything unparseable or
+    under-evidenced — never trusts the model's own "confident" flag at face value: it is downgraded
+    to False unless every finding is satisfied=True AND carries non-empty evidence (deterministic
+    backstop, same shape as _enforce_execution_gate elsewhere in this file)."""
+    data = _extract_json(text)
+    if data is None:
+        return {"confident": False, "findings": [],
+                "summary": "Could not parse the reviewer's verify output; failing closed (not confident).",
+                "parse_failed": True}
+    findings = []
+    for f in (data.get("findings") or []):
+        if not isinstance(f, dict):
+            continue
+        findings.append({
+            "criterion": str(f.get("criterion", ""))[:400],
+            "satisfied": bool(f.get("satisfied", False)),
+            "evidence": str(f.get("evidence", ""))[:400],
+        })
+    all_cited = bool(findings) and all(f["satisfied"] and f["evidence"].strip() for f in findings)
+    confident = bool(data.get("confident", False)) and all_cited
+    return {
+        "confident": confident,
+        "findings": findings,
+        "summary": str(data.get("summary", ""))[:1500],
+        "parse_failed": False,
+    }
+
+
+async def verify_no_changes(ticket: Ticket, app: AppConfig, cfg: Config, report: str) -> dict:
+    """EU-396: verify a Builder no-changes claim against the UNCHANGED tree before the loop escalates
+    it to the Commander. Read-only Reviewer pass, no diff — per-AC file:line evidence.
+
+    Returns {"confident", "findings", "summary", "cost_usd", "input_tokens", "output_tokens",
+    "provider", "model_version", "raw", "parse_failed"}. Fails CLOSED (confident=False, zero cost) on
+    any call error — an unverifiable claim is NEVER auto-closed, it just falls through to today's
+    escalation, optionally with whatever findings this call did manage to gather.
+    """
+    from . import models
+    model, mreason = models.for_officer(cfg, effort="high")
+    if getattr(cfg, "auto_model", False):
+        print(f"  · no-changes verify model: {mreason}", flush=True)
+    options = ClaudeAgentOptions(
+        model=model,
+        system_prompt=memory.preamble() + NO_CHANGES_VERIFY_SYSTEM,
+        cwd=app.workdir or app.repo_path,   # the isolated worktree when enabled
+        permission_mode="bypassPermissions",   # read-only audit; must never dead-stop on a prompt
+        allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
+        setting_sources=["project"],
+        max_turns=18,
+        effort="high",
+    )
+    try:
+        run = await run_agent_with_fallback(_no_changes_prompt(ticket, report), options,
+                                            tag="reviewer-verify", ticket_id=ticket.id, cfg=cfg)
+    except Exception as exc:  # noqa: BLE001 — a verify-call crash must fail closed, never crash the caller
+        return {"confident": False, "findings": [], "summary": f"Verification call failed: {exc}",
+                "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "provider": "",
+                "model_version": "", "raw": "", "parse_failed": True}
+    result = _parse_no_changes_verdict(run.final or run.text or "")
+    result["cost_usd"] = getattr(run, "cost_usd", 0.0)
+    result["input_tokens"] = getattr(run, "input_tokens", 0)
+    result["output_tokens"] = getattr(run, "output_tokens", 0)
+    result["provider"] = getattr(run, "provider", "")
+    result["model_version"] = getattr(run, "model_version", "")
+    result["raw"] = run.final or run.text or ""
+    return result

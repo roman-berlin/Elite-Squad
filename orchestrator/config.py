@@ -293,6 +293,14 @@ class Config:
     # EXISTING forensics.classify/attempts — no new memory store. Set False to disable.
     retry_forensics_enabled: bool = True
 
+    # EU-396: before a Builder no-changes claim ("the ACs are already satisfied") escalates to the
+    # Commander unverified, run the Reviewer read-only against the UNCHANGED tree with the ticket's
+    # ACs — a senior teammate checks the claim first, instead of "verify and close it yourself".
+    # Confident PASS with per-AC file:line evidence -> QA (reversible, never Done), audited. Anything
+    # less than confident -> escalate as before, with the Reviewer's per-AC findings attached so the
+    # Commander's check is one look, not an investigation. Set False to restore the pre-EU-396 behaviour.
+    verify_no_changes_enabled: bool = True
+
     # --- Senior PM pre-build triage gate (EU-107): DELETED in Phase-2 §2 (2026-07-06). Its
     #     ANSWER/CLOSE/REFILE verdicts fold into the Planner's single per-ticket decision, with
     #     the EU-134 conservative overrides (AC / [Feature] / [Bug] ⇒ always build) kept as
