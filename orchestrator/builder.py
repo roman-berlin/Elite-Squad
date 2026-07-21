@@ -697,7 +697,10 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     _budget = budget_for(cfg, eff)
     if _budget:
         from . import backends as _backends
-        if not _backends.is_glm(cfg):
+        # EU-417: gate on the builder's per-tag/hybrid-RESOLVED backend, not just is_glm(cfg). In
+        # hybrid mode (main=opus, secondary=glm) is_glm(cfg) is False but the builder is routed to
+        # GLM via current_for_tag('builder'); a tag-blind gate would attach the beta option there.
+        if not _backends.is_glm_for_tag("builder", cfg):
             options.task_budget = {"total": _budget}
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.

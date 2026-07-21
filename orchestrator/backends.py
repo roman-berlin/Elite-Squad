@@ -520,6 +520,30 @@ def is_glm(cfg=None) -> bool:
     return current() == GLM
 
 
+def is_glm_for_tag(tag: str | None, cfg=None) -> bool:
+    """EU-417: True if the EFFECTIVE backend for one officer call (by tag) is GLM.
+
+    Hybrid-mode aware: in a run with main=opus and secondary=glm, a builder pass is routed to GLM
+    via :func:`current_for_tag` even though :func:`is_glm` (which only sees ``cfg.model_backend``
+    and the run's MAIN backend) returns False. Gating ``task_budget`` on ``is_glm(cfg)`` alone
+    would attach the Anthropic-only beta option to a GLM-routed pass. This returns True when the
+    per-tag/hybrid-resolved backend is GLM, while preserving :func:`is_glm`'s robustness for
+    fleet-default GLM and ``run_agent_with_fallback`` (which receives ``cfg``).
+
+    Resolution precedence matches :func:`builder._backend_turn_scale`: :func:`current_for_tag` is
+    consulted FIRST, and a pinned hybrid secondary's resolved backend ALWAYS determines the per-tag
+    result — in EITHER direction. So a GLM-as-secondary build pass reads True (budget off), and a
+    GLM-as-main-with-a-non-GLM-secondary build pass reads False (the non-GLM secondary wins; budget
+    on). Only when the tag-resolved backend is NATIVE AND no hybrid secondary is pinned at all does
+    this fall back to ``cfg.model_backend`` (the fleet-default / ``run_agent_with_fallback`` path),
+    so a direct call with a cfg but no run context still classifies correctly.
+    """
+    effective = current_for_tag(tag)
+    if not (normalize(effective) == NATIVE and hybrid_secondary() is None and cfg is not None):
+        return normalize(effective) == GLM
+    return normalize(getattr(cfg, "model_backend", NATIVE)) == GLM
+
+
 # ── EU-190: GLM configuration validation + a live connection test ────────────────────────────────
 # So a bad GLM setup (missing/incorrect token, wrong URL) surfaces a clear, actionable message in
 # the cockpit ("what to fix, or re-onboard") instead of failing cryptically mid-run.
