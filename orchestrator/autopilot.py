@@ -1873,6 +1873,16 @@ def _tally_errored(reports, error_counts: dict[str, int]):
     exactly like infra here (no strike, reported in ``infra``); the caller splits those ids out
     again to arm the dedicated auth-hold (see ``_enter_auth_hold``) instead of the offline-hold.
 
+    EU-407: a PROVIDER-CAP refusal is the same class again. A builder call that dies with an
+    exhausted usage/plan/weekly quota or a GLM/z.ai billing cap (``usage.is_cap_refusal`` — the
+    text reaches notes via ``_exception_report``'s ``notes=str(exc)``) is a PROVIDER outage, not a
+    ticket defect: it charges NO strike. Without this, the 5h-window storm charged the head-of-queue
+    ticket a strike per cycle and parked it on the exact cycle the barren-cycle breaker fired
+    (``_MAX_TICKET_ERRORS == _MAX_BARREN_CYCLES == 3``). Cap ids are NOT folded into ``infra`` —
+    the offline-hold's connectivity probe would falsely clear on them — so the caller tracks them
+    separately (``_cap_ids``) for the EU-407 fail-closed block, and deliberately does NOT add them
+    to the barren-cycle ``_explained`` set so a pure-cap storm still arms the breaker as a backstop.
+
     Returns ``(park_now_additions, errored_ids, retrying_ids, infra_ids, counts_changed)``. A
     ticket that made progress (no longer ERRORED) still has its tally reset, same as before.
     """
@@ -1887,6 +1897,8 @@ def _tally_errored(reports, error_counts: dict[str, int]):
             if auth_probe.is_login_failure(r.notes) or infra_classify.classify(r.notes):
                 infra.add(r.ticket_id)
                 continue   # no strike, no counter touch — see docstring
+            if usage.is_cap_refusal(r.notes):
+                continue   # EU-407: provider cap, not a ticket defect — no strike, no counter touch
             n = error_counts.get(r.ticket_id, 0) + 1
             if n >= _MAX_TICKET_ERRORS:
                 park_now.append(r.ticket_id)
@@ -2260,6 +2272,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # a cooldown, one alert, one audit event; auto-resume when the cooldown expires.
         usage_hold_until = 0.0
         consecutive_barren = 0
+        # EU-407: True when the most-recently-processed cycle produced a provider-CAP refusal
+        # (usage.is_cap_refusal on an ERRORED report's notes). Consumed at the TOP of the next cycle
+        # by the plan-limit block: a blind usage probe (plan_limit_hit blind=True — the 5h Max window
+        # exhausted so the throwaway probe itself is refused) PLUS cap_refusal_seen means the provider
+        # IS capped → fail CLOSED (usage.mark_blind_cap_hit) instead of churning 3 barren cycles and
+        # error-striking the head-of-queue ticket. Mirrors how consecutive_barren / offline_hold carry
+        # one cycle's observation into the next cycle's dispatch decision.
+        cap_refusal_seen = False
         # EU-310: a ticket that modifies the unit's OWN code merges but its post-merge Jira transition
         # can be lost or lag propagation, so the board still shows In Progress and the drain re-picks
         # and rebuilds already-merged code (EU-307, 2026-07-14 — re-picked 19s after merge). Track the
@@ -2351,6 +2371,22 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # EU-118: Plan-limit governor — halt when Claude Max subscription limits (session/weekly/per-model)
             # are hit. This prevents silent churn where the autopilot spins on rate-limit errors.
             plan_check = usage.plan_limit_hit(cfg)
+            # EU-407: FAIL CLOSED on a blind probe. plan_limit_hit surfaces blind=True when the usage
+            # probe can't see (the 5h Max window exhausted → the throwaway probe itself is refused, so
+            # over_limits is empty and hit=False — fails OPEN; the EU-357 blind flag had zero consumers).
+            # Blind alone is not actionable (blind != over-limit), but blind PLUS a cap-classified
+            # refusal observed last cycle (cap_refusal_seen) means the provider IS capped. Promote it to
+            # a real hit via mark_blind_cap_hit: every reader of plan_limit_hit — the secondary-fallback /
+            # pause block just below, backends.resolve_for_run's usability probe, the cockpit banner — then
+            # treats the blind window as a real cap and the drain engages the secondary or pauses NOW,
+            # instead of churning 3 barren cycles and error-striking the head-of-queue ticket. (Cap
+            # refusals themselves already add NO strike — _tally_errored / usage.is_cap_refusal — so even
+            # before this hold arms, a cap storm parks zero tickets.)
+            if not plan_check.get("hit") and plan_check.get("blind") and cap_refusal_seen:
+                usage.mark_blind_cap_hit()
+                plan_check = usage.plan_limit_hit(cfg)   # re-reads the seeded cache → hit=True
+                audit.record("plan_limit_blind_cap", app=app_name or "",
+                             note="blind usage probe + cap refusal → treated as limit hit (fail closed)")
             if plan_check.get("hit"):
                 # 2026-07-19 (Commander order): the SECONDARY model absorbs a plan-limit hit —
                 # resolve_for_run returns the usable secondary when one is configured, so the
@@ -2703,6 +2739,17 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             # restored" while the Claude login is still dead. They arm their own auth-hold below.
             _auth_ids = {r.ticket_id for r in reports
                          if r.outcome is Outcome.ERRORED and auth_probe.is_login_failure(r.notes)}
+
+            # EU-407: provider-CAP refusals this cycle (usage.is_cap_refusal). _tally_errored already
+            # charged them NO strike, so they park nothing on their own. Two consumers here:
+            # (1) cap_refusal_seen carries this observation into the NEXT cycle's plan-limit block,
+            #     where blind-probe + cap ⇒ fail closed (mark_blind_cap_hit) — AC1.
+            # (2) they are deliberately NOT added to the barren-cycle `_explained` set below, so a
+            #     pure-cap storm (e.g. GLM quota exhausted while the Claude probe is healthy, not
+            #     blind) still arms the usage-exhaustion breaker as a backstop after _MAX_BARREN_CYCLES.
+            _cap_ids = {r.ticket_id for r in reports
+                        if r.outcome is Outcome.ERRORED and usage.is_cap_refusal(r.notes)}
+            cap_refusal_seen = bool(_cap_ids)
 
             # EU-228: one or more tickets errored on infra/outage this cycle — hold ALL new work
             # (not just these tickets) until connectivity_probe passes again; no counter touched.

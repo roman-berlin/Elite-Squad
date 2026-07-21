@@ -412,6 +412,33 @@ def plan_usage(cfg: Config | None = None, *, now: float | None = None, force: bo
     return data
 
 
+# EU-407: provider-cap refusal signatures — the SDK surfaces these in a builder-failure's notes
+# when a plan/session/weekly quota or a GLM/z.ai billing cap is exhausted. The text reaches
+# TicketReport.notes via loop._exception_report's ``notes=str(exc)``, so the per-cycle strike tally
+# (autopilot._tally_errored) re-recognises them here. Keep these in lock-step with agent._CAP_PATTERNS
+# (the agent-call-time classifier): both must agree on what a "cap" looks like. Deliberately EXCLUDES
+# the transient per-minute 429/529 overload language (agent._TRANSIENT_PATTERNS) — that is retry
+# territory and the breaker's signal, not a settled provider cap.
+_CAP_REFUSAL_MARKERS = (
+    "usage limit", "usage-limit", "plan limit", "weekly limit",
+    "quota exceeded", "insufficient balance", "insufficient quota",
+    "insufficient credit", "account balance", "billing issue", "payment required",
+)
+
+
+def is_cap_refusal(text: str | None) -> bool:
+    """True when ``text`` (a builder report's notes) carries a PROVIDER-CAP refusal marker — an
+    exhausted usage/plan/weekly quota or a GLM/z.ai billing cap (mirrors the cap class
+    ``agent._classify_plan_limit`` splits out at call time). Never matches transient per-minute
+    429/529 overload text (retry territory) or turn-limit text (ticket-attributable, EU-248).
+
+    A cap refusal is a PROVIDER outage, not a ticket defect: ``autopilot._tally_errored`` uses this
+    to charge it NO per-ticket strike (mirroring the infra/login no-strike exemption), so a usage
+    storm can never Blocked-park a healthy ticket (EU-407)."""
+    t = (text or "").lower()
+    return bool(t) and any(m in t for m in _CAP_REFUSAL_MARKERS)
+
+
 # EU-118: cache plan-limit hit state (utilization >= 1.0) so autopilot doesn't spin on repeated checks.
 _plan_limit_hit_cache: dict = {"hit": False, "ts": 0.0, "ttl": 60.0}  # cache for 1 minute
 
@@ -479,6 +506,37 @@ def plan_limit_reset_cache() -> None:
     _plan_limit_hit_cache["hit"] = False
     _plan_limit_hit_cache["over_limits"] = []
     _plan_limit_hit_cache["ts"] = 0.0
+
+
+def mark_blind_cap_hit(now: float | None = None) -> None:
+    """EU-407: seed the plan-limit cache with a synthetic HIT when the usage probe is blind but a
+    cap-classified refusal this cycle proves the provider IS capped.
+
+    The EU-357 ``blind`` flag had zero consumers, so a capped provider looked healthy (``hit=False``
+    fails OPEN) and the drain churned the whole backlog until the barren-cycle breaker paused three
+    cycles later — error-striking the head-of-queue ticket on the way. This is the missing consumer:
+    autopilot calls it under ``blind + cap_refusal_seen`` so every reader of ``plan_limit_hit`` —
+    its own secondary-fallback/pause block, ``backends.resolve_for_run``'s usability probe, and the
+    cockpit's plan-limit banner — consistently treats the blind window as a real cap until the cache
+    ttl (~1 min) expires, exactly as a probed ``utilization >= 1.0`` would. Then it re-probes: still
+    blind + still seeing cap refusals → re-seeded; window rolled (probe sees, no refusals) → not
+    re-seeded → the cap clears and the fallback switches back to the main model.
+
+    Idempotent and cache-ttl-bounded; never raises."""
+    global _plan_limit_hit_cache
+    t = now if now is not None else time.time()
+    _plan_limit_hit_cache = {
+        "hit": True,
+        "over_limits": [{
+            "key": "usage",
+            "label": "usage window (probe blind)",
+            "utilization": 1.0,
+            "resets_in": "when the window rolls",
+            "resets_at": 0,
+        }],
+        "ts": t,
+        "ttl": 60.0,
+    }
 
 
 def daily_burn_series(cfg: Config | None = None, days: int = 14) -> list[float]:
