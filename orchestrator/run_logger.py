@@ -129,6 +129,33 @@ def open_run_log(cfg: Any, app_name: str | None, ticket_key: str | None,
     return log_path
 
 
+def drain_log_path() -> str | None:
+    """Where THIS process's stdout actually lands — the shared drain stream (2026-07-21).
+
+    The concurrent drain's per-ticket file is a pointer note saying "consult the drain log", but
+    it never said WHERE, so following it meant guessing (it cost a live misdiagnosis: an active
+    build read as a stall because the per-ticket file looked empty). Resolved from fd 1 via lsof,
+    which handles the launchd/systemd redirect case that os.readlink('/dev/fd/1') cannot.
+    Returns None when stdout is a terminal/pipe or the probe fails — the caller then prints the
+    generic hint instead of a wrong path."""
+    import os
+    import subprocess
+    try:
+        r = subprocess.run(["lsof", "-p", str(os.getpid()), "-a", "-d", "1", "-Fn"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        if line.startswith("n") and len(line) > 2:
+            target = line[1:].strip()
+            # only a real file is useful to tail; a tty/pipe/socket is not a log
+            if target.startswith("/") and not target.startswith(("/dev/tty", "/dev/pts")):
+                return target
+    return None
+
+
 def write_note_log(cfg: Any, app_name: str | None, ticket_key: str | None, note: str) -> Path:
     """Write a standalone dated per-ticket log file containing *note* — NO handle registered.
 
@@ -138,6 +165,14 @@ def write_note_log(cfg: Any, app_name: str | None, ticket_key: str | None, note:
     than leave a SILENTLY EMPTY per-ticket file, we drop a real, dated file that explains the
     gap and points at the shared drain stream.  Best-effort: never raises."""
     log_path = _prepare_log_path(cfg, app_name, ticket_key)
+    # 2026-07-21: a pointer note has to point somewhere. Append the resolved drain-stream path
+    # (and the command to follow it) so "consult the drain log" is actionable instead of a riddle.
+    drain = drain_log_path()
+    note = note.rstrip("\n") + (
+        f"\nLive stream for this run:  tail -f {drain}" if drain else
+        "\nLive stream for this run: the serve process's stdout "
+        "(launchd/systemd StandardOutPath; e.g. ~/Library/Logs/General/cockpit.log on macOS)."
+    )
     try:
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(note.rstrip("\n") + "\n")
