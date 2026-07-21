@@ -61,9 +61,13 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    counterpart of the autopilot daemon), not a retired scheduler — allow-listed for the same reason.
 #    2026-07-19: general-autopull.sh is the CURRENT EU-335 autopull agent script (brought under
 #    version control by the stabilization sweep; its header cites its launchd plist) — same class.
+#    2026-07-21: install-mac-watchdog-daemon.sh is the CURRENT EU-403 out-of-process watchdog
+#    installer (a periodic StartInterval agent, the counterpart that watches the cockpit is alive)
+#    — same class. scripts/watchdog.sh itself is token-free and stays OUT of this allow-list.
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
              "scripts/general-autopull.sh",
+             "scripts/install-mac-watchdog-daemon.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):
