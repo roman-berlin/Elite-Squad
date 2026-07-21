@@ -741,4 +741,5 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         output_tokens=getattr(run, "output_tokens", 0),  # getattr-guarded: stubs may omit these
         provider=getattr(run, "provider", ""),         # EU-123: which provider served this run
         model_version=getattr(run, "model_version", ""), # EU-123: clean model identifier
+        is_turn_limit=getattr(run, "is_turn_limit", False),  # EU-408: max-turns OR glm_token_ceiling
     )

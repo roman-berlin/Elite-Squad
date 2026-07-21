@@ -97,6 +97,45 @@ script from cron: `*/4 * * * * /path/to/repo/scripts/watchdog.sh >> ~/general-wa
 Tunables (env, all optional): `COCKPIT_URL`, `STALE_SEC`, `FAIL_THRESHOLD`, `RE_ALERT_EVERY`,
 `HEALTH_TIMEOUT`.
 
+**Config & secrets backup (EU-408).** `.env` (Jira/Telegram/GLM tokens) and `config.yaml` are
+gitignored by design, so they have no version-control safety net — a disk failure, an errant
+`rm -rf`, or a bad agent edit loses them and the unit is down until every credential is re-issued
+and the ~150-line config is rebuilt. A nightly backup copies BOTH files to a **private location
+outside the repo** (so a repo wipe does not take the backup with it), keeping a bounded changelog
+of every edit. Install it:
+
+```bash
+bash scripts/install-mac-config-backup-daemon.sh            # Mac: nightly launchd agent (StartInterval 86400)
+bash scripts/install-mac-config-backup-daemon.sh uninstall  # stop + remove
+bash scripts/backup-config.sh                               # one-off: snapshot now
+# VPS cron (3:17am daily):
+#   17 3 * * *  /path/to/repo/scripts/backup-config.sh >> ~/general-config-backup.log 2>&1
+```
+
+- **Where:** `~/.general-config-backups/` by default (override: `GENERAL_CONFIG_BACKUP_DIR`). Each
+  run writes `<name>.<YYYYMMDD-HHMMSS>` only when the file *changed* since the last backup, so the
+  retained history is a real changelog of edits, not 14 identical nightly copies. `<name>.latest`
+  always points at the newest copy.
+- **Retention:** newest 14 per file (override: `BACKUP_KEEP`). **Perms:** dir `700`, every copy
+  `600` — these files *are* the secrets.
+- **Log:** `~/Library/Logs/General/config-backup.log` (one line per run; the backups themselves are
+  never logged).
+
+**Restore** (from the backup host — adjust the repo path to match your checkout):
+1. See what's recoverable: `ls -t ~/.general-config-backups/` (the `.latest` links point at the
+   newest of each).
+2. Restore the files from the newest snapshots:
+   ```bash
+   REPO=/path/to/General
+   cp ~/.general-config-backups/.env.latest         "$REPO/.env"         && chmod 600 "$REPO/.env"
+   cp ~/.general-config-backups/config.yaml.latest  "$REPO/config.yaml"
+   ```
+   For a point-in-time restore, pick a specific timestamped copy (e.g. `.env.20260721-1405`)
+   instead of `.latest`.
+3. Reload creds into the running process: `source .env`, then restart the cockpit so it re-reads
+   config.yaml — `./general deploy` (it refuses mid-build; see "Restarting the cockpit safely").
+4. Verify: `./general doctor` should come back all ✓ (auth, repo, config).
+
 ---
 
 ## Later — the "software-company" platform (real builds, do when worth it)

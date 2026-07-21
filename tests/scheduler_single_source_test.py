@@ -64,10 +64,14 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    2026-07-21: install-mac-watchdog-daemon.sh is the CURRENT EU-403 out-of-process watchdog
 #    installer (a periodic StartInterval agent, the counterpart that watches the cockpit is alive)
 #    — same class. scripts/watchdog.sh itself is token-free and stays OUT of this allow-list.
+#    2026-07-22: install-mac-config-backup-daemon.sh is the CURRENT EU-408 config/secrets backup
+#    installer (a daily StartInterval agent that runs scripts/backup-config.sh) — same class as the
+#    watchdog installer above. scripts/backup-config.sh is token-free and stays OUT of this allow-list.
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
              "scripts/general-autopull.sh",
              "scripts/install-mac-watchdog-daemon.sh",
+             "scripts/install-mac-config-backup-daemon.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):

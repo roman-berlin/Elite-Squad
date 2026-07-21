@@ -106,14 +106,26 @@ def configure_audit(audit) -> None:
 _OFFICER_TIMEOUT_S = 900     # planner/reviewer/pm/etc. — low-effort officer roles
 _BUILDER_TIMEOUT_S = 3600    # builder — real code changes legitimately run long
 
+# EU-408: per-pass INPUT-token ceiling for GLM calls. builder_task_budget paces Anthropic passes via
+# an API-side task budget, but GLM/z.ai ignores that beta header — so a GLM pass had no in-pass brake
+# and one burned 13.28M input tokens (4.4x the envelope). agent.py accumulates per-turn input tokens
+# on the stream and cuts the pass off CLEANLY at this ceiling, treated as a turn-limit hit (the
+# split/boosted-retry ladder), recording a `glm_token_ceiling` audit event. Default applies even when
+# configure_timeouts() is never called (tests, ad-hoc scripts) so the guard is never silently off.
+# GLM-only — NATIVE/Anthropic passes are paced by builder_task_budget instead. 0 disables.
+_GLM_PASS_TOKEN_CEILING = 5_000_000
+
 
 def configure_timeouts(cfg) -> None:
-    """Point wall-clock timeout budgets at the run config. Call once at process start
-    (main.py / server.py), alongside configure_audit. `getattr` with the existing default
-    as fallback so an older/test Config stand-in that doesn't define these fields is fine."""
-    global _OFFICER_TIMEOUT_S, _BUILDER_TIMEOUT_S
+    """Point wall-clock timeout budgets (and the GLM per-pass token ceiling) at the run config.
+    Call once at process start (main.py / server.py), alongside configure_audit. `getattr` with the
+    existing default as fallback so an older/test Config stand-in that doesn't define these fields
+    is fine."""
+    global _OFFICER_TIMEOUT_S, _BUILDER_TIMEOUT_S, _GLM_PASS_TOKEN_CEILING
     _OFFICER_TIMEOUT_S = int(getattr(cfg, "officer_timeout_s", _OFFICER_TIMEOUT_S) or _OFFICER_TIMEOUT_S)
     _BUILDER_TIMEOUT_S = int(getattr(cfg, "builder_timeout_s", _BUILDER_TIMEOUT_S) or _BUILDER_TIMEOUT_S)
+    _GLM_PASS_TOKEN_CEILING = int(getattr(cfg, "glm_pass_token_ceiling", _GLM_PASS_TOKEN_CEILING)
+                                  or _GLM_PASS_TOKEN_CEILING)
 
 
 def _timeout_for_tag(tag: str) -> float:
@@ -355,12 +367,24 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
     model = getattr(options, "model", "") or ""
     provider, model_version = _provider.get_provider_info(model, backend=effective_backend)
 
+    # EU-408: GLM passes have no API-side task budget (GLM ignores the beta header), so cap the
+    # pass's cumulative INPUT tokens here as a compensating in-pass brake — the 13.28M-token GLM
+    # pass had no per-pass bound. GLM-only: NATIVE passes are paced by builder_task_budget. A
+    # _token_ceiling of 0 (non-GLM call, or glm_pass_token_ceiling=0) disables the check entirely.
+    is_glm_call = effective_backend == _backends.GLM
+    _token_ceiling = _GLM_PASS_TOKEN_CEILING if is_glm_call else 0
+    pass_in_tokens = 0          # cumulative billed input tokens this pass (EU-408)
+    token_ceiling_hit = False
+
     import time as _time
     _t0 = _time.monotonic()
 
     saw_result = False
     import asyncio as _asyncio
     budget_s = _timeout_for_tag(tag)
+    # EU-408: hold the query() generator reference so a mid-stream token-ceiling cutoff can aclose()
+    # it (reap the still-running CLI subprocess). Iterating the literal call would lose the handle.
+    _agen = query(prompt=prompt, options=options)
     try:
         # EU-221: bound total stream-consumption wall-clock time. A stalled provider stream
         # (zero messages for the whole budget) is the case this exists for, but the budget is a
@@ -371,7 +395,7 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
         # transport.close()), whose own try/finally chain terminates + reaps the CLI subprocess
         # as the cancellation unwinds — before the TimeoutError below ever runs.
         async with _asyncio.timeout(budget_s):
-            async for message in query(prompt=prompt, options=options):
+            async for message in _agen:
                 if isinstance(message, AssistantMessage):
                     parts: list[str] = []
                     for b in message.content:
@@ -421,6 +445,29 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                             is_plan_limit = True
                             if plan_limit_kind != "cap":  # a cap sighting outranks a transient one
                                 plan_limit_kind = kind
+                    # EU-408: accumulate this turn's billed input tokens (the same fields the final
+                    # ResultMessage tallies). Cumulative billed input is the running SUM across turns
+                    # — exactly what a pass's total input figure (the 13.28M burn) measures — so this
+                    # is a faithful, monotonic per-pass burn counter.
+                    _mu = getattr(message, "usage", None)
+                    if isinstance(_mu, dict):
+                        pass_in_tokens += (int(_mu.get("input_tokens", 0) or 0)
+                                           + int(_mu.get("cache_read_input_tokens", 0) or 0)
+                                           + int(_mu.get("cache_creation_input_tokens", 0) or 0))
+                        out_tok += int(_mu.get("output_tokens", 0) or 0)
+                    # GLM in-pass ceiling: once the cumulative burn crosses it, cut off CLEANLY. The
+                    # SDK's final ResultMessage never arrives, so stamp the real burn onto in_tok for
+                    # the ledger + emit a dedicated event below. Treated EXACTLY like a turn-limit
+                    # hit (is_turn_limit routes the loop's split/boosted-retry ladder) — never a bare
+                    # error that would tick the ERRORED counter.
+                    if _token_ceiling and pass_in_tokens > _token_ceiling:
+                        token_ceiling_hit = True
+                        is_turn_limit = True
+                        is_error = True
+                        in_tok = pass_in_tokens
+                        final = (f"GLM per-pass token ceiling ({_token_ceiling:,}) hit after "
+                                 f"{pass_in_tokens:,} input tokens")
+                        break
                 elif isinstance(message, ResultMessage):
                     saw_result = True
                     cost = message.total_cost_usd or 0.0
@@ -485,6 +532,17 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
             is_error = True
         else:
             raise
+    finally:
+        # EU-408: a mid-stream token-ceiling cutoff leaves the SDK CLI subprocess running — `break`
+        # exits the `async for` with the generator suspended at its yield. aclose() resumes it by
+        # throwing GeneratorExit, which unwinds the SDK's transport.close() -> subprocess reap, the
+        # same teardown the EU-221 timeout cancellation triggers further up. (Timeout/crash paths
+        # already reaped the subprocess via cancellation; this only runs on a clean ceiling break.)
+        if token_ceiling_hit:
+            try:
+                await _agen.aclose()
+            except Exception:  # noqa: BLE001 — best-effort subprocess reap
+                pass
 
     duration_s = round(_time.monotonic() - _t0, 2)
 
@@ -506,6 +564,12 @@ async def _run_agent_unrouted(prompt: str, options: ClaudeAgentOptions, tag: str
                 extra["ticket_id"] = str(ticket_id)
             if pass_number is not None:
                 extra["pass_number"] = pass_number
+            # EU-408: a GLM pass cut off by the token ceiling gets a DEDICATED event (the cutoff
+            # itself + the burned tokens) so the economics stay analyzable independently of the
+            # generic agent_call row below. Pairs with in_tok=pass_in_tokens stamped at the break.
+            if token_ceiling_hit:
+                _AUDIT_SINK.record("glm_token_ceiling", tag=tag or "",
+                                   ceiling=_token_ceiling, input_tokens=pass_in_tokens, **extra)
             _AUDIT_SINK.record("agent_call", tag=tag or "",
                                model=getattr(options, "model", "") or "",
                                provider=provider, model_version=model_version,

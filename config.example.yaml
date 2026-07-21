@@ -211,7 +211,14 @@ apps:
 #                               # runs INSTEAD of the Architect when on
 # planner_verdict_park: true    # a Planner CLOSE/ANSWER verdict with no code evidence parks the
 #                               # ticket for you instead of building anyway (EU-375)
-# builder_task_budget: 70000    # per-build SDK token budget, scaled by effort (EU-377); 0 = off
+# builder_task_budget: 70000    # per-build SDK token budget, scaled by effort (EU-377); 0 = off.
+#                               # Anthropic-only — GLM ignores the beta header, so GLM passes have
+#                               # NO API-side budget; the in-pass brake below covers them instead.
+# glm_pass_token_ceiling: 5000000  # EU-408: per-pass INPUT-token ceiling for GLM builder passes
+#                               # (~5M). A GLM pass that crosses it is cut off cleanly and treated
+#                               # like a turn-limit hit (split/boosted-retry ladder), with a
+#                               # glm_token_ceiling audit event recording the burned tokens. GLM-only;
+#                               # 0 disables. One unbounded pass burned 13.28M before any check fired.
 # max_concurrent_builders: 1    # parallel build slots (EU-380). Leave at 1 on a 24GB Mac —
 #                               # two Opus builders exhaust memory (measured 2026-07-18)
 # self_update_auto_restart: true  # after the unit lands a change to ITSELF, exit gracefully once

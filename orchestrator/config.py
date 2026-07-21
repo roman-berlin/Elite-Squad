@@ -192,6 +192,15 @@ class Config:
     # turns (builder.budget_for); base 70K ≈ half the ~140K of intake a 96-turn pass accumulates.
     # 0 disables. Anthropic-only (GLM passes ignore it). SDK floor: 20,000.
     builder_task_budget: int = 70_000
+    # EU-408: per-pass INPUT-token ceiling for GLM builder passes. builder_task_budget (above) is
+    # Anthropic-only — GLM/z.ai ignores the beta header, so a GLM pass had no in-pass brake and one
+    # was measured at 13.28M input tokens (4.4x the intended envelope; the only GLM brakes were the
+    # coarse turn ceiling and the per-run quota gate). This is the compensating bound: agent.py
+    # accumulates per-turn input tokens on the stream and, once a GLM pass crosses this ceiling,
+    # cuts it off CLEANLY and treats it exactly like a turn-limit hit (split/boosted-retry ladder —
+    # never a bare error), recording a `glm_token_ceiling` audit event with the burned tokens. GLM-
+    # only (NATIVE/Anthropic passes are paced by builder_task_budget instead). 0 disables.
+    glm_pass_token_ceiling: int = 5_000_000
     # EU-380: builder slots per drain. 1 (default) = the historic serial drain, byte-identical
     # path. >1 = N concurrent builders over a shared queue, each in its own slot worktree
     # (<app>-s<N>), split-siblings mutexed, lands effectively serialized on the event loop and
