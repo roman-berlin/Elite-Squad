@@ -211,6 +211,12 @@ r4, a4 = _run(ReviewResult(verdict=Verdict.FAIL, spec_met=True, needs_human=True
                            summary="product question"))
 chk("(A4) needs_human FAIL never reconciles", not any(e["event"] == "review_verdict_reconciled" for e in a4.ev))
 
+r5, a5 = _run(ReviewResult(verdict=Verdict.FAIL, spec_met=True, quality_issues=[],
+                           required_changes=["rename the flag and re-run the suite"],
+                           summary="one concrete ask"))
+chk("(A5) FAIL with concrete required_changes never reconciles (2026-07-21 P1)",
+    not any(e["event"] == "review_verdict_reconciled" for e in a5.ev), r5.outcome)
+
 # =========================================================================== B
 _t = Ticket(id="EU-2", key="EU-2", summary="s", description="d", app="Elite-Unit",
             acceptance_criteria=["All 6 sync tests pass on Mobile Safari"])

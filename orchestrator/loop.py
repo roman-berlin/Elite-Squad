@@ -2304,8 +2304,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         #       advisory_ship path below files every leftover as a backlog ticket and lands → QA —
         #       instead of escalating a finished change. A blocker or unmet criteria NEVER
         #       reconciles: those FAILs are the reviewer doing its job.
+        # P1 (2026-07-21 production audit): reconciliation demands the reviewer's WHOLE output be
+        # inconsistent with FAIL — not just issue severities. A FAIL carrying spec_gaps or concrete
+        # required_changes is the reviewer asking for real work and must never be overridden.
         if (review.verdict.value == "FAIL" and review.spec_met and not blockers
-                and not review.needs_human):
+                and not review.needs_human and not review.spec_gaps
+                and not review.required_changes):
             _final_pass = iteration >= max_passes
             if not review.blocking_issues or _final_pass:
                 _rec_reason = ("fail-with-minors-only" if not review.blocking_issues
