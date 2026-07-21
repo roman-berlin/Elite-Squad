@@ -41,6 +41,15 @@ check("cap: [] -> []", builder._cap_feedback([]) == [])
 small = ["a", "b", "c"]
 check("cap: small list passes through untouched", builder._cap_feedback(small) == small)
 
+# ---- EU-395: explicit max_items/max_chars overrides bypass the cfg-key lookup entirely ----
+# (the cross-run prior-attempts digest in loop.py reuses this exact trimming with its own,
+# tighter ceiling, without adopting the builder_feedback_max_* config keys).
+ov = builder._cap_feedback(["one", "two", "three", "four"], max_items=2)
+check("cap: explicit max_items overrides the default ceiling", "four" in ov and "one" not in ov, str(ov))
+ov2 = builder._cap_feedback(["a" * 50, "b" * 50, "newest"], max_chars=60)
+check("cap: explicit max_chars overrides the default ceiling",
+      sum(len(x) for x in ov2) <= 60 + 120 and any("newest" in x for x in ov2), str(ov2))
+
 # ---- configurable via cfg ----
 cfg = Config(apps=[])
 cfg.builder_feedback_max_items = 2

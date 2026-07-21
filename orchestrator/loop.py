@@ -1364,6 +1364,9 @@ async def _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget,
     # question + answer into the builder's context and clear the park. (A Telegram answer is already baked
     # into the description by decisions.to_worklist, so this only fires for the Jira-native path.)
     ticket = _resume_from_jira_answer(cfg, ticket, backlog, audit)
+    # EU-395: cross-run memory — a re-picked ticket carries a digest of its own past failures
+    # (errored/parked/review-FAIL) into the Planner/Builder context instead of rebuilding blind.
+    ticket = _inject_prior_attempts(cfg, ticket, audit)
 
     if not cfg.dry_run and not ticket.ephemeral:
         # For a resuming ticket this transitions it out of 'Blocked' and back to 'In Progress' (EU-61).
@@ -1544,6 +1547,83 @@ def _recent_no_changes_ticket_ids(cfg: Config) -> set[str]:
     except Exception:  # noqa: BLE001
         pass
     return set()
+
+
+# EU-395: cross-run memory. A ticket that errors, parks (needs_human) or fails review keeps NO
+# memory of that once the process/run ends — the next pick re-plans and re-builds blind, often
+# burning its 3 error strikes / 2 review passes rediscovering the same dead approach the audit log
+# already recorded. These events, in this order of relevance, feed the digest:
+_PRIOR_ATTEMPT_EVENTS = {"ticket_exception", "needs_human"}   # Outcome.ERRORED / Outcome.ESCALATED
+# Deliberately tighter than builder._FEEDBACK_MAX_ITEMS/_FEEDBACK_MAX_CHARS (EU-38): this digest is
+# a short "don't repeat this" pointer for the Planner/Builder, not the full retry feedback stream —
+# same discipline (cap items, then chars, keep newest, mark elisions), smaller ceiling.
+_PRIOR_ATTEMPTS_MAX_ITEMS = 4
+_PRIOR_ATTEMPTS_MAX_CHARS = 1600
+
+
+def _prior_attempts_digest(cfg, ticket_id: str) -> str | None:
+    """A bounded 'what was tried, why it failed' digest of ticket_id's PAST attempts, built from the
+    audit log: prior errors (ticket_exception), parks (needs_human), and review FAIL verdicts.
+
+    Returns None on a first attempt (no such events found yet) or on any read failure — fails
+    toward 'no digest' exactly like `_already_pm_triaged`: an unreadable audit log must never block
+    or corrupt a build, it just costs the re-pick the memory this ticket exists to add. Capped in
+    both items and chars via `builder._cap_feedback`'s own trimming (EU-38 discipline) so a ticket
+    with a long, thrashy history can never blow the Planner/Builder input budget."""
+    try:
+        import json
+        from . import dashboard as _D
+        rows: list[tuple[str, str]] = []   # (ts, rendered line) — sorted oldest->newest below
+        for line in _D.audit_lines(getattr(cfg, "audit_path", "./state/audit.jsonl")):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("ticket_id") != ticket_id:
+                continue
+            ev = e.get("event")
+            ts = str(e.get("ts", ""))
+            if ev in _PRIOR_ATTEMPT_EVENTS:
+                reason = e.get("reason") or e.get("question") or e.get("error") or e.get("notes") or ""
+                reason = str(reason).strip()
+                if reason:
+                    rows.append((ts, f"- [{ev}] {reason}"))
+            elif ev == "review" and str(e.get("verdict", "")).upper() == "FAIL":
+                detail = str(e.get("summary") or "").strip()
+                changes = e.get("required_changes") or []
+                if changes:
+                    req = "; ".join(str(c) for c in changes[:3])
+                    detail = f"{detail} — required: {req}" if detail else f"required: {req}"
+                if detail:
+                    rows.append((ts, f"- [review FAIL] {detail}"))
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r[0])   # chronological — _cap_feedback below keeps the NEWEST
+        capped = builder_mod._cap_feedback(
+            [line for _, line in rows],
+            max_items=_PRIOR_ATTEMPTS_MAX_ITEMS, max_chars=_PRIOR_ATTEMPTS_MAX_CHARS)
+        return "\n".join(capped) if capped else None
+    except Exception as exc:  # noqa: BLE001 — audit-log trouble must never block a build
+        print(f"  · prior-attempts digest skipped for {ticket_id}: {exc}", flush=True)
+        return None
+
+
+def _inject_prior_attempts(cfg, ticket, audit):
+    """Fold `_prior_attempts_digest` into the ticket description BEFORE the Planner/Builder run
+    (EU-395), the same channel `_resume_from_jira_answer` uses to inject a resolved decision — both
+    the Planner (planner.plan) and the Builder (builder.build) already read ticket.description
+    verbatim, so this is the one seam that reaches both without touching either contract. A no-op
+    (returns ticket unchanged) on a first attempt or any digest-read failure."""
+    digest = _prior_attempts_digest(cfg, ticket.id)
+    if not digest:
+        return ticket
+    from dataclasses import replace
+    desc = (ticket.description or "") + (
+        "\n\n---\nPrior attempts on this ticket (from the audit log — what was tried and why it "
+        "failed; do not repeat a dead approach without addressing why it failed):\n" + digest)
+    audit.record("prior_attempts_injected", ticket_id=ticket.id, chars=len(digest))
+    print(f"  ↺ {ticket.id}: prior-attempts digest injected ({len(digest)} chars)", flush=True)
+    return replace(ticket, description=desc)
 
 
 def _planner_verdict_parked_before(cfg: Config, ticket_id: str) -> bool:
