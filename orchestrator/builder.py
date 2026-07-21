@@ -393,16 +393,21 @@ _FEEDBACK_MAX_CHARS = 6000     # ...and at most this many total chars of feedbac
 _PREAMBLE_MAX_CHARS = 4000     # trim the unit-memory preamble into the builder prompt if oversized
 
 
-def _cap_feedback(issues, cfg=None) -> list[str]:
+def _cap_feedback(issues, cfg=None, *, max_items: int | None = None, max_chars: int | None = None) -> list[str]:
     """Cap the prior_issues fed back on retry, keeping the NEWEST items (the latest review's points
     are the ones to fix). Bounds by item count first, then by total chars — both configurable via
-    `builder_feedback_max_items` / `builder_feedback_max_chars`. Returns the trimmed list, with a
-    leading marker line when anything was dropped so the Builder knows older points were elided."""
+    `builder_feedback_max_items` / `builder_feedback_max_chars`, or overridden directly via the
+    keyword args (EU-395: callers with their own discipline-but-different ceilings, e.g. the
+    cross-run prior-attempts digest, reuse this exact trimming logic without adopting the
+    review-feedback config keys). Returns the trimmed list, with a leading marker line when
+    anything was dropped so the Builder knows older points were elided."""
     items = [str(i) for i in (issues or [])]
     if not items:
         return []
-    max_items = int(getattr(cfg, "builder_feedback_max_items", _FEEDBACK_MAX_ITEMS) or _FEEDBACK_MAX_ITEMS)
-    max_chars = int(getattr(cfg, "builder_feedback_max_chars", _FEEDBACK_MAX_CHARS) or _FEEDBACK_MAX_CHARS)
+    max_items = int(max_items if max_items is not None
+                     else (getattr(cfg, "builder_feedback_max_items", _FEEDBACK_MAX_ITEMS) or _FEEDBACK_MAX_ITEMS))
+    max_chars = int(max_chars if max_chars is not None
+                     else (getattr(cfg, "builder_feedback_max_chars", _FEEDBACK_MAX_CHARS) or _FEEDBACK_MAX_CHARS))
     dropped = max(0, len(items) - max_items)
     kept = items[-max_items:] if max_items > 0 else []
     # Char budget: drop from the OLDEST end (front of `kept`) until under budget.
