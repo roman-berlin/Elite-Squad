@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-22 · EU-418 · Elite-Unit · • Docstring correction accurately reflects `_backend_turn_scale`/`normalize` behaviour (verified against orchestrator/backends.py and builder.py). · 🔗 (no UI — verify with `python3 tests/eu418_budget_for_docstring_test.py`, and full gate `python3 tests/run_all.py`)
 - 2026-07-22 · EU-417 · Elite-Unit · • task_budget is now gated on is_glm_for_tag('builder', cfg), the per-tag/hybrid-resolved backend — the exact AC. · 🔗 (no UI — verify via `python3 tests/eu417_hybrid_task_budget_test.py`; the reverse-hybrid assertion (4a–4c) is the new check)
 - 2026-07-22 · EU-408 · Elite-Unit · • All 4 acceptance criteria met: GLM per-pass ~5M input ceiling, clean cutoff routed as turn-limit (not ERRORED/plan-limit), glm_token_ceiling ledger event, and the .env/config.yaml nightly backup + DEPLOYMENT.md… · 🔗 (no UI — verify the GLM ceiling via `python tests/eu408_glm_token_ceiling_test.py` [17/17] and the backup via `bash scripts/backup-config.sh` then `ls -t ~/.general-config-backups/`)
 - 2026-07-21 · EU-407 · Elite-Unit · • AC1: blind probe + cap refusal now promotes to a real plan-limit hit (mark_blind_cap_hit seeds the cache; the EU-357 blind flag finally has a consumer) → secondary fallback or pause. · 🔗 (no UI — verify with `python3 tests/eu407_plan_limit_fail_closed_test.py`; full gate `python3 tests/run_all.py`)
