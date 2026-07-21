@@ -464,6 +464,14 @@ async def _main(argv: list[str]) -> int:
         # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and
         # the EU-356 autopilot_stop_requested audit trail are the discriminators). Never raises.
         _ap.resume_armed_drains(cfg)
+        # EU-398: reconcile In Progress tickets left dangling by a killed/crashed previous run
+        # (AUTO-177, 2026-07-19) — resume or honestly park each so the board never shows work
+        # happening on a dead run. Runs AFTER resume_armed_drains so a ticket an in-flight drain
+        # is already working reads as active and is left untouched. Never raises.
+        try:
+            _ap.boot_reconcile(cfg)
+        except Exception:  # noqa: BLE001 — boot bookkeeping must never block serving
+            pass
         server.serve(cfg, port=args.port)
         return 0
 
