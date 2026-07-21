@@ -1951,6 +1951,13 @@ def create_app(cfg: Config, port: int = 8787):
             + ("…" if n > 8 else "") if n else
             f"✓ Synced with Jira — everything in Needs-you is still genuinely waiting "
             f"({r.get('checked', 0)} checked).")
+        # EU-406 (AC2): one-line note when statuses were unrecognized — a renamed/custom Jira
+        # column parked behind these is KEPT, not guessed-and-cleared; surface it so it's visible.
+        unk = r.get("unknown", [])
+        if unk:
+            get_state(None)["last_msg"] += (
+                f" ⚠ {len(unk)} in an unrecognized Jira status (kept, not guessed): "
+                + ", ".join(t for t, _ in unk[:6]) + ("…" if len(unk) > 6 else ""))
         return redirect("/needs")
 
     @app.get("/needs")
