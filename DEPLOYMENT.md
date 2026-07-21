@@ -56,6 +56,26 @@ brew install cloudflared
 cloudflared tunnel --url http://localhost:8787    # gives a private https URL to your cockpit
 ```
 
+**Always-on watchdog (EU-403).** The cockpit keepalive restarts the process when it *exits*,
+but a *wedged-but-alive* process (a deadlock, a hung HTTP call, a host that simply slept) looks
+healthy to the keepalive and is invisible until you open the cockpit — the 2026-07-20 16:23→23:05
+gap (host down 6.7h) produced zero alerts. Install the out-of-process watchdog: a separate
+periodic launchd agent, pure shell + curl, that shares nothing with the serve process. It probes
+the cockpit health endpoint and the audit log's freshness every ~4 min and pages you on Telegram
+after two consecutive failures (and sends a recovery notice when it comes back).
+
+```bash
+bash scripts/install-mac-watchdog-daemon.sh            # install (runs a check immediately)
+bash scripts/install-mac-watchdog-daemon.sh uninstall  # stop + remove
+```
+
+QA it once installed: with the cockpit running, pause the serve process
+(`kill -STOP <serve pid>`) and confirm a "cockpit unreachable or wedged" alert lands within ~8
+min, then resume it (`kill -CONT`) for a "cockpit recovered" notice. On the VPS, run the same
+script from cron: `*/4 * * * * /path/to/repo/scripts/watchdog.sh >> ~/general-watchdog.log 2>&1`.
+Tunables (env, all optional): `COCKPIT_URL`, `STALE_SEC`, `FAIL_THRESHOLD`, `RE_ALERT_EVERY`,
+`HEALTH_TIMEOUT`.
+
 ---
 
 ## Later — the "software-company" platform (real builds, do when worth it)
