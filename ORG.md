@@ -23,6 +23,7 @@ graph TD
     G --> PRV["Security Engineer · Security<br/>secrets · tenant-isolation · CVEs"]
     G --> PE["Performance Engineer · Perf Gate<br/>hot-path benchmark · countersign before Review"]
     G --> QM["Release Manager · S-4 DevOps<br/>CI / deploy readiness"]
+    G --> SN["SRE · Sentinel · S-3 Integration & rollback<br/>post-merge suite · forward-only revert on red"]
 
     ENG --> SQ["Dev Team Lead's squad — your repo's .claude/agents<br/>Frontend Engineer · Ordnance BE · Logistics DB<br/>Technical Writer Docs · AI · Judge Advocate Legal · Growth"]
 
@@ -30,7 +31,7 @@ graph TD
     classDef active fill:#0b3d2e,stroke:#10b981,color:#d1fae5;
     classDef planned fill:#1f2937,stroke:#6b7280,color:#9ca3af,stroke-dasharray:5 5;
     class C,G command;
-    class ADJ,ENG,INS,SCT,PRV,PE,QM,SQ active;
+    class ADJ,ENG,INS,SCT,PRV,PE,QM,SN,SQ active;
 ```
 
 **Build vs. check (no one signs off their own bridge):** officers that *build* live inside the
@@ -105,6 +106,7 @@ Run it: `general council` (now) · scheduled daily 06:30 via the server crontab 
 | QA Engineer | S-2 | Browser / e2e smoke on DEV (flows + a11y) | **active** | `officers/scout.md`, `scout.py` |
 | Security Engineer | — | Security: secrets, tenant-isolation, authz, CVEs | **active** | `officers/provost.md`, `provost.py` |
 | Release Manager | S-4 | CI / deploy readiness (build, migrations, env) | **active** | `officers/quartermaster.md`, `quartermaster.py` |
+| SRE | S-3 | Post-merge integration & rollback on DEV: heavier post-merge suite (e2e/integration) on the landed base; forward-only revert + hand-back on red | **active** | `officers/sentinel.md`, `sentinel.py` |
 
 **Retired posts.** The **Test Engineer** (a separate coverage gate between Gate and Review) was retired
 by `c276155` — the Planner now hands the Dev Team Lead testable acceptance criteria, the Dev Team Lead
