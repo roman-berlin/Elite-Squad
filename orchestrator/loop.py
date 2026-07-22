@@ -28,9 +28,9 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport, Verdict)
-from .gate import (base_gate_check, base_gate_timed_out, extract_failure_evidence,
-                   gate_fingerprint, publish_base_green, run_deterministic_checks, run_gate,
-                   select_gate_groups)
+from .gate import (base_gate_check, base_gate_timed_out, evict_base_green,
+                   extract_failure_evidence, gate_fingerprint, publish_base_green,
+                   run_deterministic_checks, run_gate, select_gate_groups)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -2952,6 +2952,12 @@ def _postmerge_verify_flag(cfg, app, ticket, git, merge_sha, audit, backlog, ite
     # the next pick's base gate). Record the wiring-level fail event atop the engine's postmerge_verify_red.
     try:
         audit.record("postmerge_verify_fail", ticket_id=ticket.id, app=app.name, merge_sha=merge_sha)
+        # EU-454: publish_base_green already wrote a green entry for merge_sha BEFORE this verify
+        # ran (EU-376's dedup). A RED here means that entry is now FALSE — the next pick's
+        # base_gate_check would HIT it and skip re-running against the real (red) dev (the EU-447
+        # false-green hazard). Evict it so the next pick MISSES and re-verifies. Best-effort: a
+        # failure just leaves the stale entry (the merge already stands; green is left untouched).
+        evict_base_green(app, cfg, merge_sha)
         msg = (f"🚨 Post-merge dev-HEAD verify FAILED for {ticket.id} — DEV may be silently red; "
                f"needs revert/escalation\n• {pnote[:900]}")
         _notify(cfg, msg)
