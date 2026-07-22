@@ -85,6 +85,16 @@ smoke_enabled: true         # ARMED (EU-60): after a land, run that app's single
                             # canary, e.g. a Playwright auth-redirect smoke). Unlike Sentinel it NEVER reverts — on red
                             # it FLAGS the merge (Telegram + audit + ticket comment) so you catch a broken DEV at QA.
                             # NO-OP for any app without a `smoke_command:` (below), so arming it costs nothing.
+postmerge_verify: false      # EU-453 master switch for the post-merge dev-HEAD re-verification runner
+                             # (postmerge_verify.py): after a land, re-run the app's own `gate_commands` against the
+                             # ACTUAL merged <base> HEAD and FLAG a red merge (audit + Telegram + Needs Human + ticket
+                             # comment) — FLAG-ONLY, the merge STANDS, it NEVER auto-reverts (that's the Commander's
+                             # call / the next pick's base gate). The post-land counterpart to the pre-land
+                             # red_base_check: where that blocks a build on a red CLEAN base, this catches a merge
+                             # that turns DEV red. Arms only when THIS master switch, a per-app `postmerge_verify:`
+                             # (below), AND a non-empty `gate_commands` are ALL set — three factors (mirrors
+                             # sentinel_enabled+postmerge_commands and smoke_enabled+smoke_command), so adding the
+                             # field here costs nothing until an app opts in both ways.
 # worktree_dir: "..."       # optional parent for worktrees (default: <repo_parent>/.general-worktrees/<app>)
 # worktree_setup_cmd: "npm install"   # optional unit-wide default: run ONCE when a fresh worktree is created
                                       # (deps for the gate). A bun/npm/pnpm/yarn install auto-skips for an app
@@ -166,6 +176,14 @@ apps:
                                      # comment) but never reverts — the auth-redirect smoke lives in the AUTO repo
                                      # under e2e/. Omit to skip (the smoke runner stays inert). Bounded by
                                      # gate_timeout_sec + gate_env, same as the gate.
+    # postmerge_verify: true         # EU-453 per-app opt-in (second of three keys — needs the top-level
+                                     # `postmerge_verify:` master switch AND a non-empty `gate_commands` above).
+                                     # After a land, re-run THIS app's own `gate_commands` against the ACTUAL merged
+                                     # <base> HEAD; a red merge is FLAGGED (audit + Telegram + Needs Human) but
+                                     # NEVER auto-reverted. Use it for the repo whose own gate is the cheapest
+                                     # reliable full-suite proxy (e.g. a Python repo's `tests/run_all.py`); leave it
+                                     # off for an app whose gate is a narrow typecheck (a green typecheck says
+                                     # little about whether the merged tree actually runs).
     backlog_backend: "jira"          # "jira" | "notion" | "none"
     backlog:
       base_url: "https://YOURTEAM.atlassian.net"
