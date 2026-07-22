@@ -173,7 +173,7 @@ solo now.)
 
 **12.3 Resilience** — (sanity) if one officer errors, the others still run and report.
 
-**12.4 Schedule** — `crontab -l | grep patrol` → the weekly `0 9 * * 1 … ./general patrol` line is present (installed by `scripts/install-server-cron.sh`). Fires weekly Mon 09:00.
+**12.4 Schedule** — patrol is **not** cron-scheduled (EU-432: the server has no real product repo to patrol, and the Mac launchd scheduler is retired). Run it on demand via 12.1/12.2, or schedule it yourself on a host that holds a real product checkout.
 
 ---
 

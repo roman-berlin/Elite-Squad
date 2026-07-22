@@ -193,11 +193,13 @@ flowchart TD
    `/unblock <id>`, `/council`, `/standup`, `/status`, `/help`; a `TICKET: decision` reply
    resumes a parked ticket (`decisions.handle_reply`, `decisions.py:100`); any other free-text goes to
    the CTO as 1:1 chat (`decisions.route_message`, `decisions.py:199`).
-4. **Scheduled — VPS cron** (`scripts/install-server-cron.sh`, `CRON_TZ=Asia/Jerusalem`):
-   self-update every 15 min, state sync every 15 min + 06:30, **daily council/muster 06:30**, corridor
-   small-talk 11:00/14:30-ish/16:00-ish, weekly patrol Mon 09:00. The Mac launchd council is **retired**
-   — the VPS cron is the single source (`install-server-cron.sh:8`). (The retired Mac `*.plist` launch
-   agents and their `run-*.sh` wrappers have been removed from `scripts/`; nothing loaded them.)
+4. **Scheduled — VPS cron** (`scripts/install-server-cron.sh`; all times UTC — the box clock is
+   Etc/UTC and Ubuntu cron ignores CRON_TZ, EU-432): self-update every 15 min, state sync every
+   15 min, a LIGHT daily stand-up (`general daily`) at 05:30 UTC (= 08:30 Asia/Jerusalem), and a
+   WEEKLY deep council (`general council`) Mon 06:30 UTC (= 09:30). sync/daily/council run through
+   `general cron-guard` (timestamps + rotates `council/cron.log`, alerts Telegram on repeated
+   failure). patrol and the SWE-bench builder are NOT scheduled here (no real product target / host
+   never builds). The Mac launchd scheduler is **retired** — the VPS cron is the single source.
 
 ---
 

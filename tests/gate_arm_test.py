@@ -49,7 +49,9 @@ broken = gate.run_gate(app(cmds=["sh -c 'echo boom; exit 7'"]))
 chk("runtime-broken gate FAILS pre-land", not broken.passed)
 chk("gate report carries the failure", "exit 7" in (broken.report or ""))
 chk("clean gate passes", gate.run_gate(app(cmds=["true"])).passed)
-chk("empty gate is a pass (unchanged)", gate.run_gate(app(cmds=[])).passed)
+# EU-432: an empty gate now REFUSES the build (was a vacuous pass) — a host with no gate_commands
+# (the VPS) must never land ungated. An operator who wants to build configures a real command.
+chk("empty gate is REFUSED (EU-432 pin — no ungated build)", not gate.run_gate(app(cmds=[])).passed)
 
 # --- ACCEPTANCE path B: if it slips the gate, an armed Sentinel reverts it post-merge ---
 g, au = FakeGit(), Audit()
