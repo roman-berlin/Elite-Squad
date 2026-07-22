@@ -631,6 +631,12 @@ async def _main(argv: list[str]) -> int:
     # live-entrypoint-only discipline as backend_pref.migrate / adopt_legacy_council.
     from . import forensics as _forensics_mod
     _forensics_mod.adopt_legacy_signature_ledger(cfg, AuditLog(cfg.audit_path))
+    # EU-435: self-heal the postmortem archive the 2026-07-21 state/ migration orphaned — MOVE the
+    # legacy postmortems/ dir of *.md (one per repeatedly-failing ticket) into state/postmortems/ on
+    # boot, BEFORE the next failure can write a fresh postmortem and the irreplaceable failure history
+    # stays orphaned. Identical in shape to council/, same live-entrypoint-only discipline as
+    # backend_pref.migrate / adopt_legacy_council / adopt_legacy_signature_ledger.
+    _forensics_mod.adopt_legacy_postmortems(cfg, AuditLog(cfg.audit_path))
     from . import usage
     usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
     usage.prune(cfg)

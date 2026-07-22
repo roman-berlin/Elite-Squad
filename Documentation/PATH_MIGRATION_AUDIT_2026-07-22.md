@@ -48,7 +48,7 @@ are **not** orphaned and are excluded.)
 | sidecar | site | orphaned? | impact | treatment |
 |---|---|---|---|---|
 | `council/` (dir: `index.jsonl` + transcripts) | `council.py:175` | **yes** (31 transcripts, 23-row index to 2026-06-20) | archive unreachable; `history()` would reset to 1 row at next ceremony | **FIXED** — adopted on boot |
-| `postmortems/` (dir: `*.md`) | `forensics.py:145` | likely (written on every repeated ticket failure) | postmortem history unreachable; `postmortem_path` starts fresh | **recommend** same `adopt_legacy_*` pattern (follow-up) |
+| `postmortems/` (dir: `*.md`) | `forensics.py:145` | likely (written on every repeated ticket failure) | postmortem history unreachable; `postmortem_path` starts fresh | **FIXED** — adopted on boot (EU-435, `forensics.adopt_legacy_postmortems`) |
 
 ### B — Dedup / idempotency state (orphan → duplicate work or tickets)
 
@@ -98,8 +98,9 @@ shows a stale report until the next sweep. **No action.**
 The class fix is one cheap, reusable move per sidecar (the `adopt_legacy_council` template). In
 priority order, worth their own tickets:
 
-1. **`postmortems/`** — irreplaceable archive, identical shape to `council/` (dir of files). One
-   call at the boot hook.
+1. **`postmortems/`** — irreplaceable archive, identical shape to `council/` (dir of files). **DONE
+   (EU-435)** — `forensics.adopt_legacy_postmortems` moves the legacy `*.md` archive into
+   `state/postmortems/` on boot, same template as `adopt_legacy_council`.
 2. **`signature_filed.json`** — orphaning files **duplicate Jira tickets** (active board harm).
 3. **`pending_decisions.json` / `proposals.json` / `blocked_tickets.json`** — verify on the box
    whether they held in-flight items at 10:55; adopt if non-empty.
