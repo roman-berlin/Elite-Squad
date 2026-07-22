@@ -404,6 +404,63 @@ def _mark_sig_filed(cfg, sig: str, when: float) -> None:
         pass
 
 
+def _legacy_sig_state_file(cfg) -> Path:
+    """The pre-2026-07-21 signature_filed.json location — a sibling of the audit_path's PARENT dir
+    (the repo root before the state/ migration moved audit_path one level deeper into state/).
+    ``parent.parent`` matches the actual one-level migration (audit.jsonl -> state/audit.jsonl); any
+    other layout simply yields a non-existent legacy file -> no adoption (fails safe). Mirrors
+    ``council._legacy_council_dir``."""
+    return Path(getattr(cfg, "audit_path", "./state/audit.jsonl")).resolve().parent.parent / "signature_filed.json"
+
+
+def adopt_legacy_signature_ledger(cfg, audit=None) -> bool:
+    """EU-436: self-heal the filed-signature dedup ledger the 2026-07-21 state/ migration orphaned.
+
+    Background: the migration moved ``audit_path`` (and with it every ``with_name("signature_filed.json")``
+    derivation) one level deeper into ``state/``, but left the real ledger at the legacy
+    ``signature_filed.json`` sibling. ``_sig_state_file()`` now resolves to the (missing/empty)
+    ``state/signature_filed.json``; with the ledger lost, ``_sig_last_filed()`` returns ``{}`` and a
+    recurring crash signature whose postmortem was ALREADY filed gets filed AGAIN — a duplicate Jira
+    ticket (active board harm).
+
+    On boot this MOVES the legacy ledger into the new location (byte-for-byte, so the
+    {signature: ts} dedup map is preserved and the reader sees every entry), records a
+    ``signature_ledger_adopted`` audit event carrying the adopted entry count, and is done. Idempotent
+    + no-clobber: a new ledger that already exists (a signature has already been filed in the new
+    location) is never touched — the legacy file is LEFT IN PLACE for the operator to reconcile (a
+    divergent ledger is never silently overwritten or merged). Best-effort — never raises.
+
+    Mirrors ``council.adopt_legacy_council`` and ``backend_pref.migrate``: called ONLY from the live CLI
+    entrypoint (``main._main``), so a test around a tmp config can never relocate the operator's real
+    ledger. Returns True iff it moved the ledger in (for observability / tests)."""
+    import json as _json
+    import shutil
+    try:
+        new = _sig_state_file(cfg).resolve()             # the exact path the reader uses (abs for the move)
+        if new.exists():                                 # already present -> never clobber (AC pin)
+            return False
+        legacy = _legacy_sig_state_file(cfg)
+        if legacy == new or not legacy.exists():         # nothing to adopt (fails safe)
+            return False
+        entries = 0
+        try:
+            data = _json.loads(legacy.read_text(encoding="utf-8"))
+            entries = len(data) if isinstance(data, dict) else 0
+        except (OSError, ValueError, TypeError):
+            entries = 0                                  # move it anyway — a corrupt file still beats silence
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy), str(new))               # move, not copy: idempotent on the next boot
+        if audit is not None:
+            try:
+                audit.record("signature_ledger_adopted", entries=entries,
+                             from_path=str(legacy), to_path=str(new))
+            except Exception:  # noqa: BLE001 — an audit write must never break a sweep
+                pass
+        return True
+    except Exception:  # noqa: BLE001 — boot-critical: a migration helper must NEVER break startup
+        return False
+
+
 def _row_ts(row: dict) -> float:
     """A failed-run row's start time as a unix ts (0.0 when undatable — such a row can never be
     'newer than the last filing', so it stays out of a re-open decision)."""
