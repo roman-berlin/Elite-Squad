@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-22 · EU-430 · Elite-Unit · • All 5 ACs met: 401 results alert-not-broadcast, artefacts skipped, markers widened, expiry pre-flight, roster/standup guards, VPS re-auth documented. · 🔗 (no UI — `python3 tests/eu430_vps_auth_outage_test.py`; on the VPS, `./general doctor` → "Claude auth" check and `./general daily` → real brief vs. the ⚠️ auth-outage alert)
 - 2026-07-22 · EU-428 · Elite-Unit · • AC0 publisher: periodic launchd agent runs ./general sync, host-id pinned, allow-listed + documented — met. · 🔗 (no UI — verify via `./general sync` output, `shared/mac.jsonl` freshness, and `scripts/peer-watchdog.sh` on the VPS)
 - 2026-07-22 · EU-426 · Elite-Unit · • All 5 ACs implemented and pinned: Done+unmerged tags then deletes (local+remote) with branch_retired audit; merged clause skips the tag; open statuses/worktree/unreachable-board all fail closed. · 🔗 (no UI — `python3 tests/eu426_branch_retire_test.py` for the 35-check harness; in operation, watch `state/audit.jsonl` for `branch_retired` events at the next non-dry-run autopilot start, and `git tag --list 'attic/*'` for archived tips)
 - 2026-07-22 · EU-418 · Elite-Unit · • Docstring correction accurately reflects `_backend_turn_scale`/`normalize` behaviour (verified against orchestrator/backends.py and builder.py). · 🔗 (no UI — verify with `python3 tests/eu418_budget_for_docstring_test.py`, and full gate `python3 tests/run_all.py`)
