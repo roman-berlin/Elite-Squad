@@ -570,6 +570,12 @@ async def _main(argv: list[str]) -> int:
     # backend_pref.migrate: a tmp-config test never relocates the operator's real archive.
     from . import council as _council_mod
     _council_mod.adopt_legacy_council(cfg, AuditLog(cfg.audit_path))
+    # EU-436: self-heal the filed-signature dedup ledger the 2026-07-21 state/ migration orphaned —
+    # MOVE the legacy signature_filed.json into state/ on boot, BEFORE the next signature_sweep can
+    # re-file a postmortem for a crash signature it already surfaced (a duplicate Jira ticket). Same
+    # live-entrypoint-only discipline as backend_pref.migrate / adopt_legacy_council.
+    from . import forensics as _forensics_mod
+    _forensics_mod.adopt_legacy_signature_ledger(cfg, AuditLog(cfg.audit_path))
     from . import usage
     usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
     usage.prune(cfg)
