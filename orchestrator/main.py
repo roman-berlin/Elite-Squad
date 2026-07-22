@@ -564,6 +564,12 @@ async def _main(argv: list[str]) -> int:
     # One-time move of a legacy repo-root model_backend.json into the state dir (live entrypoint only —
     # never from library/app code, so tests around tmp configs can't relocate the operator's real pref).
     backend_pref.migrate(cfg)
+    # EU-431: self-heal the council archive the 2026-07-21 state/ migration orphaned — MOVE the
+    # legacy council/ (index.jsonl + transcripts) into state/council/ on boot, BEFORE any ceremony
+    # can write a fresh index and lose the back-history. Same live-entrypoint-only discipline as
+    # backend_pref.migrate: a tmp-config test never relocates the operator's real archive.
+    from . import council as _council_mod
+    _council_mod.adopt_legacy_council(cfg, AuditLog(cfg.audit_path))
     from . import usage
     usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
     usage.prune(cfg)
