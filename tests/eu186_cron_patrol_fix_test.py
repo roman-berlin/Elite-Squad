@@ -1,32 +1,32 @@
-"""Test that the weekly patrol cron includes the required app argument.
-EU-186: The cron was running './general patrol' without the required positional app argument,
-causing it to fail every Monday. This test verifies the fix adds 'automatixy' as the app.
+"""EU-186 (history) + EU-432 (current): the weekly patrol cron.
+
+EU-186 (2026-07-10): the server cron ran `./general patrol` without the required positional app
+argument, failing every Monday. EU-186 fixed it to `./general patrol automatixy`.
+
+EU-432 (2026-07-22) SUPERSEDES that fix for the SERVER: patrol is NO LONGER scheduled there at all.
+The server's automatixy.repo_path is a PLACEHOLDER pointing at the orchestrator's OWN source (the box
+has no product repo), so `patrol automatixy` would patrol the orchestrator code and file AUTO tickets
+against the product backlog. The server's role is "discusses, never builds/patrols"
+(config.server.example.yaml). So the patrol cron is removed from install-server-cron.sh. The patrol
+SUBCOMMAND is unchanged — it still requires the app argument (the EU-186 parser guard below), and can
+be run manually on the Mac against a real repo.
 """
 import subprocess
 import tempfile
 import os
 from pathlib import Path
 
-def test_cron_installation_includes_patrol_app_argument():
-    """Verify the install-server-cron.sh script installs the patrol cron with the app argument."""
+def test_patrol_not_scheduled_on_server():
+    """EU-432: patrol must NOT be scheduled on the server (no real product target there)."""
 
-    # Read the install script to check it contains the corrected line
-    script_path = Path("scripts/install-server-cron.sh")
-    script_content = script_path.read_text(encoding="utf-8")
+    script_content = Path("scripts/install-server-cron.sh").read_text(encoding="utf-8")
 
-    # The corrected line should include 'automatixy' after 'patrol'
-    expected_line = "0 9 * * 1 cd $HOME/General && ./general patrol automatixy >> council/cron.log 2>&1"
+    assert "./general patrol" not in script_content, (
+        "EU-432: patrol must NOT be scheduled on the server — automatixy.repo_path there is a "
+        "placeholder pointing at the orchestrator's own source, so it would self-patrol and file "
+        "AUTO tickets against the product backlog. Run patrol manually on the Mac against a real repo.")
 
-    # Check that the script contains the expected patrol line
-    assert expected_line in script_content, \
-        f"Expected cron line '{expected_line}' not found in install-server-cron.sh"
-
-    # Verify the old broken line is NOT present
-    broken_line = "0 9 * * 1 cd $HOME/General && ./general patrol >> council/cron.log 2>&1"
-    assert broken_line not in script_content, \
-        f"Broken cron line '{broken_line}' should not be present in install-server-cron.sh"
-
-    print("✓ install-server-cron.sh contains the corrected patrol line with 'automatixy' argument")
+    print("✓ EU-432: patrol is not scheduled on the server (no real product target)")
 
 def test_patrol_command_requires_app_argument():
     """Verify that the patrol command requires the app argument (this proves the bug existed)."""
@@ -61,10 +61,10 @@ def test_patrol_command_works_with_automatixy_argument():
     # (This is a basic sanity check - full integration test would require more setup)
 
 if __name__ == "__main__":
-    print("\n================ EU-186 CRON PATROL FIX TEST ================")
+    print("\n================ EU-186 / EU-432 PATROL CRON TEST ================")
 
     try:
-        test_cron_installation_includes_patrol_app_argument()
+        test_patrol_not_scheduled_on_server()
         test_patrol_command_requires_app_argument()
         test_patrol_command_works_with_automatixy_argument()
 

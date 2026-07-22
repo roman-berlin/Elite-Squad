@@ -88,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
     cnl = sub.add_parser("council", help="deep WEEKLY council (officers muster, brief you) — for the daily use `daily`")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
+    cg = sub.add_parser("cron-guard",
+        help="wrap a cron job: timestamp + rotate council/cron.log, alert Telegram on repeated failure (EU-432)")
+    cg.add_argument("--job", required=True, help="cron job name (the log tag + the per-job state key)")
+    cg.add_argument("wrapped", nargs=argparse.REMAINDER,
+        help="the command to run, after -- (e.g. -- ./general daily)")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
@@ -352,6 +357,30 @@ def _onboard(args) -> int:
     return 0
 
 
+def _cron_guard(args) -> int:
+    """EU-432 — wrap a cron job: timestamp + rotate ``council/cron.log`` and alert Telegram on
+    repeated failure (exactly one alert per N consecutive failures).
+
+    The wrapped command is everything after ``--`` (a leading ``--`` argparse may leave in the
+    REMAINDER is stripped). Paths are the canonical ones the crontab already writes
+    (``council/cron.log`` — EU-431 keeps it there; ``state/cron_health.json`` beside the audit
+    root), so this needs no config. Returns the wrapped command's real exit code.
+    """
+    from . import cron_guard
+    wrapped = list(getattr(args, "wrapped", None) or [])
+    if wrapped and wrapped[0] == "--":   # strip the single options-separator argparse leaves in
+        wrapped = wrapped[1:]
+    if not wrapped:
+        print("cron-guard: no command given. Pass it after `--`, e.g.\n"
+              "  ./general cron-guard --job daily -- ./general daily", file=sys.stderr)
+        return 2
+    return cron_guard.run_guarded(
+        args.job, wrapped,
+        log_path="council/cron.log",
+        state_path="state/cron_health.json",
+    )
+
+
 def _doctor(cfg_path: str) -> int:
     from . import health
     glyph = {"ok": "  ✓", "warn": "  ⚠", "bad": "  ✗"}
@@ -521,6 +550,12 @@ async def _main(argv: list[str]) -> int:
 
     if args.command == "benchmark":
         return await _benchmark(args)
+
+    # EU-432: cron job guard — dispatched BEFORE the config preamble so a 15-min cron tick stays
+    # cheap (no adopt_legacy/usage pass). It uses the canonical, deliberately-not-migrated paths
+    # (council/cron.log per EU-431, state/cron_health.json), not cfg.
+    if args.command == "cron-guard":
+        return _cron_guard(args)
 
     if args.command == "consolidate":
         return _consolidate(args)

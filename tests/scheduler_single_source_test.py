@@ -105,8 +105,13 @@ chk("light daily stand-up is scheduled every day (general daily)",
 chk("deep council is scheduled WEEKLY (Mon dow=1), not daily",
     len(_council) == 1 and _council[0].split()[4] == "1", str(_council))
 chk("ceremonies: corridor small-talk stays de-cronned", "./general smalltalk" not in cron_text)
-chk("single source still schedules the weekly patrol (Mon)", "0 9 * * 1" in cron_text
-    and "./general patrol" in cron_text)
+# EU-432 (2026-07-22): patrol is deliberately NOT scheduled on the server — the box has no real
+# product repo (automatixy.repo_path is a placeholder pointing at the orchestrator's own source),
+# so `patrol automatixy` there would file AUTO tickets against the product backlog from the wrong
+# code. The patrol subcommand is unchanged (run it manually on the Mac against a real repo); it is
+# just no longer cron-scheduled here.
+chk("EU-432: patrol is NOT scheduled on the server (no real product target)",
+    "./general patrol" not in cron_text)
 
 # 5) Doc-reality (EU-56 iter-3): no repo doc may carry an *actionable* reference to the retired Mac
 #    launchd scheduler — a `com.roman.general.*` agent name, a `run-*.sh` wrapper, or a

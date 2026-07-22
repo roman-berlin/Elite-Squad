@@ -85,7 +85,8 @@ chk("fallback: touched-but-unconfigured component -> repo-wide default runs", no
 legacy = app(default=PASS)
 chk("legacy: no per-app config + no changed paths -> default gate runs (pass)",
     gate.run_gate(legacy).passed)
-chk("legacy: empty everything is a pass (unchanged)", gate.run_gate(app()).passed)
+chk("legacy: empty everything is REFUSED (EU-432 pin — no ungated build)",
+    not gate.run_gate(app()).passed)
 
 print("\n================= GATE PER-APP (EU-19) QA =================")
 passed = sum(1 for _, ok, _ in results if ok)
