@@ -15,7 +15,7 @@ import time
 
 from .config import Config
 from .officers import display
-from . import scrum
+from . import auth_probe, scrum
 
 # (internal officers key, role, duty, which configured model attribute it runs on — None = deterministic).
 # The human-facing display NAME for each key is NOT stored here: it's resolved from officers.OFFICER_NAMES
@@ -84,7 +84,13 @@ def mermaid_chart() -> str:
 
 def build_doc(cfg: Config, status: str = "") -> str:
     """The full roster as Markdown — deterministic structure + duties + chart, plus an optional
-    one-line daily status."""
+    one-line daily status.
+
+    EU-430 AC5: a provider-error body is NEVER persisted as the status line — drop it, so a dead
+    credential can't poison ROSTER.md ("Failed to authenticate. API Error: 401 …" sat here for 2
+    days). Belt-and-suspenders: _status_line already returns '' on the same shape."""
+    if auth_probe.looks_like_provider_error(status):
+        status = ""
     out = [f"# Elite Unit — Roster", "", f"_As of {time.strftime('%Y-%m-%d %H:%M')}._", ""]
     if status.strip():
         out += ["> " + status.strip().replace("\n", " "), ""]
@@ -102,11 +108,15 @@ def doc_path(cfg: Config) -> Path:
 
 
 def latest_status(cfg: Config) -> str:
-    """The status line from the last-written ROSTER.md (the '> …' blockquote), or ''."""
+    """The status line from the last-written ROSTER.md (the '> …' blockquote), or ''.
+
+    EU-430: a status line that is a provider-error string (a relic from a ceremony run while the
+    credential was dead) is treated as absent — never surfaced as the unit's state."""
     try:
         for ln in doc_path(cfg).read_text(encoding="utf-8").splitlines():
             if ln.startswith("> "):
-                return ln[2:].strip()
+                line = ln[2:].strip()
+                return "" if auth_probe.looks_like_provider_error(line) else line
     except OSError:
         pass
     return ""
@@ -153,6 +163,13 @@ def html_view(cfg: Config, status: str = "") -> str:
     return "".join(parts)
 
 
+def _safe_status(text: str) -> str:
+    """EU-430 AC5: the model's one-line status, or '' if it is a provider-error string. Producer-side
+    guard so a dead credential never becomes ROSTER.md's status line (build_doc is the belt)."""
+    line = (text or "").strip().split("\n")[0][:240]
+    return "" if auth_probe.looks_like_provider_error(line) else line
+
+
 async def _status_line(cfg: Config) -> str:
     """One cheap (Haiku) sentence on the unit's state today, from the record. Best-effort; '' on any
     hiccup. Info only — never a decision."""
@@ -171,7 +188,7 @@ async def _status_line(cfg: Config) -> str:
                                permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
                                disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
                                max_turns=3, effort="low"), tag="roster")
-        return (run.final or run.text or "").strip().split("\n")[0][:240]
+        return _safe_status(run.final or run.text or "")
     except Exception:  # noqa: BLE001
         return ""
 

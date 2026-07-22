@@ -273,3 +273,69 @@ echo "ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart general.service" | 
 3. `./general council` by hand once → a briefing appears, and `council/` gets a transcript.
 4. SSH-tunnel to the cockpit → Reports shows the council; Needs-you shows any recommendations.
 5. Close your laptop → the unit keeps answering on Telegram. That's the whole point.
+
+## Maintenance — re-authenticate Claude when the credential lapses (EU-430)
+
+The box authenticates to the model with a **Claude Code OAuth login** (Step 2), not an API key. That
+login **expires** — the access token lapses on a schedule and is refreshed from a *refresh token*.
+If the refresh token ever comes back **empty** (the login was dropped / not completed cleanly) the
+box can no longer self-heal: every model call returns **`401 Invalid authentication credentials`**,
+and — left un-fixed — that raw error used to be broadcast to your phone *as the daily brief* and
+written into `ROSTER.md` / `last-standup.md`. EU-430 closes that hole two ways: a ceremony now
+**refuses to broadcast or persist a provider error** (it sends a short `⚠️ SQUAD: … cannot
+authenticate …` alert instead), and a **pre-flight** warns you to Telegram ~48 h before the token
+lapses (or immediately, if the refresh token is empty). Either way, the fix on the box is the same:
+re-authenticate by hand.
+
+### Symptom
+- Telegram: a `⚠️ SQUAD auth pre-flight: …` warning, and/or `⚠️ SQUAD: the VPS cannot authenticate
+  to the model — briefs are degraded until re-auth` in place of a daily brief.
+- `./general doctor` → the **Claude auth** check reads `bad / EXPIRED`.
+- `./general council` (or `daily`) → returns the auth-outage alert instead of a briefing.
+
+### Re-auth (do this on the box over SSH)
+```bash
+claude /login          # interactive: it prints a URL — open it on your laptop, sign in with Max, approve
+```
+If `/login` does not refresh cleanly, re-run the first-run flow instead:
+```bash
+claude                 # prompts login the same way as the initial Step 2 install
+```
+Then restart the service so the long-running `general serve` picks up the fresh credential:
+```bash
+sudo systemctl restart general.service
+```
+
+### Verify the re-auth took (BOTH must hold)
+1. **`expiresAt` is in the future** AND **`refreshToken` is non-empty** — inspect the credential
+   file directly (the two fields the pre-flight checks):
+   ```bash
+   python3 - <<'PY'
+   import json, datetime, pathlib
+   p = pathlib.Path.home() / ".claude" / ".credentials.json"
+   b = json.loads(p.read_text())
+   o = b.get("claudeAiOauth", b)
+   exp = o.get("expiresAt")
+   exp = datetime.datetime.fromisoformat(str(exp).replace("Z", "+00:00")) if exp else None
+   print("refreshToken:", "PRESENT" if str(o.get("refreshToken") or "").strip() else "EMPTY")
+   print("expiresAt   :", exp, "(in the future)" if exp and exp > datetime.datetime.now(exp.tzinfo) else "(!! not in the future)")
+   PY
+   ```
+   You want `refreshToken: PRESENT` and `expiresAt: … (in the future)`. An **empty refresh token**
+   is the dead state from EU-430 — `/login` must populate it; if it stays empty, re-run `claude`
+   (not just `/login`) and re-check.
+2. **A real round-trip answers** — the strongest check (also what the liveness probe runs):
+   ```bash
+   claude -p "reply with the single word READY"     # expect: READY
+   ```
+3. Confirm health is green and the artefacts regenerate clean on the next ceremony:
+   ```bash
+   ./general doctor                                  # Claude auth → ok
+   ./general daily                                   # a real briefing (not the ⚠️ alert)
+   ```
+
+> Why there is no fallback: the box runs Max-plan **subscription** auth on purpose (Step 2). There
+> is no `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` on the VPS, so when the OAuth login dies
+> nothing else can answer — re-auth is the only remedy. (If you ever want a non-expiring fallback,
+> set `ANTHROPIC_API_KEY` in `~/General/.env`; the pre-flight then skips the file-expiry check,
+> since an API key is not login-expiry-bound.)
