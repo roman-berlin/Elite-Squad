@@ -102,12 +102,24 @@ def _audit_paths(audit_path: str | Path, local_only: bool = False) -> list[Path]
     root = p.parent
     if root.name == "state":
         root = root.parent
+    # This host's OWN published copy must never be merged back in. sync.publish writes
+    # shared/<host_id>.jsonl as a MIRROR of the local audit.jsonl already at paths[0], so globbing it
+    # too counts every local event twice. Latent until 2026-07-22, when installing the EU-428 audit
+    # publisher made the Mac start publishing again: the merge went to 12,392 local + 12,391
+    # published rows with 12,315 overlapping keys, silently doubling every count the board, the
+    # stand-up and the 'shipped in last 24h' digest derive from it. A peer's file is real data; our
+    # own is a duplicate of a file we are already reading.
+    try:
+        from . import sync
+        own = f"{sync.host_id()}.jsonl"
+    except Exception:  # noqa: BLE001 - never let host resolution break the audit view
+        own = ""
     seen: set[Path] = set()
     for shared in (root / ".unit-state" / "shared", p.parent / ".unit-state" / "shared", p.parent / "shared"):
         if shared in seen or not shared.is_dir():
             continue
         seen.add(shared)
-        paths += sorted(shared.glob("*.jsonl"))
+        paths += [f for f in sorted(shared.glob("*.jsonl")) if f.name != own]
     return paths
 
 
