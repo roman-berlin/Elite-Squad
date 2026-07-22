@@ -33,7 +33,7 @@ from .agent import run_agent
 from .config import Config
 from .signals import collect_signals, format_signals
 from .officers import OFFICER_NAMES, display
-from . import notify
+from . import auth_probe, notify
 
 # Reverse map (display name -> stable internal key). Officer display names are renamed in
 # OFFICER_NAMES (EU-17/EU-40); the internal keys are immutable, so selection and run-tags resolve
@@ -385,10 +385,16 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
                        broadcast: bool | None = None) -> str:
     """Run the muster as a multi-round debate; the CTO chairs. Returns the briefing,
     saves the full transcript, and sends the briefing to Telegram."""
+    _auth_preflight(cfg)                               # EU-430 AC4: warn before the first 401
     sig = collect_signals(cfg)
     digest = format_signals(sig)
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
+    # EU-303: single-sender election — elect early so an auth-outage alert (EU-430) respects the
+    # same one-host rule as a normal broadcast, and a second scheduler can't double-send it.
+    if broadcast is None:
+        from . import decisions as _dec
+        broadcast = _dec.should_poll_telegram(cfg)[0]
 
     if topic:
         print("\n🎖️  Muster — officers in session…\n", flush=True)
@@ -399,6 +405,16 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
         # one daily. Each officer reports Yesterday/Today/Blockers; the CTO synthesises from it.
         print("\n🎖️  Daily muster — officers reporting; the CTO will brief…\n", flush=True)
         _sd, said, handoffs = await _gather_standup(cfg)
+
+    # EU-430 AC2/AC3: if any officer's report is a provider auth error, the model is down — alert
+    # the operator and bail BEFORE writing the poisoned stand-up file / the CTO call / the
+    # transcript / the roster refresh. (The CTO call is also guarded below for mid-ceremony expiry.)
+    _auth_down_report = next((rep for _, rep in said if auth_probe.looks_like_provider_error(rep)),
+                             None)
+    if _auth_down_report is not None:
+        return _ceremony_auth_down(cfg, audit, ceremony="council", broadcast=bool(broadcast),
+                                   detail=_auth_down_report)
+    if not topic:
         try:
             _standup_file(cfg).write_text(_standup_text(said, handoffs), encoding="utf-8")
         except OSError:
@@ -424,6 +440,12 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
         max_turns=6, effort="high"), tag="the-general")
     chair_provider, chair_model = chair.provider, chair.model_version
     briefing_raw = (chair.final or chair.text or "(no briefing)").strip()
+    # EU-430 AC2: the chair call itself can fail auth even if the officers didn't (a credential that
+    # lapsed mid-ceremony, or a topic-muster whose discuss() passed but the chair didn't). Guard it
+    # the same way — alert, never broadcast/persist the raw error.
+    if auth_probe.looks_like_provider_error(briefing_raw):
+        return _ceremony_auth_down(cfg, audit, ceremony="council", broadcast=bool(broadcast),
+                                   detail=briefing_raw)
 
     # Route any ticket-worthy items the briefing proposed into the Commander's approval queue
     # (or, with meeting_autospawn, file them) — the block is stripped from the briefing shown.
@@ -435,12 +457,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
     saved = _save_transcript(cfg, topic, digest, said, briefing)
     questions = _commander_questions(briefing)
 
-    # EU-303: single-sender election (same as daily_brief) — only the elected host broadcasts the
-    # weekly council, so a second scheduler/host can't double-send. Interactive callers force it.
-    if broadcast is None:
-        from . import decisions as _dec
-        broadcast = _dec.should_poll_telegram(cfg)[0]
-
+    # broadcast was elected at the top of this function (EU-303 single-sender, EU-430 early).
     # Report up to the Commander.
     header = "🎖️ *Daily Council*" if not topic else f"🎖️ *Muster — {topic}*"
     if broadcast:
@@ -1227,6 +1244,57 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
             f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
 
 
+# EU-430 (2026-07-22 VPS outage): when the model credential is dead, the SDK returns the provider's
+# raw error string (e.g. "Failed to authenticate. API Error: 401 …") AS the run result. The
+# ceremonies must treat that as an OUTAGE — alert the operator, NEVER broadcast the raw error as the
+# brief, and NEVER persist it into ROSTER.md / last-standup.md / the transcript. For 3 ceremonies
+# (07-20 daily, 07-20 council, 07-21 daily) that string went to the Commander's phone verbatim.
+_AUTH_DOWN_ALERT = (
+    "⚠️ SQUAD: the VPS cannot authenticate to the model — briefs are degraded until re-auth"
+)
+
+
+def _auth_preflight(cfg: Config) -> None:
+    """EU-430 AC4: ceremony pre-flight. Warn to Telegram when the Claude credential expires within
+    48h OR the refresh token is empty, so a dead login is caught BEFORE the first 401 — not after
+    the fourth failed brief. Silent on a healthy / unknown credential (no spam, no false red)."""
+    try:
+        st = auth_probe.credential_status()
+    except Exception:  # noqa: BLE001 — a pre-flight must never break a ceremony
+        return
+    if st.get("level") != "warn":
+        return
+    try:
+        notify.send(f"⚠️ SQUAD auth pre-flight: {st.get('reason', 'credential expiring')} — "
+                    "re-auth on the box before briefs degrade.")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ceremony_auth_down(cfg: Config, audit, *, ceremony: str, broadcast: bool,
+                        detail: str = "") -> str:
+    """EU-430 AC2/AC3: a ceremony's model call failed auth. Do NOT broadcast the provider's raw
+    error as the brief — send the operator-shaped alert, skip the poisoned artefacts (the caller
+    bails before writing them), record the outage, and invalidate the auth-probe cache so health's
+    'Claude auth' check degrades on the next pass instead of rendering the error as content.
+    Returns the alert text (what the ceremony hands back to its caller)."""
+    try:
+        auth_probe.invalidate()           # stale cached 'valid' must not mask the outage in health
+    except Exception:  # noqa: BLE001
+        pass
+    if broadcast:
+        try:
+            notify.send(_AUTH_DOWN_ALERT)
+        except Exception:  # noqa: BLE001
+            pass
+    if audit is not None:
+        try:
+            audit.record(ceremony, auth_down=True, broadcast=bool(broadcast), detail=detail[:200])
+        except Exception:  # noqa: BLE001
+            pass
+    return _AUTH_DOWN_ALERT
+
+
 async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None) -> str:
     """The LIGHT daily stand-up (best-practice: fast daily, deep weekly).
 
@@ -1235,7 +1303,16 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
     bar, the single decision that is genuinely the Commander's. That is ~1 model call, versus the ~8
     of the deep multi-officer council (hold_council), which is now a WEEKLY ceremony. Sends one
     skimmable phone ping; surfaces any Commander decision as a separate 'needs your call'."""
+    _auth_preflight(cfg)                               # EU-430 AC4: warn before the first 401
     from . import dashboard
+    # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine
+    # holds the cron prevented duplicates, so a second cron/timer/host (or install-server-cron run
+    # twice) each broadcast its own copy. Elect ONE sender (the same host that owns the Telegram
+    # poller, EU-185), unless an interactive caller (cockpit/Telegram /daily) forces broadcast=True.
+    # Elected early so an auth-outage alert (EU-430) respects the same single-sender rule.
+    if broadcast is None:
+        from . import decisions as _dec
+        broadcast = _dec.should_poll_telegram(cfg)[0]
     facts = dashboard.standup(cfg)                     # deterministic — yesterday shipped, needs you, awaiting
     notes = recent_commander_notes(cfg)
     cwd = _general_root()
@@ -1255,17 +1332,16 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=3, effort="low"), tag="the-general")
-    synth = _honest_commander_section(cfg, (run.final or run.text or "").strip())
+    raw = (run.final or run.text or "").strip()
+    # EU-430 AC2/AC3: a provider auth error is an OUTAGE — alert the operator, never broadcast the
+    # raw error as the brief, never persist it as the transcript. Degrade health (probe invalidated).
+    if auth_probe.looks_like_provider_error(raw):
+        return _ceremony_auth_down(cfg, audit, ceremony="daily_brief", broadcast=bool(broadcast),
+                                   detail=raw)
+    synth = _honest_commander_section(cfg, raw)
     questions = _commander_questions(synth)
 
-    # EU-303: single-sender election. The daily/council SEND had no host gate — only which machine
-    # holds the cron prevented duplicates, so a second cron/timer/host (or install-server-cron run
-    # twice) each broadcast its own copy. Elect ONE sender (the same host that owns the Telegram
-    # poller, EU-185), unless an interactive caller (cockpit/Telegram /daily) forces broadcast=True.
-    if broadcast is None:
-        from . import decisions as _dec
-        broadcast = _dec.should_poll_telegram(cfg)[0]
-
+    # broadcast was elected at the top of this function (EU-303 single-sender, EU-430 early).
     # One skimmable phone ping: the deterministic facts + the CTO's focus/decision.
     if broadcast:
         notify.send(f"{facts}\n\n{synth}")
@@ -1284,7 +1360,12 @@ async def daily_brief(cfg: Config, audit=None, *, broadcast: bool | None = None)
 
 async def hold_standup(cfg: Config, audit=None) -> str:
     """On-demand stand-up (the daily one now runs inside the muster). Saves last-standup.md + notifies."""
+    _auth_preflight(cfg)                               # EU-430 AC4: warn before the first 401
     digest, rows, handoffs = await _gather_standup(cfg)
+    # EU-430 AC5: never write a stand-up file whose officer sections are provider-error strings.
+    _down = next((rep for _, rep in rows if auth_probe.looks_like_provider_error(rep)), None)
+    if _down is not None:
+        return _ceremony_auth_down(cfg, audit, ceremony="standup", broadcast=True, detail=_down)
     text = _standup_text(rows, handoffs)
     _standup_file(cfg).write_text(text, encoding="utf-8")
     _save_transcript(cfg, "stand-up", digest, rows, "Daily stand-up — see the round-table below.")
