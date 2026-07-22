@@ -71,7 +71,7 @@ cat > "$PLIST" <<PLIST_EOF
     <key>Label</key>
     <string>${LABEL}</string>
 
-    <!-- PERIODIC TIMER: launchd runs `./general sync` every StartInterval seconds, NOT a KeepAlive
+    <!-- PERIODIC TIMER: launchd runs './general sync' every StartInterval seconds, NOT a KeepAlive
          respawn. 900s (15 min) matches the server's pull cadence. Publish is a short git op that
          exits; KeepAlive would busy-loop and stack overlapping syncs. -->
     <key>StartInterval</key>
@@ -80,7 +80,11 @@ cat > "$PLIST" <<PLIST_EOF
     <true/>
 
     <!-- A CURATED static PATH (mirrors install-mac-watchdog-daemon.sh): launchd agents get a minimal
-         PATH with no shell profile, so the `general` wrapper's venv activation + python must resolve. -->
+         PATH with no shell profile, so the 'general' wrapper's venv activation + python must resolve.
+         NOTE: this heredoc is UNQUOTED (it must expand \${LABEL}/\${GENERAL_BIN}), so backticks here
+         are COMMAND SUBSTITUTION, not quoting. The original text wrapped the command names in
+         backticks: install actually EXECUTED them, printed "general: command not found", and pasted
+         a stray sync line into this comment. Use single quotes in this heredoc, never backticks. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
