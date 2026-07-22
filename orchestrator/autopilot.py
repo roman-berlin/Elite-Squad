@@ -1311,17 +1311,43 @@ def _read_audit_rows(audit_path) -> list[dict]:
 
 
 def _prior_resumed_ids(audit_rows) -> set[str]:
-    """EU-398 recurrence trigger: ticket ids a PREVIOUS ``boot_reconcile`` already resumed.
+    """EU-398 recurrence trigger: ticket ids a PREVIOUS ``boot_reconcile`` already resumed — but
+    only within the ticket's CURRENT dangling run (EU-427 age-out).
 
     Re-queueing a ticket that already came back from one unclean stop and got killed AGAIN would
-    just loop the kill — so the reconcile honest-PARKs a recurring id instead of resuming it.
-    Sourced from the SAME audit read as the dangling core (no second file parse)."""
+    just loop the kill — so the reconcile honest-PARKs a recurring id instead of resuming it. But
+    EU-427: a resume in an OLD run the ticket has SINCE CLOSED OUT is not a recurrence. A ticket
+    resumed → merged → killed again much later still had its id in a stale ``boot_reconcile`` row,
+    so the reconcile phantom-PARKed it instead of resuming the genuinely-new dangle. A prior resume
+    now counts ONLY when NO terminal outcome follows it (the resume sits inside the same unclosed
+    run as the current dangle); a terminal at/after the resume ages it out. Sourced from the SAME
+    audit read as the dangling core (no second file parse)."""
+    terminal = set(AUDIT_EVENT_OUTCOME.keys())
+    # most-recent terminal outcome per ticket; absent → -inf so a resume with NO later terminal
+    # (the recurring-kill shape) still counts.
+    last_terminal: dict[str, float] = {}
+    for ev in audit_rows:
+        ev = ev or {}
+        if ev.get("event") not in terminal:
+            continue
+        tid = str(ev.get("ticket_id") or "")
+        if not tid:
+            continue
+        ts = _parse_audit_ts(ev.get("ts")) or 0.0
+        if ts >= last_terminal.get(tid, -1.0):
+            last_terminal[tid] = ts
     out: set[str] = set()
     for ev in audit_rows:
-        if (ev or {}).get("event") != "boot_reconcile":
+        ev = ev or {}
+        if ev.get("event") != "boot_reconcile":
             continue
+        resume_ts = _parse_audit_ts(ev.get("ts")) or 0.0
         for tid in (ev.get("resumed") or []):
-            out.add(str(tid))
+            tid = str(tid)
+            # EU-427: age out a resume the ticket closed out after (a terminal at/after it); only a
+            # resume with no later terminal is a recurring kill within the same unclosed run.
+            if resume_ts >= last_terminal.get(tid, -1.0):
+                out.add(tid)
     return out
 
 
