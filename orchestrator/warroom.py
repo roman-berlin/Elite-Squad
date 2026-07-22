@@ -380,18 +380,27 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         sess_total, sess_calls = w["today"]["total"], w["today"]["calls"]
         week_total, week_calls = w["week"]["total"], w["week"]["calls"]
         tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
-        # Merge today and week tokens into a single card
+        # Merge today and week tokens into a single card.
+        # 2026-07-22 (Commander: "the design text is different between KPIs — make it the same"):
+        # every other tile is a BARE VALUE in .kv over a short caps label in .kl ("16" /
+        # "MERGED -> DEV TODAY"). This one used to pack prose into .kv ("91.8M today · 18%"),
+        # which renders that sentence in the 30px tabular-nums MONO display face the other tiles
+        # only ever put digits in — so it read as a different typeface even though the CSS is
+        # identical. The qualifier belongs in the label, where the other tiles keep theirs.
         if bs["on"] and bs.get("over"):
             # Budget exhausted — show paused state
-            tok_value = "⛔ paused — budget hit"
+            tok_value = "⛔ paused"
             tok_hint = "daily cap reached · resets midnight"
         elif bs["on"]:
-            # Cap configured and not yet hit — show % consumed
+            # The % is NOT repeated here: the gauge bar directly below this value already renders it,
+            # and the hint carries the exact cap. Duplicating it in the value is what put prose in a
+            # digits-only display face in the first place.
+            tok_value = _fmt_tokens(sess_total)
             pct_str = f"{round(bs['pct'] * 100)}%"
-            tok_value = f"{_fmt_tokens(sess_total)} today · {pct_str}"
-            tok_hint = f"{_fmt_tokens(week_total)} this week · {week_calls} calls · cap {_fmt_tokens(bs['cap'])}"
+            tok_hint = (f"{pct_str} of today's cap · {_fmt_tokens(week_total)} this week · "
+                        f"{week_calls} calls · cap {_fmt_tokens(bs['cap'])}")
         else:
-            tok_value = f"{_fmt_tokens(sess_total)} today"
+            tok_value = _fmt_tokens(sess_total)
             tok_hint = f"{_fmt_tokens(week_total)} this week · {sess_calls + week_calls} calls total"
         cards.append({
             "label": "Tokens",
@@ -1430,7 +1439,57 @@ def _feed_html(items: list[dict]) -> str:
     return "".join(out)
 
 
-def _runlog_placeholder(state: dict, active: bool) -> str:
+# What the live-log placeholder calls the CURRENT phase. Deliberately NOT phases.PHASES: that tuple
+# is ("Build","Gate","Review","Land") — the *stage bar's* model, which has no PLANNING entry at all,
+# even though the Planner routinely runs 11+ minutes (EU-440: ticket_start 14:27:18 -> first planner
+# line 14:38:52). The Commander asked "if it's planning I'm supposed to see 'planning', no?" — and he
+# was right: there was nowhere for that word to come from.
+_PHASE_BY_EVENT = {
+    "ticket_start": "Planning", "prior_attempts_injected": "Planning",
+    "ticket_transition": "Planning", "squad_selected": "Planning",
+    "planner": "Building", "build": "Building", "pm_review": "Building",
+    "pm_decided": "Building", "agent_call": None,     # None = uninformative, keep looking back
+    "gate": "Gate", "deterministic_gate": "Gate", "dev_gate": "Gate",
+    "review": "Review",
+    "land_pushed": "Landing", "merged": "Landed",
+}
+
+
+def _live_phase(audit_path: str | Path) -> str:
+    """Best-effort label for what the run is doing RIGHT NOW, read from the audit tail.
+
+    The run state carries no phase field (see cockpit_state's blank dict — active/last_activity/
+    run_started/log_path and no more), so the first version of the placeholder asked it for one and
+    silently got nothing: the panel rendered "3m 34s elapsed" with no stage at all. The audit is the
+    one place that actually knows.
+
+    Walks BACKWARDS to the newest event that names a phase, skipping uninformative ones (agent_call
+    fires for every officer). Returns "" when nothing is recognisable — the caller then just omits
+    the stage rather than guessing."""
+    try:
+        p = Path(audit_path)
+        if not p.exists():
+            return ""
+        with p.open("rb") as fh:                      # bounded tail — this runs on every board render
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 60_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()[-200:]
+        import json as _json
+        for line in reversed(lines):
+            try:
+                ev = _json.loads(line).get("event")
+            except (ValueError, TypeError):
+                continue
+            if ev in _PHASE_BY_EVENT:
+                label = _PHASE_BY_EVENT[ev]
+                if label:
+                    return label
+    except Exception:  # noqa: BLE001 — a status label must never break the board
+        return ""
+    return ""
+
+
+def _runlog_placeholder(state: dict, active: bool, audit_path: str = "./state/audit.jsonl") -> str:
     """What the live-log panel shows BEFORE any output arrives (2026-07-22).
 
     The panel used to render a bare "Waiting for run output…" and sit on it. That is honest but
@@ -1446,7 +1505,8 @@ def _runlog_placeholder(state: dict, active: bool) -> str:
         return "<div class=logempty>No active run.</div>"
     import time as _t
     bits: list[str] = []
-    stage = str(state.get("phase") or state.get("stage") or "").strip()
+    # the audit knows the phase; the run state does not carry one at all
+    stage = _live_phase(audit_path)
     if stage:
         bits.append(f"<b>{_esc(stage)}</b>")
     started = state.get("run_started")
@@ -2030,6 +2090,13 @@ a.kpi:hover{border-color:var(--accent)}
 .kpi summary{list-style:none;cursor:pointer}
 .kpi summary::-webkit-details-marker{display:none}
 .kpi summary.kpisum{padding:16px 17px}
+/* 2026-07-22 (Commander: "0 needs you and 0 security blocks seem to be on different levels").
+   A KPI renders two ways: <a class=kpi> for a plain tile, <details class=kpi><summary class=kpisum>
+   for an expandable one (the security card). Both got .kpi's own padding, and the details variant
+   then added summary.kpisum's padding INSIDE it — so its number started 16px lower than every
+   neighbour and the row of tiles read as misaligned. The summary owns the padding for that
+   variant; the container must not pay it twice. */
+details.kpi{padding:0}
 .kpi[open] summary.kpisum{padding-bottom:8px}
 .secissue{border-top:1px solid var(--line);padding:12px 17px}
 .sechead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}

@@ -56,9 +56,18 @@ chk("normal: card is present", card is not None)
 hint = (card or {}).get("hint", "")
 chk("normal: hint does NOT contain verbose 'resets at local midnight'", "resets at local midnight" not in hint, repr(hint))
 chk("normal: hint does NOT contain verbose '7-day rolling'", "7-day rolling" not in hint, repr(hint))
-# pct should be ~6 % of 10 000 → "6%" (in the value field, not hint)
+# 2026-07-22 (Commander: "the design text is different between KPIs — make it the same"): the pct
+# moved OUT of the value and into the hint. Every other KPI tile is a bare figure in .kv over a caps
+# label; this one packed "600 today · 6%" into that same 30px tabular-nums MONO face, so a sentence
+# rendered in a digits-only display type and read as a different font. The percentage was never lost
+# — the gauge bar directly beneath the value has always drawn it, so the value was duplicating it.
 value = (card or {}).get("value", "")
-chk("normal: value contains a pct string (e.g. '6%')", "%" in value, repr(value))
+chk("normal: value is a BARE figure — no pct, no prose (matches the other KPI tiles)",
+    "%" not in value and "today" not in value, repr(value))
+chk("normal: the pct still reaches the operator, via the hint",
+    "%" in (card or {}).get("hint", ""), repr((card or {}).get("hint", "")))
+chk("normal: the gauge still carries the fraction (the pct's real home)",
+    isinstance((card or {}).get("gauge"), float), repr((card or {}).get("gauge")))
 
 # ── (b) over-budget state: card value is '⛔ paused — budget hit' ────────────
 
@@ -66,8 +75,8 @@ cfg_tiny = _cfg(daily_token_budget=1)   # 1-token cap → immediately over
 card_over = _tok_card(cfg_tiny)
 chk("over-budget: card is present", card_over is not None)
 val = (card_over or {}).get("value", "")
-chk("over-budget: value is '⛔ paused — budget hit'",
-    val == "⛔ paused — budget hit", repr(val))
+chk("over-budget: value is the short '⛔ paused' (the reason lives in the hint)",
+    val == "⛔ paused", repr(val))
 hint_over = (card_over or {}).get("hint", "")
 chk("over-budget: hint is concise (no verbose 'resets at local midnight')",
     "resets at local midnight" not in hint_over, repr(hint_over))
