@@ -23,7 +23,8 @@ COMMANDER (you)
        ├── Performance Engineer (Perf)   — hot-path benchmark gate      → performance-engineer.md
        ├── QA Engineer     (S-2 Recon)   — browser / e2e on DEV          → scout.md
        ├── Security Engineer (Security)  — security gate                 → provost.md
-       └── Release Manager (S-4 DevOps)  — CI / deploy readiness         → quartermaster.md
+       ├── Release Manager (S-4 DevOps)  — CI / deploy readiness         → quartermaster.md
+       └── SRE (Sentinel)                — post-merge suite + forward-only rollback → sentinel.md
 ```
 
 Every officer above is **in post today** — QA Engineer, Security Engineer and Release Manager
