@@ -368,9 +368,11 @@ def turns_for(cfg: Config, effort: str) -> int:
 def budget_for(cfg: Config, effort: str) -> int:
     """EU-377: the pass's task_budget (tokens of NEW content — model output + tool results read),
     scaled by effort like turns_for, and (EU-393) by the same backend factor — a weak/GLM pass
-    still needs the classification seam and registry-routed weak backends get the wider budget,
-    even though GLM itself currently skips task_budget (see the call site, builder.py ~659: the
-    backend won't honour the beta header). 0 disables (no budget sent).
+    still needs the classification seam and only glm/zai/z.ai-aliased backends receive the
+    ×_BACKEND_TURN_SCALE budget (registry/unknown ids normalize to NATIVE and get the default
+    budget, scale 1.0 — see :func:`_backend_turn_scale`), even though GLM itself currently skips
+    task_budget (see the call site, builder.py ~659: the backend won't honour the beta header).
+    0 disables (no budget sent).
 
     Why this and not max_turns alone: the builder's cost is quadratic in turns (fitted over 319
     passes: in_tok ≈ 728·N² + 26,491·N, a 36x replay multiple), and 70% of the 1,455-tok/turn
@@ -697,7 +699,10 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     _budget = budget_for(cfg, eff)
     if _budget:
         from . import backends as _backends
-        if not _backends.is_glm(cfg):
+        # EU-417: gate on the builder's per-tag/hybrid-RESOLVED backend, not just is_glm(cfg). In
+        # hybrid mode (main=opus, secondary=glm) is_glm(cfg) is False but the builder is routed to
+        # GLM via current_for_tag('builder'); a tag-blind gate would attach the beta option there.
+        if not _backends.is_glm_for_tag("builder", cfg):
             options.task_budget = {"total": _budget}
     # EU-38: tag this build pass in the usage ledger (ticket id + iteration) so per-pass input
     # tokens are sliceable by the ledger-analysis tooling. cfg also bounds the feedback/preamble.
@@ -741,4 +746,5 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
         output_tokens=getattr(run, "output_tokens", 0),  # getattr-guarded: stubs may omit these
         provider=getattr(run, "provider", ""),         # EU-123: which provider served this run
         model_version=getattr(run, "model_version", ""), # EU-123: clean model identifier
+        is_turn_limit=getattr(run, "is_turn_limit", False),  # EU-408: max-turns OR glm_token_ceiling
     )

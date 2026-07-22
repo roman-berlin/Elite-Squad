@@ -63,6 +63,13 @@ class BacklogAdapter(ABC):
         the unit's own comments, as plain text. Default: not supported."""
         return None
 
+    def status_category(self, key: str) -> Optional[str]:
+        """Optional: the ticket's statusCategory key ('new' | 'indeterminate' | 'done'), or None when
+        it can't be determined (unreachable board, unknown issue, no backend). The branch-retirement
+        sweep (EU-426) treats None as 'do not prune' — an unknown status must never authorise a delete.
+        Default: not supported (None → fail closed)."""
+        return None
+
     def latest_builder_comment(self, key: str) -> Optional[str]:
         """Optional: the most recent [General]-prefixed comment posted by the unit itself (Builder
         next-step instructions, CI guardrail handoffs, escalation notes), as plain text.

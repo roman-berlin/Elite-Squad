@@ -64,10 +64,27 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    2026-07-21: install-mac-watchdog-daemon.sh is the CURRENT EU-403 out-of-process watchdog
 #    installer (a periodic StartInterval agent, the counterpart that watches the cockpit is alive)
 #    — same class. scripts/watchdog.sh itself is token-free and stays OUT of this allow-list.
+#    2026-07-22: install-mac-config-backup-daemon.sh is the CURRENT EU-408 config/secrets backup
+#    installer (a daily StartInterval agent that runs scripts/backup-config.sh) — same class as the
+#    watchdog installer above. scripts/backup-config.sh is token-free and stays OUT of this allow-list.
+#    2026-07-22: install-mac-audit-publisher-daemon.sh is the CURRENT EU-428 AC0 Mac audit publisher
+#    (a periodic StartInterval agent that runs `./general sync`, restoring the heartbeat EU-181
+#    inadvertently killed) — same class as the watchdog installer. It is NOT a resurrection of the
+#    retired com.roman.general.sync.plist (distinct label com.roman.general.audit-publisher; the
+#    RETIRED list below still forbids the old plist + run-sync.sh).
+#    2026-07-22: install-mac-server-watchdog-daemon.sh is the CURRENT EU-433 Mac->VPS cross-host
+#    watchdog installer (a periodic StartInterval agent that runs `./general server-watchdog`, the
+#    reverse direction of EU-428 — the Mac probes the VPS over SSH and pages from the Mac, so a
+#    wedged VPS sender cannot suppress its own alarm) — same class as the watchdog installer above.
+#    It is NOT a resurrection of any retired plist (distinct label com.roman.general.server-watchdog;
+#    the RETIRED list below still forbids the old autopilot/council/patrol/smalltalk/sync plists).
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
              "scripts/general-autopull.sh",
              "scripts/install-mac-watchdog-daemon.sh",
+             "scripts/install-mac-config-backup-daemon.sh",
+             "scripts/install-mac-audit-publisher-daemon.sh",
+             "scripts/install-mac-server-watchdog-daemon.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):
@@ -95,8 +112,13 @@ chk("light daily stand-up is scheduled every day (general daily)",
 chk("deep council is scheduled WEEKLY (Mon dow=1), not daily",
     len(_council) == 1 and _council[0].split()[4] == "1", str(_council))
 chk("ceremonies: corridor small-talk stays de-cronned", "./general smalltalk" not in cron_text)
-chk("single source still schedules the weekly patrol (Mon)", "0 9 * * 1" in cron_text
-    and "./general patrol" in cron_text)
+# EU-432 (2026-07-22): patrol is deliberately NOT scheduled on the server — the box has no real
+# product repo (automatixy.repo_path is a placeholder pointing at the orchestrator's own source),
+# so `patrol automatixy` there would file AUTO tickets against the product backlog from the wrong
+# code. The patrol subcommand is unchanged (run it manually on the Mac against a real repo); it is
+# just no longer cron-scheduled here.
+chk("EU-432: patrol is NOT scheduled on the server (no real product target)",
+    "./general patrol" not in cron_text)
 
 # 5) Doc-reality (EU-56 iter-3): no repo doc may carry an *actionable* reference to the retired Mac
 #    launchd scheduler — a `com.roman.general.*` agent name, a `run-*.sh` wrapper, or a

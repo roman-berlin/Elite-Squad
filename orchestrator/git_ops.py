@@ -282,6 +282,162 @@ def reap_stale_worktrees(cfg) -> None:
                         pass
 
 
+def reap_closed_branches(cfg, backlogs: dict, audit) -> None:
+    """EU-426: retire abandoned ``autodev/<KEY>-*`` branches once their TICKET is Done.
+
+    A merged ticket already retires its branch (``loop._land`` deletes local + remote). This sweep
+    collects the rest — branches left behind by tickets that never merged (escalated, Planner-CLOSE-
+    parked, killed runs) but whose ticket has since closed. It is deliberately conservative: a dead
+    branch is annoying, a DELETED branch holding the only copy of someone's work is a disaster, so
+    every doubt resolves to *leave it*:
+
+      · only an ``autodev/<KEY>-*`` branch whose ticket's statusCategory is ``'done'`` is a candidate;
+      · a branch whose status can't be confirmed (no backlog for the app, backlog unreachable, an
+        unknown/None status) is NEVER pruned — an unknown status must not authorise a delete (fail
+        closed, AC4). Non-ticket branches (``adhoc-*``, ``_trial``, …) have no key → untouched;
+      · a branch still checked out in ANY worktree is NEVER pruned, even if Done (AC3);
+      · an UNMERGED branch is tagged ``attic/<KEY>-<shortsha>`` (created only if absent; if the tag
+        can't be created the branch is LEFT IN PLACE — the work must stay recoverable) before the
+        delete; a branch already merged into base needs no tag (the commits live on base);
+      · both the local ref and, when one exists, the remote ref are removed.
+
+    Runs at an idle boundary (autopilot startup, beside ``reap_stale_worktrees`` — never mid-run), so
+    no builder can be mid-commit on a branch this reaps. Each retirement is audited as
+    ``branch_retired`` with the ticket key, tip sha, attic tag (or None when already merged) and
+    whether it was merged. A single branch or git-subprocess failure never aborts the sweep — it is
+    logged and the next branch is considered. Never deletes anything but an ``autodev/*`` ref.
+    """
+    import re as _re
+    # A ticket key is <UPPER PROJECT>-<digits>, e.g. EU-426 / AUTO-57. branch_name() builds
+    # ``autodev/<id>-<slug>``, so the key is the leading <id> before the slug's first dash.
+    _KEY_RE = _re.compile(r"^autodev/([A-Z][A-Z0-9_]*-[0-9]+)(?:-|$)")
+
+    def _resolves(cwd: str, ref: str) -> bool:
+        try:
+            r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref],
+                               cwd=cwd, capture_output=True, text=True,
+                               env=_git_env(), timeout=_GIT_TIMEOUT_S)
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    for app in getattr(cfg, "apps", []) or []:
+        repo_path = getattr(app, "repo_path", "")
+        if not repo_path:
+            continue
+        try:
+            repo = str(Path(repo_path).expanduser().resolve())
+        except OSError:
+            continue
+        if not (Path(repo) / ".git").exists():
+            continue
+
+        backlog = backlogs.get(app.name) if isinstance(backlogs, dict) else None
+
+        # Prefer origin/<base> for the merge check (a land pushes there, so that's where the work
+        # truly lives); fall back to the local <base> when there's no origin (local-only repos / tests).
+        base_ref = f"origin/{app.base_branch}"
+        if not _resolves(repo, base_ref):
+            base_ref = app.base_branch
+            if not _resolves(repo, base_ref):
+                continue   # base doesn't resolve at all → can't classify "merged" → leave this repo alone
+
+        # Branches checked out in any worktree (incl. the current one) are off-limits (AC3).
+        checked_out: set[str] = set()
+        try:
+            wt = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo,
+                                capture_output=True, text=True, env=_git_env(), timeout=_GIT_TIMEOUT_S)
+            if wt.returncode == 0:
+                for line in wt.stdout.splitlines():
+                    if line.startswith("branch refs/heads/"):
+                        checked_out.add(line[len("branch refs/heads/"):].strip())
+        except (OSError, subprocess.SubprocessError):
+            checked_out = set()   # couldn't enumerate worktrees → don't let that block the sweep;
+                                  # checked_out stays empty, but git itself still refuses to delete a
+                                  # checked-out branch, so safety holds either way.
+
+        # List autodev/* branches with their tips: "<shortname>\t<sha>".
+        try:
+            fe = subprocess.run(
+                ["git", "for-each-ref", "--format=%(refname:short)%09%(objectname)",
+                 "refs/heads/autodev/*"],
+                cwd=repo, capture_output=True, text=True, env=_git_env(), timeout=_GIT_TIMEOUT_S)
+            if fe.returncode != 0:
+                continue
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        for line in fe.stdout.splitlines():
+            try:
+                branch, _, sha = line.partition("\t")
+                branch, sha = branch.strip(), sha.strip()
+                if not branch or not sha:
+                    continue
+                m = _KEY_RE.match(branch)
+                if not m:
+                    continue                              # not a ticket branch → no ticket to be Done
+                key = m.group(1)
+
+                if branch in checked_out:
+                    continue                              # checked out in a worktree → leave it (AC3)
+
+                if backlog is None:
+                    continue                              # no backlog for this app → fail closed (AC4)
+                try:
+                    category = backlog.status_category(key)
+                except Exception:  # noqa: BLE001 — a buggy/stub adapter must read as "unknown", never crash the sweep
+                    category = None
+                if category != "done":
+                    continue                              # not Done (Blocked/QA/In Progress/To Do/unknown) → fail closed (AC2/AC4)
+
+                # Is the tip already on base? (rc 0 == ancestor == merged.)
+                try:
+                    mb = subprocess.run(["git", "merge-base", "--is-ancestor", sha, base_ref],
+                                        cwd=repo, capture_output=True, env=_git_env(),
+                                        timeout=_GIT_TIMEOUT_S)
+                    merged = mb.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    continue                              # couldn't classify merged → leave it
+
+                tag = None
+                if not merged:
+                    tag = f"attic/{key}-{sha[:12]}"
+                    # Create the attic tag only if it doesn't already exist (idempotent across partial
+                    # runs). If it can't be created, DO NOT delete — the work must stay recoverable.
+                    if not _resolves(repo, f"refs/tags/{tag}"):
+                        mk = subprocess.run(["git", "tag", tag, sha], cwd=repo,
+                                            capture_output=True, text=True, env=_git_env(),
+                                            timeout=_GIT_TIMEOUT_S)
+                        if mk.returncode != 0:
+                            print(f"  · branch-retire: could not archive {branch} (tag {tag} failed: "
+                                  f"{(mk.stderr or '').strip()[:120]}) — left in place", flush=True)
+                            continue
+
+                # Delete the local ref. If that fails, don't audit a retirement that didn't happen.
+                dl = subprocess.run(["git", "branch", "-D", branch], cwd=repo,
+                                    capture_output=True, text=True, env=_git_env(),
+                                    timeout=_GIT_TIMEOUT_S)
+                if dl.returncode != 0:
+                    print(f"  · branch-retire: local delete of {branch} failed "
+                          f"({(dl.stderr or '').strip()[:120]}) — left in place", flush=True)
+                    continue
+
+                # Delete the remote ref too when one exists (the PR-on-block path pushes some).
+                # Best-effort: a missing remote ref or an absent origin is normal, never fatal.
+                subprocess.run(["git", "push", "origin", "--delete", branch], cwd=repo,
+                               capture_output=True, text=True, env=_git_env(), timeout=_GIT_TIMEOUT_S)
+
+                audit.record("branch_retired", key=key, sha=sha, tag=tag, merged=merged,
+                             app=app.name, branch=branch)
+                print(f"  · branch-retire: retired {branch} (ticket {key} done"
+                      f"{'' if merged else f', archived as {tag}'})", flush=True)
+            except (OSError, subprocess.SubprocessError) as exc:
+                # EU-334 class: a git-subprocess blip on one branch must never abort the sweep.
+                print(f"  · branch-retire: {line.split(chr(9))[0] if line else '?'} hit "
+                      f"{exc.__class__.__name__} — logged, continuing", flush=True)
+                continue
+
+
 class Git:
     def __init__(self, repo_path: str, base_branch: str = "dev",
                  protected_branch: str = "main", worktree_path: Optional[str] = None):

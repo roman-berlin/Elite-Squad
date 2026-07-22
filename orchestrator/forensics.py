@@ -82,36 +82,54 @@ def _reason(run: dict) -> str:
     return " ".join(x for x in (run.get("note"), run.get("verdict")) if x)
 
 
-def scan(cfg) -> list[dict]:
-    """Every failed run, newest first, each tagged with its category/label/action."""
+def scan(cfg, local_only: bool = True) -> list[dict]:
+    """Every failed run, newest first, each tagged with its category/label/action.
+
+    EU-428 AC3: ``local_only`` defaults to **True** — scan reads ONLY this host's own audit, never the
+    synced ``shared/<peer>.jsonl`` rows. scan is the root of every WRITE the forensics subsystem makes
+    (``signature_sweep`` cross-ticket auto-filing + ``_file_postmortem_ticket`` per-ticket filing), so a
+    crash that happened ON THE MAC must never auto-file a ticket ON THE SERVER that merely *received*
+    the row over sync. Peer rows stay display + liveness only (``dashboard.load_tasks`` default is still
+    peer-inclusive). Callers that genuinely need the merged peer view (none in the write path today) pass
+    ``local_only=False``."""
     out = []
-    for r in D.load_tasks(cfg.audit_path):
+    for r in D.load_tasks(cfg.audit_path, local_only=local_only):
         if r.get("outcome") in FAILED_OUTCOMES:
             out.append({**r, **classify(r.get("outcome", ""), _reason(r))})
     return out
 
 
-def taxonomy(cfg) -> list[dict]:
-    """Failure counts by category, most common first — for the /forensics breakdown."""
-    counts = Counter(r["category"] for r in scan(cfg))
+def taxonomy(cfg, local_only: bool = False) -> list[dict]:
+    """Failure counts by category, most common first — for the /forensics breakdown.
+
+    Display caller: ``local_only`` defaults to **False** (peer-inclusive) so the cockpit page still
+    mirrors what every host built. The filing path does not route through here."""
+    counts = Counter(r["category"] for r in scan(cfg, local_only=local_only))
     return [{"category": c, "label": _LABELS.get(c, c), "count": n, "action": _ACTIONS.get(c, "")}
             for c, n in counts.most_common()]
 
 
-def attempts(cfg, ticket_id: str) -> list[dict]:
-    """That ticket's failed runs, OLDEST first (a timeline)."""
-    runs = [r for r in scan(cfg) if (r.get("ticket_id") or "").lower() == (ticket_id or "").lower()]
+def attempts(cfg, ticket_id: str, local_only: bool = True) -> list[dict]:
+    """That ticket's failed runs, OLDEST first (a timeline).
+
+    EU-428 AC3: ``local_only`` defaults to **True** — a host counts only ITS OWN attempts at a ticket.
+    Feeds the post-mortem filing threshold (``maybe_postmortem``) and the Builder's retry hint
+    (``loop``), both of which must reflect this host's history, not a peer's."""
+    runs = [r for r in scan(cfg, local_only=local_only)
+            if (r.get("ticket_id") or "").lower() == (ticket_id or "").lower()]
     return list(reversed(runs))
 
 
-def fail_count(cfg, ticket_id: str) -> int:
-    return len(attempts(cfg, ticket_id))
+def fail_count(cfg, ticket_id: str, local_only: bool = True) -> int:
+    return len(attempts(cfg, ticket_id, local_only=local_only))
 
 
-def repeat_offenders(cfg, threshold: int = 2) -> list[dict]:
-    """Tickets that have failed >= threshold times, worst first."""
+def repeat_offenders(cfg, threshold: int = 2, local_only: bool = False) -> list[dict]:
+    """Tickets that have failed >= threshold times, worst first.
+
+    Display caller: ``local_only`` defaults to **False** (peer-inclusive) for the /forensics page."""
     by_ticket: dict[str, list[dict]] = {}
-    for r in scan(cfg):
+    for r in scan(cfg, local_only=local_only):
         by_ticket.setdefault(r.get("ticket_id") or "?", []).append(r)
     rows = []
     for tid, runs in by_ticket.items():
@@ -130,6 +148,63 @@ def postmortems_dir(cfg) -> Path:
 def postmortem_path(cfg, ticket_id: str) -> Path:
     safe = "".join(ch if (ch.isalnum() or ch in "-_") else "-" for ch in (ticket_id or "ticket"))
     return postmortems_dir(cfg) / f"{safe}.md"
+
+
+def _legacy_postmortems_dir(cfg) -> Path:
+    """The pre-2026-07-21 postmortems/ location — a sibling of the audit_path's PARENT dir (the repo
+    root before the state/ migration moved audit_path one level deeper into state/). ``parent.parent``
+    matches the actual one-level migration (audit.jsonl -> state/audit.jsonl); any other layout simply
+    yields a non-existent legacy dir -> no adoption (fails safe). Mirrors ``council._legacy_council_dir``
+    and ``_legacy_sig_state_file``."""
+    return Path(cfg.audit_path).resolve().parent.parent / "postmortems"
+
+
+def adopt_legacy_postmortems(cfg, audit=None) -> bool:
+    """EU-435: self-heal the postmortem archive the 2026-07-21 state/ migration orphaned.
+
+    Background: the migration moved ``audit_path`` (and with it every ``with_name("postmortems")``
+    derivation) one level deeper into ``state/``, but left the real archive — one ``<ticket>.md`` per
+    repeatedly-failing ticket — in the legacy ``postmortems/`` sibling. ``postmortems_dir()`` now
+    resolves to the empty ``state/postmortems/``; ``latest_postmortems()`` and ``postmortem_path()``
+    start fresh, so the irreplaceable failure history (a dir of files, identical in shape to the
+    ``council/`` archive) is unreachable.
+
+    On boot this MOVES the legacy ``*.md`` archive into the new location (byte-for-byte, so each
+    postmortem's content survives unchanged), records a ``postmortem_archive_adopted`` audit event
+    carrying the adopted file count, and is done. Idempotent + no-clobber: a new dir that already
+    holds a ``*.md`` postmortem is never touched — a legacy file is only moved when its destination is
+    absent (never overwrites). Best-effort — never raises.
+
+    Mirrors ``council.adopt_legacy_council`` and ``backend_pref.migrate``: called ONLY from the live
+    CLI entrypoint (``main._main``), so a test around a tmp config can never relocate the operator's
+    real archive. Returns True iff it moved at least one file in (for observability / tests)."""
+    import shutil
+    try:
+        new = postmortems_dir(cfg).resolve()            # the dir latest_postmortems()/write_postmortem use
+        if new.is_dir() and any(new.glob("*.md")):      # already populated -> never clobber (AC pin)
+            return False
+        legacy = _legacy_postmortems_dir(cfg)
+        if legacy == new or not legacy.is_dir():        # nothing to adopt (fails safe)
+            return False
+        new.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for src in sorted(legacy.iterdir()):
+            if not src.is_file():
+                continue                               # the archive is *.md; skip any stray subdir
+            dst = new / src.name
+            if dst.exists():
+                continue                               # never overwrite a file already present
+            shutil.move(str(src), str(dst))
+            moved += 1
+        if audit is not None:
+            try:
+                audit.record("postmortem_archive_adopted", files=moved,
+                             from_path=str(legacy), to_path=str(new))
+            except Exception:  # noqa: BLE001 — an audit write must never break a sweep
+                pass
+        return moved > 0
+    except Exception:  # noqa: BLE001 — boot-critical: a migration helper must NEVER break startup
+        return False
 
 
 def _fmt_when(dt) -> str:
@@ -384,6 +459,63 @@ def _mark_sig_filed(cfg, sig: str, when: float) -> None:
         locking.locked_rmw(_sig_state_file(cfg), _mut, default={}, corrupt_to_default=True)
     except OSError:
         pass
+
+
+def _legacy_sig_state_file(cfg) -> Path:
+    """The pre-2026-07-21 signature_filed.json location — a sibling of the audit_path's PARENT dir
+    (the repo root before the state/ migration moved audit_path one level deeper into state/).
+    ``parent.parent`` matches the actual one-level migration (audit.jsonl -> state/audit.jsonl); any
+    other layout simply yields a non-existent legacy file -> no adoption (fails safe). Mirrors
+    ``council._legacy_council_dir``."""
+    return Path(getattr(cfg, "audit_path", "./state/audit.jsonl")).resolve().parent.parent / "signature_filed.json"
+
+
+def adopt_legacy_signature_ledger(cfg, audit=None) -> bool:
+    """EU-436: self-heal the filed-signature dedup ledger the 2026-07-21 state/ migration orphaned.
+
+    Background: the migration moved ``audit_path`` (and with it every ``with_name("signature_filed.json")``
+    derivation) one level deeper into ``state/``, but left the real ledger at the legacy
+    ``signature_filed.json`` sibling. ``_sig_state_file()`` now resolves to the (missing/empty)
+    ``state/signature_filed.json``; with the ledger lost, ``_sig_last_filed()`` returns ``{}`` and a
+    recurring crash signature whose postmortem was ALREADY filed gets filed AGAIN — a duplicate Jira
+    ticket (active board harm).
+
+    On boot this MOVES the legacy ledger into the new location (byte-for-byte, so the
+    {signature: ts} dedup map is preserved and the reader sees every entry), records a
+    ``signature_ledger_adopted`` audit event carrying the adopted entry count, and is done. Idempotent
+    + no-clobber: a new ledger that already exists (a signature has already been filed in the new
+    location) is never touched — the legacy file is LEFT IN PLACE for the operator to reconcile (a
+    divergent ledger is never silently overwritten or merged). Best-effort — never raises.
+
+    Mirrors ``council.adopt_legacy_council`` and ``backend_pref.migrate``: called ONLY from the live CLI
+    entrypoint (``main._main``), so a test around a tmp config can never relocate the operator's real
+    ledger. Returns True iff it moved the ledger in (for observability / tests)."""
+    import json as _json
+    import shutil
+    try:
+        new = _sig_state_file(cfg).resolve()             # the exact path the reader uses (abs for the move)
+        if new.exists():                                 # already present -> never clobber (AC pin)
+            return False
+        legacy = _legacy_sig_state_file(cfg)
+        if legacy == new or not legacy.exists():         # nothing to adopt (fails safe)
+            return False
+        entries = 0
+        try:
+            data = _json.loads(legacy.read_text(encoding="utf-8"))
+            entries = len(data) if isinstance(data, dict) else 0
+        except (OSError, ValueError, TypeError):
+            entries = 0                                  # move it anyway — a corrupt file still beats silence
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy), str(new))               # move, not copy: idempotent on the next boot
+        if audit is not None:
+            try:
+                audit.record("signature_ledger_adopted", entries=entries,
+                             from_path=str(legacy), to_path=str(new))
+            except Exception:  # noqa: BLE001 — an audit write must never break a sweep
+                pass
+        return True
+    except Exception:  # noqa: BLE001 — boot-critical: a migration helper must NEVER break startup
+        return False
 
 
 def _row_ts(row: dict) -> float:

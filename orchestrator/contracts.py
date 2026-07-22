@@ -65,6 +65,10 @@ class BuildResult:
     output_tokens: int = 0        # completion tokens this run
     provider: str = ""            # EU-123: which provider served this run ("Anthropic" or "GLM")
     model_version: str = ""       # EU-123: clean model identifier (e.g., "claude-opus-4-8", "glm-4")
+    is_turn_limit: bool = False   # EU-408: this pass hit the turn ceiling OR the GLM per-pass token
+                                  # ceiling — the loop routes EITHER into the split/boosted-retry
+                                  # ladder instead of the ERRORED fallthrough. Set by builder from
+                                  # AgentRun.is_turn_limit (max-turns OR glm_token_ceiling cutoff).
 
 
 # --------------------------------------------------------------------------- #

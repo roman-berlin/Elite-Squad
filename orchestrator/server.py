@@ -37,6 +37,7 @@ from .cockpit_state import _LOG, _Tee, _run_lock, _sse, _state, recent_log  # no
 # via these helpers so distinct projects run (and stream) truly in parallel, while a second run on
 # the SAME project is still refused (the per-app TOCTOU guard inside ``claim_run``).
 from .cockpit_state import (  # noqa: F401
+    active_run_count,
     active_runs,
     claim_run,
     get_autopilot_status,
@@ -240,6 +241,10 @@ def create_app(cfg: Config, port: int = 8787):
     from . import agent as _agent
     _agent.configure_audit(audit)
     _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
+    # EU-425: anchor the Jira adapter's transition-audit sink to cfg.audit_path (same resolved path
+    # `audit` above was built from). See main.py for the rationale — the adapter can't see cfg.
+    from .backlog import jira as _jira
+    _jira.configure_audit_path(cfg.audit_path)
 
     # ----------------------------------------------------------------------------------------------
     # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`
@@ -471,7 +476,12 @@ def create_app(cfg: Config, port: int = 8787):
         import platform
         from flask import jsonify
         # EU-106: include is_mac so the UI layer can decide whether to show "Open logs" buttons.
-        return jsonify({**health.summary(cfg), "is_mac": platform.system() == "Darwin"})
+        # EU-405: include active_run_count so `./general deploy` — a SEPARATE process that can't see
+        # the serve process's in-memory cockpit_state — can probe the authoritative "is a build
+        # running?" signal before it restarts. This is the live counterpart to
+        # autopilot.in_flight_builds' audit-tail signal.
+        return jsonify({**health.summary(cfg), "is_mac": platform.system() == "Darwin",
+                        "active_run_count": active_run_count()})
 
     @app.get("/api/open-logs")
     def open_logs_api():
@@ -1945,6 +1955,13 @@ def create_app(cfg: Config, port: int = 8787):
             + ("…" if n > 8 else "") if n else
             f"✓ Synced with Jira — everything in Needs-you is still genuinely waiting "
             f"({r.get('checked', 0)} checked).")
+        # EU-406 (AC2): one-line note when statuses were unrecognized — a renamed/custom Jira
+        # column parked behind these is KEPT, not guessed-and-cleared; surface it so it's visible.
+        unk = r.get("unknown", [])
+        if unk:
+            get_state(None)["last_msg"] += (
+                f" ⚠ {len(unk)} in an unrecognized Jira status (kept, not guessed): "
+                + ", ".join(t for t, _ in unk[:6]) + ("…" if len(unk) > 6 else ""))
         return redirect("/needs")
 
     @app.get("/needs")
@@ -2722,7 +2739,10 @@ def create_app(cfg: Config, port: int = 8787):
         cat = (request.args.get("cat") or "").strip()
         if cat:  # a KPI/taxonomy deep-link: show only the failed runs in this cause category
             label = _fx._LABELS.get(cat, cat)
-            runs = [r for r in _fx.scan(cfg) if r.get("category") == cat]
+            # EU-428 AC3: this is the /forensics DISPLAY (read-only) — opt INTO the peer-inclusive
+            # view so the page still mirrors every host's failures. scan() defaults to local-only
+            # precisely so the FILING path (signature_sweep / post-mortem) can never act on a peer row.
+            runs = [r for r in _fx.scan(cfg, local_only=False) if r.get("category") == cat]
             action = _fx._ACTIONS.get(cat, "")
             head = ("<style>.backlnk{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
                     "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"
@@ -3526,6 +3546,13 @@ def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
         print("  decision listener: ON — reply to ❓ messages in Telegram to resume tickets")
     elif notify.configured():
         print(f"  decision listener: OFF — {_why} (cockpit-only on this host)")
+    # EU-405 AC2: the serve-level self-restart watcher. Consumes the EU-387 flag at an idle boundary
+    # EVEN WHEN NO DRAIN IS ARMED — closing the manual-cockpit-run gap where a self-repo land announced
+    # "restarting automatically once idle" and then never did (the stale-process class that ran old
+    # code 11h). Gated on active_run_count()==0, so it can never kill a live build; the drain-cycle
+    # call remains the fast path. Singleton, so a re-entry never stacks a second thread.
+    from . import autopilot as _ap
+    _ap.ensure_self_restart_watcher(cfg, AuditLog(cfg.audit_path))
     print(f"\u2b22 Squad HQ: http://{host}:{port}   (Ctrl-C to stop)")
     print("  (the terminal shows the unit's progress only — dashboard polling is hidden)\n")
     # threaded: the SSE stream holds a long-lived request — without this it would block the cockpit.

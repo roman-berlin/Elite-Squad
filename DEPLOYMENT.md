@@ -49,6 +49,27 @@ Keep the Mac on and run the cockpit (this also starts the Telegram listener):
 ```bash
 ./general serve      # cockpit at http://localhost:8787
 ```
+
+**Restarting the cockpit safely (EU-405).** `./general deploy` is **THE way to restart** the cockpit
+onto the current code. It refuses to restart while a build is in flight — it probes the cockpit's live
+active-run count AND scans the audit tail for an open `ticket_start` with no terminal event — so an
+operator can never kickstart a live build mid-edit (the AUTO-177 incident, 2026-07-19, killed a build
+exactly this way). When the coast is clear it restarts via your supervisor (launchd on the Mac,
+systemd on the VPS):
+```bash
+./general deploy              # restarts now if no build is running; refuses otherwise
+./general deploy --force      # break-glass: restart even if a build appears in flight (may kill it)
+```
+A raw restart of your supervisor directly is **break-glass only** — it skips the in-flight guard and
+kills whatever is running. On the VPS: `sudo systemctl restart general.service`. On the Mac, the
+keepalive agent's label and the exact command live in `scripts/install-mac-cockpit-daemon.sh` (the
+canonical source — `./general deploy` runs them for you, safely). Use `./general deploy` instead.
+
+A self-repo land (the unit lands a change to its own code) restarts **automatically** once idle: the
+land flags a pending restart and a serve-level watcher consumes it at the next idle boundary — no
+manual step, and never mid-build. (If `self_update_auto_restart` is off, the land tells you to run
+`./general deploy` by hand instead.)
+
 From your phone (Telegram): `/standup`, `/status`, `/run automatixy <what> --live`, reply
 `AUTO-1: <decision>`. Optional — reach the cockpit remotely:
 ```bash
@@ -75,6 +96,66 @@ min, then resume it (`kill -CONT`) for a "cockpit recovered" notice. On the VPS,
 script from cron: `*/4 * * * * /path/to/repo/scripts/watchdog.sh >> ~/general-watchdog.log 2>&1`.
 Tunables (env, all optional): `COCKPIT_URL`, `STALE_SEC`, `FAIL_THRESHOLD`, `RE_ALERT_EVERY`,
 `HEALTH_TIMEOUT`.
+
+**Mac audit publisher (EU-428).** The brain-stem (councils, the daily brief) runs on the VPS; the
+builds run on the Mac. Each host reads the other's audit only because the Mac *publishes* a copy of
+its `state/audit.jsonl` to the shared `unit-state` branch. That publisher was dead for 25 days
+(EU-181 removed the broken agent and never restored the publish half), so `shared/mac.jsonl` froze
+while the VPS kept logging a healthy `pulled=True` — it was pulling a file that never changed, and
+the daily brief was being written by the one host that cannot see a build. Install the periodic
+publisher on the **Mac** (not the VPS — the VPS is pull-only):
+
+```bash
+bash scripts/install-mac-audit-publisher-daemon.sh            # Mac: periodic launchd agent (StartInterval 900)
+bash scripts/install-mac-audit-publisher-daemon.sh uninstall  # stop + remove
+```
+
+QA it once installed: after one ~15-min cycle, the newest event ts in
+`~/General/.unit-state/shared/mac.jsonl` should be within one interval of the newest ts in
+`~/General/state/audit.jsonl`. The VPS cron's `sync[server] pulled=True peers=mac(age=…)` line now
+carries the peer's **newest-event age** (parsed from the ts inside the file, not its mtime) plus a
+`STALE` marker — a successful pull of unchanged data can no longer hide behind a healthy
+`pulled=True`. The companion **VPS peer watcher** (AC2) then pages only when the Mac goes quiet
+*while it has work in flight* — see `scripts/peer-watchdog.sh`.
+
+**Config & secrets backup (EU-408).** `.env` (Jira/Telegram/GLM tokens) and `config.yaml` are
+gitignored by design, so they have no version-control safety net — a disk failure, an errant
+`rm -rf`, or a bad agent edit loses them and the unit is down until every credential is re-issued
+and the ~150-line config is rebuilt. A nightly backup copies BOTH files to a **private location
+outside the repo** (so a repo wipe does not take the backup with it), keeping a bounded changelog
+of every edit. Install it:
+
+```bash
+bash scripts/install-mac-config-backup-daemon.sh            # Mac: nightly launchd agent (StartInterval 86400)
+bash scripts/install-mac-config-backup-daemon.sh uninstall  # stop + remove
+bash scripts/backup-config.sh                               # one-off: snapshot now
+# VPS cron (3:17am daily):
+#   17 3 * * *  /path/to/repo/scripts/backup-config.sh >> ~/general-config-backup.log 2>&1
+```
+
+- **Where:** `~/.general-config-backups/` by default (override: `GENERAL_CONFIG_BACKUP_DIR`). Each
+  run writes `<name>.<YYYYMMDD-HHMMSS>` only when the file *changed* since the last backup, so the
+  retained history is a real changelog of edits, not 14 identical nightly copies. `<name>.latest`
+  always points at the newest copy.
+- **Retention:** newest 14 per file (override: `BACKUP_KEEP`). **Perms:** dir `700`, every copy
+  `600` — these files *are* the secrets.
+- **Log:** `~/Library/Logs/General/config-backup.log` (one line per run; the backups themselves are
+  never logged).
+
+**Restore** (from the backup host — adjust the repo path to match your checkout):
+1. See what's recoverable: `ls -t ~/.general-config-backups/` (the `.latest` links point at the
+   newest of each).
+2. Restore the files from the newest snapshots:
+   ```bash
+   REPO=/path/to/General
+   cp ~/.general-config-backups/.env.latest         "$REPO/.env"         && chmod 600 "$REPO/.env"
+   cp ~/.general-config-backups/config.yaml.latest  "$REPO/config.yaml"
+   ```
+   For a point-in-time restore, pick a specific timestamped copy (e.g. `.env.20260721-1405`)
+   instead of `.latest`.
+3. Reload creds into the running process: `source .env`, then restart the cockpit so it re-reads
+   config.yaml — `./general deploy` (it refuses mid-build; see "Restarting the cockpit safely").
+4. Verify: `./general doctor` should come back all ✓ (auth, repo, config).
 
 ---
 

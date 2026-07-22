@@ -33,11 +33,14 @@ never read as a bad credential, and vice versa):
 """
 from __future__ import annotations
 
+import datetime as _dt
+import json
 import os
 import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 _CACHE_TTL_S = 900.0      # ~15 min — health/summary callers ride this cache
 _PROBE_TIMEOUT_S = 30.0   # one trivial round-trip; a hang must never stall health for long
@@ -58,6 +61,23 @@ _LOGIN_FAILURE_MARKERS = (
     "authentication_error",      # the API error type the SDK/CLI surface on a rejected credential
     "oauth token has expired",
     "oauth token revoked",
+    # EU-430 (2026-07-22 VPS outage): the dead Max-plan OAuth credential surfaced as a 401 the
+    # existing markers did NOT match — "Invalid authentication credentials" (the API 401 body) and
+    # "OAuth access token has expired" (the refresh path). Without these the council broadcast the
+    # raw 401 to the Commander's phone as the daily brief for 3 ceremonies. Note "oauth token has
+    # expired" above does NOT substring-match "oauth ACCESS token has expired" (the extra word), so
+    # the full observed shape is listed explicitly.
+    "invalid authentication credentials",
+    "oauth access token has expired",
+)
+
+# EU-430: provider-error shapes broader than the login markers — a model result that is actually an
+# error string, not content. Used by the council/roster ARTEFACT guard so a failing/dead credential
+# is never broadcast as the brief or persisted into ROSTER.md / last-standup.md. These prefixes
+# never appear in a legitimate stand-up line or briefing, so the guard can't censor real content.
+_PROVIDER_ERROR_MARKERS = (
+    "api error:",                # "Failed to authenticate. API Error: 401 …"
+    "failed to authenticate",
 )
 
 # Internal sentinels _run_probe returns in place of CLI output when the probe can't produce one,
@@ -79,6 +99,22 @@ def is_login_failure(text: str | None) -> bool:
     — credential present but REJECTED. Never matches network/timeout/turn-limit text."""
     t = (text or "").lower()
     return bool(t) and any(m in t for m in _LOGIN_FAILURE_MARKERS)
+
+
+def looks_like_provider_error(text: str | None) -> bool:
+    """True when ``text`` is a provider/auth error string rather than real model output (EU-430).
+
+    Broader than :func:`is_login_failure`: a model call that fails auth returns the provider's raw
+    error as its ``result`` (e.g. ``"Failed to authenticate. API Error: 401 …"``). The council and
+    roster artefact guards use this so such a string is NEVER broadcast as the daily brief or
+    persisted into ROSTER.md / last-standup.md / the transcript. Never matches ordinary briefing or
+    stand-up text — these shapes are never legitimate content."""
+    if not text:
+        return False
+    low = text.strip().lower()
+    if is_login_failure(low):
+        return True
+    return any(m in low for m in _PROVIDER_ERROR_MARKERS)
 
 
 def _disabled() -> bool:
@@ -185,3 +221,100 @@ def invalidate() -> None:
     with _cache_lock:
         _cache["at"] = 0.0
         _cache["result"] = None
+
+
+# --------------------------------------------------------------------------- #
+# EU-430 (2026-07-22): credential-EXPIRY pre-flight — catch a soon-to-lapse or
+# unrefreshable login BEFORE the first 401, not after the fourth failed brief.
+# --------------------------------------------------------------------------- #
+def _read_oauth_block() -> dict | None:
+    """Best-effort read of the Claude OAuth credentials block (the file ``claude /login`` writes on
+    a headless/VPS box). Returns the dict carrying ``expiresAt`` / ``refreshToken``, or None when
+    absent/unreadable. Never raises; never returns a secret beyond the structural fields the expiry
+    pre-flight must inspect. (The macOS Keychain store has no expiry field to read, so a Darwin box
+    without the file correctly falls through to ``None`` → ``unknown``.)"""
+    home = Path.home()
+    for p in (home / ".claude" / ".credentials.json",
+              home / ".config" / "claude" / ".credentials.json"):
+        try:
+            if not p.is_file():
+                continue
+            data = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, ValueError):
+            continue
+        block = data.get("claudeAiOauth") if isinstance(data, dict) else None
+        if not isinstance(block, dict):
+            block = data if isinstance(data, dict) else None
+        if isinstance(block, dict) and any(k in block for k in ("expiresAt", "refreshToken", "accessToken")):
+            return block
+    return None
+
+
+def _parse_expires_at(val) -> float | None:
+    """epoch-seconds from an ``expiresAt`` value — tolerates epoch-seconds, epoch-millis, ISO-8601
+    (e.g. ``"2026-07-19T16:30:06Z"`` — the shape the 2026-07-22 audit observed on the VPS), or
+    None/unparseable → None."""
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        v = float(val)
+        return v / 1000.0 if v > 1e12 else v          # ms (anything past ~2001 in ms) → seconds
+    s = str(val).strip()
+    if not s:
+        return None
+    try:                                              # epoch-as-string
+        v = float(s)
+        return v / 1000.0 if v > 1e12 else v
+    except ValueError:
+        pass
+    try:                                              # ISO-8601
+        return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def credential_status(*, threshold_h: float = 48.0, now_epoch: float | None = None) -> dict:
+    """PRE-FLIGHT (EU-430 AC4): is the Claude credential about to lapse, or already unrefreshable?
+
+    Returns ``{"level", "reason", "expires_in_h", "path"}`` where ``level`` is:
+
+      ``"warn"``    — the credentials FILE is the auth source AND (``refreshToken`` is empty OR
+                      ``expiresAt`` is within ``threshold_h`` hours of now / already past). This is
+                      the VPS's exact dead condition (empty refresh token → cannot self-heal).
+      ``"ok"``      — a healthy file (non-empty refresh + a comfortably-future expiry), OR env-based
+                      auth (``ANTHROPIC_API_KEY`` / ``CLAUDE_CODE_OAUTH_TOKEN``) which is not
+                      file-expiry-bound.
+      ``"unknown"`` — no credentials file and no env auth: presence-only (the liveness probe handles
+                      validity); must NOT false-red a box that simply has no claude login.
+
+    Never raises. Pure (no side effects) — the ceremony wires a Telegram warning off a ``"warn"``
+    verdict (``council._auth_preflight``)."""
+    path = str(Path.home() / ".claude" / ".credentials.json")
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return {"level": "ok",
+                "reason": "env-based auth (API key / OAuth token) — not file-expiry-bound",
+                "expires_in_h": None, "path": path}
+    block = _read_oauth_block()
+    if block is None:
+        return {"level": "unknown",
+                "reason": "no credentials file — presence-only (the liveness probe handles validity)",
+                "expires_in_h": None, "path": path}
+    refresh = str(block.get("refreshToken") or "").strip()
+    if not refresh:
+        return {"level": "warn",
+                "reason": "refreshToken is EMPTY — the login cannot self-heal; re-auth on the box",
+                "expires_in_h": None, "path": path}
+    exp = _parse_expires_at(block.get("expiresAt"))
+    if exp is None:
+        return {"level": "unknown",
+                "reason": "credentials present but expiresAt unreadable — can't pre-flight expiry",
+                "expires_in_h": None, "path": path}
+    now = now_epoch if now_epoch is not None else time.time()
+    hours_left = (exp - now) / 3600.0
+    if hours_left <= threshold_h:
+        reason = (f"credential EXPIRED {-hours_left:.1f}h ago — re-auth now" if hours_left <= 0
+                  else f"credential expires in {hours_left:.1f}h "
+                       f"(within {threshold_h:.0f}h threshold) — re-auth before it lapses")
+        return {"level": "warn", "reason": reason, "expires_in_h": round(hours_left, 2), "path": path}
+    return {"level": "ok", "reason": f"credential valid for {hours_left:.1f}h more",
+            "expires_in_h": round(hours_left, 2), "path": path}

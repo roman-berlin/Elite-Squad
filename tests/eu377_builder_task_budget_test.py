@@ -78,8 +78,10 @@ ok("(5) config default is 70K (the lever ships ON)",
 src = Path("orchestrator/builder.py").read_text()
 ok("(3) the build path sets options.task_budget from budget_for",
    'options.task_budget = {"total": _budget}' in src and "_budget = budget_for(cfg, eff)" in src)
-ok("(4) GLM-routed passes are excluded (won't honour the beta header)",
-   "if not _backends.is_glm(cfg):" in src.split("_budget = budget_for", 1)[1][:600],
-   "a GLM pass with a budget the backend ignores would silently change nothing — gate it")
+ok("(4) GLM-routed passes are excluded via the tag-aware gate (won't honour the beta header)",
+   "if not _backends.is_glm_for_tag(\"builder\", cfg):" in src.split("_budget = budget_for", 1)[1][:800]
+   or "if not _backends.is_glm_for_tag('builder', cfg):" in src.split("_budget = budget_for", 1)[1][:800],
+   "a GLM pass with a budget the backend ignores would silently change nothing — gate it "
+   "(EU-417: the gate is hybrid/tag-aware so a hybrid-secondary GLM pass is also excluded)")
 
 print(f"\n{checks}/{checks} passed")

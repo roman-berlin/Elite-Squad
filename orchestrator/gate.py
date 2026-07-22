@@ -216,7 +216,19 @@ def run_gate(app: AppConfig, changed_paths: list[str] | None = None) -> GateResu
     groups = select_gate_groups(app, changed_paths or [])
     if not groups:
         if not app.gate_commands:
-            return GateResult(passed=True, report="(no gate commands configured)")
+            # EU-432: a build with NO configured gate is REFUSED, not passed vacuously. This used to
+            # return passed=True ("(no gate commands configured)"), which let a build land UNGATED on
+            # any host with no gate_commands — precisely the VPS's posture (config.server.example.yaml:
+            # "It NEVER ... builds — no gate_commands"). A weekly builder scheduled there would have
+            # shipped unverified. Refuse instead: an operator who wants to build MUST configure at
+            # least one gate command (even a trivial `true`) so the gate is a deliberate act, never an
+            # accident of an empty config. Defensive callers that only want a "did anything run?" probe
+            # should pass explicit commands; the build-loop and off-loop paths are unaffected because
+            # real build hosts (the Mac) always declare gate_commands.
+            return GateResult(passed=False, report=(
+                "REFUSED: no gate_commands are configured for this app and no per-app gate matched "
+                "the changed paths. A build may not proceed without a verification gate — configure "
+                "gate_commands (or gate_commands_by_app) first. (EU-432)"))
         return run_commands(app, app.gate_commands)
 
     failures: list[str] = []

@@ -2124,8 +2124,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Outcome.ERRORED — which would wrongly tick the EU-219 consecutive-error counter toward
             # Blocked and park a ticket that just needed to be split. Do NOT grep build.summary/raw
             # for turn-limit text — a failed build's summary holds only the last assistant message,
-            # never the turn-limit phrase; num_turns is the only reliable signal.
-            if build.num_turns >= builder_mod.turns_for(cfg, eff):
+            # never the turn-limit phrase; num_turns is the only reliable signal. EU-408: a GLM pass
+            # cut off by the per-pass token ceiling sets build.is_turn_limit directly — it can burn
+            # few-but-huge turns (a giant tool-result read) so num_turns alone would miss it and drop
+            # a clean cutoff into the ERRORED fallthrough. is_turn_limit is the one reliable signal
+            # shared by BOTH blow-out classes (max-turns and the GLM token ceiling).
+            if build.is_turn_limit or build.num_turns >= builder_mod.turns_for(cfg, eff):
                 # 2026-07-19: feed the Scrum Master the attempt's REAL progress, not just "it ran
                 # out" — fragments sliced blind repeated the parent's burn and re-blew the ceiling
                 # (the AUTO-15x lineage). The builder's own summary tells the splitter what is
@@ -3123,13 +3127,25 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # the keepalive respawns it on this landed code; EU-385 re-arms the drains on boot.
                 from . import autopilot as _ap
                 if _ap.flag_self_update(cfg, ticket.id, sha=merge_sha, audit=audit):
-                    _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code — restarting automatically "
-                                 "once idle (self_update_auto_restart); drains re-arm on the new sha.")
+                    # EU-405: the promise of an automatic restart is now TRUE even for a manual run —
+                    # the serve-level self-restart watcher (autopilot.ensure_self_restart_watcher,
+                    # started from server.serve) consumes the flag at an idle boundary whether or not a
+                    # drain is armed. But it is still conditional on the knob: with
+                    # self_update_auto_restart OFF the watcher clears the flag and never exits, so
+                    # announcing "restarting automatically" would be the announce-lie that stranded
+                    # the unit on old code for 11h. Tell the truth either way.
+                    if getattr(cfg, "self_update_auto_restart", True):
+                        _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code — restarting automatically "
+                                     "once idle (self_update_auto_restart); drains re-arm on the new sha.")
+                    else:
+                        _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code. "
+                                     "self_update_auto_restart is OFF, so the cockpit keeps running the "
+                                     "OLD code until you restart it by hand (./general deploy).")
                 else:
                     # The flag did NOT persist — no automatic restart will happen. Never announce one.
                     _notify(cfg, f"⚠️ {ticket.id} changed the squad's own code but the restart flag "
-                                 "could not be written — RESTART THE COCKPIT BY HAND or it keeps "
-                                 "running the old code.")
+                                 "could not be written — RESTART THE COCKPIT BY HAND (./general deploy) "
+                                 "or it keeps running the old code.")
         except Exception:  # noqa: BLE001 — the signal is best-effort
             pass
         # Technical Writer: log this land to the unit's feature changelog (best-effort, never breaks).

@@ -75,11 +75,27 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="print a quick task table in the terminal")
     srv = sub.add_parser("serve", help="run the control panel web app (your cockpit)")
     srv.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    # EU-405: the SAFE restart wrapper — THE way to restart the cockpit. Refuses while a build is in
+    # flight so an operator never kickstarts a live build (the AUTO-177 class, 2026-07-19). Raw
+    # `launchctl kickstart` is break-glass only — it skips this guard.
+    dep = sub.add_parser("deploy",
+                         help="safely restart the cockpit — THE way to restart (kickstart is break-glass)")
+    dep.add_argument("--port", type=int, default=8787, help="cockpit port to probe (default 8787)")
+    dep.add_argument("--force", action="store_true",
+                     help="restart even if a build appears in flight (break-glass — may kill live work)")
     st = sub.add_parser("standup", help="daily-meeting report (shipped / needs-you / decisions)")
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
     sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
     cnl = sub.add_parser("council", help="deep WEEKLY council (officers muster, brief you) — for the daily use `daily`")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
+    cg = sub.add_parser("cron-guard",
+        help="wrap a cron job: timestamp + rotate council/cron.log, alert Telegram on repeated failure (EU-432)")
+    cg.add_argument("--job", required=True, help="cron job name (the log tag + the per-job state key)")
+    cg.add_argument("wrapped", nargs=argparse.REMAINDER,
+        help="the command to run, after -- (e.g. -- ./general daily)")
+    sub.add_parser("server-watchdog",
+        help="one Mac->VPS cross-host watch tick: SSH-probe the VPS + content-check the daily brief, "
+             "alert from the Mac (EU-433). No-op without GENERAL_SERVER_SSH.")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
@@ -344,6 +360,42 @@ def _onboard(args) -> int:
     return 0
 
 
+def _cron_guard(args) -> int:
+    """EU-432 — wrap a cron job: timestamp + rotate ``council/cron.log`` and alert Telegram on
+    repeated failure (exactly one alert per N consecutive failures).
+
+    The wrapped command is everything after ``--`` (a leading ``--`` argparse may leave in the
+    REMAINDER is stripped). Paths are the canonical ones the crontab already writes
+    (``council/cron.log`` — EU-431 keeps it there; ``state/cron_health.json`` beside the audit
+    root), so this needs no config. Returns the wrapped command's real exit code.
+    """
+    from . import cron_guard
+    wrapped = list(getattr(args, "wrapped", None) or [])
+    if wrapped and wrapped[0] == "--":   # strip the single options-separator argparse leaves in
+        wrapped = wrapped[1:]
+    if not wrapped:
+        print("cron-guard: no command given. Pass it after `--`, e.g.\n"
+              "  ./general cron-guard --job daily -- ./general daily", file=sys.stderr)
+        return 2
+    return cron_guard.run_guarded(
+        args.job, wrapped,
+        log_path="council/cron.log",
+        state_path="state/cron_health.json",
+    )
+
+
+def _server_watchdog() -> int:
+    """EU-433 — one Mac→VPS cross-host watch tick.
+
+    Probes the VPS over SSH (liveness, AC1), content-checks the newest daily brief (missing / provider
+    error, AC2), and pages from the MAC (independent of the VPS process, AC3). Dispatched BEFORE the
+    config preamble (like cron-guard) so a periodic launchd tick stays cheap; it uses ``$GENERAL_SERVER_SSH``
+    + the canonical ``state/server_watchdog_state.json``, never the config. A clean no-op (return 0) when
+    no VPS target is configured, so the agent is safe to install on any host. Never raises."""
+    from . import server_watchdog
+    return server_watchdog.run()
+
+
 def _doctor(cfg_path: str) -> int:
     from . import health
     glyph = {"ok": "  ✓", "warn": "  ⚠", "bad": "  ✗"}
@@ -377,6 +429,126 @@ def _doctor(cfg_path: str) -> int:
     return 0 if s["healthy"] else 1
 
 
+# EU-405 AC1 — the SAFE restart wrapper. `./general deploy` is THE way to restart the cockpit; raw
+# `launchctl kickstart` (which kills whatever is running) is break-glass only. See DEPLOYMENT.md.
+_MAC_COCKPIT_LABEL = "com.roman.general.cockpit"
+_VPS_SERVICE = "general.service"
+
+
+def _deploy(args) -> int:
+    """EU-405: refuse to restart while a build is in flight, then restart via the host's supervisor.
+
+    The guard closes the AUTO-177 class (2026-07-19: a kickstart killed a live build mid-edit,
+    orphaning its worktree). Two signals, OR'd: (1) the cockpit's LIVE ``active_run_count`` —
+    authoritative, probed over HTTP when the cockpit is reachable; (2) the cross-process audit tail
+    (``autopilot.in_flight_builds`` — a ``ticket_start`` with no terminal event), the fallback that
+    also names WHICH tickets are running and covers a cockpit that is down. Either non-zero and no
+    ``--force`` → refuse with the exact break-glass command. Safe → kickstart/systemd/manual restart.
+    """
+    from . import autopilot as _ap
+    from .config import Config as _Config
+
+    cfg = _Config.load(args.config)
+    port = getattr(args, "port", 8787) or 8787
+    force = bool(getattr(args, "force", False))
+
+    # 1) Authoritative live signal: ask the running cockpit how many runs are active. None when the
+    #    cockpit is unreachable (down, or wedged) — then fall back to the audit signal alone.
+    live_active = _probe_active_run_count(port)
+    # 2) Cross-process audit signal: any open ticket_start the serve process wrote.
+    in_flight = _ap.in_flight_builds(cfg)
+
+    blocking: list[str] = []
+    if live_active is not None and live_active > 0:
+        blocking.append(f"the cockpit reports {live_active} active run(s) (live probe)")
+    if in_flight:
+        detail = ", ".join(f"{b['ticket_id']} (started {int(b['started_s_ago'] // 60)}m ago)"
+                           for b in in_flight[:5])
+        blocking.append(f"open build(s) with no terminal outcome: {detail}")
+
+    if blocking and not force:
+        print("⛔ Refusing to restart — a build appears to be in flight:")
+        for b in blocking:
+            print(f"    · {b}")
+        print("\n  This is the AUTO-177 guard: a restart now would kill live work mid-build.")
+        print("  Wait for it to finish (watch `./general status` or the cockpit), then re-run.")
+        print("  `./general deploy` is THE way to restart. If you are CERTAIN the signature is stale")
+        print("  (a killed run the audit never closed), re-run with --force.")
+        print("  Break-glass — restart NOW regardless, killing any in-flight work:")
+        print(f"    launchctl kickstart -k gui/$(id -u)/{_MAC_COCKPIT_LABEL}   "
+              f"(Mac)   ·   sudo systemctl restart {_VPS_SERVICE}   (VPS)")
+        return 1
+
+    note = " (--force — a possibly-stale build signature was ignored)" if force and blocking else ""
+    return _restart_cockpit(note)
+
+
+def _probe_active_run_count(port: int) -> int | None:
+    """EU-405: the cockpit's live ``active_run_count`` over HTTP, or None if unreachable.
+
+    A best-effort enrichment of the audit signal: when the cockpit is up, this is the AUTHORITATIVE
+    'is a build running?' answer (the in-memory truth the audit tail only approximates). When the
+    cockpit is down or wedged, None → the caller falls back to ``in_flight_builds``."""
+    import json as _json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as r:
+            return int(_json.loads(r.read().decode("utf-8")).get("active_run_count", -1))
+    except Exception:  # noqa: BLE001 — unreachable/wedged/old-build cockpit → fall back to the audit
+        return None
+
+
+def _restart_cockpit(note: str = "") -> int:
+    """EU-405: perform the actual restart via whichever supervisor owns the cockpit.
+
+    Auto-detects launchd (Mac), systemd (VPS), or a foreground `./general serve` (no supervisor).
+    Never restarts a second copy onto an occupied port — launchd/systemd handle that themselves."""
+    import subprocess as _sp
+    plist = os.path.expanduser(f"~/Library/LaunchAgents/{_MAC_COCKPIT_LABEL}.plist")
+    if os.path.exists(plist):
+        cmd = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{_MAC_COCKPIT_LABEL}"]
+        print(f"♻️  Restarting the cockpit via launchd{note}")
+        print(f"    $ {' '.join(cmd)}")
+        r = _sp.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print("  ✓ kickstarted — the cockpit respawns on the current code within ~5s.")
+            print("    cockpit: http://127.0.0.1:8787")
+            return 0
+        print(f"  ✗ kickstart failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()}")
+        return 1
+    if _systemd_has_service(_VPS_SERVICE):
+        cmd = ["sudo", "-n", "systemctl", "restart", _VPS_SERVICE]
+        print(f"♻️  Restarting the cockpit via systemd{note}")
+        print(f"    $ {' '.join(cmd)}")
+        r = _sp.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"  ✓ restarted {_VPS_SERVICE} — it loads the current code.")
+            return 0
+        print(f"  ✗ systemctl failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()}")
+        print("    (passwordless sudo for `systemctl restart general.service` must be configured —")
+        print("     see VPS_DEPLOYMENT.md.)")
+        return 1
+    print("ℹ️  The cockpit is not under launchd or systemd — it runs as a foreground `./general serve`.")
+    print("    Restart it by hand: stop that process (Ctrl-C) and re-run `./general serve`.")
+    print("    No build was in flight, so this is safe. (EU-405)")
+    return 0
+
+
+def _systemd_has_service(name: str) -> bool:
+    """EU-405: True when a systemd unit file for ``name`` is installed on this host."""
+    import subprocess as _sp
+    for unit_dir in ("/etc/systemd/system", "/lib/systemd/system",
+                     os.path.expanduser("~/.config/systemd/user")):
+        if os.path.exists(os.path.join(unit_dir, name)):
+            return True
+    # Fall back to asking systemctl (covers units from elsewhere / a user manager).
+    try:
+        r = _sp.run(["systemctl", "cat", name], capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001 — no systemd (Mac) → not a systemd host
+        return False
+
+
 def _which(cmd: str) -> bool:
     from shutil import which
     return which(cmd) is not None
@@ -394,6 +566,17 @@ async def _main(argv: list[str]) -> int:
     if args.command == "benchmark":
         return await _benchmark(args)
 
+    # EU-432: cron job guard — dispatched BEFORE the config preamble so a 15-min cron tick stays
+    # cheap (no adopt_legacy/usage pass). It uses the canonical, deliberately-not-migrated paths
+    # (council/cron.log per EU-431, state/cron_health.json), not cfg.
+    if args.command == "cron-guard":
+        return _cron_guard(args)
+    # EU-433: Mac->VPS cross-host watch tick — dispatched BEFORE the config preamble so a periodic
+    # launchd tick stays cheap (no adopt_legacy/usage pass). It reads $GENERAL_SERVER_SSH + the
+    # canonical state sidecar, never the config. Safe no-op where no VPS target is configured.
+    if args.command == "server-watchdog":
+        return _server_watchdog()
+
     if args.command == "consolidate":
         return _consolidate(args)
     if args.command == "forensics":
@@ -402,6 +585,8 @@ async def _main(argv: list[str]) -> int:
         return _onboard(args)
     if args.command == "doctor":
         return _doctor(args.config)
+    if args.command == "deploy":
+        return _deploy(args)
     if args.command == "ping":
         from . import notify
         if not notify.configured():
@@ -434,6 +619,24 @@ async def _main(argv: list[str]) -> int:
     # One-time move of a legacy repo-root model_backend.json into the state dir (live entrypoint only —
     # never from library/app code, so tests around tmp configs can't relocate the operator's real pref).
     backend_pref.migrate(cfg)
+    # EU-431: self-heal the council archive the 2026-07-21 state/ migration orphaned — MOVE the
+    # legacy council/ (index.jsonl + transcripts) into state/council/ on boot, BEFORE any ceremony
+    # can write a fresh index and lose the back-history. Same live-entrypoint-only discipline as
+    # backend_pref.migrate: a tmp-config test never relocates the operator's real archive.
+    from . import council as _council_mod
+    _council_mod.adopt_legacy_council(cfg, AuditLog(cfg.audit_path))
+    # EU-436: self-heal the filed-signature dedup ledger the 2026-07-21 state/ migration orphaned —
+    # MOVE the legacy signature_filed.json into state/ on boot, BEFORE the next signature_sweep can
+    # re-file a postmortem for a crash signature it already surfaced (a duplicate Jira ticket). Same
+    # live-entrypoint-only discipline as backend_pref.migrate / adopt_legacy_council.
+    from . import forensics as _forensics_mod
+    _forensics_mod.adopt_legacy_signature_ledger(cfg, AuditLog(cfg.audit_path))
+    # EU-435: self-heal the postmortem archive the 2026-07-21 state/ migration orphaned — MOVE the
+    # legacy postmortems/ dir of *.md (one per repeatedly-failing ticket) into state/postmortems/ on
+    # boot, BEFORE the next failure can write a fresh postmortem and the irreplaceable failure history
+    # stays orphaned. Identical in shape to council/, same live-entrypoint-only discipline as
+    # backend_pref.migrate / adopt_legacy_council / adopt_legacy_signature_ledger.
+    _forensics_mod.adopt_legacy_postmortems(cfg, AuditLog(cfg.audit_path))
     from . import usage
     usage.configure(cfg.audit_path)   # every agent call now meters its token burn here
     usage.prune(cfg)
@@ -441,6 +644,12 @@ async def _main(argv: list[str]) -> int:
     from . import agent as _agent
     _agent.configure_audit(AuditLog(cfg.audit_path))
     _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
+    # EU-425: anchor the Jira adapter's transition-audit sink to the same resolved audit_path the
+    # rest of the process writes to. The adapter is built from `app` alone (base.make_backlog), so
+    # it can't see cfg — without this it would fall back to Config's class default and could split
+    # ticket_transition events into a different file than the live ledger.
+    from .backlog import jira as _jira
+    _jira.configure_audit_path(cfg.audit_path)
 
     if args.command == "serve":
         from . import server
@@ -455,15 +664,31 @@ async def _main(argv: list[str]) -> int:
         # EU-387: if THIS boot is the respawn a self-update exit asked for, record the completion
         # and clear the one-shot flag (a second boot must not re-consume it).
         from .audit import AuditLog as _AL
+        _boot_audit = _AL(cfg.audit_path)
+        _self_restart = None
         try:
-            _ap.consume_self_restart_flag(cfg, _AL(cfg.audit_path))
+            _self_restart = _ap.consume_self_restart_flag(cfg, _boot_audit)
         except Exception:  # noqa: BLE001 — boot bookkeeping must never block serving
             pass
+        # EU-404 AC3: after a self-repo land, smoke the just-landed code BEFORE the drain resumes
+        # onto it — a land that passes the worktree gate but fails at boot (import cycle, schema
+        # change, missing dep) otherwise launchd-crash-loops forever with no alert. Red smoke holds
+        # the drain resume (intent kept); the cockpit still serves because serving is downstream.
+        _resume_block = None
+        if _self_restart is not None:
+            try:
+                _ok, _detail = _ap.boot_smoke(cfg, audit=_boot_audit,
+                                              ticket=_self_restart.get("ticket"))
+                if not _ok:
+                    _resume_block = f"boot-smoke-failed: {_detail}"
+            except Exception:  # noqa: BLE001 — boot must proceed; treat an unrunnable smoke as green
+                pass                          # (the import in THIS process already succeeded)
         # EU-385 (EU-224a): auto-resume drains persisted as RUNNING when the previous process
         # died — the crash-respawn recovery that closed the 66-minute dead-drain gap. A drain the
         # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and
-        # the EU-356 autopilot_stop_requested audit trail are the discriminators). Never raises.
-        _ap.resume_armed_drains(cfg)
+        # the EU-356 autopilot_stop_requested audit trail are the discriminators). EU-404 adds the
+        # crash-loop breaker (per-app) and the boot-smoke hold (global via block_reason). Never raises.
+        _ap.resume_armed_drains(cfg, block_reason=_resume_block)
         # EU-398: reconcile In Progress tickets left dangling by a killed/crashed previous run
         # (AUTO-177, 2026-07-19) — resume or honestly park each so the board never shows work
         # happening on a dead run. Runs AFTER resume_armed_drains so a ticket an in-flight drain
@@ -512,7 +737,10 @@ async def _main(argv: list[str]) -> int:
     if args.command == "sync":
         from . import sync
         r = sync.git_sync(cfg)
-        peers = ", ".join(r["hosts"]) or "(none yet)"
+        # EU-428 AC1: peers= carries each peer's NEWEST-EVENT age (parsed from the ts inside the
+        # synced file, not its mtime) + a STALE marker, so a pull that transports nothing can't hide
+        # behind a healthy pulled=True. pulled= stays the git-pull success bit.
+        peers = sync.peer_summary(cfg)
         pushed = "read-only" if r["pushed"] is None else r["pushed"]
         line = f"sync[{r['host']}] pulled={r['pulled']} pushed={pushed} peers={peers}"
         ll = sync.pull_server_state(cfg)   # Mac-side: pull the server's living log over SSH
