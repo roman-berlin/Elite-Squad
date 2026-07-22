@@ -2910,6 +2910,65 @@ def _manual_test_block(build, review) -> str | None:
     return None
 
 
+def _postmerge_verify_flag(cfg, app, ticket, git, merge_sha, audit, backlog, iteration, cost,
+                           branch) -> Optional[TicketReport]:   # noqa: F821 — Optional is lazy via __future__
+    """EU-453 — the post-merge dev-HEAD re-verification WIRING called from ``_land``.
+
+    The post-merge counterpart to the pre-land ``base_gate_check`` / ``run_gate``: AFTER a land has
+    actually moved dev to the merged tip, re-run the app's own ``gate_commands`` against that ACTUAL
+    tip via ``postmerge_verify.verify()`` and FLAG a red verdict. This is the hard-lesson mirror of
+    smoke: nothing post-merge may auto-park the queue, so a red here NEVER reverts (the revert is the
+    Commander's call / the next pick's base gate); it only records an audit event, notifies, comments,
+    and sets the ticket to ``Needs Human`` (skipped for ``ticket.ephemeral``), then returns the ticket
+    as ``Outcome.ESCALATED``. The merge already happened and stands.
+
+    Returns an ``ESCALATED`` ``TicketReport`` on a TRUE red (``verify -> (False, evidence)``);
+    ``None`` on green, an engine green-skip (sha-mismatch / runner-error -> ``(True, ...)``), or when
+    the feature isn't armed (``postmerge_verify.should_run`` is False) — in every ``None`` case
+    ``_land`` proceeds to smoke → ci → MERGED.
+
+    Never raises into the loop: the whole body is guarded so a verify/tracker/notify hiccup cannot
+    corrupt a land that already succeeded (the merge already happened and stands). The wiring's
+    ``postmerge_verify_fail`` / ``postmerge_verify_pass`` events are SEPARATE from and ADDITIONAL to
+    the engine's internal ``postmerge_verify_red`` / ``_green`` / ``_skip`` (the wiring carries
+    ``ticket_id`` + ``merge_sha``; the engine's carry ``app`` + ``reason``) — intentional, mirroring
+    how the sentinel loop records events atop ``sentinel.guard``'s. Do NOT dedupe them.
+    """
+    from . import postmerge_verify
+    if not postmerge_verify.should_run(cfg, app):
+        return None
+    try:
+        pok, pnote = postmerge_verify.verify(cfg, app, git, merge_sha, audit)
+    except Exception as exc:  # noqa: BLE001 — a verify hiccup must NEVER corrupt a landed merge
+        audit.record("postmerge_verify_skip", ticket_id=ticket.id, app=app.name,
+                     error=str(exc).splitlines()[0][:200])
+        return None
+    if pok:
+        # GREEN (or an engine green-skip): quiet — record the wiring-level pass and proceed to MERGED.
+        audit.record("postmerge_verify_pass", ticket_id=ticket.id, app=app.name, merge_sha=merge_sha)
+        return None
+
+    # RED — FLAG ONLY. The merge already happened and stands; we NEVER revert (the Commander's call /
+    # the next pick's base gate). Record the wiring-level fail event atop the engine's postmerge_verify_red.
+    try:
+        audit.record("postmerge_verify_fail", ticket_id=ticket.id, app=app.name, merge_sha=merge_sha)
+        msg = (f"🚨 Post-merge dev-HEAD verify FAILED for {ticket.id} — DEV may be silently red; "
+               f"needs revert/escalation\n• {pnote[:900]}")
+        _notify(cfg, msg)
+        if not ticket.ephemeral:
+            backlog.set_status(ticket, "Needs Human")
+            backlog.add_comment(ticket, msg)
+        print(f"  🔎 {ticket.id}: post-merge dev-HEAD verify RED — flagged (merge stands, no "
+              f"revert). {pnote[:200]}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — the merge already stands; a tracker/notify outage must not raise
+        audit.record("tracker_reconcile_needed", ticket_id=ticket.id, phase="postmerge_verify",
+                     base=app.base_branch, error=str(exc).splitlines()[0][:200])
+        print(f"  🔎 {ticket.id}: post-merge dev-HEAD verify RED, but the tracker/notify update "
+              f"failed ({exc}) — reconcile by hand (merge stands).", flush=True)
+    return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                        notes=f"post-merge dev-HEAD verify red: {pnote[:160]}")
+
+
 def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build, review,
           commenter=None) -> TicketReport:
     if commenter is None:
@@ -3178,6 +3237,17 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 print(f"  🛡️ {ticket.id}: SRE reverted the merge — needs you.", flush=True)
                 return TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                     notes=f"sentinel reverted: {snote[:160]}")
+
+        # EU-453: re-run the app's own gate_commands against the ACTUAL merged dev HEAD
+        # (postmerge_verify). Flag-only — a red merge is FLAGGED (audit + Telegram + Needs Human) and
+        # the ticket returned as ESCALATED, but the merge STANDS (never auto-reverts; that's the
+        # Commander's call / the next pick's base gate). Sits between the SRE (which CAN revert) and
+        # the lighter smoke canary. No-op unless the app opts in BOTH the master + per-app
+        # postmerge_verify flag (postmerge_verify.should_run).
+        pm = _postmerge_verify_flag(cfg, app, ticket, git, merge_sha, audit, backlog,
+                                    iteration, cost, branch)
+        if pm:
+            return pm
 
         # Post-merge SMOKE (EU-60): a fast, flag-only canary on the landed DEV. Unlike the SRE it never
         # reverts — it surfaces a red smoke loudly (smoke.run sends Telegram + records the audit event;
