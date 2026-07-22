@@ -2735,7 +2735,10 @@ def create_app(cfg: Config, port: int = 8787):
         cat = (request.args.get("cat") or "").strip()
         if cat:  # a KPI/taxonomy deep-link: show only the failed runs in this cause category
             label = _fx._LABELS.get(cat, cat)
-            runs = [r for r in _fx.scan(cfg) if r.get("category") == cat]
+            # EU-428 AC3: this is the /forensics DISPLAY (read-only) — opt INTO the peer-inclusive
+            # view so the page still mirrors every host's failures. scan() defaults to local-only
+            # precisely so the FILING path (signature_sweep / post-mortem) can never act on a peer row.
+            runs = [r for r in _fx.scan(cfg, local_only=False) if r.get("category") == cat]
             action = _fx._ACTIONS.get(cat, "")
             head = ("<style>.backlnk{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
                     "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"

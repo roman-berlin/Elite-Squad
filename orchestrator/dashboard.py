@@ -69,8 +69,10 @@ def _human_dur(seconds: Optional[float]) -> str:
 # the instant any audit (local or peer) is appended to / rewritten; a short TTL is a coarse-mtime
 # backstop. A burst of SSE frames and K tabs then share ONE read/parse per interval.
 _AUDIT_TTL = 1.5
-_audit_cache: dict[str, tuple[tuple, float, list[str]]] = {}              # path -> (sig, ts, lines)
-_tasks_cache: dict[str, tuple[tuple, float, list[dict[str, Any]]]] = {}   # path -> (sig, ts, runs)
+# EU-428 AC3: keyed by (path, local_only) — the local-only view (forensics WRITE path) and the
+# peer-inclusive view (display) cache independently.
+_audit_cache: dict[tuple[str, bool], tuple[tuple, float, list[str]]] = {}              # (path, local_only) -> (sig, ts, lines)
+_tasks_cache: dict[tuple[str, bool], tuple[tuple, float, list[dict[str, Any]]]] = {}   # (path, local_only) -> (sig, ts, runs)
 
 # Instrumentation (see tests/cockpit_cache_test.py): total audit_lines() calls vs. real disk reads. The
 # acceptance is ≤1 read per cache interval no matter how many frames/tabs call it.
@@ -78,12 +80,21 @@ audit_lines_calls = 0
 audit_lines_reads = 0
 
 
-def _audit_paths(audit_path: str | Path) -> list[Path]:
+def _audit_paths(audit_path: str | Path, local_only: bool = False) -> list[Path]:
     """The files merged into the unified audit view: this machine's audit.jsonl plus every synced
     ``shared/<host>.jsonl`` peer. Synced peers live in the state clone's shared/ (orphan unit-state
-    branch); the bare shared/ form is accepted too so tests / any local-only layout work without it."""
+    branch); the bare shared/ form is accepted too so tests / any local-only layout work without it.
+
+    ``local_only=True`` returns JUST this host's own audit.jsonl — the peer files are dropped. The
+    WRITE side of the forensics subsystem (EU-428 AC3: post-mortem + crash-signature auto-filing)
+    reads through ``forensics.scan`` with this flag, so a row a host merely *received* over sync can
+    never drive a ticket filing / parking / write on that host — peer rows are display + liveness
+    only. The DISPLAY side (board, needs, signals) keeps the peer-inclusive default so the cockpit
+    still mirrors what the other machine built."""
     p = Path(audit_path)
     paths: list[Path] = [p]
+    if local_only:
+        return paths
     # The state clone lives at the REPO ROOT: sync._repo_root strips a ``state/`` subdir, so when
     # audit.jsonl is under ``state/`` the synced shared/ is ``<root>/.unit-state/shared`` — NOT
     # ``<state>/.unit-state/shared``. Probe the state-stripped root too, or peer/server audits never
@@ -191,11 +202,14 @@ def _anchor_ok(fp: Path, offset: int, anchor: bytes) -> bool:
     return _anchor_at(fp, offset) == anchor
 
 
-def audit_lines(audit_path: str | Path) -> list[str]:
+def audit_lines(audit_path: str | Path, local_only: bool = False) -> list[str]:
     """Every audit line for the unified view: this machine's live ``audit.jsonl`` PLUS each synced
     ``shared/<host>.jsonl`` published by the other machines (see orchestrator/sync.py). Exact-duplicate
     lines are collapsed — a host's own events live in both its audit.jsonl and its published copy, so
     they are counted once. Order is local-first then shared; callers that care sort by ts.
+
+    ``local_only=True`` (EU-428 AC3) collapses the view to this host's own audit only — used by the
+    forensics WRITE path so peer rows can't drive filings on the receiver.
 
     TTL/mtime-cached so a burst of SSE board frames (and K open tabs) share a single read+merge instead
     of re-parsing the whole history several times a second. On a cache miss the per-file reader
@@ -203,8 +217,8 @@ def audit_lines(audit_path: str | Path) -> list[str]:
     a full-history re-read every request."""
     global audit_lines_calls, audit_lines_reads
     audit_lines_calls += 1
-    key = str(audit_path)
-    paths = _audit_paths(audit_path)
+    key = (str(audit_path), local_only)
+    paths = _audit_paths(audit_path, local_only=local_only)
     sig = _audit_sig(paths)
     now = time.time()
     hit = _audit_cache.get(key)
@@ -222,22 +236,24 @@ def audit_lines(audit_path: str | Path) -> list[str]:
     return out
 
 
-def load_tasks(audit_path: str | Path) -> list[dict[str, Any]]:
+def load_tasks(audit_path: str | Path, local_only: bool = False) -> list[dict[str, Any]]:
     # Same (size, mtime_ns)-keyed TTL cache as audit_lines, so the per-frame JSON parse + run assembly is
     # done once per interval and shared across SSE frames / tabs. Read-only for every caller.
-    key = str(audit_path)
-    sig = _audit_sig(_audit_paths(audit_path))
+    # local_only (EU-428 AC3): scope to this host's own audit so peer rows can't drive the forensics
+    # WRITE path; display callers keep the peer-inclusive default.
+    key = (str(audit_path), local_only)
+    sig = _audit_sig(_audit_paths(audit_path, local_only=local_only))
     now = time.time()
     hit = _tasks_cache.get(key)
     if hit is not None and hit[0] == sig and (now - hit[1]) < _AUDIT_TTL:
         return hit[2]
-    runs = _load_tasks_uncached(audit_path)
+    runs = _load_tasks_uncached(audit_path, local_only=local_only)
     _tasks_cache[key] = (sig, now, runs)
     return runs
 
 
-def _load_tasks_uncached(audit_path: str | Path) -> list[dict[str, Any]]:
-    lines = audit_lines(audit_path)
+def _load_tasks_uncached(audit_path: str | Path, local_only: bool = False) -> list[dict[str, Any]]:
+    lines = audit_lines(audit_path, local_only=local_only)
     if not lines:
         return []
     def _new(tid: str, ev: dict) -> dict[str, Any]:
