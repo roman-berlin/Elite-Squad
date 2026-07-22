@@ -54,27 +54,56 @@ _COMMENT_MAX_PAGES = 20
 # EU-397: 133 merges, ZERO audited transitions — only the post-merge call site logged anything
 # (merge_transition_failed), so board-vs-Jira drift was undiagnosable everywhere else. Instrumented
 # HERE, at the adapter's one write choke-point, instead of at each of set_status's many call sites.
-# JiraAdapter is built from `app` alone (see base.make_backlog) — no `cfg` ever reaches it — so this
-# lazily opens its own sink against Config's own audit_path default (audit_path has no per-app
-# override, so this always matches the live process's real ledger). Tests substitute this module
-# attribute directly with a fake sink (`jira._AUDIT_LOG = fake`) — the guard below short-circuits
-# before any real file touches disk.
+# Tests substitute this module attribute directly with a fake sink (`jira._AUDIT_LOG = fake`) — the
+# guard below short-circuits before any real file touches disk.
 _AUDIT_LOG: AuditLog | None = None
+
+# EU-425: the audit_path the LIVE process resolved from its loaded Config INSTANCE — handed in once
+# at boot by configure_audit_path() (main.py / server.py, right where they build their own
+# AuditLog(cfg.audit_path)). JiraAdapter is built from `app` alone (see base.make_backlog), so no cfg
+# ever reaches the constructor; without this hook _audit() falls back to Config.audit_path — the
+# dataclass CLASS default './state/audit.jsonl' — which only ever matched the live ledger because both
+# example configs set audit_path to that same default. An overridden audit_path in a live config would
+# otherwise route ticket_transition events to a DIFFERENT file than the rest of the process writes to,
+# silently re-breaking the board-vs-Jira traceability EU-397 exists to restore. Tests never boot, so
+# this stays None under run_all and GENERAL_AUDIT_PATH governs isolation there.
+_RESOLVED_AUDIT_PATH: str | None = None
+
+
+def configure_audit_path(path: str | None) -> None:
+    """Anchor the adapter's audit sink to the same resolved ``audit_path`` the live process uses.
+
+    Call once at process start (main.py / server.py), alongside ``agent.configure_audit``. ``path``
+    is ``cfg.audit_path`` — the loaded Config INSTANCE value, NOT the dataclass class default
+    ``_audit()`` used to read on its own. Idempotent: a repeat call with the same path is a no-op;
+    a CHANGED path drops the cached sink so the next ``_audit()`` rebuilds against the new path.
+    ``None`` clears it (a reconfigure, or a test reset, falls back to the class default)."""
+    global _RESOLVED_AUDIT_PATH, _AUDIT_LOG
+    if path == _RESOLVED_AUDIT_PATH:
+        return
+    _RESOLVED_AUDIT_PATH = path
+    _AUDIT_LOG = None   # cached sink was opened against the old/default path — rebuild on next use
 
 
 def _audit() -> AuditLog:
     global _AUDIT_LOG
     if _AUDIT_LOG is None:
-        # GENERAL_AUDIT_PATH wins over the config default. Same contract as GENERAL_PID_FILE
-        # (EU-355): run_all points it at a per-run temp file so NO harness can write to the live
-        # ledger, whether or not it remembered to stub `_AUDIT_LOG`. state_routing_test.py did not,
-        # and every `python3 tests/run_all.py` appended 5 fabricated AUTO-73 ticket_transition rows
-        # to the operational audit — 15 of the 29 rows on record were test fixtures, including a
-        # `landed: Fertig` from a German-column case that never existed on any real board. The
-        # dashboard, forensics and the daily brief all read that file.
+        # Resolution order:
+        #   1. GENERAL_AUDIT_PATH env — the highest override. Same contract as GENERAL_PID_FILE
+        #      (EU-355): run_all points it at a per-run temp file so NO harness can write to the live
+        #      ledger, whether or not it remembered to stub `_AUDIT_LOG`. state_routing_test.py did
+        #      not, and every `python3 tests/run_all.py` appended 5 fabricated AUTO-73 ticket_transition
+        #      rows; 15 of the 29 rows on record were test fixtures, incl. a `landed: Fertig` from a
+        #      German-column case that existed on no board. The dashboard, forensics and the daily
+        #      brief all read that file.
+        #   2. _RESOLVED_AUDIT_PATH — the LIVE cfg.audit_path handed in by configure_audit_path (EU-425).
+        #   3. Config.audit_path — the dataclass class-level default; the pre-EU-425 behaviour, kept
+        #      as the fallback for any entry point that does not call configure_audit_path.
         env_path = os.environ.get("GENERAL_AUDIT_PATH", "").strip()
         if env_path:
             path: str = env_path
+        elif _RESOLVED_AUDIT_PATH:
+            path = _RESOLVED_AUDIT_PATH
         else:
             try:
                 from ..config import Config
@@ -388,8 +417,16 @@ class JiraAdapter(BacklogAdapter):
                                  landed=landed, outcome="matched")
         except Exception as exc:  # noqa: BLE001 - audited, then re-raised unchanged (six call sites
             # still fail-soft around this call exactly as before; this is what makes each miss visible)
-            _audit().record("ticket_transition_failed", ticket_id=ticket.id, wanted=wanted,
-                             error=str(exc)[:300])
+            # EU-425: guard the audit write so a ledger failure (disk full, bad perms) can never mask
+            # the original transition exception — the re-raise below must always hand the caller the
+            # REAL error, not an audit-write error standing in for it. (record() opens/locks a file,
+            # so it is genuinely fallible; the success-path record() calls above are NOT guarded
+            # because there a ledger error is itself the signal worth surfacing, not a mask.)
+            try:
+                _audit().record("ticket_transition_failed", ticket_id=ticket.id, wanted=wanted,
+                                 error=str(exc)[:300])
+            except Exception:  # noqa: BLE001 - the audit sink is best-effort in the failure path
+                pass
             raise
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
