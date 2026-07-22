@@ -644,6 +644,12 @@ async def _main(argv: list[str]) -> int:
     from . import agent as _agent
     _agent.configure_audit(AuditLog(cfg.audit_path))
     _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
+    # EU-425: anchor the Jira adapter's transition-audit sink to the same resolved audit_path the
+    # rest of the process writes to. The adapter is built from `app` alone (base.make_backlog), so
+    # it can't see cfg — without this it would fall back to Config's class default and could split
+    # ticket_transition events into a different file than the live ledger.
+    from .backlog import jira as _jira
+    _jira.configure_audit_path(cfg.audit_path)
 
     if args.command == "serve":
         from . import server

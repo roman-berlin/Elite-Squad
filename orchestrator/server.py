@@ -241,6 +241,10 @@ def create_app(cfg: Config, port: int = 8787):
     from . import agent as _agent
     _agent.configure_audit(audit)
     _agent.configure_timeouts(cfg)   # EU-221: per-tag wall-clock budgets (officer/builder)
+    # EU-425: anchor the Jira adapter's transition-audit sink to cfg.audit_path (same resolved path
+    # `audit` above was built from). See main.py for the rationale — the adapter can't see cfg.
+    from .backlog import jira as _jira
+    _jira.configure_audit_path(cfg.audit_path)
 
     # ----------------------------------------------------------------------------------------------
     # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`
