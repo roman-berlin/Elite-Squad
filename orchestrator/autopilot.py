@@ -1757,6 +1757,83 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     return f"unblocked all ({len(blocked)})"
 
 
+_RED_BASE_MARKERS = ("is RED before any build", "gate fails on the clean base", "red base")
+
+
+def _auto_resume_red_base(cfg: Config, blocked: set[str], audit: "AuditLog") -> set[str]:
+    """Resume tickets parked on a RED base the moment the base is GREEN again — no answer needed.
+
+    A red base is NOT a decision the Commander can make. The ticket parked because the base tree
+    fails its own gate; that clears when the base is fixed, not when a human picks an option. The
+    card even offered "Re-queue now — the base is green again", asking the operator to verify
+    something the unit can check itself.
+
+    Observed 2026-07-22 14:25 (Commander: "I answered the tickets and they appeared again"): each
+    answer re-queued the ticket, the still-red base parked it again within seconds, and a FRESH
+    card was filed — an endless dialogue that no answer could end. Two answers, two immediate
+    re-parks, one new card.
+
+    Green is established from ``red_base_cache.json``: a ``passed`` entry for the ticket's repo
+    whose timestamp is NEWER than the park proves the base was verified green AFTER the ticket
+    parked. (Comparing timestamps rather than resolving the current sha keeps this free of a git
+    handle, and a cached green is exactly what the next build would consult anyway.)
+
+    Returns the possibly-shrunken ``blocked`` set. Best-effort: any exception leaves both stores
+    untouched, so a cache hiccup can never strand or wrongly release a ticket."""
+    from . import decisions
+
+    try:
+        pending = decisions.load(cfg)
+        if not pending:
+            return blocked
+        red_parked = [p for p in pending
+                      if any(m in str(p.get("question") or "") for m in _RED_BASE_MARKERS)]
+        if not red_parked:
+            return blocked
+
+        cache_path = Path(cfg.audit_path).with_name("red_base_cache.json")
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return blocked
+        if not isinstance(cache, dict):
+            return blocked
+
+        # newest GREEN verdict per repo path
+        newest_green: dict[str, float] = {}
+        for key, val in cache.items():
+            if not isinstance(val, dict) or not val.get("passed"):
+                continue
+            repo = str(key).rsplit("@", 1)[0]
+            ts = float(val.get("ts") or 0.0)
+            if ts > newest_green.get(repo, 0.0):
+                newest_green[repo] = ts
+
+        repo_for = {str(getattr(a, "name", "")): str(getattr(a, "repo_path", ""))
+                    for a in (getattr(cfg, "apps", None) or [])}
+
+        resumed: list[str] = []
+        for p in red_parked:
+            repo = repo_for.get(str(p.get("app") or ""), "")
+            green_ts = newest_green.get(repo, 0.0)
+            if green_ts and green_ts > float(p.get("ts") or 0.0):
+                resumed.append(str(p.get("id")))
+
+        if not resumed:
+            return blocked
+
+        remaining = [p for p in pending if str(p.get("id")) not in set(resumed)]
+        decisions._save(cfg, remaining)
+        blocked = remove_blocked(cfg, set(resumed)) or (blocked - set(resumed))
+        audit.record("red_base_auto_resumed", tickets=sorted(set(resumed)))
+        print(f"  · base is GREEN again — auto-resumed {', '.join(sorted(set(resumed)))} "
+              f"(no answer needed; the park was an infrastructure condition, not a decision)",
+              flush=True)
+    except Exception:  # noqa: BLE001 — self-healing must never break the cycle
+        pass
+    return blocked
+
+
 def _resumable_answered(cfg: Config, app_name: str | None, blocked: set[str]) -> dict:
     """EU-61 + EU-229: parked tickets the Commander has answered DIRECTLY on their Jira ticket → auto-resume.
 
@@ -2603,6 +2680,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             blocked = _auto_clear_merged_ghosts(cfg, blocked, audit)
             # EU-229: auto-clear ghost pending decisions whose base ticket already merged
             _auto_clear_decision_ghosts(cfg, audit)
+            # 2026-07-22: a RED-base park is an infrastructure condition, not a decision — resume it
+            # automatically once the base is verified green, instead of re-asking forever.
+            blocked = _auto_resume_red_base(cfg, blocked, audit)
             # 2026-07-19: reconcile the needs stores against LIVE Jira statuses (throttled) — a
             # ticket the Commander moved to Done/QA or re-queued in Jira clears everywhere.
             try:

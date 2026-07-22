@@ -25,7 +25,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from . import memory, models
+from . import backends, memory, models
 from .agent import run_agent
 from .config import Config
 from .contracts import Ticket
@@ -74,23 +74,25 @@ Output ONLY a single JSON object, no prose around it, exactly this shape:
 For ANSWER/CLOSE/REFILE/SPLIT put the reply/reason/sub-ticket list in "answer" and leave the
 build fields empty. Never wrap the JSON in markdown fences; never add commentary after it."""
 
-# 2026-07-19 (Commander order — squad modes): appended to PLANNER_SYSTEM only when squad_pref
-# routes the ticket to the ELITE squad. The Analyst's decompose-first duties: an ordered step
-# plan the Builder executes one-at-a-time, and every assumption/question surfaced NOW — because
-# a mid-build "stop and wait" strands a worktree; questions batch here, at analysis time.
-ELITE_PLAN_ADDENDUM = """
+# ALWAYS appended to PLANNER_SYSTEM (2026-07-22). The Analyst's decompose-first duties: an ordered
+# step plan the Builder executes one-at-a-time, and every assumption/question surfaced NOW —
+# because a mid-build "stop and wait" strands a worktree; questions batch here, at analysis time.
+# Previously gated behind the "elite squad" mode; that mode is retired — decomposing before
+# building is correct for every ticket, and effort now scales per ticket via size_ticket().
+PLAN_ADDENDUM = """
 
-ELITE SQUAD — you are the Analyst for a small elite squad; the Builder will execute your plan
-one step at a time with a check after every step. Two extra duties on a BUILD verdict:
+WORKING METHOD — you are the Analyst; the Builder will execute your plan one step at a time,
+running the repo's own checks after every step. Two extra duties on a BUILD verdict:
 1. In "steps" (or the plan body), give an ORDERED list of small, independently-checkable steps —
    each one small enough to implement and verify in one sitting, sequenced so every step leaves
    the tree green. Name the verification for each step (which test/command proves it).
 2. Surface EVERY material assumption and unclear point NOW, in the plan — the Builder will not
    stop mid-build to ask. A genuinely CRITICAL unknown that blocks safe work is a needs_human
    question at this stage, not a guess.
-Also recalibrate SPLIT: the elite Builder carries a 2.4x turn budget and works step-by-step, so
-prefer BUILD-with-step-plan for large-but-coherent work; reserve SPLIT for genuinely unrelated
-asks or repo-wide sweeps that no single careful pass can land.
+Calibrate SPLIT honestly: the Builder works step-by-step, and its turn budget scales with the
+ticket's own size (a large ticket earns a large budget; a small one does not). Prefer
+BUILD-with-step-plan for large-but-coherent work; reserve SPLIT for genuinely unrelated asks or
+repo-wide sweeps that no single careful pass can land.
 """
 
 
@@ -209,6 +211,43 @@ def parse_plan(text: str | None) -> PlannerResult:
     )
 
 
+def _fanout_addendum(max_agents: int) -> str:
+    """Instructions for a Planner that may fan out. Only composed when the gate armed (L/XL ticket,
+    native backend, enabled in config) — a Planner that cannot spawn must never be told it can.
+
+    The value of a fan-out is INDEPENDENCE, not volume: several investigators each reading a
+    different subsystem surface things one context misses, and a claim that survives a skeptic is
+    worth more than one nobody checked. Volume alone just multiplies the same blind spot, which is
+    why the cap is small and the last instruction is to reconcile disagreements rather than average
+    them."""
+    return f"""
+
+---
+
+INVESTIGATE IN PARALLEL (this ticket is large — you have the Task tool)
+
+You may launch up to {max_agents} READ-ONLY sub-agents to investigate before you write the plan.
+Use them when the ticket spans several subsystems, or when the right approach genuinely depends on
+facts you do not yet have. Do NOT use them for a change whose shape is already obvious — a fan-out
+on simple work is pure cost.
+
+How to use them well:
+1. SPLIT BY SUBSYSTEM, not by task. Give each sub-agent a DIFFERENT area (e.g. "the auth middleware
+   and its tests", "the DB layer and migrations", "every existing caller of this API"). Overlapping
+   briefs return overlapping findings and teach you nothing new.
+2. ASK FOR EVIDENCE, not opinions. Each brief must demand concrete file:line references and the
+   actual current behaviour — never "assess whether this is a good idea".
+3. Launch them in ONE message so they run concurrently.
+4. RECONCILE, don't average. When two sub-agents disagree, say so explicitly in your plan and state
+   which you believe and why — a disagreement is a finding. Never quietly split the difference.
+5. Anything a sub-agent could not verify goes in the plan as an open assumption/question, exactly
+   like your own unverified assumptions. A sub-agent's guess is still a guess.
+
+Your own output contract is UNCHANGED: the same JSON plan, the same fields. The sub-agents inform
+it; they do not replace it, and you remain accountable for every claim in it.
+"""
+
+
 async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResult:
     """Run the Planner on one ticket → a PlannerResult. Read-only, Opus-tier, high effort.
 
@@ -218,28 +257,58 @@ async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResu
     if app is None:
         app = cfg.app(ticket.app or cfg.apps[0].name)
     try:
-        model, _peffort, mreason = models.for_planner(cfg, ticket, effort="high")
+        # 2026-07-22: the Planner's effort now scales with the TICKET instead of being pinned at
+        # "high" for everything. size_ticket() already grades every ticket for the Builder; a
+        # planner that thinks equally hard about a typo and an architecture migration was both
+        # wasteful and under-powered at the top end. Floored at medium — planning is cheap relative
+        # to building, and a thin plan costs a whole build pass, so we never go below medium here
+        # even when the sizer says low.
+        _p_effort = "high"
+        _p_size = ""
+        try:
+            from .builder import size_ticket as _size
+            _p_size, _sized_effort, _ = _size(ticket)
+            _p_effort = _sized_effort if _sized_effort in ("high", "xhigh", "max") else "medium"
+        except Exception:  # noqa: BLE001 — a sizer hiccup must never block a plan
+            _p_effort = "high"
+        model, _peffort, mreason = models.for_planner(cfg, ticket, effort=_p_effort)
         if getattr(cfg, "auto_model", False) or "deep" in mreason:
             print(f"  · planner model: {mreason}", flush=True)
+        # Fan-out gate (all three must hold, else the Planner stays single-agent as before):
+        #   · enabled in config, · the ticket is genuinely large (L/XL), · the effective backend is
+        #     NATIVE — Task is a Claude Code capability and the GLM compat endpoint is not
+        #     guaranteed to serve it, so arming it there would burn turns on a tool that never works.
+        _fanout = False
         try:
-            from . import squad_pref as _squad
-            _elite = _squad.resolve_for_ticket(cfg, ticket)[0] == "elite"
-        except Exception:  # noqa: BLE001 - a pref hiccup must never change a plan
-            _elite = False
+            _fanout = (bool(getattr(cfg, "planner_fanout", True))
+                       and _p_size in ("L", "XL")
+                       and backends.normalize(backends.current_for_tag("planner")) == backends.NATIVE)
+        except Exception:  # noqa: BLE001 — never let the gate itself break planning
+            _fanout = False
+        _max_agents = max(1, int(getattr(cfg, "planner_fanout_max_agents", 4) or 4))
+        if _fanout:
+            print(f"  · planner: fan-out armed (≤{_max_agents} read-only sub-agents, "
+                  f"≤${float(getattr(cfg, 'planner_fanout_budget_usd', 3.0)):.2f})", flush=True)
         options = ClaudeAgentOptions(
             model=model,
             system_prompt=memory.preamble() + PLANNER_SYSTEM
-                          + (ELITE_PLAN_ADDENDUM if _elite else ""),
+                          + PLAN_ADDENDUM
+                          + (_fanout_addendum(_max_agents) if _fanout else ""),
             cwd=app.workdir or app.repo_path,
             permission_mode="bypassPermissions",
-            allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"],
+            allowed_tools=(["Read", "Grep", "Glob", "Task"] if _fanout
+                           else ["Read", "Grep", "Glob"]),
+            disallowed_tools=(["Write", "Edit", "Bash", "NotebookEdit"] if _fanout
+                              else ["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"]),
+            # A fan-out is the one officer call that can multiply its own spend — bound it in dollars,
+            # not just turns, so a runaway investigation cannot outlive the ticket's economics.
+            max_budget_usd=(float(getattr(cfg, "planner_fanout_budget_usd", 3.0)) if _fanout else None),
             # 24 turns, not 14: GLM-routed planners batch ~1 tool call per turn (Anthropic batches
             # many), so on monorepo tickets they hit the old cap mid-exploration and fail-safe into
             # a briefless BUILD — 4 of 6 GLM planner calls on 2026-07-16 (AUTO-155/156/157/137,
             # "Reached maximum number of turns (14)"), one of which (AUTO-156) then burned a full
             # build into a turn-limit park. A read-only planner turn is far cheaper than that.
-            setting_sources=[], max_turns=24, effort="high",
+            setting_sources=[], max_turns=24, effort=_p_effort,
         )
         run = await run_agent(_prompt(ticket), options, tag="planner", ticket_id=ticket.id)
         res = parse_plan(run.final or run.text)

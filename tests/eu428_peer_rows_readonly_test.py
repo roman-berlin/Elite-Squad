@@ -19,6 +19,7 @@ proves:
   • no filing fires — signature_sweep() never calls the filer (_file_one) for peer evidence.
 """
 import json
+import os
 import sys
 import tempfile
 import time
@@ -44,6 +45,15 @@ _req.Session = lambda: types.SimpleNamespace(
     auth=None, headers=types.SimpleNamespace(update=lambda *a, **k: None))
 sys.modules["requests"] = _req
 sys.path.insert(0, ".")
+
+# This harness plants its peer at shared/mac.jsonl, so it must NOT be running as host "mac" —
+# `_audit_paths` deliberately drops shared/<own host_id>.jsonl (a host's own published file is a
+# MIRROR of the audit.jsonl it already reads; merging it double-counts every local event). Without
+# this pin the harness inherits GENERAL_HOST_ID from the ambient shell: it passed standalone but
+# failed under run_all whenever the suite was launched from a shell that had sourced .env
+# (GENERAL_HOST_ID=mac), making its "peer" self-referential. The scenario under test is "we are the
+# SERVER, receiving the MAC's rows", so say so explicitly rather than depending on the environment.
+os.environ["GENERAL_HOST_ID"] = "server"
 
 from orchestrator import dashboard as D
 from orchestrator import forensics

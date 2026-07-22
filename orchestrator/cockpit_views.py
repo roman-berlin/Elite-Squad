@@ -560,40 +560,8 @@ def backend_control(cfg, app_name: str | None = None) -> str:
            if secondary else "")
         + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
         'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>'
-        # 2026-07-19 (Commander order — squad modes): WHICH formation builds. Full squad = the
-        # standard pipeline; Elite = the small careful trio (Analyst step-plan → one iterative
-        # Builder with per-step checks and a 2.4x turn budget → the unchanged gate + review);
-        # Auto = the ticket sizer routes L/XL to Elite, S/M to Full.
-        + _squad_selector(cfg))
+        )
 
-
-def _squad_selector(cfg) -> str:
-    from . import squad_pref
-    sq = squad_pref.get_mode(cfg)
-    notes = {
-        "full": '<span class="tbnote dim" title="The standard pipeline: Planner &#8594; Builder '
-                '&#8594; Gate &#8594; Review &#8594; Land, with PM/Scrum ceremony.">'
-                '&#128101; standard pipeline</span>',
-        "elite": '<span class="tbnote dim" title="Small careful trio: the Analyst lays out ordered '
-                 'steps and surfaces assumptions up front; one Builder executes step-by-step, '
-                 'running the repo&#39;s tests after every step, with a 2.4x turn budget; the '
-                 'deterministic gate + one independent review verify.">'
-                 '&#127894; careful step-by-step loop</span>',
-        "auto": '<span class="tbnote dim" title="The ticket sizer routes each ticket: large/risky '
-                '(L/XL) &#8594; Elite squad; small/medium &#8594; Full squad.">'
-                '&#9878; sizer picks per ticket</span>',
-    }
-    return (
-        '<form method=post action=/api/squad class=tbf '
-        'title="Squad — which formation builds a ticket. Full squad: the standard pipeline. '
-        'Elite squad: a small careful trio working step-by-step with checks after every step. '
-        'Auto: big tickets go Elite, small ones Full.">'
-        '<span class=tbsel-label>Squad</span>'
-        '<select name=squad onchange="this.form.submit()" style="font-size:13px">'
-        f"<option value='full' {'selected' if sq == 'full' else ''}>Full squad</option>"
-        f"<option value='elite' {'selected' if sq == 'elite' else ''}>Elite squad — careful &amp; iterative</option>"
-        f"<option value='auto' {'selected' if sq == 'auto' else ''}>Auto — by ticket size</option>"
-        '</select></form>' + notes[sq])
 
 
 def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = True,

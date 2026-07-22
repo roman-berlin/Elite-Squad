@@ -786,11 +786,34 @@ def create_app(cfg: Config, port: int = 8787):
             # EventSource reconnect flicker. Poll the state until a path appears (or ~60s idle).
             log_path = st.get("log_path")
             waited = 0.0
+            # 2026-07-22: fall back to the SHARED drain stream when no per-ticket log appears.
+            # A CONCURRENT drain (max_concurrent_builders > 1) never calls open_run_log — loop.py's
+            # EU-380 branch writes a pointer NOTE instead and leaves state['log_path'] unset — so
+            # this panel sat on "Waiting for run output…" for 60s and then said "No active run log"
+            # for EVERY run, while the build was streaming happily to the process stdout the note
+            # points at. Tail that stream instead of showing the operator nothing.
+            drain_fallback = ""
+            tail_from_end = False
             while not log_path and waited < 60.0:
+                if waited >= 10.0 and not drain_fallback:
+                    try:
+                        from . import run_logger as _rl_probe
+                        drain_fallback = _rl_probe.drain_log_path() or ""
+                    except Exception:  # noqa: BLE001 - a probe failure must not kill the stream
+                        drain_fallback = ""
+                    if drain_fallback:
+                        break
                 yield ": waiting-for-log\n\n"
                 time.sleep(1.0)
                 waited += 1.0
                 log_path = get_state(appkey).get("log_path")
+            if not log_path and drain_fallback:
+                log_path = drain_fallback
+                # The shared stream is the whole process stdout (tens of thousands of lines) — start
+                # at its CURRENT end so the panel shows this run's output, not the session's history.
+                tail_from_end = True
+                yield _sse("log", "— no per-ticket log for this run (concurrent drain); "
+                                  "showing the shared drain stream —")
             if not log_path:
                 yield _sse("log", "No active run log to stream.")
                 return
@@ -807,8 +830,10 @@ def create_app(cfg: Config, port: int = 8787):
                     for line in fh.readlines():
                         yield _sse("log", line.rstrip("\n\r"))
 
-            # Stream the log file, sending new lines as they're added
-            last_size = 0
+            # Stream the log file, sending new lines as they're added. A per-ticket log starts at 0
+            # (it belongs to this run alone); the shared drain stream starts at its CURRENT end, or
+            # the panel would replay the entire session's stdout before reaching this run's output.
+            last_size = log_file.stat().st_size if tail_from_end else 0
             last_check = 0.0
 
             while True:
@@ -1050,22 +1075,6 @@ def create_app(cfg: Config, port: int = 8787):
                 + _run_form(appq, _checkbox_rows([t for _, t in items]), "Develop selected"))
         return _wrap(f"Choose tickets — {html.escape(appq)}", body)
 
-    @app.post("/api/squad")
-    def squad_api():
-        # 2026-07-19 (Commander order — squad modes): persist WHICH formation builds tickets.
-        # full = the standard pipeline; elite = the small careful trio (step-by-step Builder,
-        # 2.4x turn budget, unchanged gate+review); auto = the sizer routes L/XL → elite.
-        from . import squad_pref
-        sq = (request.form.get("squad") or "").strip().lower()
-        if sq in ("full", "elite", "auto"):
-            squad_pref.set_mode(sq, cfg)
-            get_state(None)["last_msg"] = {
-                "full": "Full squad — the standard pipeline builds every ticket.",
-                "elite": "Elite squad — the careful trio builds every ticket: ordered step plan, "
-                         "one iterative Builder with per-step checks, independent review.",
-                "auto": "Auto — big tickets (L/XL) go to the Elite squad, the rest to the Full squad.",
-            }[sq]
-        return redirect("/")
 
     @app.post("/api/model")
     def model_api():

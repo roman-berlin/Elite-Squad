@@ -1719,17 +1719,6 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             dry_run=cfg.dry_run,
             no_comment=getattr(cfg, "no_comments", False)
         )
-    # 2026-07-19 squad modes: record WHICH formation builds this ticket. Only the elite squad is
-    # audited ('full' is the default and would be noise); the same resolver drives the Planner
-    # addendum and the Builder's method layer + effort floor, so this one event names them all.
-    try:
-        from . import squad_pref as _squad
-        _sq_mode, _sq_why = _squad.resolve_for_ticket(cfg, ticket)
-        if _sq_mode == "elite":
-            audit.record("squad_selected", ticket_id=ticket.id, mode="elite", reason=_sq_why)
-            print(f"  🎖️ elite squad — {_sq_why}", flush=True)
-    except Exception:  # noqa: BLE001 - visibility only, never blocks a build
-        pass
     cost = 0.0
     # EU-353: last review binding this attempt saw — may stay None if every pass broke before
     # reaching the review step. Read (guarded) at the max-passes escalation site below to surface

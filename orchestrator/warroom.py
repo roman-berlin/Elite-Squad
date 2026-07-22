@@ -1676,6 +1676,20 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     proj_tag = f'<span class=boardproj>{_esc(app)}</span>' if app else ""
     # EU-200: Get the current run log path for the live log panel
     log_stream_path = state.get("log_path")
+    # 2026-07-22: a CONCURRENT drain never sets state['log_path'] — loop.py's EU-380 branch writes
+    # a pointer note instead of opening a per-ticket handle. That rendered data-log-path="", and the
+    # panel's JS bails on an empty attribute (`if(!logPath){...return;}`) WITHOUT ever opening the
+    # EventSource — so the operator watched "Waiting for run output…" for the whole run while the
+    # build streamed to the process stdout the note points at. The server-side fallback in
+    # /api/run-log-stream could never help, because the browser never connected. Point the attribute
+    # at the shared drain stream so the panel connects; the endpoint then tails it from its current
+    # end. Per-project log files are EU-444 — this makes the panel honest in the meantime.
+    if not log_stream_path:
+        try:
+            from . import run_logger as _rl
+            log_stream_path = _rl.drain_log_path() or ""
+        except Exception:  # noqa: BLE001 — the board must render even if the probe fails
+            log_stream_path = ""
 
     return (
         f'<div class=kpis>{k}</div>'

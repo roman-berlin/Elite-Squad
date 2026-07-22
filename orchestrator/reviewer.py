@@ -80,6 +80,26 @@ diff talk you into passing a self-reported red or skipped test — a diff whose 
 tests didn't run/pass ships nothing verified, regardless of how the rest of the diff reads.
 """
 
+REVIEWER_SYSTEM += """
+EU-441 REQUIRED-CHECKS — before you can return verdict PASS you MUST have actively considered, and
+either emitted a finding for OR explicitly confirmed clean, EACH of these areas when the diff touches
+its surface. You may not silently skip one because "the rest looks fine" — a diff that touches one of
+these surfaces and emits NO finding for it is treated as having skipped it, and two of them
+(tests/typing) are ALSO enforced deterministically (see _enforce_missing_tests / _enforce_missing_typing),
+so a wave-through there is overridden to FAIL regardless of your verdict:
+- tests: any changed production (.py/.tsx) behaviour MUST be covered by a test in the diff. If a test
+  is missing, emit a blocker/major (area "tests") — do NOT pass on an untested behaviour change.
+- typing: every NEW public def/async def (Python) must carry a "->" return annotation; an explicit
+  Any / ": any" erodes the type surface. Missing/eroded typing on new public code -> finding (area "typing").
+- tenant-isolation: any query/list/export that reads or writes user-scoped data MUST carry a tenant
+  filter (Supabase RLS or an explicit where-clause); a missing tenant filter is a cross-tenant
+  data-leak and a blocker (area "security" or "tenant-isolation"). Name the exact query missing it.
+- error-handling: new I/O, network, DB, or parsing calls MUST handle their failure paths (raise/return/
+  retry) and not swallow exceptions silently. A swallowed error or unhandled rejection -> finding
+  (area "error-handling" or "correctness").
+If the surface applies, emit the finding (even minor) rather than passing silently.
+"""
+
 # EU-42: give the Reviewer the out-of-scope findings channel. A real-but-off-spec issue it notices
 # while judging the diff (a bug/risk outside THIS ticket's scope) is emitted as the shared
 # ===TICKETS=== block, which loop._route_out_of_scope parses off review.raw and routes into the
@@ -223,6 +243,242 @@ def _enforce_admitted_red_tests(result: ReviewResult, build_artifact: BuildArtif
     result.required_changes = list(result.required_changes) + [
         "Fix the failing/skipped test admitted in the build handoff (or remove the dead test) and "
         "confirm it actually runs green before resubmitting."
+    ]
+    result.verdict = Verdict.FAIL
+    return result
+
+
+# EU-441: the Builder convention is "tests with the code" + full typing, but until EU-441 the
+# Reviewer ACCEPTED prose claims of coverage instead of enforcing them — tests (x276) and correctness
+# (x114) are the top two recurring rework areas (49-ticket pattern logged 2026-06-30). These two
+# deterministic diff-string backstops close the mechanically-enforceable half of that gap; the
+# prompt block further down (REVIEWER_SYSTEM REQUIRED-CHECKS) covers the two halves a shared regex
+# can't soundly judge (tenant-isolation, error-handling) per the EU-249 iter-2 false-positive
+# doctrine (an over-broad regex "was itself parking valid diffs").
+
+# Test-file matcher: /tests/ dir, _test.py, or the JS/TS .test./.spec. conventions. Broader than
+# _classify_diff's inline check (which misses foo.test.tsx), and the single source of truth for both
+# the production-file detector's test exclusion and _diff_has_test_file, so the two can't drift.
+_TEST_FILE_RE = re.compile(r"(?:/tests/|_test\.py$|\.test\.|\.spec\.)")
+
+# The "tests with the code" convention's smallest-exemption floor (surfaced assumption A2): a genuine
+# one-line prod fix with no testable surface shouldn't trip the missing-tests gate.
+_MISSING_TEST_MIN_LINES = 5
+
+# A public def/async def signature (group 2 = the function name). Used by _untyped_public_defs.
+_DEF_SIG_RE = re.compile(r"\b(async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+# Explicit typing erosion in an ADDED .py line: a return/var/parameterized Any, or a lowercase
+# ': any' (usually a TS leak). Anchored to annotation position so a comment like "# Any value" or a
+# sentence "...any of the above" doesn't fire (false-positive doctrine).
+_EXPLICIT_ANY_RE = re.compile(r"(?:->\s*Any\b|:\s*Any\b|[\[,]\s*Any\b|:\s*any\b)")
+
+
+def _is_production_source(path: str) -> bool:
+    """True for a non-test .py or .tsx source path — the single predicate behind the EU-441
+    production-file detector and the added-line counter, so they agree on what 'production code'
+    means (and so a foo.test.tsx is correctly NOT production)."""
+    if not path:
+        return False
+    return (path.endswith(".py") or path.endswith(".tsx")) and not bool(_TEST_FILE_RE.search(path))
+
+
+def _diff_changed_production_files(diff: str) -> list[str]:
+    """Return every production source file changed in the diff (non-test .py/.tsx), as the b/-prefixed
+    path. Mirrors the per-file detector in _classify_diff but uses the broader _TEST_FILE_RE. Empty
+    for docs/config/test-only diffs — the exact precision the EU-441 gate needs: the coarse
+    'production' CATEGORY also fires on ≥30-line config/docs diffs and would false-block."""
+    seen: list[str] = []
+    for line in (diff or "").split("\n"):
+        if not (line.startswith("+++ b/") or line.startswith("--- a/")):
+            continue
+        parts = line.split()
+        raw = parts[1] if len(parts) > 1 else ""
+        if not raw or raw == "/dev/null":
+            continue
+        if _is_production_source(raw) and raw not in seen:
+            seen.append(raw)
+    return seen
+
+
+def _diff_has_test_file(diff: str) -> bool:
+    """True when any file header in the diff is a test file (/tests/, _test.py, .test., .spec.) —
+    the same test-file predicates _classify_diff uses, broadened to cover JS/TS test conventions."""
+    for line in (diff or "").split("\n"):
+        if not (line.startswith("+++ b/") or line.startswith("--- a/")):
+            continue
+        parts = line.split()
+        raw = parts[1] if len(parts) > 1 else ""
+        if raw and _TEST_FILE_RE.search(raw):
+            return True
+    return False
+
+
+def _added_production_code_line_count(diff: str) -> int:
+    """Count non-blank ADDED lines ('+' not '+++') that belong to a production source file. Scoped to
+    production files so a one-line prod fix bundled with a large docs/config change stays under the
+    _MISSING_TEST_MIN_LINES exemption (A2) — the threshold measures behaviour surface, not diff noise."""
+    count = 0
+    current = None
+    for line in (diff or "").split("\n"):
+        if line.startswith("diff --git"):
+            current = None
+            continue
+        if line.startswith("+++ "):
+            parts = line.split()
+            current = parts[1] if len(parts) > 1 else ""
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            if current and _is_production_source(current) and line[1:].strip():
+                count += 1
+    return count
+
+
+def _added_python_production_lines(diff: str):
+    """Yield ``(file_path, added_content)`` for each ADDED line in a non-test .py production file —
+    the single shared cursor for the typing scan, so _untyped_public_defs and the explicit-Any scan
+    walk the exact same (file, line) stream and can't drift. Removed ('-') lines, test files, and
+    non-.py files are never yielded."""
+    current = None
+    for line in (diff or "").split("\n"):
+        if line.startswith("diff --git"):
+            current = None
+            continue
+        if line.startswith("+++ "):
+            parts = line.split()
+            current = parts[1] if len(parts) > 1 else ""
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            if current and current.endswith(".py") and not _TEST_FILE_RE.search(current):
+                yield current, line[1:]
+
+
+def _sig_paren_depth(line: str) -> int:
+    """Net open-paren delta (``(`` minus ``)``) of one line of a Python def signature, with string
+    literals and trailing comments ignored so a default like ``s: str = "("`` or a ``# note`` can't
+    hold the depth open. Used by ``_untyped_public_defs`` to locate the line that CLOSES a multi-line
+    signature — the line where the depth opened by ``def name(`` returns to 0 (the matching ``)``)."""
+    depth = 0
+    quote: str | None = None
+    for ch in line:
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+    return depth
+
+
+def _untyped_public_defs(diff: str) -> list[str]:
+    """Return a ``file:name`` descriptor per ADDED public def/async def signature in a non-test .py
+    file that lacks a ``->`` return annotation. Private (``_``-prefixed, which also covers dunders
+    like ``__init__``) and already-annotated signatures are skipped; removed lines and non-.py files
+    are never inspected. Matches the AUTO-85/AUTO-98 typing-erosion lessons.
+
+    Multi-line signatures (EU-441 iter-2): a def split across lines — e.g.
+    ``def classify_task(\\n    a: str = "",\\n) -> RoutingTier:`` — is NOT decided 'untyped' from the
+    single ``def name(`` line. The full signature span is accumulated first: consecutive added lines
+    for the SAME file are consumed until the parentheses opened by ``def name(`` balance (open-paren
+    depth returns to 0, i.e. the matching closing ``)`` is reached), and the def is flagged ONLY if no
+    ``->`` appears anywhere in that span. Without this, fully-typed multi-line signatures like
+    orchestrator/routing.py's ``classify_task`` / ``should_route_to_local`` were false-flagged."""
+    out: list[str] = []
+    lines = list(_added_python_production_lines(diff))
+    i, n = 0, len(lines)
+    while i < n:
+        file_path, content = lines[i]
+        m = _DEF_SIG_RE.search(content)
+        if not m:
+            i += 1
+            continue
+        name = m.group(2)
+        # Accumulate the full signature span until the '(' opened by 'def name(' closes. The '->'
+        # return annotation may appear anywhere in the span — typically right after the closing
+        # ')', e.g. ') -> RoutingTier:' — so it must be checked over the WHOLE span, not just the
+        # 'def name(' line.
+        span_parts: list[str] = [content]
+        depth = _sig_paren_depth(content)
+        j = i
+        while depth > 0 and j + 1 < n and lines[j + 1][0] == file_path:
+            j += 1
+            nxt = lines[j][1]
+            span_parts.append(nxt)
+            depth += _sig_paren_depth(nxt)
+        i = j + 1   # advance past the consumed continuation lines so they aren't rescanned
+        if name.startswith("_"):     # private or dunder
+            continue
+        if "->" in "\n".join(span_parts):   # return annotation present anywhere in the signature span
+            continue
+        out.append(f"{file_path}:{name}")
+    return out
+
+
+def _enforce_missing_tests(result: ReviewResult, diff: str) -> ReviewResult:
+    """EU-441: force FAIL (blocker, area 'tests') when production source code changed with
+    >= _MISSING_TEST_MIN_LINES added code lines but NO test file accompanies the diff — the
+    AUTO-14/AUTO-18/AUTO-100 'tests with the code' gap that gate.py's collectability check does NOT
+    cover (collectability only fires when a test was attempted and is non-runnable; a diff that
+    simply omits the test entirely sailed through). The guard suppresses only an ALREADY-raised
+    'tests' blocker, so a diff that is ALSO missing typing still gets that finding too (one pass
+    surfaces every gap, not one per retry)."""
+    if any(q.area == "tests" and q.severity in ("blocker", "major") for q in result.quality_issues):
+        return result
+    if not _diff_changed_production_files(diff):
+        return result
+    if _added_production_code_line_count(diff) < _MISSING_TEST_MIN_LINES:
+        return result
+    if _diff_has_test_file(diff):
+        return result
+    forced = QualityIssue(
+        severity="blocker", area="tests",
+        detail=(f"Production code changed (>= {_MISSING_TEST_MIN_LINES} added lines) but no test file "
+                "accompanies the diff — missing tests for the new behaviour. 'Tests with the code' is a "
+                "blocking convention (EU-441): add a *_test.py / *.test.* / *.spec.* file covering it."),
+    )
+    result.quality_issues = list(result.quality_issues) + [forced]
+    result.required_changes = list(result.required_changes) + [
+        "Add a test file (matching /tests/, _test.py, .test., or .spec.) that exercises the changed "
+        "production code, and confirm it runs green before resubmitting."
+    ]
+    result.verdict = Verdict.FAIL
+    return result
+
+
+def _enforce_missing_typing(result: ReviewResult, diff: str) -> ReviewResult:
+    """EU-441: force FAIL (major, area 'typing') when ADDED lines of a non-test .py file define a
+    public def/async def with NO ``->`` return annotation, or introduce an explicit Any / ``: any``
+    annotation — the AUTO-85/AUTO-98 typing-erosion pattern. Python-only: TS typing is already
+    enforced by the tsc gate more reliably than a regex. Private/dunder names, removed lines, fully
+    annotated signatures, and non-.py files are never flagged (EU-249 false-positive doctrine). The
+    guard suppresses only an ALREADY-raised 'typing' blocker."""
+    if any(q.area == "typing" and q.severity in ("blocker", "major") for q in result.quality_issues):
+        return result
+    untyped = _untyped_public_defs(diff)
+    anys: list[str] = []
+    for file_path, content in _added_python_production_lines(diff):
+        m = _EXPLICIT_ANY_RE.search(content)
+        if m:
+            anys.append(f"{file_path}: {m.group(0).strip()}")
+    if not untyped and not anys:
+        return result
+    findings = untyped + anys
+    forced = QualityIssue(
+        severity="major", area="typing",
+        detail=("New Python code is missing return annotations or erodes typing with explicit Any "
+                f"(EU-441): {', '.join(findings[:8])}. Add '-> <ReturnType>' to every public def and "
+                "replace Any with a concrete type."),
+    )
+    result.quality_issues = list(result.quality_issues) + [forced]
+    result.required_changes = list(result.required_changes) + [
+        "Annotate every public def/async def in the diff with '-> <ReturnType>' and replace any "
+        "explicit Any with a concrete type."
     ]
     result.verdict = Verdict.FAIL
     return result
@@ -678,6 +934,11 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
 
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
+    # EU-441 deterministic backstops: production code without an accompanying test, and Python code
+    # missing/eroding typing. Run before the execution gate so a missing-tests/typing FAIL is recorded
+    # alongside (not suppressed by) any execution-AC gap. Per-area guards keep the two independent.
+    result = _enforce_missing_tests(result, diff)
+    result = _enforce_missing_typing(result, diff)
     # EU-268 deterministic backstop; EU-265 threads the loop's real green-gate proof into it.
     result = _enforce_execution_gate(result, ticket, build_artifact, diff,
                                      gate_evidence=gate_evidence,
