@@ -150,6 +150,63 @@ def postmortem_path(cfg, ticket_id: str) -> Path:
     return postmortems_dir(cfg) / f"{safe}.md"
 
 
+def _legacy_postmortems_dir(cfg) -> Path:
+    """The pre-2026-07-21 postmortems/ location — a sibling of the audit_path's PARENT dir (the repo
+    root before the state/ migration moved audit_path one level deeper into state/). ``parent.parent``
+    matches the actual one-level migration (audit.jsonl -> state/audit.jsonl); any other layout simply
+    yields a non-existent legacy dir -> no adoption (fails safe). Mirrors ``council._legacy_council_dir``
+    and ``_legacy_sig_state_file``."""
+    return Path(cfg.audit_path).resolve().parent.parent / "postmortems"
+
+
+def adopt_legacy_postmortems(cfg, audit=None) -> bool:
+    """EU-435: self-heal the postmortem archive the 2026-07-21 state/ migration orphaned.
+
+    Background: the migration moved ``audit_path`` (and with it every ``with_name("postmortems")``
+    derivation) one level deeper into ``state/``, but left the real archive — one ``<ticket>.md`` per
+    repeatedly-failing ticket — in the legacy ``postmortems/`` sibling. ``postmortems_dir()`` now
+    resolves to the empty ``state/postmortems/``; ``latest_postmortems()`` and ``postmortem_path()``
+    start fresh, so the irreplaceable failure history (a dir of files, identical in shape to the
+    ``council/`` archive) is unreachable.
+
+    On boot this MOVES the legacy ``*.md`` archive into the new location (byte-for-byte, so each
+    postmortem's content survives unchanged), records a ``postmortem_archive_adopted`` audit event
+    carrying the adopted file count, and is done. Idempotent + no-clobber: a new dir that already
+    holds a ``*.md`` postmortem is never touched — a legacy file is only moved when its destination is
+    absent (never overwrites). Best-effort — never raises.
+
+    Mirrors ``council.adopt_legacy_council`` and ``backend_pref.migrate``: called ONLY from the live
+    CLI entrypoint (``main._main``), so a test around a tmp config can never relocate the operator's
+    real archive. Returns True iff it moved at least one file in (for observability / tests)."""
+    import shutil
+    try:
+        new = postmortems_dir(cfg).resolve()            # the dir latest_postmortems()/write_postmortem use
+        if new.is_dir() and any(new.glob("*.md")):      # already populated -> never clobber (AC pin)
+            return False
+        legacy = _legacy_postmortems_dir(cfg)
+        if legacy == new or not legacy.is_dir():        # nothing to adopt (fails safe)
+            return False
+        new.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for src in sorted(legacy.iterdir()):
+            if not src.is_file():
+                continue                               # the archive is *.md; skip any stray subdir
+            dst = new / src.name
+            if dst.exists():
+                continue                               # never overwrite a file already present
+            shutil.move(str(src), str(dst))
+            moved += 1
+        if audit is not None:
+            try:
+                audit.record("postmortem_archive_adopted", files=moved,
+                             from_path=str(legacy), to_path=str(new))
+            except Exception:  # noqa: BLE001 — an audit write must never break a sweep
+                pass
+        return moved > 0
+    except Exception:  # noqa: BLE001 — boot-critical: a migration helper must NEVER break startup
+        return False
+
+
 def _fmt_when(dt) -> str:
     try:
         return dt.strftime("%Y-%m-%d %H:%M")
