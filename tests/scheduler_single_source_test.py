@@ -72,12 +72,19 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    inadvertently killed) — same class as the watchdog installer. It is NOT a resurrection of the
 #    retired com.roman.general.sync.plist (distinct label com.roman.general.audit-publisher; the
 #    RETIRED list below still forbids the old plist + run-sync.sh).
+#    2026-07-22: install-mac-server-watchdog-daemon.sh is the CURRENT EU-433 Mac->VPS cross-host
+#    watchdog installer (a periodic StartInterval agent that runs `./general server-watchdog`, the
+#    reverse direction of EU-428 — the Mac probes the VPS over SSH and pages from the Mac, so a
+#    wedged VPS sender cannot suppress its own alarm) — same class as the watchdog installer above.
+#    It is NOT a resurrection of any retired plist (distinct label com.roman.general.server-watchdog;
+#    the RETIRED list below still forbids the old autopilot/council/patrol/smalltalk/sync plists).
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
              "scripts/general-autopull.sh",
              "scripts/install-mac-watchdog-daemon.sh",
              "scripts/install-mac-config-backup-daemon.sh",
              "scripts/install-mac-audit-publisher-daemon.sh",
+             "scripts/install-mac-server-watchdog-daemon.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):

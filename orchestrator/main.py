@@ -93,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     cg.add_argument("--job", required=True, help="cron job name (the log tag + the per-job state key)")
     cg.add_argument("wrapped", nargs=argparse.REMAINDER,
         help="the command to run, after -- (e.g. -- ./general daily)")
+    sub.add_parser("server-watchdog",
+        help="one Mac->VPS cross-host watch tick: SSH-probe the VPS + content-check the daily brief, "
+             "alert from the Mac (EU-433). No-op without GENERAL_SERVER_SSH.")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
     sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
@@ -381,6 +384,18 @@ def _cron_guard(args) -> int:
     )
 
 
+def _server_watchdog() -> int:
+    """EU-433 — one Mac→VPS cross-host watch tick.
+
+    Probes the VPS over SSH (liveness, AC1), content-checks the newest daily brief (missing / provider
+    error, AC2), and pages from the MAC (independent of the VPS process, AC3). Dispatched BEFORE the
+    config preamble (like cron-guard) so a periodic launchd tick stays cheap; it uses ``$GENERAL_SERVER_SSH``
+    + the canonical ``state/server_watchdog_state.json``, never the config. A clean no-op (return 0) when
+    no VPS target is configured, so the agent is safe to install on any host. Never raises."""
+    from . import server_watchdog
+    return server_watchdog.run()
+
+
 def _doctor(cfg_path: str) -> int:
     from . import health
     glyph = {"ok": "  ✓", "warn": "  ⚠", "bad": "  ✗"}
@@ -556,6 +571,11 @@ async def _main(argv: list[str]) -> int:
     # (council/cron.log per EU-431, state/cron_health.json), not cfg.
     if args.command == "cron-guard":
         return _cron_guard(args)
+    # EU-433: Mac->VPS cross-host watch tick — dispatched BEFORE the config preamble so a periodic
+    # launchd tick stays cheap (no adopt_legacy/usage pass). It reads $GENERAL_SERVER_SSH + the
+    # canonical state sidecar, never the config. Safe no-op where no VPS target is configured.
+    if args.command == "server-watchdog":
+        return _server_watchdog()
 
     if args.command == "consolidate":
         return _consolidate(args)

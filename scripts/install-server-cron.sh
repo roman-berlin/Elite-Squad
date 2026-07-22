@@ -33,6 +33,12 @@
 # critical failure, the import smoke-test) and its header lines carry $(date); the guard's rotation
 # still rolls the whole file.
 #
+# EU-433 (2026-07-22): AC4 — this host's OWN watchdog.sh was installed but scheduled by nothing, so a
+# local cockpit wedge (alive-but-stuck, or a dead cockpit systemd hasn't restarted yet) went unreported.
+# Added a */5 cron that runs it out-of-process (bash+curl), pointed at this host's own cockpit, so a
+# local wedge is caught locally AND still pages with general.service stopped. The Mac's cross-host
+# watcher (AC1, install-mac-server-watchdog-daemon.sh) is the reverse-direction belt to this suspenders.
+#
 # Re-run any time — it replaces the unit's own lines and leaves any other cron entries you have alone.
 set -uo pipefail
 cd "$HOME/General" || { echo "Run this from the server's ~/General directory."; exit 1; }
@@ -50,6 +56,14 @@ cat >> "$TMP" <<'CRON'
 30 5 * * * cd $HOME/General && ./general cron-guard --job daily -- ./general daily >> council/cron.log 2>&1
 # Deep officer council — WEEKLY, Mon 09:30 Jerusalem (IDT, UTC+3) -> 06:30 UTC (the multi-officer muster).
 30 6 * * 1 cd $HOME/General && ./general cron-guard --job council -- ./general council >> council/cron.log 2>&1
+# EU-433 AC4 — VPS LOCAL watchdog. The on-box watchdog.sh script ships in the repo but was scheduled
+# by NOTHING, so a local wedge (cockpit alive-but-stuck, or systemd's Restart=always not yet catching
+# a dead cockpit) went unreported. It runs OUT OF general.service (pure bash+curl), curls THIS host's
+# own cockpit (the script's built-in default http://127.0.0.1:8787/api/health — the cockpit is never
+# exposed to the internet) and reads THIS host's own state/audit.jsonl, then pages via curl-to-Telegram
+# directly — so it STILL ALERTS with general.service stopped (the VPS cannot report its own wedge via
+# the serve process; this independent cron path can). Pairs with the Mac's cross-host watcher (AC1).
+*/5 * * * * cd $HOME/General && bash scripts/watchdog.sh >> council/watchdog.log 2>&1
 CRON
 crontab "$TMP"
 rm -f "$TMP"
