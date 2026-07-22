@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-22 · EU-433 · Elite-Unit · • AC1–AC4 all met: Mac→VPS SSH liveness probe + content check (distinct brief_missing / brief_bad alerts) + independent Mac Telegram path + VPS-side watchdog.sh cron. · 🔗 (no UI — verify via `./general server-watchdog` and the gate harness `tests/eu433_vps_cross_watch_test.py`)
 - 2026-07-22 · EU-432 · Elite-Unit · • AC1 UTC conversion correct (08:30 IDT→30 5, 09:30 IDT→30 6), CRON_TZ dropped, comment made honest; DST drift disclosed as follow-up. · 🔗 (no UI — on the VPS: `bash scripts/install-server-cron.sh` then `crontab -l` shows UTC times + `cron-guard` + no patrol/swebench; `./general cron-guard --job smoke -- echo ok` writes a timestamped `council/cron.log` line; force 3 failures → one Telegram alert)
 - 2026-07-22 · EU-436 · Elite-Unit · • Path math (state/ vs repo-root sibling), move/no-clobber/idempotent semantics, and audit event all correct and faithful to the adopt_legacy_council template. · 🔗 (no UI — the boot hook runs on the next `general` CLI / cockpit start; verify via `grep signature_ledger_adopted ~/General/state/audit.jsonl`)
 - 2026-07-22 · EU-431 · Elite-Unit · • AC1: legacy archive MOVED (not copied) byte-for-byte, ordering preserved; cron.log explicitly left for the crontab redirect — correct, well-evidenced. · 🔗 (no UI — orchestrator backend path-migration; verify via `python3 tests/run_all.py` + the live boot audit event below)
