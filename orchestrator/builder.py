@@ -197,12 +197,18 @@ def size_ticket(ticket) -> tuple[str, str, str]:
     return size, eff, "; ".join(reasons) or "no strong signals"
 
 
-# 2026-07-19 (Commander order — squad modes): the ELITE working method, appended to the system
-# prompt only when squad_pref resolves this ticket to the elite squad. It changes HOW the one
-# careful Builder works (iterative, verified, reported), never WHAT verifies the result — the
-# deterministic gate and the independent review run unchanged after it. English rendition of the
-# Commander's iterative-methodology directive.
-ELITE_METHOD = """
+# The Builder's working method — ALWAYS applied (2026-07-22). It changes HOW the one careful
+# Builder works (iterative, verified, reported), never WHAT verifies the result: the deterministic
+# gate and the independent review run unchanged after it.
+#
+# 2026-07-22 (Commander order): this was previously gated behind an "elite squad" mode, with a
+# "full squad" alternative that ran without it. The record showed 44/44 tickets routed to elite and
+# ZERO ever used full — the choice existed but was never exercised. More to the point, the method
+# is correct at any size; the only thing that made it expensive on small work was the xhigh effort
+# FLOOR bundled with it, which overrode the ticket sizer. That floor is gone and size_ticket() now
+# decides effort for every ticket, so a small ticket runs this same loop cheaply and a large one
+# runs it thoroughly. One method, effort scaled per ticket, no mode to pick.
+BUILD_METHOD = """
 
 ELITE SQUAD METHOD — you are the single careful Builder on a small elite squad. Work in
 small, verified iterations; the goal is a correct, stable, clear result — not a fast one.
@@ -271,17 +277,6 @@ def mark_turn_retry(cfg, ticket_id: str) -> bool:
         return False
 
 
-def _elite_squad(cfg, ticket) -> bool:
-    """True when squad_pref routes THIS ticket to the elite squad. Fail-safe to False — a broken
-    pref store must never change how a build runs."""
-    if ticket is None:
-        return False
-    try:
-        from . import squad_pref
-        return squad_pref.resolve_for_ticket(cfg, ticket)[0] == "elite"
-    except Exception:  # noqa: BLE001
-        return False
-
 
 def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     """(effort, human-readable reason) for this build pass.
@@ -297,13 +292,13 @@ def effort_plan(cfg: Config, iteration: int, ticket=None) -> tuple[str, str]:
     else:
         base = normalize_effort(getattr(cfg, "builder_effort", "high"))
         reason = f"default → {base}"
-    # Elite squad floor: one careful pass replaces retry churn, so the Builder gets the xhigh
-    # turn/task budget up front (2.4x turns) regardless of how small the sizer called the ticket.
-    # Compared by TURN SCALE, not ladder index — xhigh shares a ladder rung with high (it model-
-    # falls-back to high off-Opus) but carries the bigger turn budget, which is what elite needs.
-    if _elite_squad(cfg, ticket) and _TURN_SCALE.get(base, 1.0) < _TURN_SCALE.get("xhigh", 2.4):
-        base = "xhigh"
-        reason += "; elite squad floor → xhigh"
+    # 2026-07-22: the elite-squad xhigh FLOOR was removed here. It forced every ticket to the 2.4x
+    # turn/effort budget regardless of how small the sizer called it — the one thing that made the
+    # careful method expensive on trivial work, and the only reason a second "full squad" mode had
+    # to exist. size_ticket() already grades effort by ticket (S/M low-medium, L/XL high-xhigh), so
+    # cost now scales with the work instead of with a mode. An underestimated ticket is still
+    # overridable per-ticket via the `effort-max` label / [effort:max] marker, which is a sharper
+    # instrument than a global switch.
     # Turn-limit requeue boost: a ticket re-queued after blowing the turn ceiling unsplittably
     # (see loop._exception_report) runs one effort level higher so turns_for grants real headroom.
     if ticket is not None and turn_retry_count(cfg, getattr(ticket, "id", "")) > 0:
@@ -678,7 +673,7 @@ async def _solo_build(req: BuildRequest, app: AppConfig, cfg: Config,
     options = ClaudeAgentOptions(
         model=model,                   # the configured ceiling, or auto-chosen <= ceiling
         system_prompt=_trim_preamble(memory.preamble(), cfg) + BUILDER_SYSTEM
-                      + (ELITE_METHOD if _elite_squad(cfg, req.ticket) else ""),
+                      + BUILD_METHOD,
         cwd=workdir,                   # the isolated worktree when enabled
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
