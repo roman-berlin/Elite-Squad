@@ -35,6 +35,8 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +93,83 @@ def shared_files(cfg: Config) -> list[Path]:
     """Every host's published audit visible to this machine (from the state clone)."""
     d = shared_dir(cfg)
     return sorted(d.glob("*.jsonl")) if d.is_dir() else []
+
+
+# EU-428 AC1 — transport honesty. A peer whose newest published EVENT is older than this is flagged
+# STALE in the `sync` cron log. Deliberately an EVENT-age threshold, not a file-mtime threshold: a
+# no-op `git pull` of unchanged data refreshes the file's mtime while the event inside stays ancient,
+# which is exactly how the dead Mac heartbeat hid for 25 days behind a healthy-looking `pulled=True`.
+STALE_PEER_S = 3600  # 1 hour: well past the ~15-min publish cadence, short of the watcher's 2h alert
+
+_TS_FMTS = ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S")
+
+
+def _parse_iso_epoch(ts: str) -> float | None:
+    """An ISO-8601 audit ts (with or without a +HHMM offset) as a unix epoch, or None when it can't be
+    parsed. Bare (no offset) timestamps are read as UTC. Used to age peer events chronologically."""
+    if not ts:
+        return None
+    s = str(ts).strip().strip('"').strip()
+    for fmt in _TS_FMTS:
+        try:
+            dt = datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return None
+
+
+def peer_ages(cfg: Config) -> dict[str, float | None]:
+    """Newest-EVENT age in seconds for each synced peer audit, keyed by host stem.
+
+    The age is parsed from the newest ``ts`` INSIDE ``shared/<peer>.jsonl`` — NEVER the file's mtime.
+    A successful but empty ``git pull`` refreshes mtime while the event inside stays ancient, so a
+    mtime-based age would read "fresh" while transporting nothing (the EU-428 defect). ``None`` for a
+    peer file with no parseable ts, so it can never be misreported as fresh."""
+    out: dict[str, float | None] = {}
+    now = time.time()
+    for p in shared_files(cfg):
+        newest: float | None = None
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            out[p.stem] = None
+            continue
+        for m in re.finditer(r'"ts"\s*:\s*"([^"]+)"', text):
+            epoch = _parse_iso_epoch(m.group(1))
+            if epoch is not None and (newest is None or epoch > newest):
+                newest = epoch
+        out[p.stem] = (now - newest) if newest is not None else None
+    return out
+
+
+def _fmt_age(seconds: float | None) -> str:
+    """Compact human age for a sync-log peer: ``6m`` / ``3h`` / ``25d`` / ``?``."""
+    if seconds is None:
+        return "?"
+    s = int(seconds)
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def peer_summary(cfg: Config) -> str:
+    """The ``peers=`` fragment for the ``sync`` log line: each peer with its newest-event age, and a
+    ``STALE`` marker once past ``STALE_PEER_S``, so a peer transporting nothing is visibly stale in
+    the cron log (EU-428 AC1). ``'(none yet)'`` when no peers are synced yet."""
+    ages = peer_ages(cfg)
+    if not ages:
+        return "(none yet)"
+    parts: list[str] = []
+    for host in sorted(ages):
+        age = ages[host]
+        stale = " STALE" if (age is not None and age >= STALE_PEER_S) else ""
+        parts.append(f"{host}(age={_fmt_age(age)}){stale}")
+    return ", ".join(parts)
 
 
 def _git(cwd: Path, *args: str, timeout: int = 180) -> subprocess.CompletedProcess[str]:

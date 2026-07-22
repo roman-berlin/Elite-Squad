@@ -97,6 +97,27 @@ script from cron: `*/4 * * * * /path/to/repo/scripts/watchdog.sh >> ~/general-wa
 Tunables (env, all optional): `COCKPIT_URL`, `STALE_SEC`, `FAIL_THRESHOLD`, `RE_ALERT_EVERY`,
 `HEALTH_TIMEOUT`.
 
+**Mac audit publisher (EU-428).** The brain-stem (councils, the daily brief) runs on the VPS; the
+builds run on the Mac. Each host reads the other's audit only because the Mac *publishes* a copy of
+its `state/audit.jsonl` to the shared `unit-state` branch. That publisher was dead for 25 days
+(EU-181 removed the broken agent and never restored the publish half), so `shared/mac.jsonl` froze
+while the VPS kept logging a healthy `pulled=True` — it was pulling a file that never changed, and
+the daily brief was being written by the one host that cannot see a build. Install the periodic
+publisher on the **Mac** (not the VPS — the VPS is pull-only):
+
+```bash
+bash scripts/install-mac-audit-publisher-daemon.sh            # Mac: periodic launchd agent (StartInterval 900)
+bash scripts/install-mac-audit-publisher-daemon.sh uninstall  # stop + remove
+```
+
+QA it once installed: after one ~15-min cycle, the newest event ts in
+`~/General/.unit-state/shared/mac.jsonl` should be within one interval of the newest ts in
+`~/General/state/audit.jsonl`. The VPS cron's `sync[server] pulled=True peers=mac(age=…)` line now
+carries the peer's **newest-event age** (parsed from the ts inside the file, not its mtime) plus a
+`STALE` marker — a successful pull of unchanged data can no longer hide behind a healthy
+`pulled=True`. The companion **VPS peer watcher** (AC2) then pages only when the Mac goes quiet
+*while it has work in flight* — see `scripts/peer-watchdog.sh`.
+
 **Config & secrets backup (EU-408).** `.env` (Jira/Telegram/GLM tokens) and `config.yaml` are
 gitignored by design, so they have no version-control safety net — a disk failure, an errant
 `rm -rf`, or a bad agent edit loses them and the unit is down until every credential is re-issued

@@ -82,36 +82,54 @@ def _reason(run: dict) -> str:
     return " ".join(x for x in (run.get("note"), run.get("verdict")) if x)
 
 
-def scan(cfg) -> list[dict]:
-    """Every failed run, newest first, each tagged with its category/label/action."""
+def scan(cfg, local_only: bool = True) -> list[dict]:
+    """Every failed run, newest first, each tagged with its category/label/action.
+
+    EU-428 AC3: ``local_only`` defaults to **True** — scan reads ONLY this host's own audit, never the
+    synced ``shared/<peer>.jsonl`` rows. scan is the root of every WRITE the forensics subsystem makes
+    (``signature_sweep`` cross-ticket auto-filing + ``_file_postmortem_ticket`` per-ticket filing), so a
+    crash that happened ON THE MAC must never auto-file a ticket ON THE SERVER that merely *received*
+    the row over sync. Peer rows stay display + liveness only (``dashboard.load_tasks`` default is still
+    peer-inclusive). Callers that genuinely need the merged peer view (none in the write path today) pass
+    ``local_only=False``."""
     out = []
-    for r in D.load_tasks(cfg.audit_path):
+    for r in D.load_tasks(cfg.audit_path, local_only=local_only):
         if r.get("outcome") in FAILED_OUTCOMES:
             out.append({**r, **classify(r.get("outcome", ""), _reason(r))})
     return out
 
 
-def taxonomy(cfg) -> list[dict]:
-    """Failure counts by category, most common first — for the /forensics breakdown."""
-    counts = Counter(r["category"] for r in scan(cfg))
+def taxonomy(cfg, local_only: bool = False) -> list[dict]:
+    """Failure counts by category, most common first — for the /forensics breakdown.
+
+    Display caller: ``local_only`` defaults to **False** (peer-inclusive) so the cockpit page still
+    mirrors what every host built. The filing path does not route through here."""
+    counts = Counter(r["category"] for r in scan(cfg, local_only=local_only))
     return [{"category": c, "label": _LABELS.get(c, c), "count": n, "action": _ACTIONS.get(c, "")}
             for c, n in counts.most_common()]
 
 
-def attempts(cfg, ticket_id: str) -> list[dict]:
-    """That ticket's failed runs, OLDEST first (a timeline)."""
-    runs = [r for r in scan(cfg) if (r.get("ticket_id") or "").lower() == (ticket_id or "").lower()]
+def attempts(cfg, ticket_id: str, local_only: bool = True) -> list[dict]:
+    """That ticket's failed runs, OLDEST first (a timeline).
+
+    EU-428 AC3: ``local_only`` defaults to **True** — a host counts only ITS OWN attempts at a ticket.
+    Feeds the post-mortem filing threshold (``maybe_postmortem``) and the Builder's retry hint
+    (``loop``), both of which must reflect this host's history, not a peer's."""
+    runs = [r for r in scan(cfg, local_only=local_only)
+            if (r.get("ticket_id") or "").lower() == (ticket_id or "").lower()]
     return list(reversed(runs))
 
 
-def fail_count(cfg, ticket_id: str) -> int:
-    return len(attempts(cfg, ticket_id))
+def fail_count(cfg, ticket_id: str, local_only: bool = True) -> int:
+    return len(attempts(cfg, ticket_id, local_only=local_only))
 
 
-def repeat_offenders(cfg, threshold: int = 2) -> list[dict]:
-    """Tickets that have failed >= threshold times, worst first."""
+def repeat_offenders(cfg, threshold: int = 2, local_only: bool = False) -> list[dict]:
+    """Tickets that have failed >= threshold times, worst first.
+
+    Display caller: ``local_only`` defaults to **False** (peer-inclusive) for the /forensics page."""
     by_ticket: dict[str, list[dict]] = {}
-    for r in scan(cfg):
+    for r in scan(cfg, local_only=local_only):
         by_ticket.setdefault(r.get("ticket_id") or "?", []).append(r)
     rows = []
     for tid, runs in by_ticket.items():

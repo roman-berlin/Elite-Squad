@@ -658,7 +658,10 @@ async def _main(argv: list[str]) -> int:
     if args.command == "sync":
         from . import sync
         r = sync.git_sync(cfg)
-        peers = ", ".join(r["hosts"]) or "(none yet)"
+        # EU-428 AC1: peers= carries each peer's NEWEST-EVENT age (parsed from the ts inside the
+        # synced file, not its mtime) + a STALE marker, so a pull that transports nothing can't hide
+        # behind a healthy pulled=True. pulled= stays the git-pull success bit.
+        peers = sync.peer_summary(cfg)
         pushed = "read-only" if r["pushed"] is None else r["pushed"]
         line = f"sync[{r['host']}] pulled={r['pulled']} pushed={pushed} peers={peers}"
         ll = sync.pull_server_state(cfg)   # Mac-side: pull the server's living log over SSH

@@ -67,11 +67,17 @@ chk("no stray *.plist remains under scripts/", not stray_plists, f"found={stray_
 #    2026-07-22: install-mac-config-backup-daemon.sh is the CURRENT EU-408 config/secrets backup
 #    installer (a daily StartInterval agent that runs scripts/backup-config.sh) — same class as the
 #    watchdog installer above. scripts/backup-config.sh is token-free and stays OUT of this allow-list.
+#    2026-07-22: install-mac-audit-publisher-daemon.sh is the CURRENT EU-428 AC0 Mac audit publisher
+#    (a periodic StartInterval agent that runs `./general sync`, restoring the heartbeat EU-181
+#    inadvertently killed) — same class as the watchdog installer. It is NOT a resurrection of the
+#    retired com.roman.general.sync.plist (distinct label com.roman.general.audit-publisher; the
+#    RETIRED list below still forbids the old plist + run-sync.sh).
 NEEDLES = ("launchctl", "LaunchAgents", "com.roman.general", ".plist")
 SRC_ALLOW = {"scripts/install-mac-autopilot-daemon.sh", "scripts/install-mac-cockpit-daemon.sh",
              "scripts/general-autopull.sh",
              "scripts/install-mac-watchdog-daemon.sh",
              "scripts/install-mac-config-backup-daemon.sh",
+             "scripts/install-mac-audit-publisher-daemon.sh",
              "orchestrator/autopilot.py", "orchestrator/server.py"}
 offenders = []
 for p in _tracked("orchestrator/**/*.py", "scripts/*.sh"):
