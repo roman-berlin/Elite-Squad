@@ -126,6 +126,35 @@ def _tg_chunks(text: str, limit: int = _TG_MAX_CHARS) -> list[str]:
     return chunks or [""]
 
 
+_PHONE_MAX_CHARS = 900     # ~a phone screenful; above this a report stops being skimmable
+
+
+def brief_for_phone(text: str) -> str:
+    """Fold an over-long notification into a skimmable brief. Deterministic and never-fails.
+
+    Applied by ``send`` to every outbound message. Anything at or under ``_PHONE_MAX_CHARS`` is
+    returned untouched — the goal is to stop the occasional wall of text, not to reformat the
+    one-line events that make up most of the traffic.
+
+    A header line (the first line, which carries the emoji + ticket id the Commander scans for) is
+    always preserved verbatim; only the body is bulletized. On any failure the original text is
+    returned — a brevity helper must never be able to swallow a notification."""
+    try:
+        if not text or len(text) <= _PHONE_MAX_CHARS:
+            return text
+        lines = text.splitlines()
+        head = lines[0].strip() if lines else ""
+        body = "\n".join(lines[1:]).strip()
+        if not body:
+            return text
+        folded = bulletize(body, max_bullets=8, max_chars=_PHONE_MAX_CHARS - len(head) - 2)
+        if not folded.strip():
+            return text
+        return f"{head}\n{folded}" if head else folded
+    except Exception:  # noqa: BLE001 — never let brevity lose a message
+        return text
+
+
 def send(text: str, chat_id: str | int | None = None) -> bool:
     """Send a Telegram message. Returns True if sent, False if not configured or
     failed. Never raises — notifications must not break the pipeline.
@@ -138,7 +167,16 @@ def send(text: str, chat_id: str | int | None = None) -> bool:
 
     EU-358: messages over Telegram's 4096-char ceiling are chunked (they were rejected with a 400
     and silently lost — exactly the long escalation reports that most need to arrive), and a 429
-    gets ONE bounded retry honouring retry_after (capped so a rate-limit can't stall the pipeline)."""
+    gets ONE bounded retry honouring retry_after (capped so a rate-limit can't stall the pipeline).
+
+    2026-07-22 (Commander: "must be brief"): chunking keeps a long message from being LOST, but a
+    report that arrives as three phone notifications is still unreadable on a phone. Every message
+    is now folded to a skimmable length HERE, at the one seam they all pass through, rather than
+    hunting each verbose call site (and re-hunting every new one). Deliberately the DETERMINISTIC
+    bulletizer, never the model: this runs on the notification path of every officer event, so it
+    must add no latency, no cost and no failure mode of its own. Short messages — the overwhelming
+    majority — are untouched."""
+    text = brief_for_phone(text)
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     target = str(chat_id) if chat_id is not None else os.environ.get("TELEGRAM_CHAT_ID")
     if not (token and target):

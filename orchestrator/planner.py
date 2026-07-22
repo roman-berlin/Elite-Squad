@@ -54,6 +54,20 @@ screens/routes/modules that each need their own tests, or is a repo-wide rename/
 the change is focused (a handful of related files, one screen/module) even if non-trivial. When you
 SPLIT, list the sub-tickets in "answer", each sized to land on its own in one pass.
 
+TWO SIZING RULES THE FILE-COUNT TEST MISSES (2026-07-22 — both cost a full wasted pass):
+
+  · PRIOR WALL-CLOCK TIMEOUT. If the ticket text carries a "Prior attempts" section showing a
+    previous run hit a wall-clock/turn limit, that is PROOF this ticket is too big for one pass —
+    regardless of how few files it touches. Do not hand back the same scope and hope; SPLIT it, or
+    narrow the BUILD to the smallest slice that can finish, and say in "answer" what you deferred.
+    EU-438 is the case that taught this: it timed out at 3600s, was re-planned as BUILD unchanged
+    because it touches almost no files, and timed out again.
+
+  · OPEN-ENDED INVESTIGATION. "Investigate/diagnose/find out why X" is bounded in FILES but
+    unbounded in TIME — the file-count rule can never catch it. Convert it into a bounded question
+    with a definite stopping condition ("determine whether A or B causes X, by doing Y"), and if the
+    investigation and the resulting fix are both substantial, SPLIT them: diagnose first, fix second.
+
 Be CONSERVATIVE about ANSWER/CLOSE/REFILE: when in doubt whether a ticket is real work, BUILD it — a
 ticket with acceptance criteria, or labelled Feature or Bug, is almost always BUILD, never ANSWER/CLOSE
 it away. But do NOT force a genuinely oversized ticket through as one BUILD — SPLIT it per the sizing
