@@ -1430,6 +1430,46 @@ def _feed_html(items: list[dict]) -> str:
     return "".join(out)
 
 
+def _runlog_placeholder(state: dict, active: bool) -> str:
+    """What the live-log panel shows BEFORE any output arrives (2026-07-22).
+
+    The panel used to render a bare "Waiting for run output…" and sit on it. That is honest but
+    useless: a run's first ~10 minutes are genuinely silent — the Planner makes ONE long model call
+    and prints nothing until it returns (EU-440: ticket_start 14:27:18, first planner line 14:38:52,
+    11m30s of nothing). Indistinguishable from a broken panel, which is exactly how the Commander
+    read it three separate times.
+
+    So say what IS known instead of what is missing: the stage, how long the run has been going, and
+    when the process last did anything. Every field already exists in the run state — this only
+    stops throwing it away."""
+    if not active:
+        return "<div class=logempty>No active run.</div>"
+    import time as _t
+    bits: list[str] = []
+    stage = str(state.get("phase") or state.get("stage") or "").strip()
+    if stage:
+        bits.append(f"<b>{_esc(stage)}</b>")
+    started = state.get("run_started")
+    if started:
+        try:
+            el = max(0, int(_t.time() - float(started)))
+            bits.append(f"{el // 60}m {el % 60:02d}s elapsed")
+        except (TypeError, ValueError):
+            pass
+    last = state.get("last_activity")
+    if last:
+        try:
+            ago = max(0, int(_t.time() - float(last)))
+            bits.append(f"last step {ago}s ago" if ago < 90
+                        else f"last step {ago // 60}m ago")
+        except (TypeError, ValueError):
+            pass
+    head = " &middot; ".join(bits) if bits else "run starting"
+    return (f'<div class=logempty>&#9654; {head}<br><br>'
+            f'<span style="opacity:.7">No output yet — an officer\'s model call prints nothing '
+            f'until it returns. The first pass is normally silent for several minutes.</span></div>')
+
+
 def _liveness(state: dict, active: bool) -> str:
     """A heartbeat chip: green while the unit is printing steps, amber/red if it goes quiet —
     so you can tell 'working' from 'stuck' at a glance.
@@ -1702,7 +1742,7 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<section class=panel>'
         f'<div class=ph>&#128190; Live run log</div>'
         f'<div class=runlog id=runlog data-log-path="{_esc(str(log_stream_path or ""))}">'
-        f'<div class=logempty>Waiting for run output…</div></div></section>'
+        f'{_runlog_placeholder(state, active)}</div></section>'
         '</div>'
         f'<div class=col-side>'
         # EU-297: proof-of-integration call site for the cockpit_views._card partial —
@@ -2271,7 +2311,10 @@ startStream();
   function renderRunlogLines(){
     if(!runlogPanel)return;
     if(runlogBuffer.length===0){
-      runlogPanel.innerHTML='<div class=logempty>Waiting for run output…</div>';
+      /* 2026-07-22: do NOT overwrite here. The server renders a live status placeholder
+         (stage / elapsed / last step) and refreshes it with the board; blanking it back to
+         a static string threw away the only information available during the silent first
+         pass of a run. Leave whatever the server put there until real lines arrive. */
       return;
     }
 
