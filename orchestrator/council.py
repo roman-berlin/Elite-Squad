@@ -177,6 +177,65 @@ def _council_dir(cfg: Config) -> Path:
     return d
 
 
+def _legacy_council_dir(cfg: Config) -> Path:
+    """The pre-2026-07-21 council/ location — a sibling of the audit_path's PARENT dir (the repo
+    root before the state/ migration moved audit_path one level deeper into state/). ``parent.parent``
+    matches the actual one-level migration (audit.jsonl -> state/audit.jsonl); any other layout
+    simply yields a non-existent legacy dir -> no adoption (fails safe)."""
+    return Path(cfg.audit_path).resolve().parent.parent / "council"
+
+
+def adopt_legacy_council(cfg: Config, audit=None) -> bool:
+    """EU-431: self-heal the council archive the 2026-07-21 state/ migration orphaned.
+
+    Background: the migration moved ``audit_path`` (and with it every ``with_name("council")``
+    derivation) one level deeper into ``state/``, but left the real archive — ``index.jsonl`` + N
+    transcripts back to 2026-06-20 — in the legacy ``council/`` sibling. ``_council_dir()`` now
+    resolves to the empty ``state/council/``; the next ceremony would append a single fresh row to a
+    new ``state/council/index.jsonl`` and ``history()`` would permanently lose every prior row (a
+    lost-index problem — the files stay on disk but nothing points at them).
+
+    On boot this MOVES the legacy archive into the new location (transcripts + index.jsonl,
+    byte-for-byte, so the append ordering — and thus ``history()`` — is preserved), leaving
+    ``cron.log`` where the crontab's ``>> council/cron.log`` redirect still writes it (AC1), and
+    records a ``council_archive_adopted`` audit event (AC2). Idempotent + no-clobber: a new dir
+    that already holds an ``index.jsonl`` is never touched. Best-effort — never raises.
+
+    Mirrors ``backend_pref.migrate``: called ONLY from the live CLI entrypoint (``main._main``), so
+    a test around a tmp config can never relocate the operator's real archive. Returns True iff it
+    moved the archive in (for observability / tests)."""
+    import shutil
+    try:
+        new = _council_dir(cfg).resolve()              # ensures state/council/ exists
+        if (new / "index.jsonl").exists():             # already populated -> never clobber (AC2 pin)
+            return False
+        legacy = _legacy_council_dir(cfg)
+        if legacy == new or not (legacy / "index.jsonl").exists():
+            return False                               # nothing to adopt
+        moved = 0
+        for src in sorted(legacy.iterdir()):
+            if src.name == "cron.log":
+                continue                               # AC1: the crontab redirect writes here — leave it
+            dst = new / src.name
+            if dst.exists():
+                continue                               # never overwrite a file already present
+            shutil.move(str(src), str(dst))
+            moved += 1
+        rows = 0
+        idx = new / "index.jsonl"
+        if idx.exists():
+            rows = sum(1 for ln in idx.read_text(encoding="utf-8").splitlines() if ln.strip())
+        if audit is not None:
+            try:
+                audit.record("council_archive_adopted", rows=rows, files=moved,
+                             from_path=str(legacy), to_path=str(new))
+            except Exception:  # noqa: BLE001 — an audit write must never break a ceremony
+                pass
+        return moved > 0
+    except Exception:  # noqa: BLE001 — boot-critical: a migration helper must NEVER break startup
+        return False
+
+
 def _notes_file(cfg: Config) -> Path:
     return Path(cfg.audit_path).with_name("commander_notes.md")
 

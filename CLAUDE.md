@@ -78,6 +78,10 @@ Everything under `Documentation/` (these are the only files there — keep this 
   12-auditor + 3-lens-verifier pass over all of `orchestrator/`, the launcher, and `tests/`; the 11
   defects fixed directly (EU-358, pinned by `tests/eu358_audit_fixes_test.py`), the deferred findings
   filed as EU-359..EU-372, the 8 recurring improvement clusters, and the durable EU-259 evidence.
+- `Documentation/PATH_MIGRATION_AUDIT_2026-07-22.md` — EU-431: the 2026-07-21 `state/` migration
+  orphaned every `Path(cfg.audit_path).with_name(...)` sibling. The council archive is now adopted
+  on boot (`adopt_legacy_council`); this lists every affected sidecar, the `cron.log`-stays
+  decision, and the recommended follow-ups (postmortems, signature_filed.json, …).
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them
