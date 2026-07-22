@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-22 · EU-436 · Elite-Unit · • Path math (state/ vs repo-root sibling), move/no-clobber/idempotent semantics, and audit event all correct and faithful to the adopt_legacy_council template. · 🔗 (no UI — the boot hook runs on the next `general` CLI / cockpit start; verify via `grep signature_ledger_adopted ~/General/state/audit.jsonl`)
 - 2026-07-22 · EU-431 · Elite-Unit · • AC1: legacy archive MOVED (not copied) byte-for-byte, ordering preserved; cron.log explicitly left for the crontab redirect — correct, well-evidenced. · 🔗 (no UI — orchestrator backend path-migration; verify via `python3 tests/run_all.py` + the live boot audit event below)
 - 2026-07-22 · EU-430 · Elite-Unit · • All 5 ACs met: 401 results alert-not-broadcast, artefacts skipped, markers widened, expiry pre-flight, roster/standup guards, VPS re-auth documented. · 🔗 (no UI — `python3 tests/eu430_vps_auth_outage_test.py`; on the VPS, `./general doctor` → "Claude auth" check and `./general daily` → real brief vs. the ⚠️ auth-outage alert)
 - 2026-07-22 · EU-428 · Elite-Unit · • AC0 publisher: periodic launchd agent runs ./general sync, host-id pinned, allow-listed + documented — met. · 🔗 (no UI — verify via `./general sync` output, `shared/mac.jsonl` freshness, and `scripts/peer-watchdog.sh` on the VPS)
