@@ -380,18 +380,27 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         sess_total, sess_calls = w["today"]["total"], w["today"]["calls"]
         week_total, week_calls = w["week"]["total"], w["week"]["calls"]
         tok_tone = "bad" if bs.get("over") else "warn" if bs.get("alert") else None
-        # Merge today and week tokens into a single card
+        # Merge today and week tokens into a single card.
+        # 2026-07-22 (Commander: "the design text is different between KPIs — make it the same"):
+        # every other tile is a BARE VALUE in .kv over a short caps label in .kl ("16" /
+        # "MERGED -> DEV TODAY"). This one used to pack prose into .kv ("91.8M today · 18%"),
+        # which renders that sentence in the 30px tabular-nums MONO display face the other tiles
+        # only ever put digits in — so it read as a different typeface even though the CSS is
+        # identical. The qualifier belongs in the label, where the other tiles keep theirs.
         if bs["on"] and bs.get("over"):
             # Budget exhausted — show paused state
-            tok_value = "⛔ paused — budget hit"
+            tok_value = "⛔ paused"
             tok_hint = "daily cap reached · resets midnight"
         elif bs["on"]:
-            # Cap configured and not yet hit — show % consumed
+            # The % is NOT repeated here: the gauge bar directly below this value already renders it,
+            # and the hint carries the exact cap. Duplicating it in the value is what put prose in a
+            # digits-only display face in the first place.
+            tok_value = _fmt_tokens(sess_total)
             pct_str = f"{round(bs['pct'] * 100)}%"
-            tok_value = f"{_fmt_tokens(sess_total)} today · {pct_str}"
-            tok_hint = f"{_fmt_tokens(week_total)} this week · {week_calls} calls · cap {_fmt_tokens(bs['cap'])}"
+            tok_hint = (f"{pct_str} of today's cap · {_fmt_tokens(week_total)} this week · "
+                        f"{week_calls} calls · cap {_fmt_tokens(bs['cap'])}")
         else:
-            tok_value = f"{_fmt_tokens(sess_total)} today"
+            tok_value = _fmt_tokens(sess_total)
             tok_hint = f"{_fmt_tokens(week_total)} this week · {sess_calls + week_calls} calls total"
         cards.append({
             "label": "Tokens",
@@ -2081,6 +2090,13 @@ a.kpi:hover{border-color:var(--accent)}
 .kpi summary{list-style:none;cursor:pointer}
 .kpi summary::-webkit-details-marker{display:none}
 .kpi summary.kpisum{padding:16px 17px}
+/* 2026-07-22 (Commander: "0 needs you and 0 security blocks seem to be on different levels").
+   A KPI renders two ways: <a class=kpi> for a plain tile, <details class=kpi><summary class=kpisum>
+   for an expandable one (the security card). Both got .kpi's own padding, and the details variant
+   then added summary.kpisum's padding INSIDE it — so its number started 16px lower than every
+   neighbour and the row of tiles read as misaligned. The summary owns the padding for that
+   variant; the container must not pay it twice. */
+details.kpi{padding:0}
 .kpi[open] summary.kpisum{padding-bottom:8px}
 .secissue{border-top:1px solid var(--line);padding:12px 17px}
 .sechead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
