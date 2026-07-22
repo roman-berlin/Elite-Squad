@@ -295,6 +295,15 @@ class Config:
     # Planner judged isn't work. Fires once per ticket, so /unblock is an unambiguous "build it".
     # Set False to restore the pre-EU-375 "build anyway".
     planner_verdict_park: bool = True
+    # 2026-07-22 (Commander order): the Planner may fan out to read-only sub-agents on genuinely
+    # large/architectural tickets — several investigators over different subsystems, then one
+    # synthesis. Off-switch + hard cost ceiling, because a fan-out is the one officer call that can
+    # multiply its own spend. Only ever armed on the NATIVE backend (the Task tool is a Claude Code
+    # capability; the GLM compat endpoint is not guaranteed to serve it) and only for L/XL tickets —
+    # a small ticket has nothing to decompose across.
+    planner_fanout: bool = True
+    planner_fanout_max_agents: int = 4
+    planner_fanout_budget_usd: float = 3.0
 
     # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
     # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a

@@ -210,7 +210,7 @@ def size_ticket(ticket) -> tuple[str, str, str]:
 # runs it thoroughly. One method, effort scaled per ticket, no mode to pick.
 BUILD_METHOD = """
 
-ELITE SQUAD METHOD — you are the single careful Builder on a small elite squad. Work in
+WORKING METHOD — you are the single careful Builder on this ticket. Work in
 small, verified iterations; the goal is a correct, stable, clear result — not a fast one.
 
 For every work cycle:

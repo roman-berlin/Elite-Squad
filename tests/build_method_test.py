@@ -52,8 +52,11 @@ chk("the builder composes it UNCONDITIONALLY (no mode test)",
     "+ BUILD_METHOD," in bsrc and "if _elite_squad" not in bsrc)
 
 # 2) the planner addendum
+# Assert the CONTRACT (the addendum is composed and never conditional), not the formatting —
+# the first version pinned the trailing comma and broke the moment a second addendum was appended
+# on the next line, which is a test failing on punctuation rather than on behaviour.
 chk("the planner composes PLAN_ADDENDUM unconditionally",
-    "+ PLAN_ADDENDUM," in psrc and "_elite" not in psrc)
+    "+ PLAN_ADDENDUM" in psrc and "PLAN_ADDENDUM if" not in psrc and "_elite" not in psrc)
 chk("PLAN_ADDENDUM still demands an ordered step plan",
     "step" in planner.PLAN_ADDENDUM.lower())
 
