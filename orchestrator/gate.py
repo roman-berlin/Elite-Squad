@@ -851,6 +851,45 @@ def publish_base_green(app: AppConfig, cfg, sha: str) -> None:
         print(f"  · base-gate cache write failed ({exc}) — gate will re-run next time", flush=True)
 
 
+def evict_base_green(app: AppConfig, cfg, sha: str) -> None:
+    """EU-454: the inverse of publish_base_green — drop the green cache entry for ``sha``.
+
+    publish_base_green (EU-376) publishes a green entry for merge_sha at _land time, BEFORE the
+    post-merge dev-HEAD verify (EU-453) runs. If that verify then goes RED, the stale green would
+    make the NEXT pick's base_gate_check HIT and skip re-running against dev's real (red) state —
+    exactly the EU-447 false-green hazard (a clean combine that breaks dev stays SILENT). Called
+    only from the post-merge verify RED branch, this drops the f"{app.repo_path}@{sha}" key from
+    red_base_cache.json so the next pick's base gate MISSES and re-verifies against the real dev.
+    Green verify leaves the entry untouched (today's behaviour, preserving EU-376's ~178s-per-
+    ticket dedup win).
+
+    Never raises (best-effort): the WHOLE body is guarded, so a malformed cfg/app (e.g. a stub
+    missing repo_path) or a disk error just leaves the stale entry (restoring the old re-run
+    behaviour on the next pick) instead of propagating into the post-merge RED branch and skipping
+    its notify/tracker side effects. A no-op when the key (or the cache file) is absent — it never
+    CREATES the file, because locked_rmw unconditionally os.replace-writes on a missing path
+    (locking.py:222-227), so an evict on a cache that doesn't yet exist short-circuits first.
+    Unconditional (no lint-armed refusal, unlike publish_base_green): evict is the inverse — a
+    lint-armed app was never written, so the pop is a harmless no-op there."""
+    if not sha:
+        return
+    try:
+        cache_path = Path(cfg.audit_path).with_name("red_base_cache.json")
+        if not cache_path.exists():
+            return   # locked_rmw would os.replace-WRITE a missing file — short-circuit first
+        key = f"{app.repo_path}@{sha}"
+        from . import locking
+
+        def _del(data):
+            data = data if isinstance(data, dict) else {}
+            data.pop(key, None)   # a no-op when the key is absent (the honest inverse of publish)
+            return data
+
+        locking.locked_rmw(cache_path, _del, default={}, corrupt_to_default=True)
+    except Exception as exc:  # noqa: BLE001 — an evict failure must never block a landed merge
+        print(f"  · base-gate cache evict failed ({exc}) — stale green may linger", flush=True)
+
+
 def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, str]:
     """§3 item 1 — the EU-174 killer. Run the verification gate (and the base's lint) against
     the CLEAN base tree, BEFORE the first build pass. Returns (passed, fingerprint, report).
