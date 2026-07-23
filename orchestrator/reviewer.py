@@ -84,9 +84,10 @@ REVIEWER_SYSTEM += """
 EU-441 REQUIRED-CHECKS — before you can return verdict PASS you MUST have actively considered, and
 either emitted a finding for OR explicitly confirmed clean, EACH of these areas when the diff touches
 its surface. You may not silently skip one because "the rest looks fine" — a diff that touches one of
-these surfaces and emits NO finding for it is treated as having skipped it, and two of them
-(tests/typing) are ALSO enforced deterministically (see _enforce_missing_tests / _enforce_missing_typing),
-so a wave-through there is overridden to FAIL regardless of your verdict:
+these surfaces and emits NO finding for it is treated as having skipped it, and three of them
+(tests/typing/tenant-isolation) are ALSO enforced deterministically (see _enforce_missing_tests /
+_enforce_missing_typing / _enforce_tenant_query), so a wave-through there is overridden to FAIL
+regardless of your verdict:
 - tests: any changed production (.py/.tsx) behaviour MUST be covered by a test in the diff. If a test
   is missing, emit a blocker/major (area "tests") — do NOT pass on an untested behaviour change.
 - typing: every NEW public def/async def (Python) must carry a "->" return annotation; an explicit
@@ -479,6 +480,144 @@ def _enforce_missing_typing(result: ReviewResult, diff: str) -> ReviewResult:
     result.required_changes = list(result.required_changes) + [
         "Annotate every public def/async def in the diff with '-> <ReturnType>' and replace any "
         "explicit Any with a concrete type."
+    ]
+    result.verdict = Verdict.FAIL
+    return result
+
+
+# EU-446: the EU-441 REQUIRED-CHECKS block named tenant-isolation as one of the four surfaces, but
+# until EU-446 it was enforced by the REVIEWER_SYSTEM PROMPT alone — which the LLM can still wave
+# through (the exact AUTO-14/AUTO-18 unreliability EU-441 was created to eliminate). This backstop
+# closes the mechanically-detectable half of that surface: query PRESENCE on a user-scoped table.
+# The EU-249-safe core is 'detect query PRESENCE, never guess whether a tenant filter is MISSING' —
+# the latter is the regex-infeasible part (and the over-broad shape EU-249 iter-2 explicitly
+# rejected: an over-broad tenant-filter regex "was itself parking valid diffs"). EU itself has no
+# Supabase, so the PRESENCE of a Supabase query-builder call in the diff IS the 'this is Automatixy
+# user-data-access code' signal — no need to thread `app` into the signature, which keeps this gate
+# byte-symmetric with the other two _enforce_* diff-string backstops.
+
+# Supabase read/write ENTRY-POINT methods on an ADDED line establish query presence. `.from(` (JS) /
+# `.from_(` (Python) double as the table source. `.eq`/`.filter` are deliberately NOT triggers: they
+# always ride a read/write call AND `.eq('tenant_id', ...)` is itself the scoping signal, so treating
+# them as triggers would conflate the trip with the clearance.
+_QUERY_ENTRY_RE = re.compile(r"\.(?:select|insert|update|delete|upsert|from_?)\s*\(")
+
+# Capture the table literal in a JS/Python `.from('X')` / `.from_('X')` call (group 1 = table name).
+# Drives the user-scoped-table lever: only a query on a user-entity table trips the gate, so a global
+# lookup (countries, app_config, ...) stays SILENT instead of false-blocking (EU-249).
+_FROM_TABLE_RE = re.compile(r"\.from_?\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+
+# User-entity noun set — a `.from(<table>)` whose table (tokenized by _/-/space) STARTS with one of
+# these is user-scoped data. One commented, easy-to-tune alternation; an FP here (a user-scoped-
+# looking table that is actually global) costs one builder pass and is the accepted backstop profile.
+_USER_SCOPED_TABLE_RE = re.compile(
+    r"(?:users?|tenants?|leads?|contacts?|deals?|accounts?|profiles?|workspaces?|members?|"
+    r"customers?|subscriptions?|orgs?|organizations?|organisations?|compan(?:y|ies))"
+)
+
+# Tenant-column names whose explicit filter (a Supabase .eq / .filter, or raw SQL `where col =`)
+# clears the gate. Kept as a shared fragment so the filter and the where-clause clauses stay in sync.
+_TENANT_COLS = (
+    "tenant_id|user_id|org_id|workspace_id|account_id|owner_id|company_id|customer_id|member_id"
+)
+
+# Scoping signals that CLEAR the gate (no false-block): ANY ADDED line carrying one means tenant
+# scoping IS present somewhere in the diff — an explicit tenant-column filter on the query chain
+# (Supabase .eq / .filter, or raw SQL `where col =`), OR an RLS marker (row-level-security enablement
+# / `create policy` / `using (` / `with check`, or a deliberate `#`/`//`/`-- RLS` annotation). Scanned
+# across all added lines rather than just the query line: a chained `.eq('tenant_id', ...)` can sit on
+# its own line, and soundly associating it with a specific query across lines is not feasible — a
+# read-only string gate has no other confirmation channel, so a real RLS annotation is accepted too.
+_TENANT_SCOPING_RE = re.compile(
+    r"(?i)("
+    r"\.eq\s*\(\s*['\"](?:" + _TENANT_COLS + r")['\"]"
+    r"|\.filter\s*\(\s*['\"].*(?:" + _TENANT_COLS + r")"
+    r"|\bwhere\s+(?:[a-z_]+\.)?(?:" + _TENANT_COLS + r")\s*="
+    r"|\brow\s+level\s+security\b"
+    r"|\benable\s+row\s+level\s+security\b"
+    r"|\bcreate\s+policy\b"
+    r"|\brls\b"
+    r"|\busing\s*\("
+    r"|\bwith\s+check\b"
+    r"|(?:#|//|--)\s*rls\b"
+    r")"
+)
+
+
+def _added_diff_lines(diff: str) -> list[str]:
+    """Return the content of every ADDED diff line ('+' but not the '+++' header), leading '+'
+    stripped. The single shared cursor for the tenant-query scan: only newly-ADDED code is a leak
+    surface, never context or removed lines."""
+    out: list[str] = []
+    for line in (diff or "").split("\n"):
+        if line.startswith("+") and not line.startswith("+++"):
+            out.append(line[1:])
+    return out
+
+
+def _is_user_scoped_table(table: str) -> bool:
+    """True when the table literal names a user entity. The table is tokenized by ``_``/``-``/``/``/
+    whitespace so snake_case names (``tenant_members``, ``app_users``) match while a leading prefix
+    (``tbl_``) does not mask the noun, and the noun must START a token (so ``ideal`` is not flagged as
+    ``deal``). A genuine FP (a user-scoped-looking table that is actually global) costs one builder
+    pass — the accepted backstop profile per EU-249."""
+    for tok in re.split(r"[_\-/\s]+", (table or "").lower()):
+        if tok and _USER_SCOPED_TABLE_RE.match(tok):
+            return True
+    return False
+
+
+def _diff_unscoped_tenant_queries(diff: str) -> list[str]:
+    """EU-446: return the offending query lines — ADDED lines carrying a Supabase query on a
+    USER-SCOPED table when the diff's added lines carry NO tenant scoping signal. Empty (no fire)
+    when (a) no query entry-point method is present, (b) the query targets a non-user-scoped/lookup
+    table (``countries``, ``app_config`` — EU-249: stay SILENT rather than guess), or (c) a scoping
+    signal (``.eq('tenant_id', ...)`` / ``where tenant_id =`` / an RLS marker) appears anywhere in the
+    added lines. Pure and deterministic; detects query PRESENCE on a user-scoped table, never guesses
+    whether a filter is missing (the regex-infeasible half). Covers both JS (``.from(``) and Python
+    (``.from_(``) Supabase clients."""
+    added = _added_diff_lines(diff)
+    if not added or not any(_QUERY_ENTRY_RE.search(ln) for ln in added):
+        return []
+    # User-scoped-table lever — any '.from(<table>)' / '.from_(<table>)' naming a user entity.
+    user_scoped_lines = [
+        ln for ln in added
+        if any(_is_user_scoped_table(t) for t in _FROM_TABLE_RE.findall(ln))
+    ]
+    if not user_scoped_lines:
+        return []
+    # Scoping signal clears the gate — scan ALL added lines.
+    if any(_TENANT_SCOPING_RE.search(ln) for ln in added):
+        return []
+    return user_scoped_lines
+
+
+def _enforce_tenant_query(result: ReviewResult, diff: str) -> ReviewResult:
+    """EU-446: force FAIL (major, area 'tenant-isolation') when the diff adds a Supabase query on a
+    user-scoped table and carries NO tenant scoping signal — the AUTO-14/AUTO-18 cross-tenant
+    data-leak shape the EU-441 prompt-only rule could still let through. Symmetric with
+    ``_enforce_missing_tests`` / ``_enforce_missing_typing``: same ``(ReviewResult, diff) ->
+    ReviewResult`` shape, same per-area suppress-guard, same force-major-then-FAIL. Detects query
+    PRESENCE on a user-scoped table (mechanically sound); a global/lookup table and any RLS /
+    explicit-tenant-filter signal stay SILENT so valid diffs are not false-blocked (EU-249)."""
+    if any(q.area in ("tenant-isolation", "security") and q.severity in ("blocker", "major")
+           for q in result.quality_issues):
+        return result
+    offenders = _diff_unscoped_tenant_queries(diff)
+    if not offenders:
+        return result
+    forced = QualityIssue(
+        severity="major", area="tenant-isolation",
+        detail=("Supabase query on a user-scoped table with no tenant scoping signal in the diff "
+                f"(EU-446): {offenders[0].strip()[:200]}. Confirm an explicit tenant filter "
+                "(.eq('tenant_id', ...) / SQL 'where tenant_id =') or a Supabase row-level-security "
+                "policy guards this query, otherwise it is a cross-tenant data-leak."),
+    )
+    result.quality_issues = list(result.quality_issues) + [forced]
+    result.required_changes = list(result.required_changes) + [
+        "Add tenant scoping to the flagged query — an explicit .eq('tenant_id', ...) / SQL "
+        "'where tenant_id =' filter, or a Supabase row-level-security policy — and confirm it is in "
+        "the diff before resubmitting."
     ]
     result.verdict = Verdict.FAIL
     return result
@@ -934,11 +1073,13 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
 
     result = _parse(run.final or run.text)
     result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
-    # EU-441 deterministic backstops: production code without an accompanying test, and Python code
-    # missing/eroding typing. Run before the execution gate so a missing-tests/typing FAIL is recorded
-    # alongside (not suppressed by) any execution-AC gap. Per-area guards keep the two independent.
+    # EU-441/EU-446 deterministic backstops: production code without an accompanying test, Python
+    # code missing/eroding typing, and an unscoped Supabase query on a user-scoped table. Run before
+    # the execution gate so these FAILs are recorded alongside (not suppressed by) any execution-AC
+    # gap. Per-area guards keep each independent.
     result = _enforce_missing_tests(result, diff)
     result = _enforce_missing_typing(result, diff)
+    result = _enforce_tenant_query(result, diff)   # EU-446: unscoped user-scoped Supabase query
     # EU-268 deterministic backstop; EU-265 threads the loop's real green-gate proof into it.
     result = _enforce_execution_gate(result, ticket, build_artifact, diff,
                                      gate_evidence=gate_evidence,
