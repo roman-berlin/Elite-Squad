@@ -2000,6 +2000,14 @@ def _tally_errored(reports, error_counts: dict[str, int]):
             if auth_probe.is_login_failure(r.notes) or infra_classify.classify(r.notes):
                 infra.add(r.ticket_id)
                 continue   # no strike, no counter touch — see docstring
+            if (r.notes or "").startswith(_BASE_LEVEL_PREFIXES):
+                # EU-443: a base-level ERRORED verdict (timeout OR non-timeout environmental —
+                # preflight/import/interpreter, state-file leak) is an app/infra red, never a ticket
+                # defect. infra_classify tags the timeout notes ("timed out") but must stay too
+                # narrow to catch the non-timeout environmental notes (broadening it would mis-tag a
+                # real code red as no-strike infra); the base-level PREFIX is the safe key instead.
+                infra.add(r.ticket_id)
+                continue   # no strike, no counter touch
             if usage.is_cap_refusal(r.notes):
                 continue   # EU-407: provider cap, not a ticket defect — no strike, no counter touch
             n = error_counts.get(r.ticket_id, 0) + 1

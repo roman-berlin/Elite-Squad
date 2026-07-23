@@ -898,6 +898,50 @@ def base_gate_timed_out(report: str | None) -> bool:
     return _BASE_GATE_TIMEOUT_MARKER in (report or "")
 
 
+# EU-443: the other ENVIRONMENT/infra signatures a base-gate red can carry — each one is an
+# unambiguous "the box/toolchain, not the code" signal, so a red matching it is NOT a code red and
+# must neither poison the red cache nor park the queue (see base_gate_environmental). High-precision
+# by construction: a real assertion/harness failure never matches, so this never disarms the
+# EU-174 red-base brake (the regression guard lives in tests/eu443_redbase_environmental_test.py).
+#
+#  • preflight_imports writes exactly "gate health check FAILED …" / "gate health check: cannot run
+#    interpreter '…'" when the gate's own interpreter can't import its declared deps (the EU
+#    self-build venv/PATH hazard — a bare ``python3`` inheriting a PATH without the project venv and
+#    dying on ``import requests``). That verdict is produced BEFORE the suite runs, so it can never
+#    be confused with a ticket's own broken import.
+_BASE_GATE_ENVIRONMENTAL_MARKERS = (
+    "gate health check",        # preflight_imports: gate interpreter can't import its deps
+    "cannot run interpreter",   # preflight_imports: broken/missing python interpreter
+)
+# A FileNotFoundError on a STATE file (a stale general-autopilot.pid or the audit log) is the closed
+# EU-203/EU-334 false-red class — narrow: it needs the error class AND a state-path fragment in the
+# same report, so a ticket's own missing-fixture FileNotFoundError (a genuine code red) can't trip it.
+_BASE_GATE_STATEFILE_LEAK_RE = re.compile(
+    r"filenotfounderror[\s\S]{0,240}(?:[\w./-]+\.pid|audit\.jsonl)"
+    r"|(?:[\w./-]+\.pid|audit\.jsonl)[\s\S]{0,240}filenotfounderror",
+    re.IGNORECASE,
+)
+
+
+def base_gate_environmental(report: str | None) -> bool:
+    """True when a base-gate red is an ENVIRONMENT/infra verdict, not a code red — so it must
+    neither poison the red cache nor park the queue (the EU-443 class: EU-438's red-base verdicts
+    self-healed in ~11 minutes, the fingerprint of an environmental red cached as genuine).
+
+    A SUPERSET of base_gate_timed_out: a runtime timeout, the gate interpreter failing to import
+    its own deps (preflight_imports — the venv/PATH hazard), a broken/missing interpreter, or a
+    state-file leak (a stale .pid / audit path — the closed EU-203/EU-334 class). Every signature
+    matched here is high-precision (an unambiguous box/toolchain signal), so a genuine
+    assertion/harness failure — the EU-174 code red that MUST still park — never matches."""
+    text = report or ""
+    if base_gate_timed_out(text):
+        return True
+    low = text.lower()
+    if any(m in low for m in _BASE_GATE_ENVIRONMENTAL_MARKERS):
+        return True
+    return bool(_BASE_GATE_STATEFILE_LEAK_RE.search(text))
+
+
 def _base_gate_once(app: AppConfig, run) -> GateResult:
     """One base-tree gate pass: the verification gate plus the base's own lint (a red LINT base
     would otherwise burn every ticket's full pass budget at the deterministic stage — 2026-07-06
@@ -1024,21 +1068,27 @@ def base_gate_check(app: AppConfig, cfg, git, runner=None) -> tuple[bool, str, s
         # Confirmation re-run: only a red that REPRODUCES blocks (a single timing flake on this
         # box must never park the whole queue). A green confirm wins — old behaviour proceeds.
         # A TIMEOUT red is exempt: it isn't cached, and doubling a gate_timeout_sec suite on an
-        # already-loaded box is the harm, not the cure (2026-07-15: 2×1800s per re-check).
+        # already-loaded box is the harm, not the cure (2026-07-15: 2×1800s per re-check). A
+        # non-timeout ENVIRONMENTAL red (EU-443: preflight/import/interpreter, state-file leak) is
+        # cheap and deterministic, so it still gets its confirm re-run — and still must not park
+        # even when it reproduces (handled by the infra classification below).
         confirm = _base_gate_once(app, run)
         if confirm.passed:
             res = confirm
     # Compute the infra verdict on the FULL report BEFORE truncation — run_commands appends one
-    # entry per failing command, so a long genuine failure ahead of the timed-out command could
+    # entry per failing command, so a long genuine failure ahead of the environmental marker could
     # push the marker past the cut and make loop.py read the same red differently than we did.
-    infra_red = (not res.passed) and base_gate_timed_out(res.report)
+    infra_red = (not res.passed) and base_gate_environmental(res.report)
+    is_timeout = (not res.passed) and base_gate_timed_out(res.report)
     fp = "" if res.passed else gate_fingerprint(res.report or "")
     report = "" if res.passed else (res.report or "")[:4000]
-    if infra_red and not base_gate_timed_out(report):
+    if is_timeout and not base_gate_timed_out(report):
         report = "(timed out after gate timeout — marker restored; truncation dropped it)\n" + report[:3900]
 
-    # A timeout-shaped red is an environment verdict, not a code verdict — caching it would make
-    # every pick for the next _RED_BASE_RED_TTL_S insta-block on a box that was merely busy.
+    # An environmental red (timeout, gate preflight/import failure, broken interpreter, state-file
+    # leak) is an environment verdict, not a code verdict — caching it would make every pick for the
+    # next _RED_BASE_RED_TTL_S insta-block on a box that was merely mis-configured/busy (EU-443: the
+    # EU-438 incident — a transient environmental red cached as genuine force-parked the whole queue).
     if sha and not infra_red:
         try:
             from . import locking
