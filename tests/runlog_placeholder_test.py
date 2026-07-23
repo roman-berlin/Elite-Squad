@@ -118,6 +118,22 @@ chk("(6d) a review event reads as Review", warroom._live_phase(str(_a3)) == "Rev
 chk("(6e) a missing audit yields no label, never a crash",
     warroom._live_phase(str(AUDIT.parent / "nope.jsonl")) == "")
 
+# (6f) CONCURRENCY: two tickets emit phases into one audit (N=2 drain). The phase must be scoped to
+# the panel's OWN ticket — the Commander saw "Gate" over EU-444 while EU-444 was still building and
+# the OTHER ticket (EU-443) had reached its gate. Unscoped "newest phase anywhere" is the bug.
+_a4 = AUDIT.parent / "a4.jsonl"
+_a4.write_text("\n".join(_json.dumps(r) for r in [
+    {"ts": "1", "event": "ticket_start", "ticket_id": "EU-444"},
+    {"ts": "2", "event": "build", "ticket_id": "EU-444"},        # EU-444 is BUILDING
+    {"ts": "3", "event": "gate", "ticket_id": "EU-443"},         # EU-443 reached its GATE, later
+]) + "\n", encoding="utf-8")
+chk("(6f) scoped to EU-444 → Building (not the other ticket's Gate)",
+    warroom._live_phase(str(_a4), "EU-444") == "Building", warroom._live_phase(str(_a4), "EU-444"))
+chk("(6g) scoped to EU-443 → Gate (its own phase)",
+    warroom._live_phase(str(_a4), "EU-443") == "Gate", warroom._live_phase(str(_a4), "EU-443"))
+chk("(6h) unscoped still returns the newest-anywhere (single-run cockpit unchanged)",
+    warroom._live_phase(str(_a4)) == "Gate")
+
 print("\n========== LIVE-LOG PLACEHOLDER ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

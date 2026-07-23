@@ -1455,13 +1455,19 @@ _PHASE_BY_EVENT = {
 }
 
 
-def _live_phase(audit_path: str | Path) -> str:
+def _live_phase(audit_path: str | Path, ticket_id: str | None = None) -> str:
     """Best-effort label for what the run is doing RIGHT NOW, read from the audit tail.
 
     The run state carries no phase field (see cockpit_state's blank dict — active/last_activity/
     run_started/log_path and no more), so the first version of the placeholder asked it for one and
     silently got nothing: the panel rendered "3m 34s elapsed" with no stage at all. The audit is the
     one place that actually knows.
+
+    ``ticket_id`` scopes the lookup to ONE ticket. Under a concurrent drain (N=2) two tickets emit
+    phase events into the same audit, so the unscoped "newest phase event anywhere" showed the OTHER
+    ticket's stage on this panel — the Commander saw "Gate" over EU-444 while EU-444 was still
+    building and EU-443 had reached its gate. With a ticket_id we only count that ticket's events;
+    without one (a single-run cockpit) the old newest-anywhere behaviour is kept.
 
     Walks BACKWARDS to the newest event that names a phase, skipping uninformative ones (agent_call
     fires for every officer). Returns "" when nothing is recognisable — the caller then just omits
@@ -1477,19 +1483,21 @@ def _live_phase(audit_path: str | Path) -> str:
         import json as _json
         for line in reversed(lines):
             try:
-                ev = _json.loads(line).get("event")
+                rec = _json.loads(line)
             except (ValueError, TypeError):
                 continue
-            if ev in _PHASE_BY_EVENT:
-                label = _PHASE_BY_EVENT[ev]
-                if label:
-                    return label
+            if ticket_id and str(rec.get("ticket_id") or "") != str(ticket_id):
+                continue                              # not this panel's ticket — skip under concurrency
+            label = _PHASE_BY_EVENT.get(rec.get("event"))
+            if label:
+                return label
     except Exception:  # noqa: BLE001 — a status label must never break the board
         return ""
     return ""
 
 
-def _runlog_placeholder(state: dict, active: bool, audit_path: str = "./state/audit.jsonl") -> str:
+def _runlog_placeholder(state: dict, active: bool, audit_path: str = "./state/audit.jsonl",
+                        ticket_id: str | None = None) -> str:
     """What the live-log panel shows BEFORE any output arrives (2026-07-22).
 
     The panel used to render a bare "Waiting for run output…" and sit on it. That is honest but
@@ -1506,7 +1514,7 @@ def _runlog_placeholder(state: dict, active: bool, audit_path: str = "./state/au
     import time as _t
     bits: list[str] = []
     # the audit knows the phase; the run state does not carry one at all
-    stage = _live_phase(audit_path)
+    stage = _live_phase(audit_path, ticket_id)
     if stage:
         bits.append(f"<b>{_esc(stage)}</b>")
     started = state.get("run_started")
@@ -1802,7 +1810,7 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'<section class=panel>'
         f'<div class=ph>&#128190; Live run log</div>'
         f'<div class=runlog id=runlog data-log-path="{_esc(str(log_stream_path or ""))}">'
-        f'{_runlog_placeholder(state, active)}</div></section>'
+        f'{_runlog_placeholder(state, active, getattr(cfg, "audit_path", "./state/audit.jsonl"), (ts[0].get("ticket_id") if ts else None))}</div></section>'
         '</div>'
         f'<div class=col-side>'
         # EU-297: proof-of-integration call site for the cockpit_views._card partial —
