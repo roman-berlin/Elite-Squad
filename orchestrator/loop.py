@@ -29,8 +29,8 @@ from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport, Verdict)
 from .gate import (base_gate_check, base_gate_timed_out, evict_base_green,
-                   extract_failure_evidence, gate_fingerprint, publish_base_green,
-                   run_deterministic_checks, run_gate, select_gate_groups)
+                   extract_failure_evidence, gate_fingerprint, gate_vs_builder_verdict,
+                   publish_base_green, run_deterministic_checks, run_gate, select_gate_groups)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -2341,6 +2341,29 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 gate = confirm
         audit.record("gate", ticket_id=ticket.id, iteration=iteration, passed=gate.passed,
                      report=("" if gate.passed else extract_failure_evidence(gate.report or "")))
+        # EU-442: cross-verify the Builder's self-reported test outcome against the authoritative gate
+        # verdict. EU-151 had a Builder summary claim "all tests pass" while the gate ERRORED — nothing
+        # caught the contradiction, so it silently looped to max-effort until a human triaged it. A GREEN
+        # claim vs a RED gate (the hallucination class) OR a RED admission vs a GREEN gate (the
+        # wrong-tests / didn't-exercise-the-suite class) is a hard FLAG-and-escalate: record the
+        # mismatch, post a Jira comment naming the contradiction, and break to PM-triage instead of
+        # silently retrying — another builder pass cannot fix a Builder that misreported its own result.
+        # A summary making NO explicit test-outcome claim returns None here, so a neutral report (or an
+        # agreeing green/green pair) never fires (the EU-249-iter-2 false-positive guard).
+        _verdict_mismatch = gate_vs_builder_verdict(build.summary or build.raw or "", gate.passed)
+        if _verdict_mismatch:
+            _mismatch_dir = "builder-green/gate-red" if not gate.passed else "builder-red/gate-green"
+            audit.record("gate_builder_verdict_mismatch", ticket_id=ticket.id, iteration=iteration,
+                         direction=_mismatch_dir, mismatch=_verdict_mismatch,
+                         gate_fingerprint=gate_fingerprint(gate.report or ""))
+            mismatch_comment = commenter.summarize_gate_event(
+                "Gate/Builder mismatch", "BLOCKED", _verdict_mismatch, ticket.id)
+            if mismatch_comment and backlog and not ticket.ephemeral:
+                commenter.post_comment(backlog, ticket.key, mismatch_comment)
+            print(f"  gate · verdict mismatch with Builder self-report — {_verdict_mismatch} "
+                  f"(escalating, not retrying)", flush=True)
+            last_changes = [f"Gate/Builder verdict mismatch: {_verdict_mismatch}"]
+            break
         if not gate.passed:
             # §3.1: same failure fingerprint as the previous failed gate → the rebuild didn't
             # move it; stop building and let PM triage/exhaustion handle it (EU-174's shape).

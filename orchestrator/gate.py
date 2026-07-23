@@ -790,6 +790,99 @@ def run_deterministic_checks(app: AppConfig, changed_paths: list[str], diff: str
     return GateResult(passed=True, report="deterministic checks passed")
 
 
+# --------------------------------------------------------------------------- #
+# EU-442 — gate-vs-Builder verdict cross-verification.
+#
+# EU-151: a Builder summary reported "all tests pass" while the verification gate recorded ERRORED,
+# and nothing in the loop caught the contradiction — it silently looped to max-effort until a human
+# triaged it. 85 gate failures / 30 errored / 147 hit-max-effort suggest that decoupling is systemic.
+# This pure helper is the deterministic cross-check: parse an EXPLICIT test-outcome claim from the
+# Builder's own self-report (a GREEN claim "all tests pass" vs a RED admission "tests still failing")
+# and compare it to the authoritative gate verdict. A summary that makes NO test-outcome claim cannot
+# contradict anything, so it returns None regardless of the gate — eliminating the EU-249-iter-2
+# false-positive class. The RED-admission parser reuses reviewer.py's single source of truth (its
+# compiled _UNRESOLVED_STRONG_RE / _WEAK_RED_TEST_RE / _RESOLVED_CTX_RE) rather than re-deriving it,
+# so the two parsers can never drift apart.
+# --------------------------------------------------------------------------- #
+
+# An explicit GREEN (tests-passed) self-report. Broader than reviewer.py's resolution-context phrase
+# on purpose — a Builder can claim success in several natural wordings, and each is a falsifiable
+# assertion the gate can contradict. Negation is handled separately (_GREEN_NEGATION_RE) so "not all
+# tests pass" never reads as a green claim.
+_GREEN_TEST_CLAIM_RE = re.compile(
+    r"(?i)("
+    r"\ball\s+(?:the\s+)?tests?\s+(?:pass\w*|passed|green|succeed\w*)\b"   # "all tests pass"
+    r"|\btests?\s+(?:pass\w*|passed|are\s+passing|green|succeed\w*)\b"     # "tests passed"
+    r"|\btest\s+suite\s+(?:pass\w*|passed|green)\b"                        # "test suite passes"
+    r"|\bevery\s+test\s+pass\w*\b"                                         # "every test passes"
+    r")"
+)
+# A negation token immediately preceding a green phrase cancels it ("not all tests pass",
+# "tests don't pass"). Checked against a short prefix window of the match.
+_GREEN_NEGATION_RE = re.compile(
+    r"(?i)\b(?:not|no|never|don'?t|doesn'?t|didn'?t|cannot|can'?t|won'?t|ain'?t|without)\b\s*"
+    r"(?:\w+\s+){0,3}$"
+)
+
+
+def _green_test_claim(text: str) -> str | None:
+    """The matched GREEN phrase if ``text`` makes an explicit tests-passed claim (not negated), else
+    None. Returns the whole line carrying the claim so the mismatch reason names a readable sentence."""
+    for m in _GREEN_TEST_CLAIM_RE.finditer(text or ""):
+        prefix = text[max(0, m.start() - 28):m.start()]
+        if _GREEN_NEGATION_RE.search(prefix):
+            continue
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        if end == -1:
+            end = len(text)
+        return text[start:end].strip()[:300]
+    return None
+
+
+def _red_test_admission(text: str) -> str | None:
+    """The offending line if ``text`` admits a genuinely UNRESOLVED failing/skipped/broken test, else
+    None. Applies reviewer.py's exact STRONG / WEAK-vs-RESOLVED logic (imported, not re-derived) so
+    the orchestrator has ONE red-admission parser and the two cannot drift."""
+    from .reviewer import _RESOLVED_CTX_RE, _UNRESOLVED_STRONG_RE, _WEAK_RED_TEST_RE
+    m = _UNRESOLVED_STRONG_RE.search(text or "")
+    if not m:
+        weak = _WEAK_RED_TEST_RE.search(text or "")
+        if weak and not _RESOLVED_CTX_RE.search(text or ""):
+            m = weak
+    if not m:
+        return None
+    start = text.rfind("\n", 0, m.start()) + 1
+    end = text.find("\n", m.end())
+    if end == -1:
+        end = len(text)
+    return text[start:end].strip()[:300]
+
+
+def gate_vs_builder_verdict(build_summary: str, gate_passed: bool) -> str | None:
+    """Compare the Builder's self-reported test outcome against the authoritative gate verdict.
+
+    Returns a short mismatch reason when the two CONTRADICT, else None:
+
+      • Builder claims GREEN ("all tests pass") but the gate is RED  → the EU-151
+        hallucination-against-an-errored-gate class.
+      • Builder admits RED ("tests still failing") but the gate is GREEN → the Builder ran the
+        wrong tests / didn't actually exercise the suite class.
+
+    A summary that makes NO explicit test-outcome claim returns None regardless of the gate — a
+    neutral report ("implemented the endpoint") cannot contradict anything, so it never fires (the
+    EU-249-iter-2 false-positive guard). Both-agree-GREEN likewise returns None."""
+    text = build_summary or ""
+    green = _green_test_claim(text)
+    if green and not gate_passed:
+        return (f"Builder claims tests are GREEN (\"{green}\") but the verification gate "
+                f"FAILED (red).")
+    red = _red_test_admission(text)
+    if red and gate_passed:
+        return (f"Builder admits tests are RED (\"{red}\") but the verification gate PASSED (green).")
+    return None
+
+
 _RED_BASE_CACHE_MAX = 40   # (repo@sha) entries kept
 _RED_BASE_RED_TTL_S = 30 * 60   # a cached RED is re-verified after this long (see below)
 _BASE_GATE_TIMEOUT_MARKER = "(timed out after"   # written by run_commands on a command timeout
