@@ -753,24 +753,50 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     triage_state = None
     if ticket_id and ticket_id != "—":
         triage_state = _detect_prebuild_triage(cfg, ticket_id, has_build)
-    # One source of truth, shared with the terminal bar (loop._bar) so the two can't drift (EU-55).
-    # `reached` doubles as the count of completed phases AND the index of the current/next phase.
+    # One source of truth with the terminal bar: the PHASES labels + order (imported from
+    # phases.py, pinned by the _EXPECTED assertion below) are what loop._bar and this web bar
+    # share, so the two can never drift (EU-55). The CURRENT-phase index is NOT shared —
+    # loop._bar advances inside loop.run at each real transition, while the web bar re-derives
+    # it here from the audit (same build/gate events the terminal bar advances on, via
+    # load_tasks' `t["phase"]`). `reached` doubles as the count of completed phases AND the index
+    # of the current/next phase.
     phases = list(PHASES)
     reached = 0
-    if has_build:          # build done → the Gate runs next
-        reached = GATE
-    if has_review:
-        # 2026-07-19 (Commander order — "show me the EXACT status always"): only a PASSING
-        # review advances to Land. A live run whose latest verdict is FAIL is REBUILDING
-        # (pass N+1) — the old `reached = LAND` showed "Working · Land" next to "verdict FAIL",
-        # a display lie (AUTO-198). FAIL → the bar goes back to Build for the retry pass.
-        _v = (t.get("verdict") or "").upper()
-        if "FAIL" in _v or "REJECT" in _v:
-            reached = BUILD if live else REVIEW
+    if live:
+        # EU-448: a LIVE run's bar must show the phase it is IN right now, not the next one.
+        # `has_build` flips True the moment pass 1's `build` event exists and never resets, so it
+        # read "Gate" for the entire build — including PM-driven continuation passes (pm_review /
+        # pm_decided emit no gate event) — a confident display lie (same class as AUTO-198).
+        # Instead derive from `t["phase"]`, the LATEST build/gate event load_tasks recorded:
+        # "gate" once the gate phase actually began (loop fires `gate` before `deterministic_gate`),
+        # "build" while the Builder is still working or after a retry build reset it (EU-136 retry
+        # semantics). Do NOT use `gate_passed` — it stays non-None during a post-gate-fail retry
+        # build and would re-introduce the lie; `phase` correctly resets to "build" on retry.
+        if merged:
+            reached = len(PHASES)                       # reviewed + landed → every phase complete
+        elif has_review:
+            # 2026-07-19 (AUTO-198): a live run whose latest verdict is FAIL/REJECT is REBUILDING
+            # (pass N+1) — show Build, not "Land next to verdict FAIL".
+            _v = (t.get("verdict") or "").upper()
+            reached = BUILD if ("FAIL" in _v or "REJECT" in _v) else LAND
+        elif t.get("phase") == "gate":
+            reached = GATE                               # the gate phase actually began
         else:
-            reached = LAND     # passing review → Land runs next
-    if merged:             # reviewed and landed → every phase complete
-        reached = len(PHASES)
+            reached = BUILD                              # builder working; gate not yet reached
+    else:
+        # Idle / last-run structural path (unchanged): the run is over, so the audit's structural
+        # facts (built? reviewed? merged?) describe where it landed. Keeps phase_fail_test.py and
+        # the idle EU-55 cases exactly as they were — EU-448 only fixes the LIVE derivation.
+        if has_build:          # build done → the Gate runs next
+            reached = GATE
+        if has_review:
+            _v = (t.get("verdict") or "").upper()
+            if "FAIL" in _v or "REJECT" in _v:
+                reached = REVIEW
+            else:
+                reached = LAND     # passing review → Land runs next
+        if merged:             # reviewed and landed → every phase complete
+            reached = len(PHASES)
     # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
     # the phases behind it as cleanly-done. Derive the phase the run died at so the bar shows where
     # it actually broke instead of implying it sailed through review and just didn't deploy.
@@ -788,9 +814,9 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     # EU-55 / F12 audit: phases.py is the single source of truth. Ordering confirmed:
     #   PHASES[BUILD]="Build", PHASES[GATE]="Gate", PHASES[REVIEW]="Review",
     #   PHASES[LAND]="Land".  (Phase-2 §2: the Security and Tests phases were removed.)
-    # The bar stays at Gate until a review verdict is recorded. LAND (idx 3) is not used
-    # as a "reached" value; len(PHASES) marks all phases complete after merge (same effect
-    # as LAND+1). ✓
+    # A live run reads Build→Gate→Review→Land off the gate-phase signal (EU-448); LAND (idx 3)
+    # is not used as a live "reached" value — a passing review sets reached=LAND but the merge
+    # lands it at len(PHASES). len(PHASES) marks all phases complete after merge. ✓
     _EXPECTED = ("Build", "Gate", "Review", "Land")
     if PHASES != _EXPECTED:
         raise AssertionError(
