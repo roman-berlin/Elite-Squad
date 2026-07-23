@@ -129,7 +129,7 @@ filed_calls: list[str] = []
 _orig_file_one = forensics._file_one
 
 
-def _spy_file_one(app_cfg, label, proposal):
+def _spy_file_one(app_cfg, label, proposal, audit=None):
     filed_calls.append(f"{label}:{proposal.get('title', '')[:60]}")
     return None  # don't really file
 
@@ -156,7 +156,7 @@ D._file_line_cache.clear()
 D._audit_cache.clear()
 D._tasks_cache.clear()
 filed_calls2: list[str] = []
-forensics._file_one = lambda app_cfg, label, proposal: filed_calls2.append(label) or None
+forensics._file_one = lambda app_cfg, label, proposal, audit=None: filed_calls2.append(label) or None
 try:
     forensics.signature_sweep(cfg)
 finally:

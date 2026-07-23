@@ -52,6 +52,13 @@ class BacklogAdapter(ABC):
         THAT up first. Default: not supported (callers fall back to the title match)."""
         return None
 
+    def set_labels(self, key: str, add: tuple = (), remove: tuple = ()) -> bool:
+        """Optional: add and/or remove labels on an EXISTING ticket — non-clobbering (only the
+        named labels change; every other label, the officer label, assignee, etc. are untouched).
+        EU-439: ``relabel_fingerprint`` uses this to correct a mis-stamped subject fingerprint
+        (the EU-422/423/424 collision). Default: not supported (returns False)."""
+        return False
+
     def comments(self, key: str) -> list:
         """Optional: all human-visible comments on a ticket, oldest -> newest. The read half of a
         decision round-trip (the loop posts a question, the Commander answers in a comment).
