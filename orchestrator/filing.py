@@ -154,6 +154,34 @@ def subject_fingerprint(title: str, body: str = "") -> str | None:
     return None
 
 
+# EU-456: the EXACT sentinel prefixes JiraAdapter._to_ticket appends to Ticket.description — the
+# Commander's comment thread and the downloaded image paths. relabel_fingerprint re-reads a LIVE
+# ticket and fingerprints its body, so it must strip these synthetic blocks first: a comment citing
+# a code anchor (or an image basename) is a longer "real anchor" than the clean body carries, so it
+# would win subject_fingerprint's "longest wins" pick and the recomputed fp would diverge from the
+# one a clean new filing stamps — silently re-breaking the very collision AC4 fixed. These are the
+# SINGLE source of truth: backlog/jira.py (the writer) imports them, so the writer and this stripper
+# can NEVER drift on the appended wording — which is exactly the drift that would re-introduce this
+# bug the moment someone edits _to_ticket's appended text.
+_COMMANDER_COMMENTS_PREFIX = "\n\nCommander's comments (oldest -> newest) —"
+_TICKET_IMAGES_PREFIX = "\n\nTicket images — OPEN and VIEW each"
+
+
+def _clean_ticket_description(description: str) -> str:
+    """Return the ticket's ORIGINAL body with the synthetic blocks JiraAdapter._to_ticket appends
+    (Commander comments, downloaded images) stripped off. Cuts at the FIRST occurrence of either
+    sentinel — whichever sorts earliest — so the text relabel_fingerprint fingerprints is the same
+    text a clean new filing would stamp. A description carrying neither append passes through whole
+    (so the EU-439 BOILERPLATE case is an exact no-op)."""
+    description = description or ""
+    cut = len(description)
+    for prefix in (_COMMANDER_COMMENTS_PREFIX, _TICKET_IMAGES_PREFIX):
+        i = description.find(prefix)
+        if i != -1 and i < cut:
+            cut = i
+    return description[:cut]
+
+
 def relabel_fingerprint(backlog, key: str) -> str | None:
     """EU-439: correct a mis-stamped subject-fingerprint label on an EXISTING ticket. Re-reads the
     ticket's CURRENT title + body, recomputes the correct ``subject_fingerprint``, and swaps any
@@ -167,7 +195,11 @@ def relabel_fingerprint(backlog, key: str) -> str | None:
     against the real tickets."""
     ticket = backlog.get_task(key)
     title = getattr(ticket, "summary", "") or ""
-    body = getattr(ticket, "description", "") or ""
+    # EU-456: fingerprint the ORIGINAL body only. _to_ticket appends the Commander's comment thread
+    # + image paths to description; a comment code anchor (or image basename) would otherwise win
+    # subject_fingerprint's "longest real anchor" pick and the recomputed fp would diverge from the
+    # one a clean new filing stamps — defeating this relabel's whole purpose.
+    body = _clean_ticket_description(getattr(ticket, "description", "") or "")
     fp = subject_fingerprint(title, body)
     labels = list(getattr(ticket, "labels", None) or [])
     fp_labels = [l for l in labels if str(l).startswith("fp-")]
