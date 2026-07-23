@@ -373,15 +373,19 @@ def _resolve_app(cfg, rows) -> object | None:
     return None
 
 
-def _file_one(app_cfg, label: str, proposal: dict) -> str | None:
+def _file_one(app_cfg, label: str, proposal: dict, audit=None) -> str | None:
     """File ONE synthesized finding through filing.file_findings, whose title-dedupe
     (backlog.find_open_by_summary) is the EU-231 dedupe. Returns the key only when NEWLY filed
     (deduped / failed / unsupported backend -> None, so callers notify+audit only on new tickets).
     Imports stay local: filing pulls in the backlog adapters, which the cockpit's thin read paths
-    (taxonomy/scan renders) never need."""
+    (taxonomy/scan renders) never need.
+
+    EU-439: ``audit`` is threaded through to file_findings so a SUPPRESSED re-file (a dedup hit
+    in this path) emits a `filing_suppressed` event — the infra-signature path is the bug's home,
+    so its suppressions must leave a trace, not vanish."""
     from . import filing
     try:
-        res = filing.file_findings(app_cfg, label, filing.make_block([proposal]))
+        res = filing.file_findings(app_cfg, label, filing.make_block([proposal]), audit=audit)
         return res.filed[0] if res.filed else None
     except Exception:  # noqa: BLE001 - a backlog hiccup must never sink forensics
         return None
@@ -421,7 +425,8 @@ def _file_postmortem_ticket(cfg, ticket_id: str, audit=None) -> str | None:
             f"Recommended fix:\n\n{_ACTIONS.get(dom, '')}\n\n"
             f"Timeline:\n\n{timeline}\n")
     key = _file_one(app_cfg, "postmortem",
-                    {"title": title, "type": "Task", "severity": "MEDIUM", "body": body})
+                    {"title": title, "type": "Task", "severity": "MEDIUM", "body": body},
+                    audit=audit)
     if key:
         if audit is not None:
             audit.record("postmortem_filed", ticket_id=ticket_id, filed=key,
@@ -590,7 +595,8 @@ def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
                     f"This is a cross-ticket pattern — fix the shared cause, not the individual "
                     f"tickets.")
             key = _file_one(app_cfg, "infra-signature",
-                            {"title": title, "type": "Bug", "severity": "HIGH", "body": body})
+                            {"title": title, "type": "Bug", "severity": "HIGH", "body": body},
+                            audit=audit)
             if key:
                 filed.append(key)
                 # Acknowledge exactly the evidence this ticket carries: a later sweep counts only
