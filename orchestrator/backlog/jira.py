@@ -557,6 +557,21 @@ class JiraAdapter(BacklogAdapter):
                 f"label de-dup search failed for project '{self.project}': {exc}") from exc
         return issues[0].get("key") if issues else None
 
+    def set_labels(self, key: str, add: tuple = (), remove: tuple = ()) -> bool:
+        """Add and/or remove labels on an existing issue via Jira's edit-operations form. EU-439:
+        ``relabel_fingerprint`` uses this to swap a mis-stamped subject fingerprint label for the
+        correct one. Non-clobbering — only the named labels change; the officer label, autofiled,
+        assignee and every other label are untouched (the ``update`` edit-operations form mutates
+        the label SET, it never replaces it). A duplicate add / unknown remove is a harmless
+        no-op on Jira's side. Returns True on success."""
+        ops = ([{"add": str(l)} for l in (add or [])]
+               + [{"remove": str(l)} for l in (remove or [])])
+        if not ops:
+            return True
+        r = self.session.put(self._url(f"issue/{key}"), json={"update": {"labels": ops}})
+        r.raise_for_status()
+        return True
+
     # -- Senior PM operations: close & transition -------------------------------- #
     def close_ticket(self, ticket_id: str, comment: str = "", audit=None) -> bool:
         """Close a ticket with an optional comment. Returns True on success.

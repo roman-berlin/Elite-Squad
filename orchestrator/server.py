@@ -119,6 +119,7 @@ def compute_merge_stats(audit_path: str, time_range: str, now: float | None = No
 
     merged = 0
     pr_opened = 0
+    merged_tickets: list[dict] = []
     for line in D.audit_lines(audit_path):
         try:
             ev = _json.loads(line)
@@ -132,18 +133,55 @@ def compute_merge_stats(audit_path: str, time_range: str, now: float | None = No
             continue
         if event == "merged":
             merged += 1
+            tid = str(ev.get("ticket_id") or "").strip()
+            if tid:
+                merged_tickets.append({"id": tid, "ts": str(ev.get("ts", ""))})
         else:
             pr_opened += 1
 
     total_attempts = merged + pr_opened
     success_rate = (merged / total_attempts) if total_attempts else None
+    # EU-158 + 2026-07-23 (Commander: "show which tickets were merged + Jira link"): the page used to
+    # show only counts. Return the ids too — newest first, capped so a long "all time" window can't
+    # bloat the payload. URLs are added by _link_merged_tickets in the route (pure fn stays URL-free).
+    merged_tickets.reverse()
     return {
         "time_range": time_range,
         "total_merges": merged,
         "pr_opened": pr_opened,
         "success_rate": success_rate,
         "window_start": window_start,
+        "merged_tickets": merged_tickets[:60],
     }
+
+
+def _jira_base_for(cfg, ticket_id: str) -> str:
+    """The Jira base_url for a ticket, matched by its project-key prefix (EU-123 -> the app whose
+    backlog project_key is EU). Empty string when no jira-backed app matches — the caller then
+    renders the id as plain text rather than a dead link."""
+    prefix = str(ticket_id or "").split("-", 1)[0].upper()
+    for app in getattr(cfg, "apps", None) or []:
+        if getattr(app, "backlog_backend", "") != "jira":
+            continue
+        b = getattr(app, "backlog", None) or {}
+        if str(b.get("project_key", "") or "").upper() == prefix:
+            return str(b.get("base_url", "") or "").rstrip("/")
+    return ""
+
+
+def _link_merged_tickets(cfg, stats: dict) -> dict:
+    """Enrich compute_merge_stats' bare ``merged_tickets`` with a Jira ``url`` per ticket. Kept out of
+    the pure aggregator so that stays URL-free and directly testable; the route and the API both call
+    this so the server render and the range-switch refresh render identical links."""
+    out = dict(stats)
+    linked = []
+    for t in stats.get("merged_tickets", []) or []:
+        tid = str(t.get("id") or "")
+        base = _jira_base_for(cfg, tid)
+        linked.append({"id": tid, "ts": t.get("ts", ""),
+                       "url": f"{base}/browse/{tid}" if base else ""})
+    out["merged_tickets"] = linked
+    return out
 
 
 # EU-361: guards the compare-and-set on the one-shot ceremony flags below. Separate from
@@ -1774,7 +1812,7 @@ def create_app(cfg: Config, port: int = 8787):
         time_range = request.args.get("time_range")
         if time_range not in MERGE_STATS_TIME_RANGES:
             time_range = "today"
-        stats = compute_merge_stats(cfg.audit_path, time_range)
+        stats = _link_merged_tickets(cfg, compute_merge_stats(cfg.audit_path, time_range))
         sr = stats["success_rate"]
         sr_str = "—" if sr is None else f"{round(sr * 100)}%"
         range_labels = {"today": "Today", "week": "This week", "month": "This month", "all": "All time"}
@@ -1794,6 +1832,16 @@ def create_app(cfg: Config, port: int = 8787):
             ".msbig.msfade{opacity:.25}"
             ".mslabel{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;"
             "font-weight:700}"
+            ".msmerged{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;"
+            "gap:2px;max-width:620px}"
+            ".msmrow{display:flex;align-items:baseline;justify-content:space-between;gap:14px;"
+            "padding:8px 12px;border:1px solid var(--line);border-radius:var(--r-md);"
+            "background:var(--panel)}"
+            ".msmlink{color:var(--accent);font-weight:650;text-decoration:none;"
+            "font-variant-numeric:tabular-nums}"
+            "a.msmlink:hover{text-decoration:underline}"
+            ".msmts{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}"
+            ".msmempty{color:var(--dim);padding:8px 12px}"
             ".msranges{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}"
             ".msrange{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);"
             "color:var(--ink);padding:7px 14px;font-weight:600;cursor:pointer;font:inherit;"
@@ -1842,6 +1890,16 @@ def create_app(cfg: Config, port: int = 8787):
             "pr.textContent=s.pr_opened;"
             "var rate=s.success_rate;"
             "sr.textContent=(rate===null||rate===undefined)?'—':Math.round(rate*100)+'%';"
+            "var list=document.getElementById('ms-merged-list');"
+            "if(list){"
+            "var items=(s.merged_tickets||[]);"
+            "if(!items.length){list.innerHTML='<li class=msmempty>No merges in this window yet.</li>';}"
+            "else{list.innerHTML=items.map(function(t){"
+            "var ts=(t.ts||'').slice(0,19).replace('T',' ');"
+            "var id=String(t.id||'').replace(/[<>&]/g,'');"
+            "var lnk=t.url?('<a class=msmlink href="'+t.url+'" target=_blank rel=noopener>'+id+'</a>'):('<span class=msmlink>'+id+'</span>');"
+            "return '<li class=msmrow>'+lnk+'<span class=msmts>'+ts+'</span></li>';"
+            "}).join('');}}"
             "setTimeout(function(){"
             "[total,pr,sr].forEach(function(el){if(el){el.classList.remove('msfade');}});"
             "},16);"
@@ -1898,6 +1956,20 @@ def create_app(cfg: Config, port: int = 8787):
                f"{html.escape(sr_str)}</div><div class=mslabel id=ms-sr-label>Success rate</div></div>")
             + "</div>"
             + "</section>"
+            + "<section aria-labelledby=ms-merged-heading>"
+            + "<h2 id=ms-merged-heading class=mssectitle>Merged tickets</h2>"
+            + "<ul class=msmerged id=ms-merged-list>"
+            + ("".join(
+                  (f"<li class=msmrow><a class=msmlink href=\"{html.escape(t['url'])}\" "
+                   f"target=_blank rel=noopener>{html.escape(t['id'])}</a>"
+                   f"<span class=msmts>{html.escape(str(t['ts'])[:19].replace('T', ' '))}</span></li>")
+                  if t.get('url') else
+                  (f"<li class=msmrow><span class=msmlink>{html.escape(t['id'])}</span>"
+                   f"<span class=msmts>{html.escape(str(t['ts'])[:19].replace('T', ' '))}</span></li>")
+                  for t in stats.get('merged_tickets', []))
+               or "<li class=msmempty>No merges in this window yet.</li>")
+            + "</ul>"
+            + "</section>"
             + "</main>"
             + script
         )
@@ -1914,7 +1986,7 @@ def create_app(cfg: Config, port: int = 8787):
                 "error": (f"invalid time_range {time_range!r} — must be one of: "
                           f"{'|'.join(MERGE_STATS_TIME_RANGES)}"),
             }), 400
-        return jsonify(compute_merge_stats(cfg.audit_path, time_range))
+        return jsonify(_link_merged_tickets(cfg, compute_merge_stats(cfg.audit_path, time_range)))
 
     @app.post("/api/approve-proposals")
     def approve_proposals_api():

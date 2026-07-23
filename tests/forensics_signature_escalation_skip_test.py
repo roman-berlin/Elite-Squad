@@ -52,7 +52,7 @@ NOW = datetime.strptime("2026-07-17T12:00:00", "%Y-%m-%dT%H:%M:%S").timestamp() 
 
 # Capture every _file_one call so we can assert what WOULD file without a real backlog backend.
 filed_calls = []
-def _fake_file_one(app_cfg, label, proposal):
+def _fake_file_one(app_cfg, label, proposal, audit=None):
     filed_calls.append((label, proposal))
     return f"FAKE-{label}-{len(filed_calls)}"
 forensics._file_one = _fake_file_one

@@ -100,13 +100,31 @@ def parse_tickets(report: str) -> tuple[list[dict], str]:
 
 _ANCHOR_RE = re.compile(r"[A-Za-z0-9_]+(?:[./][A-Za-z0-9_]+)+|[a-z0-9]+(?:_[a-z0-9]+){2,}")
 
+# EU-439: anchors that are SHARED BOILERPLATE, not a finding's distinguishing subject. Every
+# forensics.signature_sweep report opens with "Auto-filed by forensics.signature_sweep (EU-231)
+# ...", and "forensics.signature_sweep" was the longest anchor in that text — so it dominated
+# the hash and three unrelated [infra-signature] titles collapsed to ONE fp- (EU-422/423/424),
+# silently suppressing every later crash pattern as "already filed". These anchors are excluded
+# from contention; when they are the ONLY anchors, the title text is hashed instead (see below).
+# If a future auto-filer introduces its own boilerplate anchor, add it HERE.
+_BOILERPLATE_ANCHORS = {"forensics.signature_sweep", "signature_sweep"}
+
 
 def subject_fingerprint(title: str, body: str = "") -> str | None:
     """A stable de-dup label for a finding's SUBJECT (2026-07-21). Six differently-worded reports
     of one failing test (EU-409..414) sailed past the exact-title match — but every one of them
     named the same code anchors (`eu255_env_minimization_test.py`). Extract the path-like /
-    snake_case identifiers, keep the 3 most distinctive (longest), and hash them into a Jira-safe
-    label. Prose-only findings (no anchors) return None — the title match stays their only key."""
+    snake_case identifiers, keep the single most distinctive (longest), and hash it into a
+    Jira-safe label. Prose-only findings (no anchors) return None — the title match stays their
+    only key.
+
+    EU-439 (2026-07-23): boilerplate anchors are excluded before the "longest wins" pick, so a
+    shared report prefix can no longer dominate the hash. When the body is boilerplate-DOMINATED
+    (the only anchors left after exclusion are boilerplate), the normalized TITLE text is hashed
+    instead — that is what gives every distinct [infra-signature] prose title its own fp-. A
+    title-preference rewrite was REJECTED: it breaks the EU-409..414 pin (_w1's title yields a
+    truncated anchor while _w2's title yields none — the fuller body anchor must stay in
+    contention), so the fix is exclusion + a title fallback, not title-preference."""
     text = f"{title or ''}\n{body or ''}"
     anchors: set[str] = set()
     for m in _ANCHOR_RE.finditer(text):
@@ -117,20 +135,58 @@ def subject_fingerprint(title: str, body: str = "") -> str | None:
                 break
         if len(a) >= 8 and not a.replace(".", "").replace("_", "").isdigit():
             anchors.add(a)
-    if not anchors:
-        return None
-    # ONE key: the single most distinctive (longest) anchor. Two findings that orbit the same
-    # file/identifier are the same SUBJECT for de-dup purposes — that is exactly the EU-409..414
-    # class (six phrasings, one failing test).
-    top = sorted(sorted(anchors), key=len, reverse=True)[0]
+    real = {a for a in anchors if a not in _BOILERPLATE_ANCHORS}
     import hashlib
-    return "fp-" + hashlib.sha1(top.encode("utf-8")).hexdigest()[:12]
+    if real:
+        # ONE key: the single most distinctive (longest) real anchor. Two findings that orbit
+        # the same file/identifier are the same SUBJECT for de-dup purposes — exactly the
+        # EU-409..414 class (six phrasings, one failing test). Boilerplate never wins this pick.
+        top = sorted(sorted(real), key=len, reverse=True)[0]
+        return "fp-" + hashlib.sha1(top.encode("utf-8")).hexdigest()[:12]
+    if anchors:
+        # Boilerplate-dominated body, no real anchor: the TITLE is the only thing that
+        # distinguishes this finding, so hash its normalized text. Distinct titles -> distinct
+        # fp- (the three infra signatures diverge); a re-stated title -> same fp- (stable).
+        norm = " ".join(str(title or "").lower().split())
+        if norm:
+            return "fp-" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
+    # Truly anchor-free AND boilerplate-free: prose-only finding — the title match stays its key.
+    return None
 
 
-def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResult:
+def relabel_fingerprint(backlog, key: str) -> str | None:
+    """EU-439: correct a mis-stamped subject-fingerprint label on an EXISTING ticket. Re-reads the
+    ticket's CURRENT title + body, recomputes the correct ``subject_fingerprint``, and swaps any
+    wrong ``fp-`` label for it (non-clobbering — the officer / autofiled / infra-signature labels
+    stay put). Returns the correct fp (or None when the finding has no fingerprint). A no-op when
+    the ticket already carries the right label, so it is safe to re-run.
+
+    Why re-read live: the ticket the collision shadowed (EU-422/423/424) may have been title-edited
+    since filing; the recomputed fp simply follows the edited title. ``run_all`` cannot exercise
+    this (it stubs the network) — it is verified against a stub backlog in eu439 and run live once
+    against the real tickets."""
+    ticket = backlog.get_task(key)
+    title = getattr(ticket, "summary", "") or ""
+    body = getattr(ticket, "description", "") or ""
+    fp = subject_fingerprint(title, body)
+    labels = list(getattr(ticket, "labels", None) or [])
+    fp_labels = [l for l in labels if str(l).startswith("fp-")]
+    add = [fp] if (fp and fp not in fp_labels) else []
+    remove = [l for l in fp_labels if l != fp]
+    if add or remove:
+        backlog.set_labels(key, add=add, remove=remove)
+    return fp
+
+
+def file_findings(app: AppConfig, officer_label: str, report: str, audit=None) -> FilingResult:
     """Create a ticket per proposed finding (de-duped). Returns the REAL per-finding outcome
     (filed / deduped / failed) plus the human result lines — so callers report what actually
-    happened, never just the number of proposals."""
+    happened, never just the number of proposals.
+
+    EU-439: ``audit`` (optional AuditLog) records a ``filing_suppressed`` event on EVERY dedup
+    (label or summary hit) carrying the matched key, the suppressed title, how it matched, and the
+    fingerprint — so a suppression is never again a silent drop (the EU-422/423/424 collision went
+    unnoticed for exactly that reason). Default ``None`` keeps every other caller unchanged."""
     proposals, _ = parse_tickets(report)
     res = FilingResult()
     if not proposals:
@@ -150,12 +206,29 @@ def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResu
             # getattr-guarded like _with_default_timeout: bare test stubs and older adapters
             # without the method just skip straight to the title match.
             _by_label = getattr(backlog, "find_open_by_label", None)
-            existing = _by_label(fp) if (fp and callable(_by_label)) else None
+            existing = None
+            matched_by = None
+            if fp and callable(_by_label):
+                existing = _by_label(fp)
+                if existing:
+                    matched_by = "label"
             if not existing:
-                existing = backlog.find_open_by_summary(title)
+                got = backlog.find_open_by_summary(title)
+                if got:
+                    existing = got
+                    matched_by = "summary"
             if existing:
                 res.deduped.append(existing)
                 res.lines.append(f"↺ {existing} already open — {title}")
+                # EU-439: a suppression leaves a trace. Not requiring an exact-title corroboration
+                # for a label hit (that would re-break EU-409..414, whose point is title-INSENSITIVE
+                # dedup) — the audit event IS the corroboration the ticket asks for.
+                if audit is not None:
+                    try:
+                        audit.record("filing_suppressed", key=existing, title=title,
+                                     matched_by=matched_by, fp=fp)
+                    except Exception:  # noqa: BLE001 — an audit hiccup must never change filing
+                        pass
                 continue
             key = backlog.create_task(title, body,
                                       labels=[officer_label, "autofiled"] + ([fp] if fp else []),
@@ -177,10 +250,13 @@ def file_findings(app: AppConfig, officer_label: str, report: str) -> FilingResu
 
 
 def present(report: str, app: AppConfig, officer_label: str,
-            do_file: bool) -> tuple[str, str, FilingResult]:
+            do_file: bool, audit=None) -> tuple[str, str, FilingResult]:
     """Return (clean_report, filing_block, result). filing_block lists proposals and, if do_file,
     results; `result` is the real filing outcome (empty FilingResult when proposing-only/no
-    findings) so the caller can report new/already-open/failed counts and escalate failures."""
+    findings) so the caller can report new/already-open/failed counts and escalate failures.
+
+    EU-439: ``audit`` is passed through to ``file_findings`` so the present() path (scout /
+    provost / quartermaster filing) records `filing_suppressed` on dedup too."""
     proposals, clean = parse_tickets(report)
     if not proposals:
         return clean, "", FilingResult()
@@ -188,7 +264,7 @@ def present(report: str, app: AppConfig, officer_label: str,
     lines += [f"  • [{p.get('severity', '?')}] {p.get('title')}" for p in proposals]
     result = FilingResult()
     if do_file:
-        result = file_findings(app, officer_label, report)
+        result = file_findings(app, officer_label, report, audit=audit)
         lines.append("")
         lines += result.lines
     else:

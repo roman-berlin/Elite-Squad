@@ -116,6 +116,12 @@ class AppConfig:
     # Bun product install deps while the Python EU repo (no package.json) installs nothing.
     worktree_setup_cmd: Optional[str] = None
     postmerge_commands: list[str] = field(default_factory=list)  # SRE's heavier post-merge suite (e2e/integration); empty = skip
+    # EU-452: per-app opt-in for the post-merge dev-HEAD re-verification runner (postmerge_verify.py).
+    # The master switch lives on Config.postmerge_verify; this per-app flag is the second key — together
+    # with a non-empty gate_commands they arm should_run() (see the three-factor gate there). OFF by
+    # default so the framework stays inert (a no-op) for every app until armed both ways, exactly like
+    # sentinel_enabled+postmerge_commands and smoke_enabled+smoke_command.
+    postmerge_verify: bool = False
     # EU-60: a single fast post-merge SMOKE command run on the landed <base> (e.g. a Playwright
     # auth-redirect smoke). Unlike postmerge_commands it never reverts — on red it FLAGS the merge
     # (Telegram + audit + ticket comment) so the Commander catches a broken DEV at QA. None = skip
@@ -235,6 +241,14 @@ class Config:
                                             # FLAG it (Telegram + audit + ticket comment) if red — never reverts, that's
                                             # the SRE's job. NO-OP for any app without a `smoke_command` (smoke.should_run),
                                             # so arming it costs nothing until an app opts a command in.
+    postmerge_verify: bool = False             # EU-452 master switch for the post-merge dev-HEAD re-verification runner
+                                            # (postmerge_verify.py): the post-land counterpart to the pre-land base_gate_check.
+                                            # After a land, re-run the app's own `gate_commands` against the ACTUAL merged dev
+                                            # HEAD and return a green/red verdict — WITHOUT wiring into the loop or reverting
+                                            # (engine only; siblings own wiring/revert/cache). OFF by default — the per-app
+                                            # AppConfig.postmerge_verify flag AND a non-empty gate_commands must both be set
+                                            # before should_run() arms it (postmerge_verify.should_run), so adding this field
+                                            # costs nothing until an app opts in both ways.
     # EU-271: declared fields, not phantoms. ci_conclusion.py read `ci_conclusion_enabled` via a
     # getattr default while Config never declared it — and Config.load routes YAML through
     # _known_only, which DROPS unknown keys, so the documented off-switch was silently discarded at
