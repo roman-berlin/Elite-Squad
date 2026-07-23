@@ -28,9 +28,10 @@ from .backlog.base import BacklogAdapter, NoneBacklog, make_backlog
 from .config import AppConfig, Config
 from .contracts import (BuildRequest, Outcome, PerTicketArtifactStore,
                        SpecArtifact, Ticket, TicketReport, Verdict)
-from .gate import (base_gate_check, base_gate_timed_out, evict_base_green,
-                   extract_failure_evidence, gate_fingerprint, gate_vs_builder_verdict,
-                   publish_base_green, run_deterministic_checks, run_gate, select_gate_groups)
+from .gate import (base_gate_check, base_gate_environmental, base_gate_timed_out,
+                   evict_base_green, extract_failure_evidence, gate_fingerprint,
+                   gate_vs_builder_verdict, publish_base_green, run_deterministic_checks,
+                   run_gate, select_gate_groups)
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -370,14 +371,22 @@ def _is_deliberate_halt(text: str | None) -> bool:
 
 _TURN_LIMIT_MARKERS = ("maximum number of turns", "max turns", "max_turns")
 
-# Report notes for the two BASE-LEVEL verdicts. Both are emitted ONLY from the constants below
+# Report notes for the BASE-LEVEL verdicts. These are emitted ONLY from the constants below
 # (never inline literals) because _run_inner and autopilot key their base-level halts on these
 # prefixes — an inline rewording would silently disarm both halts and reopen the 2026-07-15
 # needs_human massacre class. _BASE_INFRA_NOTES must additionally contain "timed out" so
 # infra_classify.classify tags it infra (EU-228: no error strike).
+#
+# EU-443: _BASE_ENV_NOTES is the non-timeout environmental verdict (gate preflight/import failure,
+# broken/missing interpreter, state-file leak — see gate.base_gate_environmental). It shares the
+# infra/ERRORED path with timeouts (charge no ticket, hold the drain, never park/escalate). It is
+# recognised as infra in autopilot._tally_errored by its base-level prefix (not by infra_classify,
+# whose markers must stay narrow to avoid tagging a real code red as a no-strike infra failure).
 _RED_BASE_NOTES = "red base — gate fails on the clean base tree"
 _BASE_INFRA_NOTES = "base gate timed out on the clean base tree — environment/load infra, not a code red"
-_BASE_LEVEL_PREFIXES = ("red base", "base gate timed out")
+_BASE_ENV_NOTES = ("base gate environmental failure on the clean base tree — "
+                   "interpreter/import/path infra, not a code red")
+_BASE_LEVEL_PREFIXES = ("red base", "base gate timed out", "base gate environmental failure")
 
 
 def _is_turn_limit(text: str | None) -> bool:
@@ -1800,28 +1809,43 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             _at_base = False
     if _at_base:
         base_ok, base_fp, base_report = base_gate_check(app, cfg, git, runner=run_gate)
-        if not base_ok and base_gate_timed_out(base_report):
-            # 2026-07-15 (twice: 04:20 and 17:41 waves): a box under load timed the base suite
-            # out, the red got cached, and the drain force-parked every To Do ticket to
-            # needs_human. A timeout is an environment verdict (EU-228 class), never a code-red:
-            # charge no ticket, ask the Commander nothing. The notes carry the timeout marker so
-            # autopilot's infra_classify path (EU-228) holds the drain with no error strike, and
+        if not base_ok and base_gate_environmental(base_report):
+            # An ENVIRONMENTAL base-gate red is an infra verdict, never a code-red: charge no
+            # ticket, ask the Commander nothing. Two flavours share this path:
+            #   • TIMEOUT (2026-07-15, twice: 04:20 and 17:41 waves) — a box under load timed the
+            #     base suite out, the red got cached, and the drain force-parked every To Do ticket
+            #     to needs_human. Notes carry "timed out" so infra_classify tags them infra.
+            #   • NON-TIMEOUT environmental (EU-443: the EU-438 postmortem) — a preflight/import or
+            #     broken-interpreter failure, or a state-file (.pid/audit) leak: a transient red
+            #     cached as genuine force-parked the whole queue until the TTL expired. These
+            #     _BASE_ENV_NOTES are recognised as infra by their base-level prefix in
+            #     autopilot._tally_errored (not by infra_classify, which must stay narrow).
             # _run_inner stops this run so the rest of the worklist stays queued untouched.
+            _env_timeout = base_gate_timed_out(base_report)
+            _env_msg = ("base gate timed out — environment/load, not a red base"
+                        if _env_timeout else
+                        "base gate red is environmental (interpreter/import/path), not a red base")
             audit.record("base_gate_infra", ticket_id=ticket.id,
                          report=(base_report or "")[:1500])
-            print(f"  🌐 {ticket.id}: base gate timed out — environment/load, not a red base; "
-                  "no ticket charged, run holding.", flush=True)
+            print(f"  🌐 {ticket.id}: {_env_msg}; no ticket charged, run holding.", flush=True)
             try:
                 # The pick already moved this ticket to In Progress with a "started" ping; without
                 # a comment the board shows silent stalled work (the loop.py:240 invisibility
                 # problem). Best-effort — a tracker hiccup must never break the infra path.
-                backlog.add_comment(ticket, "⏳ Base gate timed out (environment/load, not a code "
-                                            "failure) — no work was done on this ticket; the drain "
-                                            "holds and retries automatically.")
+                backlog.add_comment(ticket, "⏳ Base gate failed for an environment reason "
+                                            "(load/interpreter/import/path, not a code failure) — "
+                                            "no work was done on this ticket; the drain holds and "
+                                            "retries automatically.")
             except Exception:  # noqa: BLE001
                 pass
+            # The two infra notes are emitted as CONSTANT literals (never inline) — autopilot and
+            # the EU-228 regression harness key on these exact tokens. The timeout arm keeps the
+            # original _BASE_INFRA_NOTES; the non-timeout environmental arm uses _BASE_ENV_NOTES.
+            if _env_timeout:
+                return _resolve(TicketReport(ticket.id, Outcome.ERRORED, 0, cost, app.name, branch,
+                                             notes=_BASE_INFRA_NOTES))
             return _resolve(TicketReport(ticket.id, Outcome.ERRORED, 0, cost, app.name, branch,
-                                         notes=_BASE_INFRA_NOTES))
+                                         notes=_BASE_ENV_NOTES))
         if not base_ok:
             audit.record("red_base_block", ticket_id=ticket.id, fingerprint=base_fp,
                          report=(base_report or "")[:2500])
