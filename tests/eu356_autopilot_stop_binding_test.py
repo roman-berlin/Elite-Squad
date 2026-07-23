@@ -77,6 +77,21 @@ autopilot.intake.from_drain = lambda c, app, n: []      # empty worklist → the
 autopilot.notify.configured = lambda: False
 autopilot.notify.send = lambda *a, **k: None
 
+# EU-438: the real autopilot() run by sections 1/2/7 (run_drain) calls the REAL
+# git_ops.reap_stale_worktrees(cfg) + clear_parked_repos() unconditionally at startup
+# (orchestrator/autopilot.py ~L2260/L2264). reap runs `git worktree list`/`remove`/`prune`
+# against the HOST's real worktree table — the EU-334 cross-harness worktree-state-bleed
+# class (a reap during a live drain can remove a live builder slot → FileNotFoundError → a
+# false "red base" under run_all.py). With apps=[] below it is incidentally a no-op today, but
+# the EU-355/EU-360 hermeticity pattern isolates test side-effects STRUCTURALLY, not by cfg
+# shape — and this same stub is already the established idiom (autopilot_retry_test.py:56 and
+# section 5 below). Stubbing at MODULE level covers EVERY real-autopilot section, so no later
+# cfg change can bleed the host worktree table. (The section-5 stub below is now a harmless
+# duplicate; kept to keep that section independently hermetic if this line ever moves.)
+import orchestrator.git_ops as git_ops
+git_ops.reap_stale_worktrees = lambda c: None          # never side-effect real worktrees from a test
+git_ops.clear_parked_repos = lambda: None              # belt-and-braces: only clears an in-process set
+
 
 def run_drain(live_ev, on_cycle, app_name=APP):
     """Run the REAL autopilot() in a thread; call ``on_cycle(n)`` from inside the live loop each cycle.
