@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-24 · EU-500 · Elite-Unit · • All 4 ACs met: function exists, callable with cfg, issues exactly the 4 prescribed git commands in order, deletes nothing (EU-428 guard honoured).
 - 2026-07-24 · EU-479 · Elite-Unit · • AC1–AC4 all met: same-app double-build reads '2 builds running · 1 project', two apps read '2 … 2 projects', zero runs → empty badge, EU-103 tests preserved.
 - 2026-07-24 · EU-480 · Elite-Unit · • Verify-and-close integration ticket; feature code shipped with siblings EU-485/486/487/488 and is accurately described.
 - 2026-07-24 · EU-488 · Elite-Unit · • All 4 scenarios (0/1/2/3+ runs, cap) trace cleanly to green against live warroom.py — signatures, freshness filter, cap, and _ticket_done offline-safety all match.
