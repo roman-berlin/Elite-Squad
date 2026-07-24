@@ -1478,7 +1478,7 @@ async def _pm_decide_before_park(cfg, ticket, app, audit, backlog, question: str
             try:
                 backlog.add_comment(ticket,
                     "🤖 Automode — PM decided autonomously (DEV only — review & reverse if needed).\n\n"
-                    + pm_outcome["body"][:1200])
+                    + notify.jira_brief(pm_outcome["body"], max_chars=1200))
             except Exception:  # noqa: BLE001 - a comment failure must not break the run
                 pass
         head = ("🤖 Automode — the PM decided autonomously" if auto
@@ -2226,7 +2226,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                         try:
                             backlog.add_comment(ticket,
                                 "🤖 Automode — PM decided autonomously (DEV only — review & reverse if needed).\n\n"
-                                + pm_outcome["body"][:1200])
+                                + notify.jira_brief(pm_outcome["body"], max_chars=1200))
                         except Exception:  # noqa: BLE001 - a comment failure must not break the run
                             pass
                     head = ("🤖 Automode — the PM decided autonomously" if auto
@@ -2863,7 +2863,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     decisions.add(cfg, ticket, app.name, esc[:1500])
     if not cfg.dry_run and not ticket.ephemeral:
         # decisions.add already parked it to 'Blocked' (EU-61) — just leave the escalation note.
-        backlog.add_comment(ticket, ("🎖️ [PM] " + esc[:1400]) if triage else esc)
+        # 2026-07-23 (Commander): brief bullets, no tables/headings, and NEVER a mid-sentence
+        # cut — the old bare 1400-char slice chopped the EU-445 triage comment mid-word.
+        backlog.add_comment(ticket, ("🎖️ [PM] " + notify.jira_brief(esc)) if triage
+                            else notify.jira_brief(esc))
     print("  ✗ escalated — needs you (max passes reached without a clean review)", flush=True)
     # QW3: structured disagreement record — who wanted what when the loop was cut. One event the
     # cockpit/forensics can read instead of re-mining build/review payloads.
@@ -2934,9 +2937,9 @@ def _commit_message(ticket, build) -> str:
 
 
 def _manual_test_block(build, review) -> str | None:
-    """The manual-test hand-off text when this land needs the Commander's hands, else None
-    (2026-07-20 Commander order: 'if need manual testing they need to write in the comments the
-    exact test steps and put in Blocked').
+    """The manual-test hand-off text when this land needs the Commander's hands, else None.
+    (2026-07-20 order: exact steps in the comments; 2026-07-23 supersession: the ticket goes to QA,
+    not Blocked — 'manual steps to run' IS QA work, Blocked stays reserved for genuine parks.)
 
     Two deterministic signals, either suffices:
       · the Builder's own 'MANUAL TEST:' section (the prompt contract obliges it whenever an AC
@@ -3171,19 +3174,19 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
         if not ticket.ephemeral:
             from . import dashboard as _D
             whatdone = _D.bullets(review.summary or build.summary, limit=3, width=200)
-            # 2026-07-20 Commander order: a land whose verification needs HUMAN hands (an AC the
-            # unit could not run itself) goes to the Blocked column with the EXACT manual test
-            # steps as the hand-off comment — not to QA as if it were fully machine-verified.
-            # ('Needs Human' is the logical status the boards map to their Blocked column.)
+            # 2026-07-23 Commander order (supersedes 2026-07-20): a land whose verification needs
+            # HUMAN hands goes to QA — with the EXACT manual test steps as the hand-off comment.
+            # "Manual steps to run" IS QA work; Blocked means "cannot proceed", and parking merged
+            # code there buried it among genuine blockers. Blocked stays reserved for real parks.
             manual = None if cfg.mark_done_on_merge else _manual_test_block(build, review)
             head = ("marked Done" if cfg.mark_done_on_merge
-                    else "moved to Blocked — manual test needed" if manual else "moved to QA")
+                    else "moved to QA — manual test steps on the ticket" if manual else "moved to QA")
             # Best-effort: the code IS merged at this point — a Jira hiccup here must degrade to a
             # log line, not propagate to _exception_report and mislabel a successful land as a
             # ticket_exception (which would strand the already-merged ticket In Progress).
             try:
                 if manual:
-                    backlog.set_status(ticket, "Needs Human")
+                    backlog.set_status(ticket, "QA")
                     backlog.add_comment(
                         ticket,
                         f"🧪 Merged to {app.base_branch} — needs YOUR manual test before sign-off.\n\n"
@@ -3211,7 +3214,7 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                         and _manual_test_block(build, review))
         done = "" if ticket.ephemeral else (
             " · marked Done" if cfg.mark_done_on_merge
-            else " · moved to Blocked — exact manual test steps are on the ticket" if _manual_tail
+            else " · moved to QA — exact manual test steps are on the ticket" if _manual_tail
             else " · moved to QA")
         _notify(cfg, f"🧪 {ticket.id} ready for manual test on {app.base_branch}{done}\n{ticket.summary}{test_line}")
         audit.record(Outcome.MERGED.audit_event, ticket_id=ticket.id, base=app.base_branch,

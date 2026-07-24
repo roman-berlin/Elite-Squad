@@ -435,6 +435,18 @@ class JiraAdapter(BacklogAdapter):
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.
+        # 2026-07-23 (Commander: "relevant to ALL comments … effective, brief, human language"):
+        # every LONG comment folds through notify.jira_brief at this one choke point — tables,
+        # headings and code fences dropped, prose folded to bullets, trimmed at a line boundary
+        # (never mid-sentence). Short comments (the majority — merge notes, hand-offs) pass through
+        # byte-identical, same passthrough contract as brief_for_phone on the Telegram side. The
+        # structured hand-off lines (WHY/BLOCKER/DECISION/OPTIONS/MANUAL TEST) survive verbatim.
+        if len(body or "") > 700:
+            try:
+                from .. import notify
+                body = notify.jira_brief(body) or body
+            except Exception:  # noqa: BLE001 — formatting must never lose a comment
+                pass
         self.session.post(self._url(f"issue/{ticket.key}/comment"),
                           json={"body": _adf("[Squad] " + body)}).raise_for_status()
 

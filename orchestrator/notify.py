@@ -155,6 +155,61 @@ def brief_for_phone(text: str) -> str:
         return text
 
 
+def jira_brief(text: str, max_chars: int = 1400) -> str:
+    """Fold an officer's report into a brief, skimmable JIRA comment. Deterministic, never raises.
+
+    2026-07-23 (Commander, on the EU-445 PM triage comment): ticket comments were "too long, too
+    many programming elements … not a storytelling" — and the hard ``[:1400]`` slice at the comment
+    sites cut them MID-SENTENCE. This is the comment-side sibling of ``brief_for_phone``:
+
+    · markdown noise a Jira comment renders badly is dropped (``#`` headings, ``|table|`` rows,
+      code fences) — the structured hand-off lines (WHY/BLOCKER/DECISION/OPTIONS/numbered options)
+      are kept verbatim, they are the contract the cockpit parses;
+    · prose folds to '• ' bullets via ``bulletize`` (complete thoughts, never a mid-word cut);
+    · the cap trims at a bullet boundary, not at byte N.
+    """
+    try:
+        text = (text or "").strip()
+        if not text:
+            return ""
+        keep_prefixes = ("WHY PM CANNOT RESOLVE:", "BLOCKER:", "DECISION:", "OPTIONS:",
+                         "MANUAL TEST", "TEST:", "1.", "2.", "3.")
+        kept: list[str] = []
+        prose: list[str] = []
+        in_fence = False
+        for ln in text.splitlines():
+            t = ln.strip()
+            if t.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence or not t:
+                continue
+            if t.startswith("|") or set(t) <= {"-", "|", ":", " "}:
+                continue                       # table rows / rules — unreadable in a Jira comment
+            t = t.lstrip("#").strip()          # headings become plain lines
+            if any(t.startswith(k) for k in keep_prefixes):
+                kept.append(t)
+            else:
+                prose.append(t)
+        folded = bulletize("\n".join(prose), max_bullets=6,
+                           max_chars=max(200, max_chars - sum(len(k) + 1 for k in kept)))
+        out_lines = kept + ([folded] if folded else [])
+        out = "\n".join(out_lines).strip()
+        if len(out) <= max_chars:
+            return out or text[:max_chars]
+        # trim at a line boundary, never mid-sentence
+        acc: list[str] = []
+        used = 0
+        for ln in out.splitlines():
+            if used + len(ln) + 1 > max_chars:
+                break
+            acc.append(ln)
+            used += len(ln) + 1
+        return "\n".join(acc) or out[:max_chars]
+    except Exception:  # noqa: BLE001 — a formatting helper must never lose a comment
+        return (text or "")[:max_chars]
+
+
 def send(text: str, chat_id: str | int | None = None) -> bool:
     """Send a Telegram message. Returns True if sent, False if not configured or
     failed. Never raises — notifications must not break the pipeline.
