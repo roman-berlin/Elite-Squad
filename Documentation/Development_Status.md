@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-24 · EU-480 · Elite-Unit · • Verify-and-close integration ticket; feature code shipped with siblings EU-485/486/487/488 and is accurately described.
 - 2026-07-24 · EU-488 · Elite-Unit · • All 4 scenarios (0/1/2/3+ runs, cap) trace cleanly to green against live warroom.py — signatures, freshness filter, cap, and _ticket_done offline-safety all match.
 - 2026-07-24 · EU-487 · Elite-Unit · • Per-card filter param wired correctly: each card emits its own data-log-ticket and &ticket= open-log link (AC met, tested).
 - 2026-07-24 · EU-486 · Elite-Unit · • Spec met: 2 distinct live cards render, cap enforced via max_concurrent_builders, single/idle path is the unchanged pre-EU-486 code (identity guaranteed by the len(lives)<=1 guard), and a test with 2 fixture live runs… · 🔗 /board?app=testapp (or whichever app has 2+ concurrent live runs)
