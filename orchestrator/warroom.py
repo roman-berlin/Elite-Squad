@@ -1737,6 +1737,46 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
     return warn + f'<div class=blhead>{head}</div><div class=bllist>{"".join(rows)}</div>'
 
 
+def _render_run_card_data(cfg, app, run, tasks, *, active, mode, manual):
+    """Compute elapsed / stage / pass-count for a single run card.
+
+    Extracted from ``render_board`` (EU-485).  Takes one scoped task dict (the newest run on
+    the project), the full task list (passed through only because ``active_run`` derives the
+    sparkline / triage detection from scoped history), and renders the same values the inline
+    block produced — but now reusable when we later loop over multiple cards.
+
+    Returns ``{run_obj, mode, elapsed, manual, active}`` so the caller can unpack exactly as
+    before.  ``run_obj`` carries ``stage`` (``reached``), ``pass-count`` (``passes``,
+    ``phases``, ``sparkline``) that downstream templates read directly.
+    """
+    # Elapsed: only when a run is genuinely in flight.  EU-147 uses task-specific start time.
+    elapsed = None
+    if active and run is not None and run.get("started"):
+        started_dt = run["started"]
+        if isinstance(started_dt, datetime):
+            elapsed = _fmt_dur(datetime.now().timestamp() - started_dt.timestamp())
+        elif isinstance(started_dt, str):
+            parsed_ts = D._parse_ts(started_dt)
+            if parsed_ts:
+                elapsed = _fmt_dur(datetime.now().timestamp() - parsed_ts.timestamp())
+
+    # --- keep these in sync with the caller's assignments ---
+    # (mode and active are passed in; ghost-suppress may reset them below)
+
+    run_obj = active_run(cfg, tasks, app, active)
+    # EU-104: re-validate live ticket against Jira — suppress the ghost 'Working' card if
+    # the ticket is already Done/Closed.
+    if run_obj and run_obj.get("live") and _ticket_done(cfg, app, run_obj.get("ticket")):
+        run_obj = dict(run_obj)       # shallow copy — never mutate the cached object
+        run_obj["live"] = False
+        active = False
+        mode = None
+        elapsed = None
+        manual = False
+    return {"run_obj": run_obj, "mode": mode, "elapsed": elapsed,
+            "manual": manual, "active": active}
+
+
 def render_board(cfg, app: Optional[str], state: dict) -> str:
     """Inner board (everything that updates on the poll).
 
@@ -1764,30 +1804,16 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     # Elapsed on the live run; Stop only for a manual run (Autopilot stops from the header).
     # EU-147: Use task-specific start time, not project-level run_started, so elapsed time
     # reflects only the current task's duration.
-    elapsed = None
     ts = _scope(tasks, app)
-    if active and ts and ts[0].get("started"):
-        started_dt = ts[0]["started"]
-        if isinstance(started_dt, datetime):
-            elapsed = _fmt_dur(datetime.now().timestamp() - started_dt.timestamp())
-        elif isinstance(started_dt, str):
-            # Parse string timestamp if needed
-            parsed_ts = D._parse_ts(started_dt)
-            if parsed_ts:
-                elapsed = _fmt_dur(datetime.now().timestamp() - parsed_ts.timestamp())
+    run = ts[0] if ts else None
     manual = bool(state.get("active")) and not ap_on
-    run_obj = active_run(cfg, tasks, app, active)
-    # EU-104: re-validate the live ticket against Jira — suppress the ghost 'Working' card if
-    # the ticket is already Done/Closed.  This catches interrupted runs whose in-memory active
-    # flag was never cleared (crash/restart) and the _run_in_flight heuristic still fires.
-    # _ticket_done is TTL-cached (30s) so the SSE poll doesn't hammer the Jira REST API.
-    if run_obj and run_obj.get("live") and _ticket_done(cfg, app, run_obj.get("ticket")):
-        run_obj = dict(run_obj)   # shallow copy — never mutate the cached object
-        run_obj["live"] = False   # fall through to the 'idle · last run' rendering path
-        active = False
-        mode = None
-        elapsed = None
-        manual = False
+    # EU-485: extracted into reusable per-run helper (single-call; loop reshaping is next ticket).
+    card = _render_run_card_data(cfg, app, run, tasks, active=active, mode=mode, manual=manual)
+    run_obj = card["run_obj"]
+    mode = card["mode"]
+    elapsed = card["elapsed"]
+    manual = card["manual"]
+    active = card["active"]
     k = _kpi_html(kpis(cfg, tasks, app))
     # EU-106: pass log_path from state so the per-run 'open log' link appears next to the phase bar.
     log_path = state.get("log_path")
