@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-502 · Elite-Unit · • All 4 acceptance criteria are directly asserted against the BARE ORIGIN with real git (no stubs): single-commit rev-list count, byte-exact shared/<host>.jsonl content, branch+file survival. · 🔗 (no UI — run `python3 tests/eu449_state_compact_test.py` standalone or verify via `python3 tests/run_all.py` that eu449_state_compact_test.py reports 7/7 PASS)
 - 2026-07-25 · EU-501 · Elite-Unit · • Test reproduces the real `compact_state_branch` 4-step sequence verbatim (verified against orchestrator/sync.py lines 265-270) and pins it via full-list equality, satisfying the 'exact order/args, not just call count'… · 🔗 (no UI — run `python3 tests/eu449_state_compact_test.py`; standalone exit 0 proves the exact 4-command sequence; also visible under `python3 tests/run_all.py` in the 465-harness sweep)
 - 2026-07-24 · EU-500 · Elite-Unit · • All 4 ACs met: function exists, callable with cfg, issues exactly the 4 prescribed git commands in order, deletes nothing (EU-428 guard honoured).
 - 2026-07-24 · EU-479 · Elite-Unit · • AC1–AC4 all met: same-app double-build reads '2 builds running · 1 project', two apps read '2 … 2 projects', zero runs → empty badge, EU-103 tests preserved.
