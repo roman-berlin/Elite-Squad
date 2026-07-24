@@ -2,6 +2,10 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-501 · Elite-Unit · • Test reproduces the real `compact_state_branch` 4-step sequence verbatim (verified against orchestrator/sync.py lines 265-270) and pins it via full-list equality, satisfying the 'exact order/args, not just call count'… · 🔗 (no UI — run `python3 tests/eu449_state_compact_test.py`; standalone exit 0 proves the exact 4-command sequence; also visible under `python3 tests/run_all.py` in the 465-harness sweep)
+- 2026-07-24 · EU-500 · Elite-Unit · • All 4 ACs met: function exists, callable with cfg, issues exactly the 4 prescribed git commands in order, deletes nothing (EU-428 guard honoured).
+- 2026-07-24 · EU-479 · Elite-Unit · • AC1–AC4 all met: same-app double-build reads '2 builds running · 1 project', two apps read '2 … 2 projects', zero runs → empty badge, EU-103 tests preserved.
+- 2026-07-24 · EU-480 · Elite-Unit · • Verify-and-close integration ticket; feature code shipped with siblings EU-485/486/487/488 and is accurately described.
 - 2026-07-24 · EU-488 · Elite-Unit · • All 4 scenarios (0/1/2/3+ runs, cap) trace cleanly to green against live warroom.py — signatures, freshness filter, cap, and _ticket_done offline-safety all match.
 - 2026-07-24 · EU-487 · Elite-Unit · • Per-card filter param wired correctly: each card emits its own data-log-ticket and &ticket= open-log link (AC met, tested).
 - 2026-07-24 · EU-486 · Elite-Unit · • Spec met: 2 distinct live cards render, cap enforced via max_concurrent_builders, single/idle path is the unchanged pre-EU-486 code (identity guaranteed by the len(lives)<=1 guard), and a test with 2 fixture live runs… · 🔗 /board?app=testapp (or whichever app has 2+ concurrent live runs)

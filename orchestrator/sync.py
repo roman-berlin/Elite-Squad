@@ -232,6 +232,60 @@ def ensure_state_clone(cfg: Config) -> Path | None:
     return sd
 
 
+def compact_state_branch(cfg: Config) -> dict[str, bool | str | None]:
+    """Rebuild the ``unit-state`` branch's history into a single commit.
+
+    Operates on the existing state clone (the same one ``ensure_state_clone`` maintains), issuing
+    an orphan-switch → stage shared/ → commit → force-push sequence.  History is rewritten; nothing
+    is deleted (EU-428 guard: no ``git branch -D``, no ``rm`` of ``shared/``).
+
+    ``git switch --orphan`` (git ≥ 2.23) removes ALL tracked files from the working tree (git-switch
+    man page) — in a healthy state clone ``shared/`` is tracked, so the switch would wipe it before
+    step 2 could stage it (``git add shared`` → ``pathspec 'shared' did not match any files``). The
+    payload is therefore snapshotted to a scratch dir AROUND the switch — a plain filesystem copy,
+    not a git command: the git sequence below is exactly the four prescribed, in order — and restored
+    immediately after the switch.
+
+    .. note:: The local clone is intentionally left on ``tmp-compact``. The next ``git_sync`` call
+       will reconcile it via its internal ``fetch + reset --hard FETCH_HEAD`` cycle.
+
+    Returns ``{ok, step, error}`` — best-effort, never raises.
+    """
+    out: dict[str, bool | str | None] = {"ok": False, "step": None, "error": None}
+    sd = ensure_state_clone(cfg)
+    if sd is None:
+        out["error"] = "no git origin for state sync"
+        return out
+
+    shared = sd / "shared"
+    scratch = Path(tempfile.mkdtemp(prefix="unit-state-compact-"))
+    try:
+        if shared.is_dir():
+            shutil.copytree(shared, scratch / "shared")
+        steps: list[tuple[str, ...]] = [
+            ("switch", "--orphan", "tmp-compact"),
+            ("add", "shared"),
+            ("commit", "-m", "compact: collapse unit-state history"),
+            ("push", "--force", "origin", f"HEAD:{STATE_BRANCH}"),
+        ]
+        for i, args in enumerate(steps):
+            r = _git(sd, *args)
+            if r.returncode != 0:
+                out["step"] = " ".join(args)
+                out["error"] = (r.stderr or r.stdout or f"{args[0]} failed").strip()[:300]
+                return out
+            if i == 0 and (scratch / "shared").is_dir() and not shared.is_dir():
+                # The orphan switch emptied the working tree — restore the payload for `add shared`.
+                shutil.copytree(scratch / "shared", shared)
+        out["ok"] = True
+        return out
+    except (subprocess.SubprocessError, OSError) as e:
+        out["error"] = str(e)[:300]
+        return out
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def publish(cfg: Config, sd: Path | None = None) -> Path:
     """Copy this machine's live ``audit.jsonl`` into ``shared/<host>.jsonl`` in the state clone."""
     sd = sd or state_dir(cfg)

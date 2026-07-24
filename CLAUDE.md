@@ -86,6 +86,11 @@ Everything under `Documentation/` (these are the only files there — keep this 
   (builder) during the GLM weekly-cap outage. The working QwenCloud Token-Plan Anthropic endpoint,
   which model ids each plan actually serves, the Opus-reviewer quality baseline, and the flagship
   (`qwen3.8-max-preview`) builder experiment with its provisional KEEP decision.
+- `Documentation/EU-480_MULTI_RUN_BOARD_VERIFICATION.md` — EU-480 (2026-07-24): the verify & close
+  of the multi-run Active-run panel (EU-458 epic): per-AC evidence mapping EU-485/486/487/488 to
+  AC1–AC3 + the `max_concurrent_builders` cap, the full-gate integration pass (463/463 harnesses,
+  8929 checks), the single-run byte-identity regression guard, the MANUAL TEST recipe, and the
+  out-of-scope finding that the no-changes (EU-396) close path skips `_maybe_close_epic`.
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them

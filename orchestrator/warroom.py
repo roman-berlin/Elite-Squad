@@ -2042,28 +2042,68 @@ def health_banner(h: dict) -> str:
             f'</div></div><ul class=hbissues>{items}</ul></div>')
 
 
-def autopilot_switch(state: dict, app: Optional[str], healthy: bool) -> str:
-    """Header roll-up: active-run count badge across all projects (EU-103).
+def total_live_run_count(cfg=None, tasks: Optional[list[dict]] = None) -> int:
+    """The true concurrent-BUILD total across every active project, computed on demand (EU-479).
+
+    The header badge's number.  For each app with a claimed run
+    (``cockpit_state.active_runs()``) this sums ``len(live_runs(cfg, tasks, app, True))``
+    — so two tickets building concurrently in the SAME project under
+    ``max_concurrent_builders ≥ 2`` count as 2, not the flat per-app boolean of
+    ``active_run_count()``.  A claimed run always contributes at least 1 (the run exists
+    even before its first audit task lands), so the common cross-app case — N distinct
+    projects with one run each — sums to exactly N, the pre-EU-479 total (no regression).
+
+    Deliberately cache-free: the total is recomputed from live audit + run-state on every
+    call, independent of which project's board tab happens to be open or polling.  Cheap
+    in practice — ``D.audit_lines`` / ``D.load_tasks`` are TTL/mtime-cached, so each
+    per-app ``live_runs`` pass reuses the same in-memory lines the board render reads,
+    and the app count is bounded by the max-parallel-runs cap.  ``cfg=None`` (legacy /
+    test call sites without a config) degrades to ``active_run_count()`` — the old
+    distinct-project count.
+    """
+    from . import cockpit_state as _cs
+    keys = _cs.active_runs()
+    if not keys:
+        return 0
+    if cfg is None:
+        return len(keys)
+    if tasks is None:
+        tasks = D.load_tasks(getattr(cfg, "audit_path", "./state/audit.jsonl"))
+    return sum(max(1, len(live_runs(cfg, tasks, key, True))) for key in keys)
+
+
+def autopilot_switch(state: dict, app: Optional[str], healthy: bool,
+                     cfg=None, tasks: Optional[list[dict]] = None) -> str:
+    """Header roll-up: concurrent-run count badge across all projects (EU-103, EU-479).
 
     The per-project start/stop controls now live in the control bar (cockpit_views._control_bar).
-    This header slot shows only a system-wide summary — a pulsing green badge when any project
-    is running, or nothing when all are idle.  The count comes from cockpit_state.active_run_count()
-    (the canonical, lock-protected tally), so the badge stays in sync with the control bar.
+    This header slot shows a system-wide summary — a pulsing green badge when any build is
+    running, or nothing when all are idle — with a dual count: actual concurrent BUILDS
+    (``total_live_run_count``, computed on demand over every active app) plus the distinct
+    PROJECT count (``active_run_count``).  The split keeps the label honest under same-app
+    concurrency: two tickets building in one project read "2 builds running · 1 project",
+    never "2 projects", while two projects with one run each still read "2 … 2 projects".
 
-    The ``state``, ``app``, and ``healthy`` parameters are kept for call-site compatibility but
-    are no longer used in the output.
+    ``cfg`` (passed by ``render_page``) enables the on-demand per-app ``live_runs`` tally;
+    without it the badge degrades to the legacy distinct-project count.  ``state``, ``app``
+    and ``healthy`` are kept for call-site compatibility but are no longer used in the output.
     """
     try:
-        from . import cockpit_state as _cs
-        n = _cs.active_run_count()
-    except Exception:  # noqa: BLE001
+        n = total_live_run_count(cfg, tasks)  # EU-479: true total, incl. same-app concurrency
+    except Exception:  # noqa: BLE001 — the badge must never break a page render
         n = 0
     if n == 0:
         return ""
-    proj = "project" if n == 1 else "projects"
-    return (f'<div class="apsw on" title="{n} {proj} running">'
+    try:
+        from . import cockpit_state as _cs
+        p = _cs.active_run_count()     # distinct projects drive the project-side label
+    except Exception:  # noqa: BLE001
+        p = n
+    bld = "build" if n == 1 else "builds"
+    prj = "project" if p == 1 else "projects"
+    return (f'<div class="apsw on" title="{n} {bld} running · {p} {prj}">'
             f'<span class="apdot on"></span>'
-            f'<span class=aplabel>{n}&nbsp;{html.escape(proj)}&nbsp;running</span>'
+            f'<span class=aplabel>{n}&nbsp;{html.escape(bld)}&nbsp;running&nbsp;&middot;&nbsp;{p}&nbsp;{html.escape(prj)}</span>'
             '</div>')
 
 
@@ -2087,7 +2127,7 @@ def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: 
     return (_PAGE
             .replace("{{HOST}}", _host_tag(cfg))
             .replace("{{PROJ}}", project_selector(cfg, app))
-            .replace("{{AUTOPILOT}}", autopilot_switch(state, app, health.get("healthy", False)))
+            .replace("{{AUTOPILOT}}", autopilot_switch(state, app, health.get("healthy", False), cfg=cfg))
             .replace("{{HEALTHPILL}}", health_pill(health))
             .replace("{{HEALTHBAR}}", health_banner(health))
             .replace("{{BAR}}", control_bar)
