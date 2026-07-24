@@ -286,6 +286,108 @@ def compact_state_branch(cfg: Config) -> dict[str, bool | str | None]:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# EU-496 — throttle compact_state_branch behind a cadence gate
+# ---------------------------------------------------------------------------
+
+
+def _compact_sidecar(cfg: Config) -> Path:
+    """Sidecar path for tracking the last successful state-compaction timestamp."""
+    return Path(cfg.audit_path).parent / "last_state_compact.txt"
+
+
+def _state_commit_count(cfg: Config) -> int | None:
+    """The TRUE commit count of the ``unit-state`` branch, or None when it can't be known.
+
+    The state clone bootstraps shallow (``--depth 50``), so a raw ``rev-list --count`` caps at 50
+    and the default threshold (150) could NEVER fire. Complete the history first — a one-time
+    ``fetch --unshallow``; git removes the shallow graft so every later sync skips straight to the
+    (local, cheap) count and ordinary fetches stay incremental. Best-effort: an offline unshallow
+    simply leaves the count capped for this cycle (the cadence leg still covers it), and any
+    git / FS failure yields None so the gate skips without ever failing the sync.
+
+    Counts the LOCAL ``unit-state`` ref, which ``git_sync`` keeps at the fetched tip via its
+    ``reset --hard FETCH_HEAD`` and which ``compact_state_branch_now`` advances to the compacted
+    tip after a successful compaction — counting a ref nobody maintains would go stale-high the
+    moment a compaction force-pushes (the clone is left on ``tmp-compact``), re-firing the gate
+    on every subsequent sync.
+    """
+    sd = ensure_state_clone(cfg)
+    if sd is None:
+        return None
+    try:
+        shallow = _git(sd, "rev-parse", "--is-shallow-repository")
+        if shallow.returncode == 0 and (shallow.stdout or "").strip() == "true":
+            # One-time. rc deliberately ignored: offline, the clone stays shallow and the count
+            # stays capped at the depth — leg (a) just skips this cycle, the cadence leg covers it.
+            _git(sd, "fetch", "--unshallow", "origin", STATE_BRANCH)
+        r = _git(sd, "rev-list", "--count", STATE_BRANCH)
+        return int((r.stdout or "").strip()) if r.returncode == 0 else None
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _should_compact_state(cfg: Config) -> bool:
+    """Decide whether ``compact_state_branch(cfg)`` should run now.
+
+    Returns True when **either**:
+    (a) the ``unit-state`` branch's TRUE history exceeds ``GENERAL_STATE_COMPACT_THRESHOLD``
+        commits (default 150 — the clone is unshallowed before counting, so the threshold is
+        actually reachable, not capped at the depth-50 shallow window), or
+    (b) more than ``GENERAL_STATE_COMPACT_DAYS`` (default 7) have elapsed since the last
+        successful compaction, tracked in the sidecar file.
+
+    Re-evaluated on EVERY call — deliberately no process-lifetime cache, so a long-lived cockpit
+    process calling ``git_sync`` repeatedly can never freeze the throttle on a stale verdict.
+    Best-effort — any git / filesystem error returns False so that a stale sidecar or missing
+    branch never prevents the rest of the sync from completing. Also returns False when
+    ``pull_only()`` is set (the VPS has no push credentials; compaction requires force-push).
+    """
+    if pull_only():
+        return False
+    try:
+        threshold = int(os.environ.get("GENERAL_STATE_COMPACT_THRESHOLD", "150"))
+        days = int(os.environ.get("GENERAL_STATE_COMPACT_DAYS", "7"))
+    except ValueError:
+        return False
+
+    # (a) Commit-count leg — the branch's true history (unshallowed), not the shallow window.
+    count = _state_commit_count(cfg)
+    above = count is not None and count > threshold
+
+    # (b) Weekly cadence leg — read the sidecar file (best-effort).
+    cadence = False
+    try:
+        last_ts = float(_compact_sidecar(cfg).read_text(encoding="utf-8", errors="replace").strip())
+        cadence = (time.time() - last_ts) >= days * 86400
+    except (OSError, ValueError):
+        pass  # absent / unreadable → never compacted here → don't storm a fresh clone
+
+    return above or cadence
+
+
+def compact_state_branch_now(cfg: Config) -> None:
+    """Run ``compact_state_branch(cfg)`` with best-effort error handling.
+
+    Never raises into the caller. On success: (1) advances the LOCAL ``unit-state`` ref to the
+    compacted tip — the clone is left on ``tmp-compact`` and the stale ref would otherwise keep
+    the commit-count leg over threshold, re-firing compaction on EVERY subsequent sync — and
+    (2) writes the current epoch into the sidecar so the cadence leg skips until the next window
+    (EU-496 bookkeeping).
+    """
+    sd = ensure_state_clone(cfg)
+    if sd is None:
+        return  # no origin → silently skip (same signal as _should_compact_state=False)
+    rc = compact_state_branch(cfg)
+    if not rc["ok"]:
+        return
+    _git(sd, "update-ref", f"refs/heads/{STATE_BRANCH}", "HEAD")
+    try:
+        _compact_sidecar(cfg).write_text(str(int(time.time())), encoding="utf-8")
+    except OSError:
+        pass  # sidecar write failure must not crash sync
+
+
 def publish(cfg: Config, sd: Path | None = None) -> Path:
     """Copy this machine's live ``audit.jsonl`` into ``shared/<host>.jsonl`` in the state clone."""
     sd = sd or state_dir(cfg)
@@ -324,31 +426,39 @@ def git_sync(cfg: Config) -> dict[str, Any]:
             # 403, clean exit 0). Our own audit is still read locally by dashboard.audit_lines.
             out["hosts"] = [p.stem for p in shared_files(cfg)]
             out["pushed"] = None
-            return out
-
-        # 2) Publish our own audit and stage ONLY it. Single-writer: a host owns exactly
-        #    shared/<its-host>.jsonl — never `git add shared` (which would stage a peer/server file we
-        #    pulled in over SSH, e.g. pull_server_audit's shared/<server>.jsonl, and push it back,
-        #    breaking the single-writer invariant and making that host read its own audit doubled).
-        publish(cfg, sd)
-        out["hosts"] = [p.stem for p in shared_files(cfg)]
-        _git(sd, "add", f"shared/{host_id(cfg)}.jsonl")
-        if _git(sd, "diff", "--cached", "--quiet").returncode == 0:
-            out["pushed"] = True   # nothing staged since last sync — already in step with remote
-            return out
-
-        # 3) Commit + push. On a race, rebase our single commit onto the remote tip and retry once.
-        _git(sd, "commit", "-m", f"sync: {host_id(cfg)} audit")
-        push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
-        if push.returncode != 0:
-            _git(sd, "fetch", "origin", STATE_BRANCH)
-            _git(sd, "rebase", "FETCH_HEAD")
-            push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
-        out["pushed"] = push.returncode == 0
-        if not out["pushed"]:
-            out["error"] = (push.stderr or push.stdout or "push failed").strip()[:200]
+        else:
+            # 2) Publish our own audit and stage ONLY it. Single-writer: a host owns exactly
+            #    shared/<its-host>.jsonl — never `git add shared` (which would stage a peer/server
+            #    file we pulled in over SSH, and push it back, breaking the single-writer invariant).
+            publish(cfg, sd)
+            out["hosts"] = [p.stem for p in shared_files(cfg)]
+            _git(sd, "add", f"shared/{host_id(cfg)}.jsonl")
+            if _git(sd, "diff", "--cached", "--quiet").returncode == 0:
+                out["pushed"] = True   # nothing staged since last sync — already in step with remote
+            else:
+                # 3) Commit + push. On a race, rebase our single commit onto the remote tip and retry once.
+                _git(sd, "commit", "-m", f"sync: {host_id(cfg)} audit")
+                push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
+                if push.returncode != 0:
+                    _git(sd, "fetch", "origin", STATE_BRANCH)
+                    _git(sd, "rebase", "FETCH_HEAD")
+                    push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
+                out["pushed"] = push.returncode == 0
+                if not out["pushed"]:
+                    out["error"] = (push.stderr or push.stdout or "push failed").strip()[:200]
     except (subprocess.SubprocessError, OSError) as e:
         out["error"] = str(e)[:200]
+
+    # ── EU-496: throttle & wrap compaction best-effort (after all pull/push paths) ──
+    # Compaction must never fail the calling sync — any exception is caught AND logged with its
+    # detail (type + message): a bare "swallowed" line hid the cause and made a wedged compaction
+    # undiagnosable from the sync cron log.
+    try:
+        if _should_compact_state(cfg):
+            compact_state_branch_now(cfg)
+    except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
+        print(f"[sync] compaction exception swallowed: {type(e).__name__}: {e}", flush=True)
+
     return out
 
 
