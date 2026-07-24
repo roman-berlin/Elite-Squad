@@ -250,7 +250,15 @@ class JiraAdapter(BacklogAdapter):
             clauses.append("assignee = currentUser()")        # = the API-token owner's account
         if self.require_label and self.label:
             clauses.append(f'labels = "{self.label}"')
-        return " AND ".join(clauses) + " ORDER BY Rank ASC"     # board order, top first
+        # EU-344 root cause: this ordered by Rank ASC (manual board drag-order) ONLY, so the
+        # priority field was never honoured — Highest tickets sat behind lower-Rank Medium/Low ones,
+        # violating the base.py "highest priority first" contract. (EU-344 fixed the *picker* on the
+        # false premise that the adapter already emitted priority order; it never did — Rank ASC has
+        # been here since the initial commit.) `priority DESC` = Highest→Lowest (Jira's urgent-first
+        # idiom); Rank ASC is the tiebreaker so board order still decides among equal-priority
+        # tickets. Applied PER status query, so the In-Progress-first / To-Do-second resume split
+        # (EU-252) is unaffected — In Progress is still drawn before To Do regardless of priority.
+        return " AND ".join(clauses) + " ORDER BY priority DESC, Rank ASC"
 
     def _raise_if_unauthenticated(self, resp) -> None:
         """Guard against Jira's auth-blind 200. POST search/jql answers an UNAUTHENTICATED request with
