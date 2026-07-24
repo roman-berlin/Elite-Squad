@@ -261,6 +261,23 @@ def _note_model_fallback(why: str) -> None:
             pass
 
 
+def _ticket_line_ok(line: str, ticket: str | None) -> bool:
+    """EU-487: does one shared-drain-log line belong to THIS card's ticket?
+
+    The concurrent drain interleaves every build's stdout into ONE file (per-ticket log
+    files are EU-444 — deliberately NOT built here); the only per-ticket attribution a raw
+    stdout line carries is the ticket key the officer printed with it (``EU-444: builder
+    started``). A line passes when the requested ticket key appears anywhere in it. With no
+    ticket filter (the single-run cockpit — no ``ticket`` query param) EVERY line passes,
+    so the stream stays byte-identical to pre-EU-487. While a filter IS active, a line
+    carrying no ticket key at all is dropped: under interleaving, guessing its owner would
+    leak the other card's noise onto this one. Pure function of its two inputs — no state.
+    """
+    if not ticket:
+        return True
+    return ticket in line
+
+
 def create_app(cfg: Config, port: int = 8787):
     """Build the cockpit Flask app. ``port`` is the port ``serve()`` will actually bind.
 
@@ -811,9 +828,19 @@ def create_app(cfg: Config, port: int = 8787):
 
         Query params:
             app: The project name (defaults to active tab)
+            ticket: EU-487 — optional ticket id. The concurrent drain tails ONE shared log
+                with every build's stdout interleaved; when this param is set, only lines
+                naming that ticket are emitted, so each Active-run card's panel shows only
+                its own run. No param → every line, byte-identical to pre-EU-487. Applies
+                to log-file content only (see ``_ticket_line_ok``): the panel's own status
+                frames ("No active run log", "Log file not found") are never filtered, so a
+                failure stays visible on every card.
         """
         from flask import Response
         appq = _board_project(request.args.get("app"))
+        # EU-487: read in the request thread (the generator below may be iterated once the
+        # request context is gone); the closure carries the value, same as appq/st.
+        ticketq = (request.args.get("ticket") or "").strip() or None
         st = get_state(appq or None)
 
         def gen():
@@ -862,11 +889,18 @@ def create_app(cfg: Config, port: int = 8787):
                 return
 
             def _drain(f: Path, start: int):
-                """SSE frames for everything appended to ``f`` past byte ``start``."""
+                """SSE frames for everything appended to ``f`` past byte ``start``.
+
+                EU-487: when the request carried a ``ticket`` param, only lines naming
+                that ticket are emitted — the per-card filter over the shared drain log
+                (``_ticket_line_ok``). No param → the guard is a no-op and the stream is
+                byte-identical to today's.
+                """
                 with f.open("r", encoding="utf-8", errors="replace") as fh:
                     fh.seek(start)
                     for line in fh.readlines():
-                        yield _sse("log", line.rstrip("\n\r"))
+                        if _ticket_line_ok(line, ticketq):
+                            yield _sse("log", line.rstrip("\n\r"))
 
             # Stream the log file, sending new lines as they're added. A per-ticket log starts at 0
             # (it belongs to this run alone); the shared drain stream starts at its CURRENT end, or
