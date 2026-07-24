@@ -242,6 +242,112 @@ filing.relabel_fingerprint(_rbl, "EU-422")
 chk("AC4: relabel is idempotent — a correctly-labelled ticket triggers no set_labels",
     len(_rbl.label_ops) == _pre_ops, str(_rbl.label_ops))
 
+
+# ── EU-456: relabel must fingerprint the ORIGINAL body, not the comment/image appends ─────
+# JiraAdapter._to_ticket APPENDS the Commander's comment thread + downloaded image paths to
+# Ticket.description. A comment citing a code anchor (or an image basename) is a longer "real
+# anchor" than anything in the clean body, so it WINS subject_fingerprint's "longest wins" pick
+# — and the recomputed fp diverges from the one a clean new filing stamps. relabel_fingerprint
+# re-reads the ticket and fingerprints its body, so it must STRIP those appends first. The
+# BOILERPLATE used above has NO appends, which is why AC4 alone never caught this.
+#
+# The appended blocks below are the EXACT text _to_ticket emits (hardcoded here, independent of
+# the impl, so the test pins the wire format the stripper must recognise — not the constant it
+# happens to use). See the byte-identity guard further down for the writer side of that contract.
+
+_APPEND_CMDR = ("\n\nCommander's comments (oldest -> newest) — read ALL of these; they "
+                "include QA feedback on what to fix:\n"
+                "Reopened: see scripts/deploy_edge_functions_v2.py — it leaks the token.")
+_APPEND_IMGS = ("\n\nTicket images — OPEN and VIEW each (they show the desired design / "
+                "the bug); do not guess at visuals:\n"
+                "- /tmp/general-ticket-images/EU-900/bug_repro_screenshot.png")
+
+# EU-456 AC1: a Commander comment whose anchor (deploy_edge_functions_v2) dominates the clean
+# body's (anchor-free, title-hash) fp. relabel must return the CLEAN fp, not the anchor hash.
+_pc_title = INFRA_TITLES[0]
+_pc_clean = BOILERPLATE
+_pc_polluted = _pc_clean + _APPEND_CMDR
+_pc_fp_clean = subject_fingerprint(_pc_title, _pc_clean)          # title-hash (no real anchor)
+_pc_fp_polluted = subject_fingerprint(_pc_title, _pc_polluted)    # anchor hash (the bug)
+chk("EU-456 setup: the comment anchor dominates the polluted fp (so the bug is real)",
+    _pc_fp_polluted is not None and _pc_fp_polluted != _pc_fp_clean,
+    f"{_pc_fp_polluted} vs {_pc_fp_clean}")
+_rbl_pc = _RelabelBacklog()
+_rbl_pc.tickets["EU-900"] = Ticket(id="EU-900", key="EU-900", summary=_pc_title,
+                                   description=_pc_polluted,
+                                   labels=["infra-signature", "autofiled", COLLIDING])
+_pc_ret = filing.relabel_fingerprint(_rbl_pc, "EU-900")
+chk("EU-456 AC1: relabel ignores an appended Commander-comment code anchor -> clean fp",
+    _pc_ret == _pc_fp_clean, f"got {_pc_ret}, want clean {_pc_fp_clean}")
+chk("EU-456 AC1: the clean fp is stamped and the colliding label removed",
+    _pc_fp_clean in _rbl_pc.tickets["EU-900"].labels
+    and COLLIDING not in _rbl_pc.tickets["EU-900"].labels,
+    str(_rbl_pc.tickets["EU-900"].labels))
+
+# EU-456 AC2: an appended image path whose basename (bug_repro_screenshot) is a real anchor
+# that would win. Same expectation: relabel returns the clean fp.
+_pi_title = INFRA_TITLES[1]
+_pi_polluted = _pc_clean + _APPEND_IMGS
+_pi_fp_clean = subject_fingerprint(_pi_title, _pc_clean)
+_pi_fp_polluted = subject_fingerprint(_pi_title, _pi_polluted)
+chk("EU-456 setup: the image basename dominates the polluted fp (so the bug is real)",
+    _pi_fp_polluted is not None and _pi_fp_polluted != _pi_fp_clean,
+    f"{_pi_fp_polluted} vs {_pi_fp_clean}")
+_rbl_pi = _RelabelBacklog()
+_rbl_pi.tickets["EU-901"] = Ticket(id="EU-901", key="EU-901", summary=_pi_title,
+                                   description=_pi_polluted,
+                                   labels=["infra-signature", "autofiled", COLLIDING])
+_pi_ret = filing.relabel_fingerprint(_rbl_pi, "EU-901")
+chk("EU-456 AC2: relabel ignores an appended image-path anchor -> clean fp",
+    _pi_ret == _pi_fp_clean, f"got {_pi_ret}, want clean {_pi_fp_clean}")
+
+# EU-456 AC3 (direct): the strip helper recovers the clean body for every append combination and
+# leaves a clean body untouched — the regression guard (AC4's BOILERPLATE has no appends).
+from orchestrator.filing import _clean_ticket_description as _clean
+chk("EU-456 AC3: clean body (no appends) passes through unchanged",
+    _clean(BOILERPLATE) == BOILERPLATE)
+chk("EU-456 AC3: Commander-comment append stripped", _clean("BODY." + _APPEND_CMDR) == "BODY.")
+chk("EU-456 AC3: image append stripped", _clean("BODY." + _APPEND_IMGS) == "BODY.")
+chk("EU-456 AC3: comments-before-images cuts at the comments block",
+    _clean("BODY." + _APPEND_CMDR + _APPEND_IMGS) == "BODY.")
+chk("EU-456 AC3: images-before-comments cuts at whichever sorts first",
+    _clean("BODY." + _APPEND_IMGS + _APPEND_CMDR) == "BODY.")
+
+# EU-456 AC4: the shared-constant refactor of _to_ticket is byte-identical to the OLD hardcoded
+# wording (a behavior-preserving guard, not a fail-first). If anyone edits the appended text — in
+# jira.py OR by changing the shared constant — this equality breaks. The expected string is
+# hand-written with the PRE-change wording, independent of the constants, so it pins the wire format.
+_req_stub = types.ModuleType("requests")
+_req_stub.Session = lambda *a, **k: None
+_req_stub.RequestException = Exception
+sys.modules.setdefault("requests", _req_stub)
+from orchestrator.backlog import jira as _jira
+_jira._adf_to_text = lambda x: x if isinstance(x, str) else ""   # treat bodies as plain text
+_jself = types.SimpleNamespace(
+    ac_field=None, base_url="https://x.atlassian.net", app_name="automatixy", fetch_images=True,
+    _download_images=lambda key, atts: ["/tmp/i/a.png"] if atts else [])
+_jissue = {"key": "EU-900", "fields": {
+    "summary": "a title", "description": "CLEAN BODY.",
+    "comment": {"comments": [{"body": "[General] mine"}, {"body": "first"}, {"body": "second"}]},
+    "attachment": [{"mimeType": "image/png", "content": "http://x/a.png",
+                    "filename": "a.png", "id": 1}],
+    "labels": [], "issuetype": {"name": "Task"}}}
+_jdesc = _jira.JiraAdapter._to_ticket(_jself, _jissue).description
+_exp_cmdr = ("\n\nCommander's comments (oldest -> newest) — read ALL of these; they "
+             "include QA feedback on what to fix:\nfirst\n---\nsecond")
+_exp_imgs = ("\n\nTicket images — OPEN and VIEW each (they show the desired design / "
+             "the bug); do not guess at visuals:\n- /tmp/i/a.png")
+_exp_desc = "CLEAN BODY." + _exp_cmdr + _exp_imgs
+chk("EU-456 AC4: _to_ticket description is byte-identical to the pre-refactor wording",
+    _jdesc == _exp_desc, repr(_jdesc))
+chk("EU-456 AC4: the unit's own [General] comment still skipped, real ones threaded in order",
+    "[General]" not in _jdesc and "first\n---\nsecond" in _jdesc, repr(_jdesc))
+# Teeth check (mutation): if the writer used a DIFFERENT sentinel than the stripper, the live
+# _to_ticket output would no longer strip back to the clean body — proving the strip + write share
+# one sentinel. This is the guard that fails the day someone edits _to_ticket's wording by hand.
+chk("EU-456 AC4 teeth: the live _to_ticket output strips back to the clean body",
+    _clean(_jdesc) == "CLEAN BODY.", repr(_clean(_jdesc)))
+
 print("\n=========== EU-439 FINGERPRINT COLLISION QA ===========")
 passed = sum(1 for _, ok_, _ in results if ok_)
 for n, ok_, det in results:

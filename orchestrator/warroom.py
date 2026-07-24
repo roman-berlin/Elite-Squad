@@ -753,24 +753,50 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     triage_state = None
     if ticket_id and ticket_id != "—":
         triage_state = _detect_prebuild_triage(cfg, ticket_id, has_build)
-    # One source of truth, shared with the terminal bar (loop._bar) so the two can't drift (EU-55).
-    # `reached` doubles as the count of completed phases AND the index of the current/next phase.
+    # One source of truth with the terminal bar: the PHASES labels + order (imported from
+    # phases.py, pinned by the _EXPECTED assertion below) are what loop._bar and this web bar
+    # share, so the two can never drift (EU-55). The CURRENT-phase index is NOT shared —
+    # loop._bar advances inside loop.run at each real transition, while the web bar re-derives
+    # it here from the audit (same build/gate events the terminal bar advances on, via
+    # load_tasks' `t["phase"]`). `reached` doubles as the count of completed phases AND the index
+    # of the current/next phase.
     phases = list(PHASES)
     reached = 0
-    if has_build:          # build done → the Gate runs next
-        reached = GATE
-    if has_review:
-        # 2026-07-19 (Commander order — "show me the EXACT status always"): only a PASSING
-        # review advances to Land. A live run whose latest verdict is FAIL is REBUILDING
-        # (pass N+1) — the old `reached = LAND` showed "Working · Land" next to "verdict FAIL",
-        # a display lie (AUTO-198). FAIL → the bar goes back to Build for the retry pass.
-        _v = (t.get("verdict") or "").upper()
-        if "FAIL" in _v or "REJECT" in _v:
-            reached = BUILD if live else REVIEW
+    if live:
+        # EU-448: a LIVE run's bar must show the phase it is IN right now, not the next one.
+        # `has_build` flips True the moment pass 1's `build` event exists and never resets, so it
+        # read "Gate" for the entire build — including PM-driven continuation passes (pm_review /
+        # pm_decided emit no gate event) — a confident display lie (same class as AUTO-198).
+        # Instead derive from `t["phase"]`, the LATEST build/gate event load_tasks recorded:
+        # "gate" once the gate phase actually began (loop fires `gate` before `deterministic_gate`),
+        # "build" while the Builder is still working or after a retry build reset it (EU-136 retry
+        # semantics). Do NOT use `gate_passed` — it stays non-None during a post-gate-fail retry
+        # build and would re-introduce the lie; `phase` correctly resets to "build" on retry.
+        if merged:
+            reached = len(PHASES)                       # reviewed + landed → every phase complete
+        elif has_review:
+            # 2026-07-19 (AUTO-198): a live run whose latest verdict is FAIL/REJECT is REBUILDING
+            # (pass N+1) — show Build, not "Land next to verdict FAIL".
+            _v = (t.get("verdict") or "").upper()
+            reached = BUILD if ("FAIL" in _v or "REJECT" in _v) else LAND
+        elif t.get("phase") == "gate":
+            reached = GATE                               # the gate phase actually began
         else:
-            reached = LAND     # passing review → Land runs next
-    if merged:             # reviewed and landed → every phase complete
-        reached = len(PHASES)
+            reached = BUILD                              # builder working; gate not yet reached
+    else:
+        # Idle / last-run structural path (unchanged): the run is over, so the audit's structural
+        # facts (built? reviewed? merged?) describe where it landed. Keeps phase_fail_test.py and
+        # the idle EU-55 cases exactly as they were — EU-448 only fixes the LIVE derivation.
+        if has_build:          # build done → the Gate runs next
+            reached = GATE
+        if has_review:
+            _v = (t.get("verdict") or "").upper()
+            if "FAIL" in _v or "REJECT" in _v:
+                reached = REVIEW
+            else:
+                reached = LAND     # passing review → Land runs next
+        if merged:             # reviewed and landed → every phase complete
+            reached = len(PHASES)
     # A terminal-but-FAILED run (errored/escalated) must light its STOPPING phase red, not render
     # the phases behind it as cleanly-done. Derive the phase the run died at so the bar shows where
     # it actually broke instead of implying it sailed through review and just didn't deploy.
@@ -788,9 +814,9 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     # EU-55 / F12 audit: phases.py is the single source of truth. Ordering confirmed:
     #   PHASES[BUILD]="Build", PHASES[GATE]="Gate", PHASES[REVIEW]="Review",
     #   PHASES[LAND]="Land".  (Phase-2 §2: the Security and Tests phases were removed.)
-    # The bar stays at Gate until a review verdict is recorded. LAND (idx 3) is not used
-    # as a "reached" value; len(PHASES) marks all phases complete after merge (same effect
-    # as LAND+1). ✓
+    # A live run reads Build→Gate→Review→Land off the gate-phase signal (EU-448); LAND (idx 3)
+    # is not used as a live "reached" value — a passing review sets reached=LAND but the merge
+    # lands it at len(PHASES). len(PHASES) marks all phases complete after merge. ✓
     _EXPECTED = ("Build", "Gate", "Review", "Land")
     if PHASES != _EXPECTED:
         raise AssertionError(
@@ -854,6 +880,66 @@ def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = 1
     except Exception:  # noqa: BLE001
         return False
     return False
+
+
+def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool) -> list[dict]:
+    """Return all genuinely live runs for *app*, ordered newest-first, capped at max_concurrent_builders.
+
+    EU-486: drives the multi-card loop in ``render_board`` — one Active-run card per live run.
+    Calls ``D.audit_lines`` once (one-pass scan for last-activity timestamps) then filters the
+    already-loaded ``tasks``; no extra audit-file loads per frame.
+
+    Scoring heuristic mirrors ``_run_in_flight``'s freshness check (~150 s): collect the last
+    activity timestamp per ticket_id from the full audit stream, then keep a task when it has NO
+    terminal outcome AND (is the newest scoped task OR its own recent audit activity).  The
+    ``tasks`` list is already newest-first from ``load_tasks``, so the output preserves that
+    ordering before applying the cap.
+    """
+    ts = _scope(tasks, app)
+    if not ts:
+        return []
+
+    now = datetime.now().timestamp()
+
+    # One-pass: last activity timestamp per ticket_id across the whole audit.
+    last_ts: dict[str, float] = {}
+    try:
+        for line in D.audit_lines(cfg.audit_path):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            tid = ev.get("ticket_id")
+            dt = D._parse_ts(ev.get("ts", ""))
+            if not tid or not dt:
+                continue
+            tstamp = dt.timestamp()
+            prev = last_ts.get(tid, 0.0)
+            if tstamp > prev:
+                last_ts[tid] = tstamp
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Filter: keep tasks with no terminal outcome AND fresh activity.
+    result: list[tuple[float, dict]] = []          # (score, task) for sorting
+    for t in ts:
+        if t.get("outcome"):
+            continue                                  # terminal → skip
+        tid = str(t.get("ticket_id") or "")
+        score = last_ts.get(tid, 0.0)
+        # Include if this is the newest scoped task (always live on multi-card boards),
+        # or if its own audit activity falls within the freshness window.
+        if active and (t is ts[0] or (now - score) < 150):
+            result.append((score, t))
+
+    # Sort newest-first by last-activity timestamp (descending).
+    result.sort(key=lambda x: x[0], reverse=True)
+    # Apply cap.
+    cap = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
+    return [r[1] for r in result[:cap]]
 
 
 def _fmt_dur(secs: float) -> str:
@@ -1060,7 +1146,7 @@ def _kpi_sparkline_svg(
 
 def _run_html(run: Optional[dict], mode: Optional[str] = None,
               elapsed: Optional[str] = None, manual: bool = False,
-              log_path: Optional[str] = None) -> str:
+              log_path: Optional[str] = None, log_ticket: Optional[str] = None) -> str:
     """Render the Active Run panel body.
 
     EU-76: this is the single authoritative slot for the in-flight (or most-recent) run.
@@ -1072,6 +1158,12 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     EU-106: ``log_path`` — when the BE subtask stores a path in state['log_path'], a small
     '📂 open log' link is rendered right after the phase bar so you can jump to the MQL5-style
     local run log without leaving the cockpit.
+
+    EU-487: ``log_ticket`` — set ONLY on the multi-card path, where every card tails the SAME
+    shared drain log and must see only its own run's lines. The card's runhead then carries
+    ``data-log-ticket="<id>"`` (the runlog JS appends ``&ticket=`` to the stream URL from the
+    first/newest card's attribute) and the open-log link carries ``&ticket=<id>`` as well.
+    Default None → the single-run path emits neither, keeping that output unchanged.
     """
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
@@ -1142,6 +1234,10 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                 f'{_esc(lbl)}</span>'
                 '</div>'
             )
+    # EU-487: per-card drain-log filter attribute — present only when the multi-card path
+    # passes THIS card's ticket id. The runlog JS reads it off the newest card and scopes
+    # the shared stream to it; the single-run path never sets it, so its HTML is unchanged.
+    log_ticket_attr = f' data-log-ticket="{_esc(log_ticket)}"' if log_ticket else ""
     # ── Panel header: hero-style when live, compact when idle ─────────────────
     app_span = f'<span class=runtapp>{_esc(run["app"])}</span>' if run["app"] else ""
     if run["live"]:
@@ -1156,7 +1252,7 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                     else '<span class="hgchip dry">dry-run · no changes</span>' if mode == "dry"
                     else "")
         runhead = (
-            '<div class="runhead runlive">'
+            f'<div class="runhead runlive"{log_ticket_attr}>'
             '<div style="display:flex;align-items:center;gap:12px;min-width:0">'
             '<span class=hgdot></span>'
             '<div style="min-width:0">'
@@ -1178,7 +1274,7 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                   "running": "interrupted"}.get(oc, oc or "—")
         chip = f'<span class="b {otone}">{_esc(olabel)}</span>'
         runhead = (
-            f'<div class=runhead>'
+            f'<div class=runhead{log_ticket_attr}>'
             f'<div class=runtitle><span style="font-family:var(--mono)">{_esc(run["ticket"])}</span>'
             f'{app_span}</div>'
             f'<div style="display:flex;gap:7px;align-items:center">'
@@ -1241,11 +1337,14 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     # Rendered as a small anchor right after the phase bar so it's near the run context.
     log_link = ""
     if log_path:
+        # EU-487: the card's own ticket id rides along as the log's filter param, same as
+        # the runhead attribute — the shared drain log is scoped per card, never split.
+        ticket_q = f"&ticket={quote(str(log_ticket))}" if log_ticket else ""
         # 2026-07-19: fetch(), never navigate — the same fix as the toolbar Open-logs button;
         # as a plain link this replaced the cockpit tab with the endpoint's raw JSON.
         log_link = (
             f'<div style="margin-top:9px;padding-bottom:2px">'
-            f'<a href="/api/open-logs?path={quote(str(log_path))}" '
+            f'<a href="/api/open-logs?path={quote(str(log_path))}{ticket_q}" '
             f'onclick="fetch(this.href);return false" '
             f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
             f'title="Open this run log in Finder">&#128194; open log</a></div>'
@@ -1711,6 +1810,46 @@ def _backlog_html(cfg, app: Optional[str]) -> str:
     return warn + f'<div class=blhead>{head}</div><div class=bllist>{"".join(rows)}</div>'
 
 
+def _render_run_card_data(cfg, app, run, tasks, *, active, mode, manual):
+    """Compute elapsed / stage / pass-count for a single run card.
+
+    Extracted from ``render_board`` (EU-485).  Takes one scoped task dict (the newest run on
+    the project), the full task list (passed through only because ``active_run`` derives the
+    sparkline / triage detection from scoped history), and renders the same values the inline
+    block produced — but now reusable when we later loop over multiple cards.
+
+    Returns ``{run_obj, mode, elapsed, manual, active}`` so the caller can unpack exactly as
+    before.  ``run_obj`` carries ``stage`` (``reached``), ``pass-count`` (``passes``,
+    ``phases``, ``sparkline``) that downstream templates read directly.
+    """
+    # Elapsed: only when a run is genuinely in flight.  EU-147 uses task-specific start time.
+    elapsed = None
+    if active and run is not None and run.get("started"):
+        started_dt = run["started"]
+        if isinstance(started_dt, datetime):
+            elapsed = _fmt_dur(datetime.now().timestamp() - started_dt.timestamp())
+        elif isinstance(started_dt, str):
+            parsed_ts = D._parse_ts(started_dt)
+            if parsed_ts:
+                elapsed = _fmt_dur(datetime.now().timestamp() - parsed_ts.timestamp())
+
+    # --- keep these in sync with the caller's assignments ---
+    # (mode and active are passed in; ghost-suppress may reset them below)
+
+    run_obj = active_run(cfg, tasks, app, active)
+    # EU-104: re-validate live ticket against Jira — suppress the ghost 'Working' card if
+    # the ticket is already Done/Closed.
+    if run_obj and run_obj.get("live") and _ticket_done(cfg, app, run_obj.get("ticket")):
+        run_obj = dict(run_obj)       # shallow copy — never mutate the cached object
+        run_obj["live"] = False
+        active = False
+        mode = None
+        elapsed = None
+        manual = False
+    return {"run_obj": run_obj, "mode": mode, "elapsed": elapsed,
+            "manual": manual, "active": active}
+
+
 def render_board(cfg, app: Optional[str], state: dict) -> str:
     """Inner board (everything that updates on the poll).
 
@@ -1738,34 +1877,53 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     # Elapsed on the live run; Stop only for a manual run (Autopilot stops from the header).
     # EU-147: Use task-specific start time, not project-level run_started, so elapsed time
     # reflects only the current task's duration.
-    elapsed = None
     ts = _scope(tasks, app)
-    if active and ts and ts[0].get("started"):
-        started_dt = ts[0]["started"]
-        if isinstance(started_dt, datetime):
-            elapsed = _fmt_dur(datetime.now().timestamp() - started_dt.timestamp())
-        elif isinstance(started_dt, str):
-            # Parse string timestamp if needed
-            parsed_ts = D._parse_ts(started_dt)
-            if parsed_ts:
-                elapsed = _fmt_dur(datetime.now().timestamp() - parsed_ts.timestamp())
+    run = ts[0] if ts else None
     manual = bool(state.get("active")) and not ap_on
-    run_obj = active_run(cfg, tasks, app, active)
-    # EU-104: re-validate the live ticket against Jira — suppress the ghost 'Working' card if
-    # the ticket is already Done/Closed.  This catches interrupted runs whose in-memory active
-    # flag was never cleared (crash/restart) and the _run_in_flight heuristic still fires.
-    # _ticket_done is TTL-cached (30s) so the SSE poll doesn't hammer the Jira REST API.
-    if run_obj and run_obj.get("live") and _ticket_done(cfg, app, run_obj.get("ticket")):
-        run_obj = dict(run_obj)   # shallow copy — never mutate the cached object
-        run_obj["live"] = False   # fall through to the 'idle · last run' rendering path
-        active = False
-        mode = None
-        elapsed = None
-        manual = False
-    k = _kpi_html(kpis(cfg, tasks, app))
-    # EU-106: pass log_path from state so the per-run 'open log' link appears next to the phase bar.
-    log_path = state.get("log_path")
-    run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path)
+
+    # EU-486: loop over live runs to produce one Active-run card per concurrent build.
+    # 0 or 1 live → TODAY's code path byte-for-byte (identity guaranteed).
+    # 2+ live → per-ticket scoping: _render_run_card_data + _run_html per card.
+    lives = live_runs(cfg, tasks, app, active)
+    if len(lives) <= 1:
+        # Single-run / idle path: unchanged from pre-EU-486.
+        card = _render_run_card_data(cfg, app, run, tasks, active=active, mode=mode, manual=manual)
+        run_obj = card["run_obj"]
+        mode = card["mode"]
+        elapsed = card["elapsed"]
+        manual = card["manual"]
+        active = card["active"]
+        k = _kpi_html(kpis(cfg, tasks, app))
+        log_path = state.get("log_path")
+        run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path)
+    else:
+        # Multi-card path: one panel per live ticket, ordered newest-first.
+        manual = bool(state.get("active")) and not ap_on  # stop button policy
+        # Build a ticket→tasks map so each card's helper sees only its own ticket's history.
+        # This makes ``active_run`` derive THAT ticket's stage/passes/sparkline correctly
+        # on boards with multiple concurrent cards (sparkline becomes ticket-scoped here).
+        tid_tasks: dict[str, list[dict]] = {}
+        for d in tasks:
+            tid = str(d.get("ticket_id", ""))
+            tid_tasks.setdefault(tid, []).append(d)
+
+        k = _kpi_html(kpis(cfg, tasks, app))
+        cards_html = []
+        for lt in lives:
+            ticket_tasks = tid_tasks.get(str(lt.get("ticket_id", "")), [lt])
+            c = _render_run_card_data(cfg, app, lt, ticket_tasks,
+                                      active=True, mode=mode, manual=manual)
+            # EU-487: each card tails the SAME shared drain log, filtered to its OWN ticket
+            # (the run obj's ticket — what the card actually shows — falling back to the
+            # audit task's id). _run_html emits the per-card data-log-ticket attribute from
+            # this; the single-run path above passes nothing, staying byte-identical.
+            card_ticket = str((c["run_obj"] or {}).get("ticket")
+                              or lt.get("ticket_id") or "") or None
+            cards_html.append(_run_html(c["run_obj"], c["mode"], c["elapsed"],
+                                        c["manual"], log_path=state.get("log_path"),
+                                        log_ticket=card_ticket))
+        run = "\n".join(cards_html)
+
     # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
     # headline and again in the "Active run" panel below it (same ticket/phase/elapsed/pass). The
     # Active-run panel is the canonical slot: it carries the EU-55/F12 phase bar and the pass-trend
@@ -2379,6 +2537,16 @@ startStream();
     return;
   }
 
+  /* EU-487: every Active-run card tails the SAME shared drain log, so the panel scopes
+     the stream to the newest card's ticket (cards render newest-first; the attribute
+     only exists on the multi-card path). No attribute (single-run board) → no &ticket=
+     and the stream URL is exactly what it was before EU-487. */
+  function readLogTicket(){
+    var hd=document.querySelector("div.run [data-log-ticket]");
+    return hd?(hd.getAttribute("data-log-ticket")||""):"";
+  }
+  var logTicket=readLogTicket();
+
   var runlogEs=null;
   var runlogBuffer=[];
   var _runlogPoll=null;
@@ -2414,7 +2582,9 @@ startStream();
     if(!logPath)return;
 
     try{
-      runlogEs=new EventSource("/api/run-log-stream?app="+encodeURIComponent(APP));
+      var runlogUrl="/api/run-log-stream?app="+encodeURIComponent(APP);
+      if(logTicket){runlogUrl+="&ticket="+encodeURIComponent(logTicket);}
+      runlogEs=new EventSource(runlogUrl);
       runlogEs.addEventListener("log",function(e){
         runlogBuffer.push(e.data);
         // Keep buffer size manageable (last 1000 lines)
@@ -2450,18 +2620,23 @@ startStream();
   var originalApplyBoard=applyBoard;
   applyBoard=function(html){
     originalApplyBoard(html);
-    // Restart log stream with new log path
+    // Restart log stream with new log path — or a new per-card ticket filter (EU-487:
+    // the newest card changed, or the board flipped between single- and multi-card).
     var newPanel=document.getElementById("runlog");
     if(newPanel){
       var newPath=newPanel.getAttribute("data-log-path");
-      if(newPath&&newPath!==logPath){
-        logPath=newPath;
+      var newTicket=readLogTicket();
+      var pathChanged=newPath&&newPath!==logPath;
+      var ticketChanged=newTicket!==logTicket;
+      if(pathChanged||ticketChanged){
+        if(pathChanged)logPath=newPath;
+        logTicket=newTicket;
         runlogBuffer=[];
         if(runlogEs){
           runlogEs.close();
           runlogEs=null;
         }
-        startRunlogStream();
+        if(logPath)startRunlogStream();
       }
     }
   };

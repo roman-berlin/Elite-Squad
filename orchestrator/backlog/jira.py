@@ -27,6 +27,10 @@ import requests
 
 from ..audit import AuditLog
 from ..contracts import Ticket
+# EU-456: the appended-comment / appended-image sentinels are owned by filing.py (the stripper) so
+# the writer (_to_ticket below) and the stripper (_clean_ticket_description) share ONE source of
+# truth and can't drift on the appended wording — the drift that would silently re-break relabel.
+from ..filing import _COMMANDER_COMMENTS_PREFIX, _TICKET_IMAGES_PREFIX
 from .base import BacklogAdapter
 
 # Roman Berlin's Atlassian accountId. The unit only ever works and files Roman's tickets (Standing
@@ -431,6 +435,18 @@ class JiraAdapter(BacklogAdapter):
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.
+        # 2026-07-23 (Commander: "relevant to ALL comments … effective, brief, human language"):
+        # every LONG comment folds through notify.jira_brief at this one choke point — tables,
+        # headings and code fences dropped, prose folded to bullets, trimmed at a line boundary
+        # (never mid-sentence). Short comments (the majority — merge notes, hand-offs) pass through
+        # byte-identical, same passthrough contract as brief_for_phone on the Telegram side. The
+        # structured hand-off lines (WHY/BLOCKER/DECISION/OPTIONS/MANUAL TEST) survive verbatim.
+        if len(body or "") > 700:
+            try:
+                from .. import notify
+                body = notify.jira_brief(body) or body
+            except Exception:  # noqa: BLE001 — formatting must never lose a comment
+                pass
         self.session.post(self._url(f"issue/{ticket.key}/comment"),
                           json={"body": _adf("[Squad] " + body)}).raise_for_status()
 
@@ -710,13 +726,15 @@ class JiraAdapter(BacklogAdapter):
             if txt and not txt.strip().startswith(("[Squad]", "[General]")):
                 feedback.append(txt.strip())
         if feedback:
-            description += ("\n\nCommander's comments (oldest -> newest) — read ALL of these; they "
-                           "include QA feedback on what to fix:\n" + "\n---\n".join(feedback))[:8000]
+            description += (_COMMANDER_COMMENTS_PREFIX
+                           + " read ALL of these; they include QA feedback on what to fix:\n"
+                           + "\n---\n".join(feedback))[:8000]
         # Download image attachments so the Builder can SEE the mockups/screenshots, not guess.
         imgs = self._download_images(issue["key"], f.get("attachment") or [])
         if imgs:
-            description += ("\n\nTicket images — OPEN and VIEW each (they show the desired design / "
-                           "the bug); do not guess at visuals:\n" + "\n".join(f"- {p}" for p in imgs))
+            description += (_TICKET_IMAGES_PREFIX
+                           + " (they show the desired design / the bug); do not guess at visuals:\n"
+                           + "\n".join(f"- {p}" for p in imgs))
         return Ticket(
             id=issue["key"],
             key=issue["key"],

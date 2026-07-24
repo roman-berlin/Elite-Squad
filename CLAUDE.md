@@ -82,6 +82,10 @@ Everything under `Documentation/` (these are the only files there — keep this 
   orphaned every `Path(cfg.audit_path).with_name(...)` sibling. The council archive is now adopted
   on boot (`adopt_legacy_council`); this lists every affected sidecar, the `cron.log`-stays
   decision, and the recommended follow-ups (postmortems, signature_filed.json, …).
+- `Documentation/QWEN_BACKEND_2026-07-24.md` — 2026-07-24: wiring Qwen as the hybrid secondary
+  (builder) during the GLM weekly-cap outage. The working QwenCloud Token-Plan Anthropic endpoint,
+  which model ids each plan actually serves, the Opus-reviewer quality baseline, and the flagship
+  (`qwen3.8-max-preview`) builder experiment with its provisional KEEP decision.
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them

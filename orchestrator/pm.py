@@ -200,6 +200,12 @@ Judge honestly:
   they render as one-click buttons in the cockpit and a phone reply can be just the number.
   The WHY PM CANNOT RESOLVE line is MANDATORY — omitting it invalidates the escalation.
 
+COMMENT FORMAT (2026-07-23 Commander order — applies to EVERYTHING you write for the ticket,
+RESOLVE and ESCALATE alike): the Commander reads these on a phone. Write ONLY tight '- ' bullets in
+this order — PROBLEM: (1-2 bullets, plain language), ACTION: (what you did / what you need from him),
+RECOMMENDATION: (one bullet). Max ~120 words. NO markdown headings, NO tables, NO code blocks, NO
+inline identifiers unless naming the file is the point. Not a story — a hand-off.
+
 Bias strongly to RESOLVE when the work is substantively done and only discipline is missing. Use SPLIT
 only when genuinely oversized. Reserve ESCALATE for what truly only the Commander can settle.
 

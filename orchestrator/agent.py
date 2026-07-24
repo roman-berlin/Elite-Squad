@@ -155,8 +155,15 @@ def _timeout_for_tag(tag: str) -> float:
 # This is higher-stakes since 95042c2: the classifier also runs over ResultMessage.result text
 # (where a GLM/z.ai provider-side error lands), so a false positive there can pause a live drain
 # for the wrong reason. Replaced with CONTEXTUAL phrases that still cover real z.ai quota text.
-_CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit",
-                 "quota exceeded", "insufficient balance", "insufficient quota",
+# 2026-07-24: added "monthly limit" + "limit exhausted". A z.ai/GLM hard weekly cap reads
+# "[1310][Weekly/Monthly Limit Exhausted…]" — which matched NEITHER "weekly limit" (the real text is
+# "weekly/monthly limit", so the bare "weekly limit" is not a substring) NOR any other cap pattern,
+# yet DID contain "429", so it classified as TRANSIENT. A 3-day weekly exhaustion was therefore
+# retried as a per-minute blip until the barren-cycle breaker caught it, and the symmetric hybrid
+# fallback (which needs a recognised cap) never fired. Both phrases are cap-specific — a transient
+# error says "rate limit"/"too many requests", never "limit exhausted".
+_CAP_PATTERNS = ("usage limit", "usage-limit", "plan limit", "weekly limit", "monthly limit",
+                 "limit exhausted", "quota exceeded", "insufficient balance", "insufficient quota",
                  "insufficient credit", "account balance", "billing issue", "payment required")
 _TRANSIENT_PATTERNS = ("rate limit", "rate_limit", "too many requests",
                        "overloaded", "429", "529")

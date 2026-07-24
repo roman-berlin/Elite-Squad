@@ -109,7 +109,7 @@ verified by you — missing env/credentials, a device/browser matrix you cannot 
 check needing human eyes — your summary MUST include a section starting exactly 'MANUAL TEST:'
 with NUMBERED, exact steps for each unverified item: where to go (page/route), what to do
 (clicks/input), and precisely what the Commander must see to pass it. The pipeline lands such a
-ticket into the Blocked column with your steps as the hand-off comment, so vague steps = a stuck
+ticket into the QA column with your steps as the hand-off comment, so vague steps = a stuck
 ticket. Omit the section entirely when you verified everything yourself.
 """
 

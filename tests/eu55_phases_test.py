@@ -83,8 +83,9 @@ chk("terminal bar phase order matches PHASES",
     [term.index(p) for p in PH] == sorted(term.index(p) for p in PH))
 
 # --- 4) reached / failed_phase indices match the 4-phase order (drift guard) ---------------------
-# build done + live -> we've reached the Gate (next phase = index 1).
-chk("has_build (live) -> reached == Gate index", web["reached"] == PH.index("Gate"))
+# build done + live, NO gate event yet -> still Building (EU-448: the bar must NOT jump to Gate
+# the moment a build event exists; Gate is reached only once the gate phase actually fires).
+chk("build-only live -> reached == Build index (EU-448)", web["reached"] == PH.index("Build"))
 
 # reviewed + live -> Build, Gate, Review behind us; Land is next.
 reviewed = _run([dict(event="ticket_start", ticket_id="AUTO-2", app="automatixy", branch="b", ts=ts),

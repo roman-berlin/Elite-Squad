@@ -101,16 +101,14 @@ chk("no orchestrator/scripts source references the retired launchd scheduler",
 cron = (SCRIPTS / "install-server-cron.sh")
 chk("live scheduler scripts/install-server-cron.sh still present", cron.exists())
 cron_text = cron.read_text(encoding="utf-8") if cron.exists() else ""
-# 2026-07-07: best-practice ceremony split. The LIGHT daily stand-up (`general daily`) is scheduled
-# every morning; the DEEP multi-officer council (`general council`) is scheduled WEEKLY (Mon), not
-# daily. Corridor small-talk stays RETIRED. The single source must reflect exactly that.
+# 2026-07-07: best-practice ceremony split.
+# EU-437: daily stand-up and weekly council moved to systemd timers (DST-proof); they are no longer
+# cron-scheduled on the server. Corridor small-talk stays RETIRED.
 _cron_cmds = [l for l in cron_text.splitlines() if not l.strip().startswith("#") and "./general" in l]
-_council = [l for l in _cron_cmds if "./general council" in l]
 _daily = [l for l in _cron_cmds if "./general daily" in l]
-chk("light daily stand-up is scheduled every day (general daily)",
-    len(_daily) == 1 and _daily[0].split()[4] == "*", str(_daily))
-chk("deep council is scheduled WEEKLY (Mon dow=1), not daily",
-    len(_council) == 1 and _council[0].split()[4] == "1", str(_council))
+_council = [l for l in _cron_cmds if "./general council" in l]
+chk("EU-437: light daily stand-up NOT in crontab (moved to systemd timer)", len(_daily) == 0, str(_daily))
+chk("EU-437: deep council NOT in crontab (moved to systemd timer)", len(_council) == 0, str(_council))
 chk("ceremonies: corridor small-talk stays de-cronned", "./general smalltalk" not in cron_text)
 # EU-432 (2026-07-22): patrol is deliberately NOT scheduled on the server — the box has no real
 # product repo (automatixy.repo_path is a placeholder pointing at the orchestrator's own source),
