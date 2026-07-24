@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-24 · EU-485 · Elite-Unit · • Clean, byte-identical extraction: elapsed/ghost-suppress/active_run logic moved verbatim into `_render_run_card_data`, called once on the single run; all five caller variables restored via unpack.
 - 2026-07-24 · EU-437 · Elite-Unit · • Spec met: systemd timers with tz-suffixed OnCalendar (Asia/Jerusalem) + Persistent=, cron lines retired, cron-guard wrapping and timedatectl verification preserved. · 🔗 (no UI — run `tests/eu437_systemd_timers_test.py` on the VPS after `sudo bash scripts/install-server-timers.sh`; verify with `systemctl list-timers 'general-*'` and `timedatectl`)
 - 2026-07-23 · EU-456 · Elite-Unit · • Fix is correct and complete: relabel_fingerprint now fingerprints the original body via _clean_ticket_description, which cuts the appended Commander-comment and image-path blocks at the earliest sentinel; clean bodies… · 🔗 (no UI — verify via `python3 tests/eu439_fingerprint_collision_test.py` showing the EU-456 AC1–AC4 lines PASS, and `python3 tests/run_all.py` ALL GREEN; plus the live one-liner above for AC3)
 - 2026-07-23 · EU-448 · Elite-Unit · • Fix correctly re-derives the LIVE bar from the gate-phase signal t["phase"] instead of the sticky has_build — satisfies AC1 (build→Build), AC2 (PM continuation→Build), AC3 (Gate only on a real gate event). · 🔗 / (cockpit stage bar — open the Active Run panel during a live build)
