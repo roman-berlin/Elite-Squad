@@ -4,8 +4,9 @@
 # Installs, idempotently:
 #   - self-update (auto-deploy main)          every 15 min, offset :05/:20/:35/:50
 #   - Mac->server state sync (pull-only)       every 15 min
-#   - light daily stand-up                     every day 08:30 Jerusalem (05:30 UTC)
-#   - deep officer council                     Mon 09:30 Jerusalem / 06:30 UTC (WEEKLY; the muster)
+#   - VPS watchdog                            every 5 min (local wedge detection)
+# NOTE: the daily stand-up (08:30 Jerusalem) and weekly council (Mon 09:30) are now scheduled by
+# systemd timers (EU-437: install-server-timers.sh) so they are DST-proof — not crontab'd here.
 # Phase-2 §2 (2026-07-06): the 06:30 council muster and the 11/14/16 corridor small-talk crons
 # were RETIRED. 2026-07-07: best-practice ceremony split — a LIGHT daily stand-up (`general daily`)
 # runs every morning, and the DEEP multi-officer council (`general council`) is now WEEKLY. Re-run
@@ -15,10 +16,9 @@
 # LOCAL. Ubuntu's cron IGNORES per-crontab CRON_TZ (man 5 crontab, LIMITATIONS), and the box's
 # system clock is Etc/UTC (timedatectl) — so every job fired at its stated HOUR IN UTC, i.e. 3h
 # late during IDT (the "08:30 daily brief" landed at 11:30). All times below are now UTC, converted
-# from the Commander's LOCAL (Asia/Jerusalem) intent at IDT (UTC+3): 08:30->05:30, 09:30->06:30.
-# CAVEAT: these are FIXED UTC hours, so they drift by 1h when Israel flips DST (IDT<->IST). That is
-# strictly better than the old permanent 3h error; for DST-perfect scheduling move these to systemd
-# timers (which honour OnCalendar= timezone + Persistent=), a deliberate follow-up not done here.
+# from the Commander's LOCAL (Asia/Jerusalem) intent at IDT (UTC+3).
+# NOTE: daily stand-up (08:30 Jerusalem / 05:30 UTC) and weekly council (Mon 09:30 Jerusalem /
+# 06:30 UTC) are no longer crontab'd here — they are driven by systemd timers (EU-437).
 # EU-432 also REMOVED two jobs that had never once succeeded (see notes on each below):
 #   - `patrol automatixy`: this host has no real product repo (automatixy.repo_path is a placeholder
 #     pointing at the orchestrator's OWN source), so patrol would file AUTO tickets against the
@@ -52,10 +52,6 @@ cat >> "$TMP" <<'CRON'
 5,20,35,50 * * * * cd $HOME/General && bash scripts/self-update.sh >> council/cron.log 2>&1
 # sync is pull-only on this host; cron-guard timestamps + rotates the log and alerts on repeated failure.
 */15 * * * * cd $HOME/General && GENERAL_HOST_ID=server GENERAL_SYNC_PULL_ONLY=1 ./general cron-guard --job sync -- ./general sync >> council/cron.log 2>&1
-# Light daily stand-up — every morning 08:30 Jerusalem (IDT, UTC+3) -> 05:30 UTC (~1 model call).
-30 5 * * * cd $HOME/General && ./general cron-guard --job daily -- ./general daily >> council/cron.log 2>&1
-# Deep officer council — WEEKLY, Mon 09:30 Jerusalem (IDT, UTC+3) -> 06:30 UTC (the multi-officer muster).
-30 6 * * 1 cd $HOME/General && ./general cron-guard --job council -- ./general council >> council/cron.log 2>&1
 # EU-433 AC4 — VPS LOCAL watchdog. The on-box watchdog.sh script ships in the repo but was scheduled
 # by NOTHING, so a local wedge (cockpit alive-but-stuck, or systemd's Restart=always not yet catching
 # a dead cockpit) went unreported. It runs OUT OF general.service (pure bash+curl), curls THIS host's

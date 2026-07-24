@@ -4,8 +4,9 @@ Three independent defects in the VPS crontab, all silent, plus no failure signal
 unrotated, timestamp-less log. This harness pins every acceptance criterion offline:
 
   AC1 — schedules fire at intended LOCAL times: the installer drops the no-op CRON_TZ and
-        states times in UTC (the VPS clock is Etc/UTC; Ubuntu cron ignores CRON_TZ). The daily
-        08:30-IDT brief becomes 05:30 UTC; the weekly council 09:30-IDT becomes 06:30 UTC.
+        states times in UTC (the VPS clock is Etc/UTC; Ubuntu cron ignores CRON_TZ). NOTE: the
+        daily stand-up and council were MOVED TO SYSTEMD TIMERS by EU-437, so this asserts
+        they are absent from crontab and that the UTC-comment is honest.
   AC2 — patrol: a job that cannot succeed must not stay scheduled. On the SERVER host there is
         no real product repo (automatixy.repo_path is a placeholder pointing at the orchestrator's
         own source), so `patrol automatixy` would file AUTO tickets against the product backlog
@@ -66,7 +67,7 @@ def _cron_block() -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AC1 — times are UTC; CRON_TZ dropped; comment honest
+# AC1 — CRON_TZ dropped, UTC comment honest; daily/council MOVED TO SYSTEMD TIMERS (EU-437)
 # ══════════════════════════════════════════════════════════════════════════════
 block = _cron_block()
 _script_text = (ROOT / "scripts" / "install-server-cron.sh").read_text(encoding="utf-8")
@@ -75,12 +76,11 @@ chk("AC1: no CRON_TZ=Asia/Jerusalem setting in the installed block (Ubuntu cron 
 chk("AC1: header comment names UTC honestly", "UTC" in _script_text)
 chk("AC1: the false 'LOCAL via CRON_TZ' claim is gone from the comment",
     "LOCAL via CRON_TZ" not in _script_text)
-# daily brief 08:30 IDT (UTC+3) -> 05:30 UTC
-chk("AC1: daily stand-up scheduled at 05:30 UTC (= 08:30 IDT)",
-    "30 5 * * *" in block and "30 8 * * *" not in block)
-# weekly council Mon 09:30 IDT -> 06:30 UTC
-chk("AC1: weekly council scheduled Mon 06:30 UTC (= 09:30 IDT)",
-    "30 6 * * 1" in block and "30 9 * * 1" not in block)
+# EU-437: daily/council moved out of crontab into systemd timers with DST-proof OnCalendar.
+chk("AC1: daily stand-up NOT in crontab (moved to systemd timer by EU-437)",
+    "30 5 * * *" not in block, f"found in block:\n{block}")
+chk("AC1: weekly council NOT in crontab (moved to systemd timer by EU-437)",
+    "30 6 * * 1" not in block, f"found in block:\n{block}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AC2 — patrol not scheduled on the server (no real product target)
