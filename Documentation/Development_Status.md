@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-24 · EU-487 · Elite-Unit · • Per-card filter param wired correctly: each card emits its own data-log-ticket and &ticket= open-log link (AC met, tested).
 - 2026-07-24 · EU-486 · Elite-Unit · • Spec met: 2 distinct live cards render, cap enforced via max_concurrent_builders, single/idle path is the unchanged pre-EU-486 code (identity guaranteed by the len(lives)<=1 guard), and a test with 2 fixture live runs… · 🔗 /board?app=testapp (or whichever app has 2+ concurrent live runs)
 - 2026-07-24 · EU-485 · Elite-Unit · • Clean, byte-identical extraction: elapsed/ghost-suppress/active_run logic moved verbatim into `_render_run_card_data`, called once on the single run; all five caller variables restored via unpack.
 - 2026-07-24 · EU-437 · Elite-Unit · • Spec met: systemd timers with tz-suffixed OnCalendar (Asia/Jerusalem) + Persistent=, cron lines retired, cron-guard wrapping and timedatectl verification preserved. · 🔗 (no UI — run `tests/eu437_systemd_timers_test.py` on the VPS after `sudo bash scripts/install-server-timers.sh`; verify with `systemctl list-timers 'general-*'` and `timedatectl`)
