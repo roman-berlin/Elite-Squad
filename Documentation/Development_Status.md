@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-498 · Elite-Unit · • All 5 ACs verified end-to-end through the real sync.git_sync entry point (never calling compact_state_branch directly): 1-commit collapse + byte-identity, transparent pull-only replay, sidecar throttle, EU-428… · 🔗 /sync (state sync cron path — run `python3 tests/eu498_compact_e2e_test.py` standalone for automated verification)
 - 2026-07-25 · EU-497 · Elite-Unit · • All 4 ACs met: Leg 1 pins the exact fetch+reset consumer sequence via stubbed _git; Leg 2 proves reset --hard FETCH_HEAD lands cleanly on a compacted single-commit tip with no ancestry error and byte-identical… · 🔗 (no UI — verify via `python3 tests/eu497_pull_consumer_test.py` or under `python3 tests/run_all.py`)
 - 2026-07-25 · EU-496 · Elite-Unit · • All 3 ACs met: compaction gated behind _should_compact_state (threshold OR weekly cadence), exceptions swallowed+logged in git_sync, tests cover skip/trigger/failure/pull_only/no-cache paths.
 - 2026-07-25 · EU-503 · Elite-Unit · • Verified compact_state_branch(cfg) exists in orchestrator/sync.py, matches described 4-step orphan-switch/add/commit/push sequence with EU-428 no-delete guard. · 🔗 (no UI — `python3 tests/eu449_state_compact_test.py` or verify via `python3 tests/run_all.py` that `eu449_state_compact_test.py` reports 7/7 passed inside the 465-harness sweep)
