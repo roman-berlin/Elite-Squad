@@ -115,7 +115,12 @@ def active_runs() -> list[object]:
 
 
 def active_run_count() -> int:
-    """How many projects are running right now."""
+    """How many PROJECTS are running right now (distinct app keys with a claimed run).
+
+    This is a per-app boolean tally: under ``max_concurrent_builders ≥ 2`` one app can
+    build two tickets at once and still counts as 1 here.  For the true concurrent-BUILD
+    total — the header badge's number (EU-479) — use ``warroom.total_live_run_count()``,
+    which sums ``live_runs()`` per app on demand on top of ``active_runs()``."""
     return len(active_runs())
 
 
