@@ -420,8 +420,11 @@ def plan_usage(cfg: Config | None = None, *, now: float | None = None, force: bo
 # the transient per-minute 429/529 overload language (agent._TRANSIENT_PATTERNS) — that is retry
 # territory and the breaker's signal, not a settled provider cap.
 _CAP_REFUSAL_MARKERS = (
-    "usage limit", "usage-limit", "plan limit", "weekly limit",
-    "quota exceeded", "insufficient balance", "insufficient quota",
+    # 2026-07-24: kept in lock-step with agent._CAP_PATTERNS (EU-429 guard). "monthly limit" +
+    # "limit exhausted" added so a z.ai/GLM hard weekly cap ("[1310][Weekly/Monthly Limit
+    # Exhausted…]") is recognised as a cap here too, not just in the SDK-error classifier.
+    "usage limit", "usage-limit", "plan limit", "weekly limit", "monthly limit",
+    "limit exhausted", "quota exceeded", "insufficient balance", "insufficient quota",
     "insufficient credit", "account balance", "billing issue", "payment required",
 )
 

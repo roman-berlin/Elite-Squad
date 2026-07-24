@@ -111,6 +111,23 @@ check("cap plan-limit → Opus probe path (2nd call is Opus, not a Sonnet retry)
       len(calls) == 2 and "opus" in calls[1].lower(), str(calls))
 
 
+# 2026-07-24: the z.ai/GLM HARD weekly cap must classify as "cap", not "transient". The live error
+# "[1310][Weekly/Monthly Limit Exhausted…]" contains "429" (transient) but the cap set had only
+# "weekly limit" — and "weekly/monthly limit" is not a superstring of it — so a 3-day exhaustion was
+# retried as a per-minute blip and the hybrid symmetric fallback never fired.
+_GLM_EXHAUST = ("API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. "
+                "Your limit will reset at 2026-07-27 19:44:02]")
+check("GLM weekly/monthly exhaustion classifies as CAP (not transient)",
+      _classify_plan_limit(_GLM_EXHAUST) == "cap", _classify_plan_limit(_GLM_EXHAUST))
+check("a bare monthly-limit cap is recognised",
+      _classify_plan_limit("monthly limit reached") == "cap")
+check("'limit exhausted' is a cap phrase",
+      _classify_plan_limit("your limit exhausted") == "cap")
+check("a plain transient 429 is STILL transient (no false cap)",
+      _classify_plan_limit("429: rate limit reached") == "transient")
+check("'too many requests' is STILL transient",
+      _classify_plan_limit("too many requests (429)") == "transient")
+
 print("\n============ EU-210 RATE-LIMIT CLASSIFY QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
