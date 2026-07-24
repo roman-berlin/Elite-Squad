@@ -882,6 +882,66 @@ def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = 1
     return False
 
 
+def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool) -> list[dict]:
+    """Return all genuinely live runs for *app*, ordered newest-first, capped at max_concurrent_builders.
+
+    EU-486: drives the multi-card loop in ``render_board`` — one Active-run card per live run.
+    Calls ``D.audit_lines`` once (one-pass scan for last-activity timestamps) then filters the
+    already-loaded ``tasks``; no extra audit-file loads per frame.
+
+    Scoring heuristic mirrors ``_run_in_flight``'s freshness check (~150 s): collect the last
+    activity timestamp per ticket_id from the full audit stream, then keep a task when it has NO
+    terminal outcome AND (is the newest scoped task OR its own recent audit activity).  The
+    ``tasks`` list is already newest-first from ``load_tasks``, so the output preserves that
+    ordering before applying the cap.
+    """
+    ts = _scope(tasks, app)
+    if not ts:
+        return []
+
+    now = datetime.now().timestamp()
+
+    # One-pass: last activity timestamp per ticket_id across the whole audit.
+    last_ts: dict[str, float] = {}
+    try:
+        for line in D.audit_lines(cfg.audit_path):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            tid = ev.get("ticket_id")
+            dt = D._parse_ts(ev.get("ts", ""))
+            if not tid or not dt:
+                continue
+            tstamp = dt.timestamp()
+            prev = last_ts.get(tid, 0.0)
+            if tstamp > prev:
+                last_ts[tid] = tstamp
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Filter: keep tasks with no terminal outcome AND fresh activity.
+    result: list[tuple[float, dict]] = []          # (score, task) for sorting
+    for t in ts:
+        if t.get("outcome"):
+            continue                                  # terminal → skip
+        tid = str(t.get("ticket_id") or "")
+        score = last_ts.get(tid, 0.0)
+        # Include if this is the newest scoped task (always live on multi-card boards),
+        # or if its own audit activity falls within the freshness window.
+        if active and (t is ts[0] or (now - score) < 150):
+            result.append((score, t))
+
+    # Sort newest-first by last-activity timestamp (descending).
+    result.sort(key=lambda x: x[0], reverse=True)
+    # Apply cap.
+    cap = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
+    return [r[1] for r in result[:cap]]
+
+
 def _fmt_dur(secs: float) -> str:
     secs = int(max(0, secs))
     if secs < 3600:
@@ -1807,17 +1867,43 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     ts = _scope(tasks, app)
     run = ts[0] if ts else None
     manual = bool(state.get("active")) and not ap_on
-    # EU-485: extracted into reusable per-run helper (single-call; loop reshaping is next ticket).
-    card = _render_run_card_data(cfg, app, run, tasks, active=active, mode=mode, manual=manual)
-    run_obj = card["run_obj"]
-    mode = card["mode"]
-    elapsed = card["elapsed"]
-    manual = card["manual"]
-    active = card["active"]
-    k = _kpi_html(kpis(cfg, tasks, app))
-    # EU-106: pass log_path from state so the per-run 'open log' link appears next to the phase bar.
-    log_path = state.get("log_path")
-    run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path)
+
+    # EU-486: loop over live runs to produce one Active-run card per concurrent build.
+    # 0 or 1 live → TODAY's code path byte-for-byte (identity guaranteed).
+    # 2+ live → per-ticket scoping: _render_run_card_data + _run_html per card.
+    lives = live_runs(cfg, tasks, app, active)
+    if len(lives) <= 1:
+        # Single-run / idle path: unchanged from pre-EU-486.
+        card = _render_run_card_data(cfg, app, run, tasks, active=active, mode=mode, manual=manual)
+        run_obj = card["run_obj"]
+        mode = card["mode"]
+        elapsed = card["elapsed"]
+        manual = card["manual"]
+        active = card["active"]
+        k = _kpi_html(kpis(cfg, tasks, app))
+        log_path = state.get("log_path")
+        run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path)
+    else:
+        # Multi-card path: one panel per live ticket, ordered newest-first.
+        manual = bool(state.get("active")) and not ap_on  # stop button policy
+        # Build a ticket→tasks map so each card's helper sees only its own ticket's history.
+        # This makes ``active_run`` derive THAT ticket's stage/passes/sparkline correctly
+        # on boards with multiple concurrent cards (sparkline becomes ticket-scoped here).
+        tid_tasks: dict[str, list[dict]] = {}
+        for d in tasks:
+            tid = str(d.get("ticket_id", ""))
+            tid_tasks.setdefault(tid, []).append(d)
+
+        k = _kpi_html(kpis(cfg, tasks, app))
+        cards_html = []
+        for lt in lives:
+            ticket_tasks = tid_tasks.get(str(lt.get("ticket_id", "")), [lt])
+            c = _render_run_card_data(cfg, app, lt, ticket_tasks,
+                                      active=True, mode=mode, manual=manual)
+            cards_html.append(_run_html(c["run_obj"], c["mode"], c["elapsed"],
+                                        c["manual"], log_path=state.get("log_path")))
+        run = "\n".join(cards_html)
+
     # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
     # headline and again in the "Active run" panel below it (same ticket/phase/elapsed/pass). The
     # Active-run panel is the canonical slot: it carries the EU-55/F12 phase bar and the pass-trend
