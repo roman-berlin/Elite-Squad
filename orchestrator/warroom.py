@@ -1146,7 +1146,7 @@ def _kpi_sparkline_svg(
 
 def _run_html(run: Optional[dict], mode: Optional[str] = None,
               elapsed: Optional[str] = None, manual: bool = False,
-              log_path: Optional[str] = None) -> str:
+              log_path: Optional[str] = None, log_ticket: Optional[str] = None) -> str:
     """Render the Active Run panel body.
 
     EU-76: this is the single authoritative slot for the in-flight (or most-recent) run.
@@ -1158,6 +1158,12 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     EU-106: ``log_path`` — when the BE subtask stores a path in state['log_path'], a small
     '📂 open log' link is rendered right after the phase bar so you can jump to the MQL5-style
     local run log without leaving the cockpit.
+
+    EU-487: ``log_ticket`` — set ONLY on the multi-card path, where every card tails the SAME
+    shared drain log and must see only its own run's lines. The card's runhead then carries
+    ``data-log-ticket="<id>"`` (the runlog JS appends ``&ticket=`` to the stream URL from the
+    first/newest card's attribute) and the open-log link carries ``&ticket=<id>`` as well.
+    Default None → the single-run path emits neither, keeping that output unchanged.
     """
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
@@ -1228,6 +1234,10 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                 f'{_esc(lbl)}</span>'
                 '</div>'
             )
+    # EU-487: per-card drain-log filter attribute — present only when the multi-card path
+    # passes THIS card's ticket id. The runlog JS reads it off the newest card and scopes
+    # the shared stream to it; the single-run path never sets it, so its HTML is unchanged.
+    log_ticket_attr = f' data-log-ticket="{_esc(log_ticket)}"' if log_ticket else ""
     # ── Panel header: hero-style when live, compact when idle ─────────────────
     app_span = f'<span class=runtapp>{_esc(run["app"])}</span>' if run["app"] else ""
     if run["live"]:
@@ -1242,7 +1252,7 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                     else '<span class="hgchip dry">dry-run · no changes</span>' if mode == "dry"
                     else "")
         runhead = (
-            '<div class="runhead runlive">'
+            f'<div class="runhead runlive"{log_ticket_attr}>'
             '<div style="display:flex;align-items:center;gap:12px;min-width:0">'
             '<span class=hgdot></span>'
             '<div style="min-width:0">'
@@ -1264,7 +1274,7 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
                   "running": "interrupted"}.get(oc, oc or "—")
         chip = f'<span class="b {otone}">{_esc(olabel)}</span>'
         runhead = (
-            f'<div class=runhead>'
+            f'<div class=runhead{log_ticket_attr}>'
             f'<div class=runtitle><span style="font-family:var(--mono)">{_esc(run["ticket"])}</span>'
             f'{app_span}</div>'
             f'<div style="display:flex;gap:7px;align-items:center">'
@@ -1327,11 +1337,14 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     # Rendered as a small anchor right after the phase bar so it's near the run context.
     log_link = ""
     if log_path:
+        # EU-487: the card's own ticket id rides along as the log's filter param, same as
+        # the runhead attribute — the shared drain log is scoped per card, never split.
+        ticket_q = f"&ticket={quote(str(log_ticket))}" if log_ticket else ""
         # 2026-07-19: fetch(), never navigate — the same fix as the toolbar Open-logs button;
         # as a plain link this replaced the cockpit tab with the endpoint's raw JSON.
         log_link = (
             f'<div style="margin-top:9px;padding-bottom:2px">'
-            f'<a href="/api/open-logs?path={quote(str(log_path))}" '
+            f'<a href="/api/open-logs?path={quote(str(log_path))}{ticket_q}" '
             f'onclick="fetch(this.href);return false" '
             f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
             f'title="Open this run log in Finder">&#128194; open log</a></div>'
@@ -1900,8 +1913,15 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
             ticket_tasks = tid_tasks.get(str(lt.get("ticket_id", "")), [lt])
             c = _render_run_card_data(cfg, app, lt, ticket_tasks,
                                       active=True, mode=mode, manual=manual)
+            # EU-487: each card tails the SAME shared drain log, filtered to its OWN ticket
+            # (the run obj's ticket — what the card actually shows — falling back to the
+            # audit task's id). _run_html emits the per-card data-log-ticket attribute from
+            # this; the single-run path above passes nothing, staying byte-identical.
+            card_ticket = str((c["run_obj"] or {}).get("ticket")
+                              or lt.get("ticket_id") or "") or None
             cards_html.append(_run_html(c["run_obj"], c["mode"], c["elapsed"],
-                                        c["manual"], log_path=state.get("log_path")))
+                                        c["manual"], log_path=state.get("log_path"),
+                                        log_ticket=card_ticket))
         run = "\n".join(cards_html)
 
     # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
@@ -2517,6 +2537,16 @@ startStream();
     return;
   }
 
+  /* EU-487: every Active-run card tails the SAME shared drain log, so the panel scopes
+     the stream to the newest card's ticket (cards render newest-first; the attribute
+     only exists on the multi-card path). No attribute (single-run board) → no &ticket=
+     and the stream URL is exactly what it was before EU-487. */
+  function readLogTicket(){
+    var hd=document.querySelector("div.run [data-log-ticket]");
+    return hd?(hd.getAttribute("data-log-ticket")||""):"";
+  }
+  var logTicket=readLogTicket();
+
   var runlogEs=null;
   var runlogBuffer=[];
   var _runlogPoll=null;
@@ -2552,7 +2582,9 @@ startStream();
     if(!logPath)return;
 
     try{
-      runlogEs=new EventSource("/api/run-log-stream?app="+encodeURIComponent(APP));
+      var runlogUrl="/api/run-log-stream?app="+encodeURIComponent(APP);
+      if(logTicket){runlogUrl+="&ticket="+encodeURIComponent(logTicket);}
+      runlogEs=new EventSource(runlogUrl);
       runlogEs.addEventListener("log",function(e){
         runlogBuffer.push(e.data);
         // Keep buffer size manageable (last 1000 lines)
@@ -2588,18 +2620,23 @@ startStream();
   var originalApplyBoard=applyBoard;
   applyBoard=function(html){
     originalApplyBoard(html);
-    // Restart log stream with new log path
+    // Restart log stream with new log path — or a new per-card ticket filter (EU-487:
+    // the newest card changed, or the board flipped between single- and multi-card).
     var newPanel=document.getElementById("runlog");
     if(newPanel){
       var newPath=newPanel.getAttribute("data-log-path");
-      if(newPath&&newPath!==logPath){
-        logPath=newPath;
+      var newTicket=readLogTicket();
+      var pathChanged=newPath&&newPath!==logPath;
+      var ticketChanged=newTicket!==logTicket;
+      if(pathChanged||ticketChanged){
+        if(pathChanged)logPath=newPath;
+        logTicket=newTicket;
         runlogBuffer=[];
         if(runlogEs){
           runlogEs.close();
           runlogEs=null;
         }
-        startRunlogStream();
+        if(logPath)startRunlogStream();
       }
     }
   };
