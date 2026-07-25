@@ -51,6 +51,10 @@ from __future__ import annotations
 import contextvars
 import os
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .model_registry import ModelRegistry
 
 # Canonical backend ids.
 NATIVE = "opus"   # Anthropic / Claude — the default; env untouched (Max subscription inherited).
@@ -64,7 +68,7 @@ _BACKEND: contextvars.ContextVar[str] = contextvars.ContextVar("model_backend", 
 # hermetic when it is called at the SDK seam with NO explicit registry (agent._run_agent_unrouted):
 # it resolves against THIS run's store, not the live state/ store. Default None -> apply() falls
 # back to a live-anchored ModelRegistry().
-_REGISTRY: contextvars.ContextVar = contextvars.ContextVar("model_registry", default=None)
+_REGISTRY: contextvars.ContextVar[ModelRegistry | None] = contextvars.ContextVar("model_registry", default=None)
 
 # GLM defaults — overridable via env. The token has NO default: it must be provided or GLM is off.
 _GLM_BASE_URL_DEFAULT = "https://api.z.ai/api/anthropic"
@@ -145,7 +149,7 @@ _HYBRID_SECONDARY = contextvars.ContextVar("model_hybrid_secondary", default=Non
 _HYBRID_BUILD_TAGS = frozenset({"builder"})
 
 
-def set_hybrid(secondary: str | None):
+def set_hybrid(secondary: str | None) -> contextvars.Token[str | None]:
     """Pin the hybrid-mode secondary backend for this run context (None = hybrid off)."""
     return _HYBRID_SECONDARY.set(_pin_value(secondary) if secondary else None)
 
@@ -175,7 +179,7 @@ def hybrid_secondary() -> str | None:
     return _HYBRID_SECONDARY.get(None)
 
 
-def set_backend(value: str | None, registry=None):
+def set_backend(value: str | None, registry: ModelRegistry | None = None) -> tuple[contextvars.Token[str], contextvars.Token[ModelRegistry | None]]:
     """Pin the backend for the current run context. Returns a token for :func:`reset_backend`.
 
     ``value`` may be an ``opus``/``glm`` alias OR (EU-236) a model-registry record id — the id is

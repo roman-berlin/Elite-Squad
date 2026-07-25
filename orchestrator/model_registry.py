@@ -23,10 +23,13 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from . import locking
 from .secrets import Secrets
+
+if TYPE_CHECKING:
+    from .config import Config
 
 # The only providers the registry currently understands. Kept as a tuple (not a set) so error
 # messages render in a stable, predictable order.
@@ -72,7 +75,7 @@ def _validate(fields: dict, *, partial: bool) -> dict:
         if missing:
             raise ValueError(f"missing required field(s): {', '.join(missing)}")
 
-    clean: dict[str, Any] = {}
+    clean: dict[str, object] = {}
     for key, value in fields.items():
         if key not in _ALLOWED_FIELDS:
             continue
@@ -93,7 +96,7 @@ class ModelRegistry:
     parent directory; with neither, it falls back to the live ``state/model_registry.json``.
     """
 
-    def __init__(self, cfg: Any = None, path: Optional[str | Path] = None):
+    def __init__(self, cfg: Config | None = None, path: Optional[str | Path] = None):
         if path is not None:
             self._path = Path(path)
         else:

@@ -38,7 +38,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import NotRequired, TypedDict
 
 from .config import Config
 
@@ -609,13 +609,61 @@ def publish(cfg: Config, sd: Path | None = None) -> Path:
     return dst
 
 
-def git_sync(cfg: Config) -> dict[str, Any]:
+# Result shapes of the sync/promote operations below — fixed keys, documented once here so call
+# sites read a named contract instead of a loose mapping.
+class GitSyncStatus(TypedDict):
+    host: str
+    pulled: bool
+    pushed: bool | None
+    hosts: list[str]
+    error: str | None
+    gc: NotRequired[dict[str, bool | str]]
+
+
+class ServerStatePullStatus(TypedDict):
+    attempted: bool
+    pulled: bool
+    error: str | None
+
+
+class ServerAuditPullStatus(TypedDict):
+    attempted: bool
+    pulled: bool
+    host: str | None
+    error: str | None
+
+
+class PromoteStatus(TypedDict):
+    ok: bool
+    ahead_before: int
+    pushed: bool
+    error: str | None
+
+
+class AppPromoteStatus(TypedDict):
+    ahead: int
+    base: str
+    prot: str
+    error: str | None
+
+
+class AppShipStatus(TypedDict):
+    ok: bool
+    ahead_before: int
+    pushed: bool
+    error: str | None
+    base: str
+    prot: str
+    app: str
+
+
+def git_sync(cfg: Config) -> GitSyncStatus:
     """Exchange ``shared/`` with the remote: pull every host's latest, publish ours, push it back.
 
     Returns ``{host, pulled, pushed, hosts, error}``. Best-effort — a failure to push (e.g. the server
     has no credentials) still leaves ``pulled`` true, so the server has the Mac's data either way.
     """
-    out: dict[str, Any] = {"host": host_id(cfg), "pulled": False, "pushed": False,
+    out: GitSyncStatus = {"host": host_id(cfg), "pulled": False, "pushed": False,
                            "hosts": [], "error": None}
     sd = ensure_state_clone(cfg)
     if sd is None:
@@ -681,7 +729,7 @@ def git_sync(cfg: Config) -> dict[str, Any]:
     return out
 
 
-def pull_server_state(cfg: Config) -> dict[str, Any]:
+def pull_server_state(cfg: Config) -> ServerStatePullStatus:
     """Mac-side server→Mac bridge over SSH: copy the server's officer-canonical living log down so the
     Mac's builds read the latest server-learned lessons. One-directional and read-only on the server —
     we just `scp` a file out, so the server never needs git write access.
@@ -689,7 +737,7 @@ def pull_server_state(cfg: Config) -> dict[str, Any]:
     No-op unless ``GENERAL_SERVER_SSH`` (e.g. ``ubuntu@1.2.3.4``) is set and we're not the server itself
     (``GENERAL_SYNC_PULL_ONLY``). ``GENERAL_SERVER_REPO`` overrides the remote repo dir (default
     ``General``). Best-effort: any SSH hiccup is reported, never fatal."""
-    out: dict[str, Any] = {"attempted": False, "pulled": False, "error": None}
+    out: ServerStatePullStatus = {"attempted": False, "pulled": False, "error": None}
     host = os.environ.get("GENERAL_SERVER_SSH", "").strip()
     if not host or pull_only():
         return out
@@ -710,7 +758,7 @@ def pull_server_state(cfg: Config) -> dict[str, Any]:
     return out
 
 
-def pull_server_audit(cfg: Config) -> dict[str, Any]:
+def pull_server_audit(cfg: Config) -> ServerAuditPullStatus:
     """Mac-side server→Mac AUDIT bridge over SSH: scp the server's live ``audit.jsonl`` down so the Mac
     cockpit MIRRORS the server's runs (EU-181).
 
@@ -727,7 +775,7 @@ def pull_server_audit(cfg: Config) -> dict[str, Any]:
     ``GENERAL_SERVER_REPO`` (default ``General``) + ``GENERAL_SERVER_AUDIT`` (default
     ``state/audit.jsonl``, relative to the repo) locate the remote file; ``GENERAL_SERVER_HOST_ID``
     (default ``server``, sanitised) names the local file. Best-effort — any hiccup is reported, never fatal."""
-    out: dict[str, Any] = {"attempted": False, "pulled": False, "host": None, "error": None}
+    out: ServerAuditPullStatus = {"attempted": False, "pulled": False, "host": None, "error": None}
     host = os.environ.get("GENERAL_SERVER_SSH", "").strip()
     if not host or pull_only():
         return out
@@ -766,14 +814,14 @@ def can_promote() -> bool:
     return os.environ.get("GENERAL_COCKPIT_PROMOTE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def promote(cfg: Config) -> dict[str, Any]:
+def promote(cfg: Config) -> PromoteStatus:
     """Promote ``dev`` -> ``main`` on the REMOTE (the server auto-deploys ``main``) **without touching
     the working tree** — the unit constantly writes runtime files, so a dirty tree must never block a
     deploy (it was the old checkout-based version's "stuck spinner"). Pushes ``dev`` straight onto
     ``main``, **fast-forward only**; if they've diverged the push is rejected (never forced).
     ``{ok, ahead_before, pushed, error}``."""
     repo = _repo_root(cfg)
-    out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None}
+    out: PromoteStatus = {"ok": False, "ahead_before": 0, "pushed": False, "error": None}
     if not can_promote():
         out["error"] = "promote not allowed on this cockpit"
         return out
@@ -833,12 +881,12 @@ def promote(cfg: Config) -> dict[str, Any]:
 # This is the user's own product (e.g. Automatixy), not the unit's own code.
 # ---------------------------------------------------------------------------
 
-def app_promote_status(app) -> dict[str, Any]:
+def app_promote_status(app) -> AppPromoteStatus:
     """How far an app's base branch (DEV) is ahead of its protected branch (MAIN) — work that's tested
     on DEV but not yet shipped to production. ``{ahead, base, prot, error}``."""
     repo = Path(app.repo_path).expanduser()
     base, prot = app.base_branch, app.protected_branch
-    out: dict[str, Any] = {"ahead": 0, "base": base, "prot": prot, "error": None}
+    out: AppPromoteStatus = {"ahead": 0, "base": base, "prot": prot, "error": None}
     try:
         r = _git(repo, "rev-list", "--count", f"{prot}..{base}")
         out["ahead"] = int((r.stdout or "0").strip() or "0") if r.returncode == 0 else 0
@@ -871,7 +919,7 @@ def app_promote_commits(app, limit: int = 300) -> list[dict[str, str]]:
     return out
 
 
-def promote_app(app) -> dict[str, Any]:
+def promote_app(app) -> AppShipStatus:
     """Ship an app's DEV -> MAIN (production): a **real merge** of DEV into MAIN (MAIN keeps its own
     commits — e.g. earlier PR merges — and DEV's commits are added), then push MAIN. Done in a throwaway
     git worktree so the user's (often dirty) checkout is never touched, and so it works even when DEV
@@ -879,7 +927,7 @@ def promote_app(app) -> dict[str, Any]:
     and we say so — ship via a PR. The cockpit Ship button. ``{ok, ahead_before, pushed, error, ...}``."""
     repo = Path(app.repo_path).expanduser()
     base, prot = app.base_branch, app.protected_branch
-    out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
+    out: AppShipStatus = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
                            "base": base, "prot": prot, "app": app.name}
     if not can_promote():
         out["error"] = "shipping is disabled on this cockpit (read-only box)"

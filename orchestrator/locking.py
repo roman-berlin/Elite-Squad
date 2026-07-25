@@ -28,12 +28,15 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable, TypeVar
 
 try:  # POSIX advisory file locking; absent on Windows.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None  # type: ignore[assignment]
+
+_R = TypeVar("_R")   # result type of a locked_call critical section
+_T = TypeVar("_T")   # document type of a locked_rmw read-modify-write
 
 
 # One threading.Lock per absolute path. fcntl.flock serialises across processes but NOT across
@@ -147,7 +150,7 @@ def locked_text_rmw(path: str | Path, mutate_fn: Callable[[str], str], *, defaul
             os.close(lock_fd)
 
 
-def locked_call(path: str | Path, fn: Callable[[], Any]) -> Any:
+def locked_call(path: str | Path, fn: Callable[[], _R]) -> _R:
     """Run ``fn()`` while holding the cross-thread + cross-process lock keyed on ``path``'s
     sidecar ``.lock`` file — the same guarantee as :func:`locked_rmw`/:func:`locked_text_rmw`
     (a process-wide ``threading.Lock`` plus an ``fcntl.flock`` on a sidecar file), but for a
@@ -176,8 +179,8 @@ def locked_call(path: str | Path, fn: Callable[[], Any]) -> Any:
             os.close(lock_fd)
 
 
-def locked_rmw(path: str | Path, mutate_fn: Callable[[Any], Any], *, default: Any = None,
-               corrupt_to_default: bool = False) -> Any:
+def locked_rmw(path: str | Path, mutate_fn: Callable[[_T], _T], *, default: _T | None = None,
+               corrupt_to_default: bool = False) -> _T:
     """Atomically read-modify-write the JSON file at ``path``.
 
     Reads the current JSON value (or ``default`` if the file is missing or empty), passes it to

@@ -19,9 +19,13 @@ import re
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import locking, notify
 from .contracts import Ticket
+
+if TYPE_CHECKING:
+    from .config import AppConfig, Config
 
 # Jira-style ticket key (e.g. AUTO-14, EU-89) — used to extract refs from chat history.
 _TICKET_KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+")
@@ -399,7 +403,7 @@ def commit(cfg, entry_id: str) -> None:
     locking.locked_rmw(_store(cfg), _mutate, default=[])
 
 
-def to_worklist(cfg, resolved: dict):
+def to_worklist(cfg: Config, resolved: dict) -> list[tuple[AppConfig, Ticket]]:
     """Rebuild the ticket with the Commander's decision appended, ready to re-run.
 
     EU-83: strips any '#…' sub-decision suffix from the ticket id/key — those are decision-store

@@ -339,7 +339,7 @@ async def _pretooluse(input_data, tool_use_id, context, workdir=None):  # noqa: 
     return {}
 
 
-def hooks_config(workdir: str | None = None):
+def hooks_config(workdir: str | None = None) -> dict[str, list[object]] | None:
     """The ``hooks=`` dict to attach to every WRITE-CAPABLE officer's ClaudeAgentOptions. Returns None
     if the SDK is too old to support hooks (the guard then simply isn't installed — never an error).
 

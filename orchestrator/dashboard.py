@@ -16,7 +16,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 _TERMINAL = {"merged", "pr_opened", "escalated", "dryrun_land", "ship_dryrun",
              "ticket_exception", "no_changes", "needs_human", "pm_triage", "scrum_split"}
@@ -72,7 +72,11 @@ _AUDIT_TTL = 1.5
 # EU-428 AC3: keyed by (path, local_only) — the local-only view (forensics WRITE path) and the
 # peer-inclusive view (display) cache independently.
 _audit_cache: dict[tuple[str, bool], tuple[tuple, float, list[str]]] = {}              # (path, local_only) -> (sig, ts, lines)
-_tasks_cache: dict[tuple[str, bool], tuple[tuple, float, list[dict[str, Any]]]] = {}   # (path, local_only) -> (sig, ts, runs)
+# One assembled run row (load_tasks): stable str keys, heterogeneous values (str / int / float /
+# bool / None / nested dict), and ghost-stub rows carry a SUBSET of a real row's keys — so the
+# honest shared type is a str-keyed object-valued mapping rather than a fixed TypedDict.
+TaskRow = dict[str, object]
+_tasks_cache: dict[tuple[str, bool], tuple[tuple, float, list[TaskRow]]] = {}   # (path, local_only) -> (sig, ts, runs)
 
 # Instrumentation (see tests/cockpit_cache_test.py): total audit_lines() calls vs. real disk reads. The
 # acceptance is ≤1 read per cache interval no matter how many frames/tabs call it.
@@ -248,7 +252,7 @@ def audit_lines(audit_path: str | Path, local_only: bool = False) -> list[str]:
     return out
 
 
-def load_tasks(audit_path: str | Path, local_only: bool = False) -> list[dict[str, Any]]:
+def load_tasks(audit_path: str | Path, local_only: bool = False) -> list[TaskRow]:
     # Same (size, mtime_ns)-keyed TTL cache as audit_lines, so the per-frame JSON parse + run assembly is
     # done once per interval and shared across SSE frames / tabs. Read-only for every caller.
     # local_only (EU-428 AC3): scope to this host's own audit so peer rows can't drive the forensics
@@ -264,11 +268,11 @@ def load_tasks(audit_path: str | Path, local_only: bool = False) -> list[dict[st
     return runs
 
 
-def _load_tasks_uncached(audit_path: str | Path, local_only: bool = False) -> list[dict[str, Any]]:
+def _load_tasks_uncached(audit_path: str | Path, local_only: bool = False) -> list[TaskRow]:
     lines = audit_lines(audit_path, local_only=local_only)
     if not lines:
         return []
-    def _new(tid: str, ev: dict) -> dict[str, Any]:
+    def _new(tid: str, ev: dict) -> TaskRow:
         return {"ticket_id": tid, "app": ev.get("app"), "branch": ev.get("branch"),
                 "started": None, "ended": None, "passes": 0, "turns": 0, "cost": 0.0,
                 "verdict": None, "outcome": None, "pr_url": None, "dry_run": None,
@@ -280,8 +284,8 @@ def _load_tasks_uncached(audit_path: str | Path, local_only: bool = False) -> li
 
     # Each `ticket_start` begins a SEPARATE run — so a re-run of the same ticket (e.g. a dry-run
     # then a live run) does NOT merge the earlier run's phases/verdict into the new one.
-    runs: list[dict[str, Any]] = []
-    cur: dict[str, dict[str, Any]] = {}     # ticket_id -> its currently-open run
+    runs: list[TaskRow] = []
+    cur: dict[str, TaskRow] = {}     # ticket_id -> its currently-open run
     for line in lines:
         line = line.strip()
         if not line:
@@ -384,7 +388,7 @@ def dismiss(audit_path: str | Path, ticket_id: str) -> None:
         pass
 
 
-def _is_dismissed(t: dict[str, Any], dismissed: dict | None) -> bool:
+def _is_dismissed(t: TaskRow, dismissed: dict | None) -> bool:
     """Hide a needs-you run ONLY if its ticket was dismissed AND we can confirm THIS run started at/before
     that dismissal — a newer run for the same ticket shows again. Fail-safe by design: any uncertainty
     (missing/unparseable timestamps) SHOWS the item, and the comparison never raises. The old version
@@ -402,7 +406,7 @@ def _is_dismissed(t: dict[str, Any], dismissed: dict | None) -> bool:
     return st <= dt
 
 
-def _started_dt(t: dict[str, Any]) -> Optional[datetime]:
+def _started_dt(t: dict[str, object]) -> Optional[datetime]:
     """A run's 'started' as a naive datetime — tolerates a datetime object OR an ISO string with a 'T'
     or space separator and a +HH:MM / +HHMM offset (load_tasks emits the space+colon form). None if blank.
     Used for BOTH the dismissal compare and latest-run dedupe, so neither mis-orders on format drift."""
@@ -420,15 +424,15 @@ def _started_dt(t: dict[str, Any]) -> Optional[datetime]:
     return dt.replace(tzinfo=None)
 
 
-def _started_key(t: dict[str, Any]) -> datetime:
+def _started_key(t: dict[str, object]) -> datetime:
     return _started_dt(t) or datetime.min
 
 
-def latest_needs_you(tasks: list[dict[str, Any]], dismissed: dict | None = None) -> list[dict[str, Any]]:
+def latest_needs_you(tasks: list[TaskRow], dismissed: dict | None = None) -> list[TaskRow]:
     """The Needs-you list: ONE row per ticket — its most recent run — kept only if that latest run still
     needs you and isn't dismissed. Stops the panel showing every historical errored run of a ticket (the
     AUTO-14×5 duplicates) or a stale failure for a ticket that has since succeeded on a later run."""
-    latest: dict[str, dict[str, Any]] = {}
+    latest: dict[str, TaskRow] = {}
     for t in tasks:
         tid = str(t.get("ticket_id") or "")
         if not tid:
@@ -439,18 +443,18 @@ def latest_needs_you(tasks: list[dict[str, Any]], dismissed: dict | None = None)
             if t.get("outcome") in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
 
 
-def latest_parked(tasks: list[dict[str, Any]], blocked_set: set[str]) -> list[dict[str, Any]]:
+def latest_parked(tasks: list[TaskRow], blocked_set: set[str]) -> list[TaskRow]:
     """The Parked list: ONE row per blocked ticket — its most recent run.
 
     Mirrors latest_needs_you's deduplication so the parked view shows ONE row per ticket
     instead of the full run history. Tickets in blocked_set with no audit history (never
     ran, or log rotated — the 'ghost' scenario) get stub rows so they are still visible
     and Unblockable. Returned newest-first by 'started'."""
-    _stub: dict[str, Any] = {"outcome": None, "started": None, "ended": None,
+    _stub: TaskRow = {"outcome": None, "started": None, "ended": None,
                               "passes": 0, "turns": 0, "cost": 0.0, "verdict": None,
                               "note": "", "branch": "", "app": "", "passes_list": [],
                               "duration": None, "dry_run": None, "detail": {}, "pr_url": None}
-    latest: dict[str, dict[str, Any]] = {}
+    latest: dict[str, TaskRow] = {}
     for t in tasks:
         tid = str(t.get("ticket_id") or "")
         if not tid or tid not in blocked_set:
@@ -472,7 +476,7 @@ def _badge(outcome: Optional[str]) -> str:
     return f'<span class="b {cls}">{html.escape(outcome or "running…")}</span>'
 
 
-def _detail_html(t: dict[str, Any]) -> str:
+def _detail_html(t: TaskRow) -> str:
     if not t["passes_list"]:
         return '<div class=det><span class=muted>no transcript captured</span></div>'
     blocks = []
@@ -499,7 +503,7 @@ def _detail_html(t: dict[str, Any]) -> str:
     return '<div class=det>' + "".join(blocks) + '</div>'
 
 
-def _finding_str(x: Any) -> str:
+def _finding_str(x: object) -> str:
     """A reviewer finding may be a plain string or a {severity, area, detail} dict — render either."""
     if isinstance(x, dict):
         bits = [str(x.get("severity") or "").strip(), str(x.get("area") or "").strip()]
@@ -509,7 +513,7 @@ def _finding_str(x: Any) -> str:
     return str(x)
 
 
-def _short(s: Any, n: int) -> str:
+def _short(s: object, n: int) -> str:
     s = " ".join(str(s or "").split())
     if len(s) <= n:
         return s
@@ -522,7 +526,7 @@ def _short(s: Any, n: int) -> str:
     return cut.rstrip() + "…"
 
 
-def brief(text: Any, n: int = 360) -> str:
+def brief(text: object, n: int = 360) -> str:
     """A short, scannable version of a long escalation note for the Needs-you card. Prefers the PM's
     structured lines (BLOCKER/DECISION/OPTIONS/RECOMMENDATION) when present; otherwise the first couple
     of sentences. So the Commander reads the ask, not a wall of reasoning."""
@@ -543,7 +547,7 @@ def brief(text: Any, n: int = 360) -> str:
     return _short(out or raw, n)
 
 
-def bullets(text: Any, limit: int = 3, width: int = 200) -> str:
+def bullets(text: object, limit: int = 3, width: int = 200) -> str:
     """Render an officer summary as ≤`limit` tight "• …" lines for a hand-off comment (EU-79).
 
     The officers now LEAD their summary with bullets (what was done / the gap / what changed), so we
@@ -564,7 +568,7 @@ def bullets(text: Any, limit: int = 3, width: int = 200) -> str:
     return "\n".join(f"• {it}" for it in lines) or f"• {_short(raw, width)}"
 
 
-def needs_detail_html(t: dict[str, Any]) -> str:
+def needs_detail_html(t: TaskRow) -> str:
     """The Needs-you card detail: lead with a BRIEF (the ask), then the build/review passes. The full
     raw note is shown dimmed + capped + scrollable underneath — never an unbounded wall of text."""
     rows: list[str] = []
@@ -597,7 +601,7 @@ def needs_detail_html(t: dict[str, Any]) -> str:
     return "".join(rows)
 
 
-def needs_chat_summary(t: dict[str, Any]) -> str:
+def needs_chat_summary(t: TaskRow) -> str:
     """A compact plain-text brief of the problem, pre-loaded into the CTO chat when the Commander
     clicks 'Discuss with the CTO' — so he can send it as-is (or tweak) instead of retyping."""
     tid = str(t.get("ticket_id") or "this run")
@@ -643,7 +647,7 @@ def _jira_base_for(cfg, app_name: str) -> str:
         return ""
 
 
-def _jira_link(base: str, ticket_id: Any, *, stop_prop: bool = False) -> str:
+def _jira_link(base: str, ticket_id: object, *, stop_prop: bool = False) -> str:
     """A compact 'Jira ↗' anchor to {base}/browse/{KEY}, or '' when there's no base URL or the id
     isn't a Jira key (e.g. an ephemeral run). ``stop_prop`` guards it inside a row whose own click
     toggles the detail drawer — the link must open Jira without also expanding the row."""
@@ -684,7 +688,7 @@ def filter_tasks_since(tasks: list, period: str) -> list:
     return out
 
 
-def render_html(tasks: list[dict[str, Any]], show_cost: bool = True, dismissed: dict | None = None,
+def render_html(tasks: list[TaskRow], show_cost: bool = True, dismissed: dict | None = None,
                 active_filter: str | None = None, blocked: list[str] | None = None,
                 needs_count: int | None = None, cfg=None, app_name: str | None = None,
                 period: str = "all") -> str:
@@ -950,20 +954,20 @@ _BASE_RED_WINDOW_H = 48.0
 _RED_BASE_MARKER = "is RED before any build"
 
 
-def _event_dt(e: dict[str, Any]) -> Optional[datetime]:
+def _event_dt(e: dict[str, object]) -> Optional[datetime]:
     """An audit event's ``ts`` as an AWARE local datetime (audit.py:33 writes %z offsets; a naive
     peer ts is taken as local — the same EU-181 .astimezone() normalization the shipped window uses)."""
     dt = _parse_ts(str(e.get("ts") or ""))
     return dt.astimezone() if dt is not None else None
 
 
-def _active_base_red(cfg) -> Optional[dict[str, Any]]:
+def _active_base_red(cfg) -> Optional[dict[str, object]]:
     """The CURRENT red-base signal for the daily, or None when the base is (or must be presumed)
     green. Returns {'ticket_id': latest blocked ticket, 'tickets': distinct tickets blocked in the
     current red episode, 'age_s': seconds since the latest red_base_block} — see the EU-382 note on
     _BASE_RED_WINDOW_H for why every bound errs toward silence, not alarm."""
     from datetime import timedelta
-    latest_red: Optional[dict[str, Any]] = None
+    latest_red: Optional[dict[str, object]] = None
     latest_red_dt: Optional[datetime] = None
     latest_green_dt: Optional[datetime] = None
     reds: list[tuple[datetime, str]] = []
@@ -1017,21 +1021,21 @@ def _one_line(text: str, limit: int = _DECISION_MAX) -> str:
     return first + ("…" if dropped else "")
 
 
-def _needs_you_label(row: dict[str, Any]) -> str:
+def _needs_you_label(row: dict[str, object]) -> str:
     """The bracketed tag for one Needs-you row, e.g. 'AUTO-14 [errored]' / 'AUTO-9 [blocked]'."""
     if row.get("category") == "parked":
         return "blocked"
     return str(row.get("outcome") or row.get("category") or "needs you")
 
 
-def _needs_you_rows(cfg) -> list[dict[str, Any]]:
+def _needs_you_rows(cfg) -> list[dict[str, object]]:
     """The deduped, currently-actionable Needs-you rows for the daily digest — one row per ticket,
     oldest (longest-waiting) first. Sourced from needs.summary(cfg), the same live inbox the cockpit's
     Needs-you panel renders — never a raw scan of the whole audit log's outcome field."""
     from . import needs as _needs
     live = _needs.summary(cfg).get("rows") or []
     seen: set[str] = set()
-    out: list[dict[str, Any]] = []
+    out: list[dict[str, object]] = []
     for row in live:
         if row.get("category") not in _NEEDS_YOU_CATEGORIES:
             continue
@@ -1068,14 +1072,14 @@ def standup(cfg) -> str:
     needs_rows = _needs_you_rows(cfg)
     base_red = _active_base_red(cfg)
     pending = decisions.load(cfg)
-    stale_base_red: list[dict[str, Any]] = []
+    stale_base_red: list[dict[str, object]] = []
     if base_red is None:
         # EU-382: the base is not currently red, so the loop's red-base pending decisions ("Base
         # branch '…' is RED before any build …", loop.py:1430) are STALE — they fueled the
         # 2026-07-17 false "24+ tickets stuck" FOCUS headline a day after dev went green. Hold them
         # out of the BRIEF only (render-side, the EU-336/337 split): the stored decisions survive
         # untouched for the cockpit's /needs inbox, and the ♻️ note below keeps them discoverable.
-        kept: list[dict[str, Any]] = []
+        kept: list[dict[str, object]] = []
         for p in pending:
             (stale_base_red if _RED_BASE_MARKER in str(p.get("question") or "") else kept).append(p)
         pending = kept
@@ -1155,7 +1159,7 @@ def standup(cfg) -> str:
     return "\n".join(lines)
 
 
-def render_status(tasks: list[dict[str, Any]], limit: int = 15, show_cost: bool = True) -> str:
+def render_status(tasks: list[TaskRow], limit: int = 15, show_cost: bool = True) -> str:
     if not tasks:
         return "No tasks yet — run the CTO."
     head = f"{'TICKET':<26}{'APP':<12}{'OUTCOME':<14}{'PASSES':<7}{'DUR':<8}" + ("COST" if show_cost else "")

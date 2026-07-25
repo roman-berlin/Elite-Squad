@@ -15,9 +15,13 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import locking
 from .config import Config
+
+if TYPE_CHECKING:
+    from .filing import FilingResult
 
 
 def _hash(text: str) -> str:
@@ -166,7 +170,7 @@ def _find_batch(items: list[dict], batch_id: str) -> dict | None:
     return None
 
 
-def approve_proposals(cfg: Config, batch_id: str, titles=None):
+def approve_proposals(cfg: Config, batch_id: str, titles: list[str] | None = None) -> FilingResult | None:
     """Approve a queued batch — file the chosen tickets to the board (de-duped, Roman-default
     create via filing.file_findings). `titles` selects a subset (None/empty = file the whole
     batch). Returns the FilingResult, or None if the batch is unknown/already actioned.
