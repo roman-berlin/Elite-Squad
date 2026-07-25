@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 
 from claude_agent_sdk import ClaudeAgentOptions
 
@@ -88,11 +89,15 @@ these surfaces and emits NO finding for it is treated as having skipped it, and 
 (tests/typing/tenant-isolation) are ALSO enforced deterministically (see _enforce_missing_tests /
 _enforce_missing_typing / _enforce_tenant_query), so a wave-through there is overridden to FAIL
 regardless of your verdict:
-- tests: any changed production (.py/.tsx) behaviour MUST be covered by a test in the diff. If a test
+- tests: all changed production (.py/.tsx) behaviour MUST be covered by a test in the diff. If a test
   is missing, emit a blocker/major (area "tests") — do NOT pass on an untested behaviour change.
 - typing: every NEW public def/async def (Python) must carry a "->" return annotation; an explicit
-  Any / ": any" erodes the type surface. Missing/eroded typing on new public code -> finding (area "typing").
-- tenant-isolation: any query/list/export that reads or writes user-scoped data MUST carry a tenant
+  use of the Any type (uppercase, or lowercase-any in TS-style) erodes the type surface. Note:
+  ``if TYPE_CHECKING:`` imports backed by ``from __future__ import annotations`` ARE concrete types
+  satisfying the requirement — resolved at static-analysis time, never executed, never runtime Any.
+  Each typing demand must be checked against the CURRENT diff before being re-raised to prevent
+  infinite loops. Missing/eroded typing on new public code -> finding (area "typing").
+- tenant-isolation: each query/list/export that reads or writes user-scoped data MUST carry a tenant
   filter (Supabase RLS or an explicit where-clause); a missing tenant filter is a cross-tenant
   data-leak and a blocker (area "security" or "tenant-isolation"). Name the exact query missing it.
 - error-handling: new I/O, network, DB, or parsing calls MUST handle their failure paths (raise/return/
@@ -274,6 +279,11 @@ _DEF_SIG_RE = re.compile(r"\b(async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # sentence "...any of the above" doesn't fire (false-positive doctrine).
 _EXPLICIT_ANY_RE = re.compile(r"(?:->\s*Any\b|:\s*Any\b|[\[,]\s*Any\b|:\s*any\b)")
 
+# Import / "from" / "import" declaration — excluded from the explicit-Any scan so that a cumulative
+# branch-vs-base diff containing a typing import of Any (e.g. alongside TYPE_CHECKING) does NOT
+# trip as an explicit type annotation (the keyword is merely available, not *used*).
+_IMPORT_LINE_RE = re.compile(r"^\s*(from|import)\b")
+
 
 def _is_production_source(path: str) -> bool:
     """True for a non-test .py or .tsx source path — the single predicate behind the EU-441
@@ -335,23 +345,32 @@ def _added_production_code_line_count(diff: str) -> int:
     return count
 
 
-def _added_python_production_lines(diff: str):
-    """Yield ``(file_path, added_content)`` for each ADDED line in a non-test .py production file —
-    the single shared cursor for the typing scan, so _untyped_public_defs and the explicit-Any scan
-    walk the exact same (file, line) stream and can't drift. Removed ('-') lines, test files, and
-    non-.py files are never yielded."""
-    current = None
+def _added_python_production_lines(diff: str) -> Iterator[tuple[str, int, str]]:
+    """Yield ``(file_path, run_id, added_content)`` for each ADDED line in a non-test .py
+    production file — the single shared cursor for the typing scan.  ``run_id`` increments
+    whenever a ``@@`` hunk header appears, a new file starts, or the cursor jumps away from the
+    current file; this gives callers a cheap way to keep a def-span-walk inside one contiguous
+    hunk (EU-463)."""
+    current: str | None = None
+    run_id = 0
     for line in (diff or "").split("\n"):
         if line.startswith("diff --git"):
             current = None
+            run_id = 0
             continue
         if line.startswith("+++ "):
             parts = line.split()
-            current = parts[1] if len(parts) > 1 else ""
+            file_name = parts[1] if len(parts) > 1 else ""
+            if file_name != current:         # new file → reset contiguity
+                run_id += 1
+            current = file_name
+            continue
+        if line.startswith("@@"):
+            run_id += 1                      # hunk boundary
             continue
         if line.startswith("+") and not line.startswith("+++"):
             if current and current.endswith(".py") and not _TEST_FILE_RE.search(current):
-                yield current, line[1:]
+                yield current, run_id, line[1:]
 
 
 def _sig_paren_depth(line: str) -> int:
@@ -394,7 +413,7 @@ def _untyped_public_defs(diff: str) -> list[str]:
     lines = list(_added_python_production_lines(diff))
     i, n = 0, len(lines)
     while i < n:
-        file_path, content = lines[i]
+        file_path, run_id, content = lines[i]
         m = _DEF_SIG_RE.search(content)
         if not m:
             i += 1
@@ -404,16 +423,31 @@ def _untyped_public_defs(diff: str) -> list[str]:
         # return annotation may appear anywhere in the span — typically right after the closing
         # ')', e.g. ') -> RoutingTier:' — so it must be checked over the WHOLE span, not just the
         # 'def name(' line.
+        # EU-463 guard: the span-walk stays strictly inside ONE contiguous added-run (same file,
+        # same run_id). When paren depth doesn't close within that run, we stop silent — the closing
+        # ')' (and possibly a '-> RetType:') likely lives on an unchanged context line outside our
+        # visibility. We NEVER stitch across @@ hunk boundaries.
         span_parts: list[str] = [content]
         depth = _sig_paren_depth(content)
         j = i
-        while depth > 0 and j + 1 < n and lines[j + 1][0] == file_path:
+        span_closed = depth == 0    # single-line def (parens balanced) counts as "closed"
+        while (depth > 0
+               and j + 1 < n
+               and lines[j + 1][0] == file_path
+               and lines[j + 1][1] == run_id):   # must stay in the same hunk/run
             j += 1
-            nxt = lines[j][1]
+            nxt = lines[j][2]
             span_parts.append(nxt)
             depth += _sig_paren_depth(nxt)
+            if depth <= 0:
+                span_closed = True
         i = j + 1   # advance past the consumed continuation lines so they aren't rescanned
         if name.startswith("_"):     # private or dunder
+            continue
+        # If the span did NOT close within this run (depth > 0 after exhausting it), the closing
+        # ')' and possible '-> RetType:' are outside our visibility — stay SILENT rather than
+        # mis-classify partial text as an untyped def (EU-463).
+        if not span_closed:
             continue
         if "->" in "\n".join(span_parts):   # return annotation present anywhere in the signature span
             continue
@@ -463,7 +497,12 @@ def _enforce_missing_typing(result: ReviewResult, diff: str) -> ReviewResult:
         return result
     untyped = _untyped_public_defs(diff)
     anys: list[str] = []
-    for file_path, content in _added_python_production_lines(diff):
+    for file_path, _run_id, content in _added_python_production_lines(diff):
+        # Exclude import / "from" lines so a cumulative diff containing a typing import of Any
+        # (e.g. alongside TYPE_CHECKING) doesn't trip as an explicit type annotation (the keyword
+        # is merely available, not used at runtime).
+        if _IMPORT_LINE_RE.match(content):
+            continue
         m = _EXPLICIT_ANY_RE.search(content)
         if m:
             anys.append(f"{file_path}: {m.group(0).strip()}")
