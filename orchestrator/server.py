@@ -190,6 +190,14 @@ def _link_merged_tickets(cfg, stats: dict) -> dict:
 _flag_lock = threading.Lock()
 
 
+# SQUAD brand voice — plain-language copy for user-facing surfaces (Documentation/BRAND.md).
+# Internal identifiers and docstrings may still say "DEV→MAIN" or "readiness verdict";
+# only strings that ship to the cockpit/Telegram must follow the terminology map.
+QA_STATUS_TEMPLATE = (
+    "🔍 QA running for {app} — engineers inspect dev and check whether it is ready "
+    "to promote to main (results post here and to Telegram)."
+)
+
 # EU-567: pure classifier — status/in-progress messages are routed to a separate strip,
 # never mixed into the Needs-you decision cards. Default False so confirmations / errors
 # keep today's banner behaviour. Testable and importable from tests.
@@ -1793,22 +1801,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
     @app.post("/api/qa")
     def qa_api() -> Response:
-        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged. The two
-        buttons ran near-identical officer inspections of DEV (patrol: QA/Security/Release inspect
-        + FILE findings as Jira tickets; ship-review: the same lenses debating a DEV→MAIN GO/NO-GO),
-        so a single "Run QA" now does both as phases: patrol first (findings land on the board),
-        then the readiness verdict. The per-phase indicator flags (patrolling / shipreview) are
-        kept live during their phase so the cockpit star and the /council in-session banner keep
-        working unchanged."""
+        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged."""
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
             _state["last_msg"] = ("No project to QA — configure a product repo first.")
             return redirect("/")
         if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
-            _state["last_msg"] = (f"🔍 QA running for {app_name} — engineers inspect DEV and file "
-                                  "findings, then deliver the DEV→MAIN readiness verdict (posts "
-                                  "here and to Telegram).")
+            _state["last_msg"] = QA_STATUS_TEMPLATE.format(app=app_name)
 
             def _bg():
                 notes = []
@@ -2311,7 +2311,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     f"<input type=hidden name=app value='{dapp}'>"
-                    "<input type=text name=text placeholder='Answer the unit — your decision re-runs the ticket with it baked in'>"
+                    "<input type=text name=text placeholder='Answer the squad — your decision re-runs the ticket with it baked in'>"
                     "<button class='nbtn send'>Ship answer</button></form>"
                     # Dismiss without re-running — marks question handled, removes from inbox.
                     "<div class=nrow>"
@@ -2343,7 +2343,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     f"<input type=hidden name=app value='{tapp}'>"
-                    "<input type=text name=text placeholder='Answer the unit — your directive re-runs the ticket'>"
+                    "<input type=text name=text placeholder='Answer the squad — your directive re-runs the ticket'>"
                     "<button class='nbtn send'>Ship answer</button></form>"
                     # Secondary: talk it through with the CTO, or clear the row.
                     f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the CTO</a>"
@@ -3571,7 +3571,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
         threading.Thread(target=_bg_clarify, daemon=True).start()
         _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; ticket moved to To Do "
-                              "and the unit is re-running it with your decision.")
+                              "and the squad is re-running it with your decision.")
         return redirect("/needs")
 
     @app.post("/needs/resolve")

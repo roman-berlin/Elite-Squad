@@ -41,6 +41,11 @@ _APPROVAL_PHRASE_RE = re.compile(
 # (a Jira comment round-trip + a thread spawn), so 15 min can only elapse if nobody is coming back.
 _CLAIM_TTL_SEC = 900.0
 
+# SQUAD brand voice (BRAND.md): "engineer" not "officer" on user-facing surfaces.
+DECISION_FALLBACK_HEADLINE = (
+    "Decision needed — auto-sanitized from the engineer's brief:"
+)
+
 
 def _question_fingerprint(question: str) -> str:
     """Short SHA-1 of the normalised question text — used as the dedup key (EU-89).
@@ -185,7 +190,7 @@ def add(cfg, ticket: Ticket, app_name: str, question: str, entry_id: str | None 
         # un-parked them so the drain rebuild-churned the same ticket. Sanitize and store.
         cleaned = "\n".join(ln.lstrip("#").strip()
                              for ln in _strip_banner_lines(question).splitlines())
-        question = "Decision needed (auto-sanitized from the officer's brief):\n" + cleaned
+        question = DECISION_FALLBACK_HEADLINE + "\n" + cleaned
 
     eid = entry_id or ticket.id
     base_tid = str(ticket.id).split("#", 1)[0]
