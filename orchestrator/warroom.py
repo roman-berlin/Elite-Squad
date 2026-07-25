@@ -410,6 +410,14 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         else:
             tok_value = _fmt_tokens(sess_total)
             tok_hint = f"{_fmt_tokens(week_total)} this week · {sess_calls + week_calls} calls total"
+        # EU-540: compact Qwen Token-Plan quota line. Computed HERE (with cfg) rather than in
+        # _kpi_html so the warroom tile and the /usage page resolve the SAME probe path — both
+        # call qwen_quota_status(cfg) → Path(cfg.audit_path).parent/"qwen_quota.json". Best-effort:
+        # None (or any failure) simply hides the line.
+        try:
+            qwen_quota = _usage.qwen_quota_status(cfg)
+        except Exception:  # noqa: BLE001
+            qwen_quota = None
         cards.append({
             "label": "Tokens",
             "value": tok_value,
@@ -419,6 +427,7 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
             "gauge": bs["pct"] if bs["on"] else None,
             "href": "/usage",
             "sparkline": burn_series,  # EU-76: 14-day daily token-burn trend
+            "qwen_quota": qwen_quota,  # EU-540: e.g. "5h 62% · 7d 41%" or None
         })
     except Exception:  # noqa: BLE001 — never let usage metering break the board
         pass
@@ -1136,7 +1145,7 @@ def _kpi_html(cards: list[dict]) -> str:
                 'border-radius:3px;overflow:hidden">'
                 f'<div style="height:100%;width:{pct:.1f}%;background:{gcol};'
                 'border-radius:3px;transition:width .4s ease"></div></div>')
-        # EU-76: optional inline sparkline SVG beneath the gauge.
+        # EU-76 / EU-540: optional inline sparkline SVG beneath the gauge.
         # Colour tracks the card tone: ok→green, warn→amber, bad→red, else info-blue.
         spark_html = ""
         sp = c.get("sparkline")
@@ -1148,11 +1157,28 @@ def _kpi_html(cards: list[dict]) -> str:
                 "var(--info)"
             )
             spark_html = _kpi_sparkline_svg(sp, stroke=sp_stroke)
+        # EU-540: Tokens tile — show visible % text (same bs['pct'] as gauge) + compact Qwen quota line.
+        # The Qwen quota string is precomputed in kpis() WITH cfg (c["qwen_quota"]) so this tile and
+        # the /usage page read the same probe file — never re-query here with a None cfg.
+        extra = ""
+        if label == "Tokens":
+            pct_text = ""
+            if g is not None:
+                pct_val = min(100, max(0, round(float(g) * 100)))
+                pct_text = (f'<span style="display:inline-block;margin-top:6px;font-size:11px;'
+                            f'color:var(--dim);font-weight:500;font-family:var(--mono);'
+                            f'font-variant-numeric:tabular-nums">{pct_val}%</span>')
+            qwen_extra = ""
+            qw = c.get("qwen_quota")
+            if qw:
+                qwen_extra = (f'<div style="margin-top:4px;font-size:11px;color:var(--dim);'
+                              f'font-family:var(--mono)">Qwen Token-Plan: {html.escape(str(qw))}</div>')
+            extra = f"{pct_text}\n{qwen_extra}"
         # EU-297: numeral + label render via the shared cockpit_views._kpi_metric partial
         # (--t-2xl token scale) instead of duplicating the <div class=kv>/<div class=kl> markup
         # inline per card.
         out.append(CV._kpi_metric(c["value"], c.get("label", ""), tone=tone, href=href,
-                                   extra=f"{gauge_html}{spark_html}"))
+                                   extra=f"{gauge_html}{spark_html}\n{extra}"))
     return "".join(out)
 
 

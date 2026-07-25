@@ -1014,4 +1014,55 @@ def dual_provider_budget_status(cfg: Config | None = None) -> dict:
     }
 
 
+# ── EU-540: Qwen Token-Plan quota best-effort readout ────────────────────────────────
+# The external watch cron may write {five_h_pct_remaining, seven_d_pct_remaining, checked_at}
+# to state/qwen_quota.json.  Until then we fall back to a today-ledger probe: if any ledger row
+# whose model id starts with 'qwen' is recent (within the last hour), quota is alive and we
+# show "last-checked HH:MM".  If neither source works we silently drop the line from the UI.
+_QWEN_PROBE_PATH = Path("state/qwen_quota.json")
+
+
+def qwen_quota_status(cfg: Config | None = None) -> str | None:
+    """Best-effort Qwen Token-Plan quota status for the Tokens tile.
+
+    Returns HTML-safe text (or None when nothing useful to say):
+      • Cached probe file present → "5h N% · 7d M%"
+      • Ledger has recent qwen rows → "quota ok · last-checked HH:MM"
+      • Nothing → None (tile line hidden).
+    Never raises — same try/except posture as the existing kpis() usage block."""
+    try:
+        # 1) Try cached probe first (written by the external watch cron)
+        p = _QWEN_PROBE_PATH if cfg is None else Path(cfg.audit_path).parent / "qwen_quota.json"
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                fhr = data.get("five_h_pct_remaining")
+                sdr = data.get("seven_d_pct_remaining")
+                if fhr is not None or sdr is not None:
+                    parts = []
+                    if fhr is not None:
+                        parts.append(f"5h {int(round(float(fhr)))}%")
+                    if sdr is not None:
+                        parts.append(f"7d {int(round(float(sdr)))}%")
+                    if parts:
+                        return "· ".join(parts)
+            except (json.JSONDecodeError, TypeError, ValueError, OSError):
+                pass  # corrupt file → fall through to ledger probe
+
+        # 2) Fall back to today-ledger: look for qwen model rows in the last hour
+        rows = _rows(cfg, time.time() - 3600)
+        qwen_rows = [r for r in rows if (r.get("m", "") or "").startswith("qwen")]
+        if qwen_rows:
+            # Show the most recent one's timestamp
+            latest_t = max(float(r.get("t", 0)) for r in qwen_rows)
+            lt = time.localtime(latest_t)
+            hhmm = f"{lt.tm_hour:02d}:{lt.tm_min:02d}"
+            return f"quota ok · last-checked {hhmm}"
+
+        # 3) No signal at all → None (UI hides the line)
+        return None
+    except Exception:  # noqa: BLE001 — must never break the board
+        return None
+
+
 
