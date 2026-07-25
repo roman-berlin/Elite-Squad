@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-568 · Elite-Unit · • All 4 ACs met: COUNCIL_SHIP_QUESTION='Is dev ready to promote to main?', QA/answer card copy scrubbed to 'the squad', new denylist test added. · 🔗 /needs (the page with needs-you cards showing decision options, parked tickets, and QA status strip)
 - 2026-07-25 · EU-567 · Elite-Unit · • Correctly traced the ticket's example ('QA running for Elite-Unit…') to _state['last_msg'] at server.py:1809 — the only source of that text — and confirmed the /needs page is the only render site, so scope is right.
 - 2026-07-25 · EU-566 · Elite-Unit · • Word-boundary fold (reuses EU-508 helper, no second truncator) bounds label to 110 chars, no mid-word cut — AC1 met. • .nbtn CSS has no nowrap/overflow/ellipsis, so labels render fully with no CSS/JS truncation.
 - 2026-07-25 · EU-564 · Elite-Unit · • AC1 met: leading ticket-id stripped via anchored match in summarize_question/parse_options + defensively in every render path.
