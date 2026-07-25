@@ -46,7 +46,7 @@ asyncio.run(council.hold_council(cfg, broadcast=True))  # no topic = the daily m
 # send is now host-elected — force broadcast=True here since this harness tests the muster CONTENT
 # (the election gating is pinned in eu303_daily_single_sender_test).
 tags = [t for _, t in captured]
-check("daily gathers the stand-up (officers report)", any(t.startswith("standup-") for t in tags), str(tags))
+check("daily gathers the stand-up (engineers report)", any(t.startswith("standup-") for t in tags), str(tags))
 check("daily has the General brief", "the-general" in tags)
 check("daily discussions never run on Opus",
       all(m != cfg.builder_model and m != cfg.reviewer_model for m, _ in captured))
