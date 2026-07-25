@@ -1,7 +1,7 @@
 """EU-534 — rebrand 'officer' → 'engineer' in warroom.py display strings.
 
 Scans orchestrator/warroom.py source and asserts:
-  1. GROUP room tooltip reads 'convene all the engineers', not officers.
+  1. EU-594: Group room card was removed — old tooltip text no longer in source.
   2. Log-empty placeholder reads "an engineer's model call", not officer's.
   3. The /group?officer= query-param key is UNCHANGED (server.py:3194 reads it).
   4. Module-level identifiers (from .officers import, OFFICER_NAMES) are UNCHANGED.
@@ -17,12 +17,10 @@ WARROOM = pathlib.Path(__file__).resolve().parent.parent / "orchestrator" / "war
 
 
 def test_group_tooltip_uses_engineers():
-    """Group room tooltip must say 'convene all the engineers', not officers."""
+    """EU-594: Group room card was removed — tooltip text should no longer appear."""
     src = WARROOM.read_text()
-    assert 'convene all the engineers' in src, (
-        "Expected group-room tooltip with 'convene all the engineers'")
-    assert 'convene all the officers' not in src, (
-        "Old 'convene all the officers' still present")
+    assert 'convene all the engineers' not in src, (
+        "EU-594: 'convene all the engineers' should have been removed with the Group room card")
 
 
 def test_log_empty_uses_engineer():

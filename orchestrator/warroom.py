@@ -1570,9 +1570,6 @@ _TALK_HTML = (
     '<a class=talkbtn href="/chat"><span class=tki>&#128172;</span>'
     '<div class=tkbody><b>CTO</b><i>ask the orchestrator 1:1</i></div>'
     '<span class=tkarrow>&#8250;</span></a>'
-    '<a class=talkbtn href="/group"><span class=tki>&#128101;</span>'
-    '<div class=tkbody><b>Group room</b><i>convene all the engineers</i></div>'
-    '<span class=tkarrow>&#8250;</span></a>'
     '</div>')
 
 
