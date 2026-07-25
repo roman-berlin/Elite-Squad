@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-580 · Elite-Unit · • Backend /api/qa-status and qa/qa_started/qa_phase state keys exist and match the poll script's field names — wiring is real end-to-end.
 - 2026-07-25 · EU-579 · Elite-Unit · • AC1–AC4 all satisfied: endpoint never 500s on defaults, findings come from real FilingResult.filed via PatrolSummary, verdict is ship_review()'s exact returned decision text, regression test covers shape + stale-reset.
 - 2026-07-25 · EU-569 · Elite-Unit · • Test-only diff — correct for a verify-and-close integration ticket run last after EU-564..568 landed. · 🔗 /needs
 - 2026-07-25 · EU-565 · Elite-Unit · • All 4 ACs met: ensure_options 3-tier fallback (parse→synthesize→default) wired into /needs, old free-text-only branch deleted; render loop emits 2-4 numbered buttons with one ★. · 🔗 /needs (the Decisions section — look for cards where questions are plain prose like "Which approach should we take…" — they must show numbered option buttons with ★ markers, never a bare text input with "Answer the squad…")
