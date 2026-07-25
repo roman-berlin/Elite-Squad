@@ -613,6 +613,43 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # are still available, only the per-project button was removed from the control bar.
     ship_html = ""
 
+    # QA report card (EU-581): shown when _state["qa_dismissed"] is False AND there's actual data.
+    # Replaces transient last_msg with a persistent card that stays until dismissed.
+    qa_findings = list(_state.get("qa_findings") or [])
+    qa_verdict = (_state.get("qa_verdict") or "").strip()
+    _qrd = _state.get("qa_dismissed")
+    qa_report_html = ""
+    if not _qrd and (qa_findings or qa_verdict):
+        base_url = D._jira_base_for(cfg, app0)
+        findings_list = ""
+        if qa_findings:
+            n = len(qa_findings)
+            link_items = "".join(
+                f'<a href="{html.escape(base_url)}/browse/{html.escape(k)}" '
+                f'target=_blank rel=noopener>{html.escape(k)}</a>'
+                for k in qa_findings
+            )
+            findings_list = (f'{n} finding{"s" if n != 1 else ""} filed: ' + link_items)
+        else:
+            findings_list = "no new findings"
+        verdict_cls = ("ok" if "go" in (qa_verdict or "").lower() else "bad")
+        qa_report_html = (
+            '<div class="qa-report" role="status"'
+            ' style="background:var(--panel);border:1px solid var(--line);'
+            'border-radius:var(--r-lg);padding:var(--s-3) var(--s-4);margin:0 0 14px">'
+            '<div class="qa-report-title" style="font-size:var(--t-md);font-weight:700;'
+            'color:var(--ink);margin-bottom:var(--s-2)"'
+            '>&#128203; Findings Report</div>'
+            f'<div class="qa-report-findings" style="margin-bottom:var(--s-2)">{findings_list}</div>'
+            '<div class="qa-report-verdict" style="font-size:var(--t-md);font-weight:700;'
+            f'color:var(--{verdict_cls})">{html.escape(qa_verdict or "(no verdict)")}'
+            '</div>'
+            '<form method=post action=/api/qa-dismiss style="margin-top:var(--s-2);margin-bottom:0">'
+            '<button type=submit style="font-size:var(--t-xs);font-weight:600;padding:'
+            '4px 10px;border-radius:var(--r-sm);background:var(--panel2);border:1px solid var(--line)'
+            ';color:var(--dim);cursor:pointer">&#10003; Dismiss</button></form>'
+            '</div>')
+
     # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
     from . import warroom as _wr
     _base = Path(cfg.audit_path)
@@ -930,7 +967,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <span class=grow></span>
   {status}
 </div>
-{deploy_strip}{qa_strip}"""
+{deploy_strip}{qa_strip}{qa_report_html}"""
 
 
 def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
