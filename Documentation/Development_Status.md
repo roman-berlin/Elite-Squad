@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-513 · Elite-Unit · • Both cap directions (EU-118 Sonnet→Opus, EU-475 GLM→native) proven to retry exactly once and return the retry result — verified against the real run_agent_with_fallback paths. · 🔗 (no UI — `python3 tests/eu475_symmetric_fallback_test.py` or check /agents → agent runs with GLM vs Sonnet cfg)
 - 2026-07-25 · EU-512 · Elite-Unit · • Cap branch emits exactly one glm_fallback_activated (reason=plan_limit_kind, error=glm final) plus one _notify, after the transient early-return — AC1 met.
 - 2026-07-25 · EU-511 · Elite-Unit · • AC1–AC4 all implemented correctly: cap→native retry, transient/clean/error passthrough (EU-189 preserved), all-capped and broken-retry both return the original GLM result by identity.
 - 2026-07-25 · EU-498 · Elite-Unit · • All 5 ACs verified end-to-end through the real sync.git_sync entry point (never calling compact_state_branch directly): 1-commit collapse + byte-identity, transparent pull-only replay, sidecar throttle, EU-428… · 🔗 /sync (state sync cron path — run `python3 tests/eu498_compact_e2e_test.py` standalone for automated verification)
