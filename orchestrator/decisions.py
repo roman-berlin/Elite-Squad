@@ -452,16 +452,24 @@ def parse_options(question: str) -> dict | None:
                 summary.append(s)
     if not 2 <= len(opts) <= 6:
         return None
-    # exactly ONE recommended: if the officer marked several (or none), keep flags as parsed —
-    # the UI highlights whatever is marked; multiple marks degrade to multiple highlights.
-    return {"summary": " ".join(summary)[:400], "options": opts}
+    # EU-564: the summary becomes a card headline — strip a leading ticket-id so it starts
+    # with plain language, and fold at a word boundary (was raw [:400]).
+    summary_text = strip_leading_ticket_key(" ".join(summary))
+    return {"summary": _fold_word_boundary(summary_text, 400), "options": opts}
 
 
 def summarize_question(question: str, limit: int = 140) -> str:
     """A one-line brief of a stored decision question: the first meaningful sentence, with
     command dumps / test walls cut off. For the cockpit card headline — the full text stays
-    available behind the details fold."""
+    available behind the details fold.
+
+    EU-564: strips a leading ticket-id prefix and folds at word boundaries instead of
+    chopping mid-word (fixes the EU-508 'once pe…' cutoff)."""
     q = " ".join(_strip_banner_lines(str(question or "")).split())
+    # EU-564: strip a LEADING ticket-key prefix ("EU-508: …", "AUTO-14: …") so the headline
+    # starts with plain language. Anchored at position 0 — a mid-sentence ticket id keeps
+    # its preceding clause intact (a split/search would drop it).
+    q = strip_leading_ticket_key(q)
     for cut in (" $ /", " $ python", "``` ", " (exit "):
         i = q.find(cut)
         if i > 20:
@@ -470,7 +478,36 @@ def summarize_question(question: str, limit: int = 140) -> str:
         i = q.find(end)
         if 30 <= i <= limit:
             return q[:i + 1].strip()
-    return (q[:limit].rstrip() + "…") if len(q) > limit else q
+    return (_fold_word_boundary(q, limit) if len(q) > limit else q)
+
+
+# --------------------------------------------------------------------------- #
+# EU-564: shared headline helpers used by summarize_question, parse_options and the
+# /needs card render (server.py).
+
+def strip_leading_ticket_key(q: str) -> str:
+    """Drop a ticket-key prefix ('EU-508: …', 'AUTO-14: …') so a headline starts with plain
+    language. Anchored at the START only (``match``, not ``search``/``split``) — a mid-sentence
+    ticket id must never drop the clause before it."""
+    m = _TICKET_KEY_RE.match(q)
+    if m:
+        q = q[m.end():].lstrip(": \t")
+    return q
+
+
+# Word-boundary folding — mirrors orchestrator.dashboard._short: cuts at n−1, backs up to the
+# previous space, appends … (never mid-word — fixes the EU-508 'once pe…' cutoff).
+def _fold_word_boundary(text: str, limit: int) -> str:
+    """Fold *text* to *limit* characters at a word boundary, appending '…'. Returns the
+    original unchanged when it fits."""
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    if not text[limit - 1].isspace():
+        sp = cut.rfind(" ")
+        if sp > 0:
+            cut = cut[:sp]
+    return cut.rstrip() + "…"
 
 
 # The known UNSTRUCTURED question classes (stored before the EU-337 format, or produced by
