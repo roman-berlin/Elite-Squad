@@ -108,6 +108,32 @@ def test_two_fresh_both_returned():
 
 
 # ===========================================================================
+# AC 1b (2026-07-25 regression): the SAME ticket run twice → ONE card, the newest.
+# Production shape: EU-474 had a restart-orphaned old run (no terminal outcome, 25h stale)
+# plus the current re-run. `last_ts` is a per-ticket MAX, so BOTH rows inherited the fresh
+# score and the board rendered the ticket twice ("It shows me two times the same ticket").
+# The sibling-mutex guarantees one build per ticket at a time → one live card per ticket_id.
+# ===========================================================================
+
+def test_same_ticket_rerun_dedupes_to_one_card():
+    cfg = _make_cfg([
+        dict(event="ticket_start", ticket_id="DUP-1", app="testapp", branch="b",
+             ts=_ts(91_000)),                                     # orphaned old run (~25h ago)
+        dict(event="ticket_start", ticket_id="DUP-1", app="testapp", branch="b", ts=_ts(60)),
+        dict(event="build", ticket_id="DUP-1", app="testapp", iteration=1, ts=_ts(5)),
+    ], max_builders=2)
+    tasks = D.load_tasks(cfg.audit_path)
+    lives = warroom.live_runs(cfg, tasks, "testapp", active=True)
+    tids = [t.get("ticket") for t in lives]
+    chk("dup-rerun: exactly ONE card for the twice-run ticket",
+        tids == ["DUP-1"], f"expected ['DUP-1'], got {tids}")
+    if len(tasks) < 2 or str(tasks[0].get("ticket_id")) != str(tasks[1].get("ticket_id")):
+        # If load_tasks itself collapses per-ticket rows this guard is vacuous — flag it.
+        chk("dup-rerun: fixture really produced two task rows for one ticket",
+            False, f"load_tasks rows: {[(t.get('ticket_id'), t.get('started')) for t in tasks]}")
+
+
+# ===========================================================================
 # AC 2: Only one run live → exactly 1
 # ===========================================================================
 

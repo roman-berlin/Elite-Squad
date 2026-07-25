@@ -947,11 +947,22 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
 
     # Filter: keep tasks with no terminal outcome AND fresh activity of their OWN —
     # no always-include-ts[0] exception (EU-477 AC: a stale newest run drops out too).
+    # Dedupe by ticket_id: `last_ts` is a per-ticket MAX, so EVERY row sharing a ticket_id
+    # inherits the SAME freshness score. Without this, a re-run or restart-orphaned GHOST row
+    # (e.g. a 25h-old EU-474 verify that never got a terminal outcome) passes the same gate as
+    # the current run and the ticket renders TWICE. `ts` is newest-first, so the first row is
+    # the live run; later rows of that ticket are stale duplicates. The drain's sibling-mutex
+    # guarantees a ticket builds at most once at a time → exactly one live card per ticket.
     result: list[tuple[float, dict]] = []          # (score, task) for sorting
+    seen_tids: set[str] = set()
     for t in ts:
-        if t.get("outcome"):
-            continue                                  # terminal → not live
         tid = str(t.get("ticket_id") or "")
+        if tid and tid in seen_tids:
+            continue                                  # older run of an already-represented ticket
+        if tid:
+            seen_tids.add(tid)
+        if t.get("outcome"):
+            continue                                  # newest run of this ticket is terminal → not live
         score = last_ts.get(tid, 0.0)
         if (now - score) < within_s:
             result.append((score, t))
