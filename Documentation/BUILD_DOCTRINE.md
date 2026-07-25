@@ -57,6 +57,34 @@ guard tests, the rest are steps in the build workflow itself.*
 
 ## Standing guards
 
+### Model-cap fallback doctrine
+
+`run_agent_with_fallback` provides a **one-shot** fallback path that runs on each invocation, per-call —
+it never pins any weekly state. The design evolved from two independent tickets working in opposite
+directions:
+
+- **EU-118** (main → secondary): a Sonnet call that hits a plan-limit classified as `cap` retries
+  once on Opus. If Opus succeeds, its result is returned and nothing is persisted — the next call
+  starts cheap on Sonnet again. (The EU-108 weekly-Opus pin was deliberately deleted for this
+  exact reason: a Sonnet cap must never consume an entire week of the expensive tier.)
+- **EU-475 / EU-511 / EU-512** (secondary → main): a GLM/secondary call that hits a hard cap
+  retries once on the Anthropic native/main model using the same one-shot, per-call discipline.
+
+Both directions follow identical rules about **plan-limit classification**:
+
+| Classification | Behaviour |
+|---|---|
+| `"cap"` (hard quota exhausted) | Retry exactly once on the partner model. If partner succeeds → return partner result. If partner also caps → return original error so autopilot pauses (EU-82). Broken network/auth on partner → return original error (nothing proven about the cap). |
+| `"transient"` (rate-limit blip) | Never fail over to the other model. Back off and retry on the SAME model that hit it, or pass through unchanged (for GLM the passthrough is immediate — no backoff needed). The operator chose GLM to avoid burning the native subscription on transient spikes. |
+
+This distinction matters because `"cap"` means "all remaining credits on this model are gone" —
+the partner has headroom. `"transient"` means "temporary throttling" — retrying on the same model
+is correct; switching tiers would waste capacity and produce noise.
+
+See `tests/eu475_symmetric_fallback_test.py` for regression proofs of both directions side-by-side,
+including the transient guarantees. See `tests/eu212_fallback_audit_test.py` and
+`tests/eu512_glm_fallback_audit_test.py` for activation-instrumentation audits.
+
 - `tests/vacuous_assertion_guard_test.py` — AST-lints every harness for the two recurring
   vacuous-assertion classes (unguarded `.find()` comparisons; literal-`True` check conditions).
 - `tests/stub_signature_test.py` — every double bound to a registered production seam accepts
