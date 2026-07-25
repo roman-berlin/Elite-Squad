@@ -116,8 +116,8 @@ chk("First occurrence of roster-doc is the top-level btn, not the dropdown ancho
     f"roster-doc first occurrence is inside the dropdown, not in the top bar "
     f"(top={_top_at}, dropdown={_drop_at})")
 
-chk('Roster button carries the descriptive title attribute ("Officers")',
-    "Officers" in bar,
+chk('Roster button carries the descriptive title attribute ("Engineers")',
+    "Engineers" in bar,
     "title attr missing — tooltip won't appear")
 
 # ---------------------------------------------------------------------------
