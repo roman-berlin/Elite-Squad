@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-535 · Elite-Unit · • All server.py render strings + Telegram/council-brief literals rebranded officer→engineer; remaining 'officer' hits are code identifiers, wire keys, or comments (exempt).
 - 2026-07-25 · EU-534 · Elite-Unit · • Rebrand complete: zero user-facing 'officer' strings left in warroom.py; the 5 remaining hits are identifiers/keys (import, OFFICER_NAMES comments, /group?officer= param) — all correctly preserved. · 🔗 /warroom
 - 2026-07-25 · EU-533 · Elite-Unit · • Grep confirms zero [Oo]fficer occurrences remain in cockpit_views.py — AC1 fully met. • All 6 changes are display strings/docstrings; no identifier renamed (AC2), no logic touched (AC4).
 - 2026-07-25 · EU-474 · Elite-Unit · • All sync.* symbols exist and match; AC1/AC2/AC3 + pins asserted with real, falsifiable checks (remote→1 commit, loose-count decrease, byte-identity, VPS pull, publisher push, fresh peer age). · 🔗 /dashboard (sync status section shows GC compaction results + peer ages)
