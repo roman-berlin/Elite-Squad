@@ -1801,7 +1801,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
     @app.post("/api/qa")
     def qa_api() -> Response:
-        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged."""
+        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged.
+
+        EU-579: tracks run-state (phase, elapsed, findings, verdict) for live polling
+        via GET /api/qa-status."""
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
@@ -1809,29 +1812,49 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             return redirect("/")
         if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
             _state["last_msg"] = QA_STATUS_TEMPLATE.format(app=app_name)
+            # EU-579: RESET run-state at claim time — a new run must never show stale values.
+            _state["qa_started"] = time.time()
+            _state["qa_phase"] = None
+            _state["qa_error_phase"] = None
+            _state["qa_findings"] = []
+            _state["qa_verdict"] = ""
+            _state["qa_dismissed"] = True
 
             def _bg():
                 notes = []
                 try:
+                    _state["qa_phase"] = "patrol"
                     _state["patrolling"] = True
                     try:
                         from . import patrol as patrol_mod
-                        asyncio.run(patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                        summary = asyncio.run(
+                            patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                        # EU-579: patrol() returns a PatrolSummary(str) carrying .filed —
+                        # the REAL Jira keys this run filed. getattr: a stub returning a
+                        # plain str carries no .filed → empty findings, never a crash.
+                        _state["qa_findings"] = list(getattr(summary, "filed", []) or [])
                         notes.append("patrol done — findings filed as Jira tickets")
                     finally:
                         _state["patrolling"] = False
+                    _state["qa_phase"] = "ship_review"
                     _state["shipreview"] = True
                     try:
                         from . import council
-                        asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                        verdict = asyncio.run(
+                            council.ship_review(cfg, app_name, audit=audit))
+                        _state["qa_verdict"] = verdict
                         notes.append("ship verdict posted (see /council + Telegram)")
                     finally:
                         _state["shipreview"] = False
                     _state["last_result"] = f"✓ QA finished for {app_name} — " + "; ".join(notes)
+                    _state["qa_error_phase"] = None  # EU-579: clear prior error on success
+                    _state["qa_dismissed"] = False  # EU-579: new report just landed
                 except Exception as exc:  # noqa: BLE001
                     _state["last_result"] = f"QA failed: {exc}" + (
                         f" (completed: {'; '.join(notes)})" if notes else "")
+                    _state["qa_error_phase"] = _state.get("qa_phase")  # EU-579
                 finally:
+                    _state["qa_phase"] = None
                     _state["qa"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
@@ -1842,6 +1865,26 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         from flask import jsonify
         # EU-204: promote and ship-main endpoints removed; this now always returns inactive
         return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
+
+    @app.get("/api/qa-status")
+    def qa_status_api() -> Response:
+        """EU-579: live state for the QA patrol + ship-review background job. Polls for
+        progress (phase, elapsed) and post-run result (findings, verdict). Safe defaults
+        mean it never 500s when no QA has ever run."""
+        from flask import jsonify
+        st = _state
+        active = bool(st.get("qa"))
+        started = st.get("qa_started") or 0
+        elapsed_s = int(time.time() - started) if active else 0
+        return jsonify({
+            "active": active,
+            "phase": st.get("qa_phase"),
+            "elapsed_s": elapsed_s,
+            "findings": list(st.get("qa_findings") or []),
+            "verdict": st.get("qa_verdict") or "",
+            "error_phase": st.get("qa_error_phase"),
+            "dismissed": bool(st.get("qa_dismissed")),
+        })
 
     @app.get("/merge-stats")
     def merge_stats_page() -> str:

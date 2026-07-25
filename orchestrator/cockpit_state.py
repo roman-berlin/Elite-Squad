@@ -33,7 +33,10 @@ from dataclasses import asdict, dataclass, field
 _STATE_KEYS = ("active", "last_msg", "last_result", "dry_run",
                "last_activity", "run_started", "stop_event", "log_seq",
                "autopilot_mode", "autopilot_on", "log_path",
-               "plan_limit_hit", "plan_limit_reset_at")
+               "plan_limit_hit", "plan_limit_reset_at",
+               # EU-579: QA run-state fields — set/reset/tracked by qa_api()._bg
+               "qa_started", "qa_phase", "qa_error_phase",
+               "qa_findings", "qa_verdict", "qa_dismissed")
 
 
 def _new_state() -> dict:
@@ -41,7 +44,10 @@ def _new_state() -> dict:
     return {"active": False, "last_msg": "", "last_result": "", "dry_run": None,
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
             "autopilot_mode": None, "autopilot_on": False, "log_path": None,
-            "plan_limit_hit": False, "plan_limit_reset_at": None}
+            "plan_limit_hit": False, "plan_limit_reset_at": None,
+            # EU-579: QA run-state defaults
+            "qa_started": None, "qa_phase": None, "qa_error_phase": None,
+            "qa_findings": [], "qa_verdict": "", "qa_dismissed": True}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions
@@ -332,13 +338,16 @@ def get_autopilot_status(app: str | None = None) -> dict:
 def reset_run_state() -> None:
     """Drop every per-app run-state + lock back to the default-only registry — test seam."""
     global _shared_log_seq
+    defaults = _new_state()
     with _registry_lock:
         _states.clear()
         _states[None] = _state
         _run_locks.clear()
         _run_locks[None] = _run_lock
-        for key in list(_state.keys()):
-            _state[key] = _new_state()[key]
+        # Fully replace with fresh defaults (handles both existing keys and new
+        # ones like EU-579's qa_* fields, plus drops orphaned ad-hoc flags).
+        _state.clear()
+        _state.update(defaults)
     with _log_seq_lock:
         _shared_log_seq = 0
 
