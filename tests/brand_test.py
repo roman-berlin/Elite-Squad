@@ -68,6 +68,20 @@ lp = Path("orchestrator/loop.py").read_text(encoding="utf-8")
 chk("(5) split notify says 'the squad takes the fragments next'",
     "The squad takes the fragments next" in lp and "The unit takes the fragments next" not in lp)
 
+# (6) user-facing docs: no 'officer' prose — rebranded to 'engineer' (EU-536)
+import re
+for _fname in ("README.md", "SQUAD_HQ.md"):
+    _text = Path(_fname).read_text(encoding="utf-8")
+    chk(f"(6a) no 'officer' in {_fname}",
+        not re.search(r'[Oo]fficer', _text),
+        f"'officer' still present in {_fname}")
+
+# (7) BRAND.md terminology map explicitly lists officer(internal)/engineer(user-facing) split (EU-536)
+brand = Path("Documentation/BRAND.md").read_text(encoding="utf-8")
+chk("(7a) BRAND.md terminology map mentions officer→engineer split",
+    bool(re.search(r'(?i)officer.*engineer', brand)),
+    "Terminology map lacks officer→engineer row")
+
 print("\n========== SQUAD BRAND QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

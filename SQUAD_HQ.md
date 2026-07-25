@@ -39,7 +39,7 @@ Pick a project from the switcher and the **whole board scopes to it**:
 - The URL updates to `/?app=<name>` — so you can bookmark a project view or share it.
 
 Choose **All projects** for the unit-wide view across everything at once. (The roster is
-always unit-wide — your officers serve every project.)
+always unit-wide — your engineers serve every project.)
 
 ---
 
@@ -68,13 +68,13 @@ The ticket the unit is working right now (or the most recent run if idle).
 
 ## Roster (right column)
 
-All **10 officers**, in chain of command, each with a status dot and last action:
+All **10 engineers**, in chain of command, each with a status dot and last action:
 
 - 🟢 **green (pulsing)** — on duty right now (Dev Team Lead + Code Reviewer during a build).
 - 🔵 **blue** — acted in the last 10 minutes.
 - ⚪ **grey** — idle.
 
-The officers: **CTO** (orchestrator) · **Engineering Manager** · **Product Manager** ·
+The engineers: **CTO** (orchestrator) · **Engineering Manager** · **Product Manager** ·
 **Scrum Master** (ticket splitting) · **Dev Team Lead** (Builder) · **Code Reviewer** ·
 **QA Engineer** (S-2 recon) · **Security Engineer** · **Release Manager** (S-4 deploy
 readiness) · **SRE** (S-3 integration & rollback — deterministic, no model).
@@ -100,7 +100,7 @@ daily-council outcomes — each with the ticket, project, and how long ago.
 - **▶ Run** — launch it.
 
 Plus quick actions: **🐞 Report a problem** (file a QA bug with an optional screenshot),
-**🫡 Daily standup**, **💬 Council** (convene the officers), and **📋 Task log**.
+**🫡 Daily standup**, **💬 Council** (convene the engineers), and **📋 Task log**.
 
 ### Task log (`/tasks`)
 
@@ -136,5 +136,5 @@ Restart `general serve` and the new project appears in the switcher.
 
 - **Data source:** the board reads your real `audit.jsonl` (what the General actually did)
   and your real `config.yaml` apps. Nothing is invented.
-- **Live streaming** of officer actions is per-event SSE (shipped); a 5s poll remains as
+- **Live streaming** of engineer actions is per-event SSE (shipped); a 5s poll remains as
   the fallback when the stream drops.
