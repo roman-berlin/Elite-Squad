@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-567 · Elite-Unit · • Correctly traced the ticket's example ('QA running for Elite-Unit…') to _state['last_msg'] at server.py:1809 — the only source of that text — and confirmed the /needs page is the only render site, so scope is right.
 - 2026-07-25 · EU-566 · Elite-Unit · • Word-boundary fold (reuses EU-508 helper, no second truncator) bounds label to 110 chars, no mid-word cut — AC1 met. • .nbtn CSS has no nowrap/overflow/ellipsis, so labels render fully with no CSS/JS truncation.
 - 2026-07-25 · EU-564 · Elite-Unit · • AC1 met: leading ticket-id stripped via anchored match in summarize_question/parse_options + defensively in every render path.
 - 2026-07-25 · EU-536 · Elite-Unit · • `grep -n '[Oo]fficer' README.md SQUAD_HQ.md` verified zero hits directly — AC1 met. • BRAND.md terminology map now has an explicit, unambiguous officer(internal)/engineer(user-facing) row — AC2 met. · 🔗 (no UI — verify the three doc files render "engineer" instead of "officer" when served; e.g. open README.md or SQUAD_HQ.md directly, confirm `grep '[Oo]fficer'` returns nothing)
