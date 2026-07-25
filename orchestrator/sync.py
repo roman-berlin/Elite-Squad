@@ -618,6 +618,17 @@ def git_sync(cfg: Config) -> dict[str, Any]:
     out: dict[str, Any] = {"host": host_id(cfg), "pulled": False, "pushed": False,
                            "hosts": [], "error": None}
     sd = ensure_state_clone(cfg)
+
+    # ── EU-528 / EU-530: opportunistically pack the state clone when due.
+    # Placed BEFORE the early-return so every invocation exercises the throttle;
+    # gc_state_clone degrades to {"ok":True,"ran":False,"reason":"no-clone"}
+    # when .unit-state/.git is absent — never raises.
+    try:
+        out["gc"] = gc_state_clone(cfg)
+    except Exception as e:  # noqa: BLE001 — strictly best-effort, never re-raise
+        out["gc"] = {"ok": False, "ran": True, "error": str(e)[:300]}
+        print(f"[sync] gc exception swallowed: {type(e).__name__}: {e}", flush=True)
+
     if sd is None:
         out["error"] = "no git origin for state sync"
         return out
@@ -669,14 +680,6 @@ def git_sync(cfg: Config) -> dict[str, Any]:
             compact_state_branch_now(cfg)
     except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
         print(f"[sync] compaction exception swallowed: {type(e).__name__}: {e}", flush=True)
-
-    # ── EU-530: invoke per-sync gc_state_clone (throttled sentinel makes it a no-op 99% of time) ──
-    # Same best-effort pattern: caught and reported in the sync dict, never raised into caller.
-    try:
-        out["gc"] = gc_state_clone(cfg)
-    except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
-        out["gc"] = {"ok": False, "ran": True, "error": str(e)[:300]}
-        print(f"[sync] gc exception swallowed: {type(e).__name__}: {e}", flush=True)
 
     return out
 
