@@ -1886,6 +1886,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             "dismissed": bool(st.get("qa_dismissed")),
         })
 
+    @app.post("/api/qa-dismiss")
+    def qa_dismiss() -> Response:
+        """EU-581: dismiss the QA report card — sets qa_dismissed=True so the home page
+        no longer shows the report card until the next successful QA run."""
+        _state["qa_dismissed"] = True
+        return redirect("/")
+
     @app.get("/merge-stats")
     def merge_stats_page() -> str:
         """EU-159/EU-160/EU-161: the frontend merge-statistics page with a four-way time-range
