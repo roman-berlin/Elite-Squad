@@ -189,6 +189,23 @@ def _link_merged_tickets(cfg, stats: dict) -> dict:
 # cockpit_state's run locks on purpose — a ceremony is not a run and must not contend with one.
 _flag_lock = threading.Lock()
 
+
+# EU-567: pure classifier — status/in-progress messages are routed to a separate strip,
+# never mixed into the Needs-you decision cards. Default False so confirmations / errors
+# keep today's banner behaviour. Testable and importable from tests.
+def is_status_message(msg: str) -> bool:
+    """Whether ``msg`` describes a running/in-progress/status state with no pending decision."""
+    if not msg:
+        return False
+    low = msg.lower()
+    if low.startswith(("🔍", "⏳")):
+        return True
+    if any(kw in low for kw in (" running", " running.", " running,", " in progress",
+                                  "standup running", " inspect dev", " inspecting")):
+        return True
+    return False
+
+
 def _claim_flag(name: str, value=True) -> bool:
     """Compare-and-set a one-shot ceremony flag. True = the caller now OWNS the ceremony and must
     clear the flag when done; False = someone else already owns it, do nothing.
@@ -2143,18 +2160,24 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ".nbadge.err{background:var(--badbg);color:var(--bad)}"    # errored    — red
             ".nbadge.prk{background:var(--warnbg);color:var(--warn)}"    # parked     — amber
             ".nbadge.opr{background:var(--okbg);color:var(--ok)}"    # open PR    — teal
+            # EU-567: dedicated status-strip — keeps running/in-progress notices out of Needs-you cards.
+            ".nstrip{margin:0 0 12px;padding:8px 12px;border-radius:9px;"
+            "border:1px dashed var(--line2);font-size:12.5px;color:var(--dim)}"
+            ".nstrip label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-right:6px;font-weight:700}"
             "</style>")
-        # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
+        # EU-567: classify last_msg — status runs go to .nstrip, confirmations/errors keep .nbanner.
         _m = _state.pop("last_msg", "") or ""
-        banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if _m else ""
+        is_st = is_status_message(_m)
+        banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if (_m and not is_st) else ""
+        nstrip = f"<div class=nstrip><label>Status</label>{html.escape(str(_m))}</div>" if is_st else ""
         sync_btn = ("<form method=post action=/api/needs-sync style='margin:0 0 14px'>"
                     "<button class='nbtn x' title='Check every item against live Jira NOW — items "
                     "whose ticket you already moved (Done/QA) or re-queued (To Do) in Jira are "
                     "cleared'>&#8635; Sync with Jira</button></form>")
         if not s.get("total"):
-            return _wrap("Needs you", style + banner + sync_btn
+            return _wrap("Needs you", style + banner + nstrip + sync_btn
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
-        out = [style, banner, sync_btn]
+        out = [style, banner, nstrip, sync_btn]
 
         # ── Unified inbox rows — grouped by category (EU-102) ────────────────
         from urllib.parse import quote
