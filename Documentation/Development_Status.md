@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-528 · Elite-Unit · • gc_state_clone wired immediately after ensure_state_clone, before early-return, per ticket. • Old EU-530 end-of-fn call correctly removed — no double gc.
 - 2026-07-25 · EU-527 · Elite-Unit · • All 5 ACs met: gc fires when due/force with correct args, no-ops when not due, and never propagates exceptions (broad except returns error dict, sentinel untouched on failure).
 - 2026-07-25 · EU-526 · Elite-Unit · • Constants (_GC_INTERVAL_HOURS, _GC_SENTINEL_NAME) placed exactly where the ticket specifies, next to STATE_DIR_NAME/_CLONE_DEPTH.
 - 2026-07-25 · EU-477 · Elite-Unit · • Spec met: live_runs() is the shared live-subset computation; active_run() is a faithful thin wrapper (EU-130 triage + EU-448 phase derivation moved verbatim into _run_obj_for). · 🔗 (no UI — `.venv/bin/python tests/run_all.py`, or targeted: `tests/warroom_live_runs_test.py` + `tests/warroom_triage_test.py` + `tests/eu448_stage_bar_test.py` + `tests/eu486_multi_card_test.py` + `tests/render_board_multi_run_test.py`)
