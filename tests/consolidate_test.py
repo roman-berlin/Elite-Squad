@@ -94,8 +94,8 @@ r = client.get("/memory"); body = r.get_data(as_text=True)
 chk("/memory returns 200", r.status_code == 200, str(r.status_code))
 chk("/memory no longer renders the never-clearing rejection panel", "keeps rejecting" not in body)
 chk("/memory no longer offers a Consolidate action", "/api/consolidate" not in body)
-chk("the lessons the engine folds STILL reach the officers' preamble path",
-    "Update memory" in body and "officers see the newest" in body)
+chk("the lessons the engine folds STILL reach the engineers' preamble path",
+    "Update memory" in body and "engineers see the newest" in body)
 
 print("\n============= CONSOLIDATION QA =============")
 passed = sum(1 for _, ok, _ in results if ok)

@@ -485,7 +485,7 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
         "The Elite Unit's record:", "", digest, "",
         *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
         *([f"Muster focus: {topic}\n"] if topic else []),
-        "The council said:" if topic else "The officers' stand-up (Yesterday / Today / Blockers):", "",
+        "The council said:" if topic else "The engineers' stand-up (Yesterday / Today / Blockers):", "",
         *[f"### {who}\n{what}\n" for who, what in said],
         *([f"Hand-offs needing coordination: {'; '.join(handoffs)}\n"] if handoffs else []),
         "Now write the briefing.",
@@ -603,7 +603,7 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     chair_prompt = "\n".join([
         f"Meeting topic: {topic}", "", "The unit's record:", "", digest, "",
         *([f"Commander's standing guidance:\n{notes}\n"] if notes else []),
-        "The officers debated:", "",
+        "The engineers debated:", "",
         *[f"### {who}\n{what}\n" for who, what in said],
         "Now write the decision record.",
     ])
@@ -667,7 +667,7 @@ async def ship_review(cfg: Config, app_name: str | None = None, audit=None) -> s
     chair_prompt = "\n".join([
         f"Ship-review for {name}. The unit's record:", "", digest, "",
         "Release Manager readiness report:", "", (qm_report or "(none)")[:3500], "",
-        "The officers debated:", "", *[f"### {who}\n{what}\n" for who, what in said],
+        "The engineers debated:", "", *[f"### {who}\n{what}\n" for who, what in said],
         "Now write the recommendation. Remember: only the Commander promotes to MAIN.",
     ])
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
@@ -1299,7 +1299,7 @@ def _standup_telegram(rows: list[tuple[str, str]], handoffs: list[str]) -> str:
     hb = "\n".join(f"- {h}" for h in handoffs) or "- none"
     # Hand-offs/blockers are already concise bullets and this helper is sync, so bulletize() (the
     # deterministic brief) keeps every one as a tight '•' line — no model call, no truncate-and-punt.
-    return (f"🫡 *Daily stand-up* — {len(rows)} officer(s) reported.\n\n"
+    return (f"🫡 *Daily stand-up* — {len(rows)} engineer(s) reported.\n\n"
             f"*Hand-offs & blockers:*\n{notify.bulletize(hb, max_bullets=20)}\n\n_Full round-table in the cockpit._")
 
 

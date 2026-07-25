@@ -38,7 +38,7 @@ rows = [("Scout", "Yesterday: swept DEV\nToday: a11y pass\nBlockers: none"),
         ("Quartermaster", "Yesterday: deploy check\nToday: Dockerfile\nBlockers: none")]
 handoffs = ["Scout → Builder: needs the API contract first"]
 ping = council._standup_telegram(rows, handoffs)
-chk("ping shows a roll-up count", "3 officer(s) reported" in ping)
+chk("ping shows a roll-up count", "3 engineer(s) reported" in ping)
 chk("ping carries the hand-offs/blockers", "Hand-offs & blockers" in ping and "Scout → Builder: needs the API contract first" in ping)
 chk("ping points to the cockpit for the rest", "Full round-table in the cockpit" in ping)
 chk("ping does NOT dump the per-officer round-table", "###" not in ping and "Today: a11y pass" not in ping)

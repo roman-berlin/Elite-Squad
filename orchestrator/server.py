@@ -1614,20 +1614,20 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         snap = "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>"
         intro = ("<p style='color:#8a909c;margin:-4px 0 14px'>The stand-up now runs inside the daily "
                  "muster — see <a href='/council'>Daily muster &amp; meetings</a>. You don't initiate "
-                 "it; officers post anything actionable to <a href='/needs'>Needs you</a> and ping you "
+                 "it; engineers post anything actionable to <a href='/needs'>Needs you</a> and ping you "
                  "on Telegram if blocked. The button below is only for an on-demand extra.</p>")
         btn = ('<form method=post action=/api/standup style="margin:14px 0">'
                '<button>&#129303; Run an extra stand-up now</button></form>')
         if _state.get("standuping"):
-            rep = _working("The officers are reporting — Yesterday / Today / Blockers…")
+            rep = _working("The engineers are reporting — Yesterday / Today / Blockers…")
         else:
             last = council.last_standup(cfg)
             rep = ("<pre class=rep>" + html.escape(last) + "</pre>" if last
-                   else "<p style='color:#8a909c'>No officer stand-up recorded yet — the next one lands "
-                        "automatically at the 10:00 muster. Each officer reports Yesterday / Today / "
+                   else "<p style='color:#8a909c'>No engineer stand-up recorded yet — the next one lands "
+                        "automatically at the 10:00 muster. Each engineer reports Yesterday / Today / "
                         "Blockers and flags who they need.</p>")
         return _wrap("Daily standup",
-                     intro + "<h3>Snapshot</h3>" + snap + "<h3>Officer stand-up</h3>" + rep + btn)
+                     intro + "<h3>Snapshot</h3>" + snap + "<h3>Engineers' stand-up</h3>" + rep + btn)
 
     @app.post("/api/standup")
     def standup_api() -> Response:
@@ -1662,15 +1662,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         from . import council
         hist = council.history(cfg, limit=25)
         if _state.get("shipreview"):
-            top = _working("&#128640; Ship-review in session — the Release Manager + officers are checking if "
+            top = _working("&#128640; Ship-review in session — the Release Manager + engineers are checking if "
                            "DEV is ready for MAIN. The verdict will appear below and on Telegram.")
         elif _state.get("councilling"):
-            top = _working("The officers are in session — reading the record and debating…")
+            top = _working("The engineers are in session — reading the record and debating…")
         else:
             top = ""
         acts = "" if (_state.get("councilling") or _state.get("shipreview")) else _actbar(
             _actbtn("/api/council", "&#128172; Hold a council now"))
-        intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The officers hold a council "
+        intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
                  "use the <a href='/group'>Group room</a>.</p>")
         if not hist:
@@ -1726,7 +1726,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         live_full = memory._live_log()
         live_html = (
             "<h3 style='margin:18px 0 8px;font-size:14px;color:#c4c9d2'>Living lessons log "
-            f"<span style='color:#8a929f;font-weight:400;font-size:12px'>· officers see the newest "
+            f"<span style='color:#8a929f;font-weight:400;font-size:12px'>· engineers see the newest "
             f"{memory.PREAMBLE_LESSONS} in every prompt; the full log lives here</span></h3>"
             "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
         body = (banner + act + top
@@ -1751,7 +1751,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             "<p class=hint>Attending — leave all unchecked for the whole council:</p>"
             f"<div>{checks}</div>"
             "<p><button>Convene meeting</button></p></form>"
-            "<p class=hint>The officers debate, the CTO decides, and the outcome is written to "
+            "<p class=hint>The engineers debate, the CTO decides, and the outcome is written to "
             "Unit Memory. Watch it appear under <a href='/council'>councils</a>.</p>")
         return _wrap("Call a meeting", body)
 
@@ -1789,7 +1789,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             _state["last_msg"] = ("No project to QA — configure a product repo first.")
             return redirect("/")
         if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
-            _state["last_msg"] = (f"🔍 QA running for {app_name} — officers inspect DEV and file "
+            _state["last_msg"] = (f"🔍 QA running for {app_name} — engineers inspect DEV and file "
                                   "findings, then deliver the DEV→MAIN readiness verdict (posts "
                                   "here and to Telegram).")
 
@@ -3194,13 +3194,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         officer = (request.args.get("officer") or "").strip()
         # EU-287: a lightweight typing indicator (not a banner) — the officer(s) triage picked are
         # composing. `_state['grouping']` already tracks the in-flight window (set in group_api below).
-        busy = (f'<div class=typing>&middot; {html.escape(officer) if officer else "an officer"} '
+        busy = (f'<div class=typing>&middot; {html.escape(officer) if officer else "an engineer"} '
                 'is weighing in&hellip;</div>' if _state.get("grouping") else "")
         aim = (f'<div class=aim>Consulting <b>{html.escape(officer)}</b> directly — only they answer. '
                '<a href="/group">ask the whole unit instead</a></div>') if officer else ""
         oin = f'<input type=hidden name=officer value="{html.escape(officer)}">' if officer else ""
         ph = (f"Ask {html.escape(officer)} something…" if officer
-              else "Ask the unit / brainstorm with the officers…")
+              else "Ask the unit / brainstorm with the engineers…")
         body = (_CHAT_STYLE + _chat_tabs("group")
                 + '<div class=chat>' + aim + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
                 '<div class=composer><div id=grouperr class=chaterr role=alert aria-live=assertive></div>'
