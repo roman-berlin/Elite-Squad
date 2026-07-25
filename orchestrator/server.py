@@ -2230,15 +2230,27 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     for o in _po["options"]:
                         _cls = "nbtn ok" if o["recommended"] else "nbtn x"
                         _star = "&#9733; " if o["recommended"] else ""
-                        _lbl = html.escape(o["text"][:110])
+                        _lbl, _folded = _dec.fold_option_label(o["text"], 110)
+                        _lbl_esc = html.escape(_lbl)
                         _val = html.escape(f"Option {o['n']}: {o['text']}")
+                        # EU-566: when folded, ship the FULL option text as title (tooltip);
+                        # otherwise keep the existing generic tooltip so short-label behaviour
+                        # does not regress.
+                        if _folded:
+                            _tip = html.escape(o["text"])
+                            _btn_title = (f"{_tip} — click to select\n\n"
+                                          "Ship this option — it lands as a Jira comment "
+                                          "and the ticket re-runs with it")
+                        else:
+                            _tip = None
+                            _btn_title = ("Ship this option — it lands as a Jira "
+                                          "comment and the ticket re-runs with it")
                         btns += (
                             "<form method=post action=/api/answer style='margin:0'>"
                             f"<input type=hidden name=ticket value='{tid}'>"
                             f"<input type=hidden name=app value='{dapp}'>"
                             f"<input type=hidden name=text value=\"{_val}\">"
-                            f"<button class='{_cls}' title='Ship this option — it lands as a Jira "
-                            f"comment and the ticket re-runs with it'>{_star}{o['n']}. {_lbl}</button></form>")
+                            f"<button class='{_cls}' title='{_btn_title}'>{_star}{o['n']}. {_lbl_esc}</button></form>")
                     out.append(
                         "<div class=ncard>"
                         f"<div class=q><span class='nbadge dec'>Decision</span>{head}</div>"
