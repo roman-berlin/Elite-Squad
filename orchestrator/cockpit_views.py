@@ -604,7 +604,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     else:
         status = ""
 
-    def busy(k):
+    def busy(k: str) -> str:
         return "disabled" if _state.get(k) else ""
 
     # ── Per-project "Ship <app>" DEV→MAIN button removed per EU-206 — the button no longer renders.

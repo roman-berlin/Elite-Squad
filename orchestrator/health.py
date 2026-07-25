@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 from shutil import which
-from typing import Any
+from typing import TypedDict
 
 # EU-18: deps a drifted worktree silently re-pins off DEV. We compare the WHOLE bun.lock
 # (the authoritative pin), but surface these names by version when there IS drift — a mismatch
@@ -238,7 +238,17 @@ def checks(cfg) -> list[dict[str, str]]:
     return out
 
 
-def summary(cfg) -> dict[str, Any]:
+class HealthSummary(TypedDict):
+    """The rolled-up cockpit health shape returned by summary()."""
+    healthy: bool
+    problems: int
+    warnings: int
+    checks: list[dict[str, str]]
+    models: dict[str, str]
+    backend: str
+
+
+def summary(cfg) -> HealthSummary:
     c = checks(cfg)
     problems = [x for x in c if x["status"] == "bad"]
     warnings = [x for x in c if x["status"] == "warn"]

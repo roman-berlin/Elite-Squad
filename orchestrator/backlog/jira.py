@@ -21,7 +21,6 @@ come from the app's `backlog:` block:
 from __future__ import annotations
 
 import os
-from typing import Any
 
 import requests
 
@@ -147,7 +146,7 @@ def _with_default_timeout(session):
         orig = session.request
     except AttributeError:        # a test stub whose .get/.post don't route through .request
         return session
-    def request(method, url, **kwargs):
+    def request(method: str, url: str, **kwargs: object) -> requests.Response:
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
         return orig(method, url, **kwargs)
     session.request = request
@@ -312,14 +311,14 @@ class JiraAdapter(BacklogAdapter):
         resp.raise_for_status()
         return self._to_ticket(resp.json())
 
-    def comments(self, key: str) -> list[dict[str, Any]]:
+    def comments(self, key: str) -> list[dict[str, object]]:
         """All comments on an issue, oldest -> newest (GET issue/{key}/comment). The read half of a
         decision round-trip: the loop posts a question as a comment, the Commander answers in one.
 
         EU-365: this used to read ONE page. Jira returns comments oldest-first, 50 per page, so on a
         long decision thread the Commander's newest reply fell off the end and latest_answer() —
         which reads the LAST comment — handed the loop a stale answer to act on. Page to the end."""
-        out: list[dict[str, Any]] = []
+        out: list[dict[str, object]] = []
         start = 0
         for _ in range(_COMMENT_MAX_PAGES):
             resp = self.session.get(self._url(f"issue/{key}/comment"),
@@ -470,7 +469,7 @@ class JiraAdapter(BacklogAdapter):
     def create_task(self, summary: str, description: str, labels=None,
                     issue_type: str = "Task", priority: str | None = None,
                     parent: str | None = None) -> str | None:
-        fields: dict[str, Any] = {
+        fields: dict[str, object] = {
             "project": {"key": self.project},
             "summary": _summary_for_jira(summary),
             "issuetype": {"name": issue_type},
@@ -665,7 +664,7 @@ class JiraAdapter(BacklogAdapter):
             target_proj_id = projects[0]["id"]
 
             # Build update payload: change project + set acceptance criteria if field is configured
-            payload: dict[str, Any] = {"fields": {"project": {"id": target_proj_id}}}
+            payload: dict[str, object] = {"fields": {"project": {"id": target_proj_id}}}
             if self.ac_field and corrected_acceptance:
                 payload["fields"][self.ac_field] = _adf(corrected_acceptance)
 
@@ -688,7 +687,7 @@ class JiraAdapter(BacklogAdapter):
                             target_project=target_project_key, error=str(exc))
             return False
 
-    def _download_images(self, key: str, attachments: list[dict[str, Any]]) -> list[str]:
+    def _download_images(self, key: str, attachments: list[dict[str, object]]) -> list[str]:
         """Download image attachments to a local cache so the Builder's Read tool can view them.
         Best-effort: any failure (no creds, network, odd mime) is skipped, never raised."""
         if not getattr(self, "fetch_images", True) or not attachments:
@@ -718,7 +717,7 @@ class JiraAdapter(BacklogAdapter):
         return out
 
     # -- parsing ---------------------------------------------------------- #
-    def _to_ticket(self, issue: dict[str, Any]) -> Ticket:
+    def _to_ticket(self, issue: dict[str, object]) -> Ticket:
         f = issue.get("fields", {})
         description = _adf_to_text(f.get("description"))
         ac: list[str] = []
@@ -769,7 +768,7 @@ def _adf(text: str) -> dict:
                          "content": [{"type": "text", "text": text}]}]}
 
 
-def _adf_to_text(node: Any) -> str:
+def _adf_to_text(node: object) -> str:
     """Flatten an ADF node tree to plain text (newline per block)."""
     if node is None:
         return ""
@@ -777,7 +776,7 @@ def _adf_to_text(node: Any) -> str:
         return node
     out: list[str] = []
 
-    def walk(n: Any) -> None:
+    def walk(n: object) -> None:
         if isinstance(n, dict):
             if n.get("type") == "text":
                 out.append(n.get("text", ""))

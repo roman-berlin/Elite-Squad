@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TypedDict
 
 _LOG = logging.getLogger(__name__)
 
@@ -130,6 +130,16 @@ def _prompt(ticket: Ticket, repo_context: str = "") -> str:
     return "\n".join(parts)
 
 
+class ADRDict(TypedDict):
+    """The serialized ADRExtraction shape (to_dict) for audit logging and handoff."""
+    approach: str
+    risk_alt: str
+    touch_points: list[str]
+    definition_of_done: str
+    raw: str
+    skipped: bool
+
+
 @dataclass
 class ADRExtraction:
     """Structured extraction of an ADR's sections.
@@ -148,7 +158,7 @@ class ADRExtraction:
     raw: str = ""
     skipped: bool = False
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ADRDict:
         """Serialize to a dict for audit logging and handoff."""
         return {
             "approach": self.approach,

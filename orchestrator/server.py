@@ -12,6 +12,7 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Generator
 from pathlib import Path
 from urllib.parse import quote
 
@@ -278,7 +279,7 @@ def _ticket_line_ok(line: str, ticket: str | None) -> bool:
     return ticket in line
 
 
-def create_app(cfg: Config, port: int = 8787):
+def create_app(cfg: Config, port: int = 8787) -> Flask:
     """Build the cockpit Flask app. ``port`` is the port ``serve()`` will actually bind.
 
     EU-361: the port is a parameter (not a constant) because the EU-254 Host guard below has to
@@ -502,7 +503,7 @@ def create_app(cfg: Config, port: int = 8787):
         return st
 
     @app.get("/")
-    def index():
+    def index() -> str:
         appq = _scope(request.args.get("app"))   # one concrete project — the session's active tab
         try:
             from . import projects
@@ -527,7 +528,7 @@ def create_app(cfg: Config, port: int = 8787):
         return warroom.render_page(cfg, appq, _view_state(appq), bar, h)
 
     @app.get("/api/health")
-    def health_api():
+    def health_api() -> Response:
         import platform
         from flask import jsonify
         # EU-106: include is_mac so the UI layer can decide whether to show "Open logs" buttons.
@@ -539,7 +540,7 @@ def create_app(cfg: Config, port: int = 8787):
                         "active_run_count": active_run_count()})
 
     @app.get("/api/open-logs")
-    def open_logs_api():
+    def open_logs_api() -> Response:
         """Open a local log file or folder in macOS Finder (macOS only).
 
         Query param: ``path=<log path>`` — absolute or relative path to the log file or folder.
@@ -586,7 +587,7 @@ def create_app(cfg: Config, port: int = 8787):
         return jsonify({"ok": True, "path": str(requested)})
 
     @app.get("/api/autopilot")
-    def autopilot_status_api():
+    def autopilot_status_api() -> Response:
         """Live autopilot state: PID-based daemon check + in-memory cockpit flags.
 
         Returns a JSON object with:
@@ -624,7 +625,7 @@ def create_app(cfg: Config, port: int = 8787):
         })
 
     @app.post("/api/autopilot")
-    def autopilot_api():
+    def autopilot_api() -> Response:
         import copy
         from . import autopilot as ap
         action = request.form.get("action", "toggle")
@@ -777,7 +778,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect(_redir)
 
     @app.get("/api/board")
-    def board_api():
+    def board_api() -> Response:
         from flask import Response
         appq = _board_project(request.args.get("app"))   # board is per-tab — one concrete project
         # EU-106: log_lines param removed from render_board (Live Feed panel retired).
@@ -785,7 +786,7 @@ def create_app(cfg: Config, port: int = 8787):
                         mimetype="text/html")
 
     @app.get("/api/stream")
-    def stream_api():
+    def stream_api() -> Response:
         """Server-Sent Events: push a freshly-rendered board the moment the unit prints a step
         (sub-second), and at least every 2s (keeps the elapsed timer + heartbeat alive). The
         browser swaps #board on each frame; it falls back to the 5s poll if the stream drops."""
@@ -795,7 +796,7 @@ def create_app(cfg: Config, port: int = 8787):
         # this makes every tab stream ONLY its own project's board.
         appq = _board_project(request.args.get("app"))
 
-        def gen():
+        def gen() -> Generator[str, None, None]:
             last_seq = None
             last_emit = 0.0
             while True:
@@ -819,7 +820,7 @@ def create_app(cfg: Config, port: int = 8787):
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/run-log-stream")
-    def run_log_stream_api():
+    def run_log_stream_api() -> Response:
         """Stream the current run's log file in real-time using Server-Sent Events.
 
         EU-200: This provides a live view of the run log in the web dashboard,
@@ -843,7 +844,7 @@ def create_app(cfg: Config, port: int = 8787):
         ticketq = (request.args.get("ticket") or "").strip() or None
         st = get_state(appq or None)
 
-        def gen():
+        def gen() -> Generator[str, None, None]:
             appkey = appq or None
             # 2026-07-19: WAIT for the log instead of closing — the panel connects at page load,
             # often seconds BEFORE the run's open_run_log sets log_path; the old instant
@@ -955,7 +956,7 @@ def create_app(cfg: Config, port: int = 8787):
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/tasks")
-    def tasks_page():
+    def tasks_page() -> str:
         # EU-129: Resolve the active project first so needs.count() can scope to it.
         _appq = _board_project(request.args.get("app"))
         # 2026-07-19 (Commander order): the task log's job is "the tickets DONE in the project I
@@ -1014,7 +1015,7 @@ def create_app(cfg: Config, port: int = 8787):
         return page.replace("</header>", "</header>" + back, 1)
 
     @app.post("/api/dismiss")
-    def dismiss_api():
+    def dismiss_api() -> Response:
         tid = (request.form.get("ticket") or "").strip()
         back = (request.form.get("back") or "/tasks").strip()
         if tid:
@@ -1022,7 +1023,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect(back if back in ("/tasks", "/needs") else "/tasks")
 
     @app.post("/api/unblock")
-    def unblock_api():
+    def unblock_api() -> Response:
         """Remove a ticket from blocked_tickets.json (the parked set).
 
         EU-102: redirects to /needs (unified inbox) instead of /tasks?filter=parked.
@@ -1036,7 +1037,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/needs")
 
     @app.post("/api/security-reply")
-    def security_reply_api():
+    def security_reply_api() -> Response:
         """Record a response to a security block finding (EU-145).
 
         Records the response to the audit log and optionally creates a Jira ticket
@@ -1075,7 +1076,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect(f"/?app={quote(app)}")
 
     @app.get("/tickets")
-    def tickets_page():
+    def tickets_page() -> str:
         # EU-63: one concrete project per tab — the retired "All projects"/`*` grouped view is gone, so
         # this page always lists exactly one app's backlog. ``_scope`` resolves (and focuses) that tab.
         appq = _scope(request.args.get("app"))
@@ -1149,7 +1150,7 @@ def create_app(cfg: Config, port: int = 8787):
 
 
     @app.post("/api/model")
-    def model_api():
+    def model_api() -> Response:
         # EU-190/EU-223: persist the active model backend — GLOBALLY, or (an optional `app` field)
         # for ONE project only, so e.g. the Elite-Unit drain can stay on Opus while automatixy runs
         # GLM. When switching to GLM, run a LIVE connection test first so a bad setup
@@ -1220,7 +1221,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/")
 
     @app.post("/api/continue-on-alternate")
-    def continue_on_alternate_api():
+    def continue_on_alternate_api() -> Response:
         # EU-191/EU-223: the plan-limit banner's "Continue on <backend>" button. Switch the sticky
         # model backend to a runnable alternate (e.g. GLM) — for the AFFECTED app only when the
         # banner named one (`app`), else globally as before — clear the plan-limit flags, and
@@ -1303,15 +1304,15 @@ def create_app(cfg: Config, port: int = 8787):
         return fields, (request.form.get("api_key") or "").strip()
 
     @app.get("/models")
-    def models_page():
+    def models_page() -> str:
         return models_views.render_models_list(cfg)
 
     @app.get("/models/add")
-    def models_add_form():
+    def models_add_form() -> str:
         return models_views.render_model_form(cfg)
 
     @app.post("/models/add")
-    def models_add_api():
+    def models_add_api() -> str | Response:
         fields, api_key = _model_form_fields()
         errors = []
         try:
@@ -1342,14 +1343,14 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/models")
 
     @app.get("/models/edit/<model_id>")
-    def models_edit_form(model_id):
+    def models_edit_form(model_id) -> str | Response:
         record = ModelRegistry(cfg).get(model_id)
         if record is None:
             return Response("Unknown model backend.", status=404, mimetype="text/plain")
         return models_views.render_model_form(cfg, record=record)
 
     @app.post("/models/edit/<model_id>")
-    def models_edit_api(model_id):
+    def models_edit_api(model_id) -> str | Response:
         registry = ModelRegistry(cfg)
         record = registry.get(model_id)
         if record is None:
@@ -1370,7 +1371,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/models")
 
     @app.post("/models/delete/<model_id>")
-    def models_delete_api(model_id):
+    def models_delete_api(model_id) -> Response:
         registry = ModelRegistry(cfg)
         record = registry.get(model_id)
         if record is not None:
@@ -1385,7 +1386,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/models")
 
     @app.post("/models/test")
-    def models_test_api():
+    def models_test_api() -> dict[str, object]:
         """EU-237: probe the form's CURRENT field values (not the saved record) so the operator
         can validate a backend before saving — NO state change, ever. A blank api_key with a
         ``record_id`` (the edit form's hidden field) means "retest with the stored key": the
@@ -1406,7 +1407,7 @@ def create_app(cfg: Config, port: int = 8787):
             fields["provider"], fields["base_url"], fields["model_id"], api_key)
 
     @app.post("/api/run-selected")
-    def run_selected_api():
+    def run_selected_api() -> Response:
         app_name = _scope(request.form.get("app"))   # the run targets exactly one concrete project
         keys = request.form.getlist("ticket")
         if not keys:
@@ -1494,7 +1495,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/")
 
     @app.post("/api/run")
-    def run_api():
+    def run_api() -> Response:
         # EU-63: context is always ONE concrete project (the active tab) — no "All projects"/`*`. The
         # drain therefore drains just this project's backlog, not every app.
         app_name = _scope(request.form.get("app"))
@@ -1589,7 +1590,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/")
 
     @app.post("/api/stop-run")
-    def stop_run_api():
+    def stop_run_api() -> Response:
         # EU-64: stop THIS project's run (the Stop button lives on a per-tab board). Resolve the tab's
         # project read-only (don't steal the active tab), then signal that app's stop Event.
         appq = _board_project(request.form.get("app"))
@@ -1608,7 +1609,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/")
 
     @app.get("/standup")
-    def standup_page():
+    def standup_page() -> str:
         from . import council
         snap = "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>"
         intro = ("<p style='color:#8a909c;margin:-4px 0 14px'>The stand-up now runs inside the daily "
@@ -1629,7 +1630,7 @@ def create_app(cfg: Config, port: int = 8787):
                      intro + "<h3>Snapshot</h3>" + snap + "<h3>Officer stand-up</h3>" + rep + btn)
 
     @app.post("/api/standup")
-    def standup_api():
+    def standup_api() -> Response:
         if _claim_flag("standuping"):   # EU-361: claimed here, not inside _bg
             def _bg():
                 try:
@@ -1643,7 +1644,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/standup")
 
     @app.post("/api/council")
-    def council_api():
+    def council_api() -> Response:
         if _claim_flag("councilling"):   # EU-361: claimed here, not inside _bg
             def _bg():
                 try:
@@ -1657,7 +1658,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/council")
 
     @app.get("/council")
-    def council_page():
+    def council_page() -> str:
         from . import council
         hist = council.history(cfg, limit=25)
         if _state.get("shipreview"):
@@ -1687,7 +1688,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Daily Council", body)
 
     @app.post("/api/scribe")
-    def scribe_api():
+    def scribe_api() -> Response:
         if _claim_flag("scribing"):   # EU-361: claimed here, not inside _bg
             def _bg():
                 try:
@@ -1701,7 +1702,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/memory")
 
     @app.get("/memory")
-    def memory_page():
+    def memory_page() -> str:
         memory.ensure()
         top = (_working("The Technical Writer is folding recent lessons into Squad memory…")
                if _state.get("scribing") else "")
@@ -1735,7 +1736,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Unit Memory", body)
 
     @app.get("/meeting")
-    def meeting_form():
+    def meeting_form() -> str:
         from . import council
         names = [o[0] for o in council.COUNCIL]
         checks = "".join(
@@ -1755,7 +1756,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Call a meeting", body)
 
     @app.post("/api/meeting")
-    def meeting_api():
+    def meeting_api() -> Response:
         topic = (request.form.get("topic") or "").strip()
         if not topic:
             return redirect("/meeting")
@@ -1774,7 +1775,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/council")
 
     @app.post("/api/qa")
-    def qa_api():
+    def qa_api() -> Response:
         """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged. The two
         buttons ran near-identical officer inspections of DEV (patrol: QA/Security/Release inspect
         + FILE findings as Jira tickets; ship-review: the same lenses debating a DEV→MAIN GO/NO-GO),
@@ -1819,14 +1820,14 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/")
 
     @app.get("/api/deploy-status")
-    def deploy_status_api():
+    def deploy_status_api() -> Response:
         """Live state for the deploy progress bar. The cockpit polls this so the button shows progress instead of looking dead."""
         from flask import jsonify
         # EU-204: promote and ship-main endpoints removed; this now always returns inactive
         return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
 
     @app.get("/merge-stats")
-    def merge_stats_page():
+    def merge_stats_page() -> str:
         """EU-159/EU-160/EU-161: the frontend merge-statistics page with a four-way time-range
         selector (today / this week / this month / all time). Reads ``?time_range=`` and validates
         it against ``MERGE_STATS_TIME_RANGES``, falling back to 'today' when absent or invalid, then
@@ -2010,7 +2011,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Merge statistics", inner)
 
     @app.get("/api/merge-stats")
-    def merge_stats_api():
+    def merge_stats_api() -> Response | tuple[Response, int]:
         """EU-158: merge statistics for a time window, aggregated from the audit log's land-outcome
         events (`merged` / `pr_opened`). See ``compute_merge_stats`` for the aggregation itself."""
         from flask import jsonify
@@ -2023,7 +2024,7 @@ def create_app(cfg: Config, port: int = 8787):
         return jsonify(_link_merged_tickets(cfg, compute_merge_stats(cfg.audit_path, time_range)))
 
     @app.post("/api/approve-proposals")
-    def approve_proposals_api():
+    def approve_proposals_api() -> Response:
         """Approve a queued batch of unit-proposed tickets — file the checked subset to the board
         (de-duped). EU-61."""
         batch = (request.form.get("batch") or "").strip()
@@ -2046,7 +2047,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/needs")
 
     @app.post("/api/deny-proposals")
-    def deny_proposals_api():
+    def deny_proposals_api() -> Response:
         """Deny a queued batch of unit-proposed tickets — discard, nothing filed. EU-61."""
         batch = (request.form.get("batch") or "").strip()
         reason = (request.form.get("reason") or "").strip()
@@ -2057,7 +2058,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/needs")
 
     @app.post("/api/needs-sync")
-    def needs_sync_api():
+    def needs_sync_api() -> Response:
         """2026-07-19 (Commander order): reconcile Needs-you against live Jira NOW — clears
         parked/decision/errored entries whose tickets the Commander already moved (Done/QA) or
         re-queued (To Do) in Jira. Synchronous: the click waits for the truth."""
@@ -2080,7 +2081,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/needs")
 
     @app.get("/needs")
-    def needs_page():
+    def needs_page() -> str:
         """Unified Commander inbox — decisions, errored runs, parked tickets, open PRs.
 
         EU-102: renders s['rows'] (already typed with category+why) grouped into four
@@ -2365,7 +2366,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Needs you", "".join(out))
 
     @app.get("/usage")
-    def usage_page():
+    def usage_page() -> str:
         from . import usage as _usage
         w = _usage.windows(cfg)
         bs = _usage.budget_status(cfg)
@@ -2491,7 +2492,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Token usage", body)
 
     @app.get("/budget")
-    def budget_page():
+    def budget_page() -> str:
         """EU-122: Dedicated budget page — dual-provider budget monitor with Claude + GLM side-by-side.
 
         Shows a focused view of both providers' budget status with:
@@ -2528,7 +2529,7 @@ def create_app(cfg: Config, port: int = 8787):
                      '<div class=bhead>Dual-provider budget monitor</div>' + expl + dual_gauge + "</div>")
 
     @app.get("/jira")
-    def jira_page():
+    def jira_page() -> str:
         """Pick a Jira per project + quick-connect a new one. Roman runs several products against
         DIFFERENT Jira accounts; this lets him switch the active Jira for the current project (or add one)
         without hand-editing .env / config. Tokens are shown masked; the raw token never leaves the box."""
@@ -2691,7 +2692,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Jira connections", body)
 
     @app.post("/api/jira-connect")
-    def jira_connect_api():
+    def jira_connect_api() -> Response:
         from . import connections as _conn
         f = request.form
         app_name = (f.get("app") or "").strip()
@@ -2706,20 +2707,20 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect(f"/jira?app={quote(app_name)}")
 
     @app.post("/api/jira-assign")
-    def jira_assign_api():
+    def jira_assign_api() -> Response:
         from . import connections as _conn
         app_name = (request.form.get("app") or "").strip()
         _conn.assign(cfg, app_name, (request.form.get("id") or "").strip())
         return redirect(f"/jira?app={quote(app_name)}")
 
     @app.post("/api/jira-forget")
-    def jira_forget_api():
+    def jira_forget_api() -> Response:
         from . import connections as _conn
         _conn.remove(cfg, (request.form.get("id") or "").strip())
         return redirect(f"/jira?app={quote((request.form.get('app') or '').strip())}")
 
     @app.get("/onboard")
-    def onboard_page():
+    def onboard_page() -> str:
         """Scaffold a new product into config.yaml — so the unit serves SignalDesk / the EAs, not just
         Automatixy. Detects branches, backs up the file, optionally wires a saved Jira connection.
         Repos found next to your configured ones are listed as click-to-onboard (they pre-fill the form)."""
@@ -2777,7 +2778,7 @@ def create_app(cfg: Config, port: int = 8787):
             nearby = ("<h3>Found nearby <span class=opt style='color:#5c6573;font-weight:400'>"
                       "(click to fill the form)</span></h3><div class=nearby>" + chips + "</div>")
 
-        def val(v):
+        def val(v) -> str:
             return f" value='{esc(v)}'" if v else ""
         form = (
             "<form method=post action=/api/onboard class=ob>"
@@ -2799,7 +2800,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Onboard a product", body)
 
     @app.post("/api/onboard")
-    def onboard_api():
+    def onboard_api() -> str:
         from . import onboarding
         esc = html.escape
         f = request.form
@@ -2847,7 +2848,7 @@ def create_app(cfg: Config, port: int = 8787):
                      "<a class='navbtn' href='/'>cockpit</a></div>")
 
     @app.get("/forensics")
-    def forensics_page():
+    def forensics_page() -> str:
         """Why tickets fail — a taxonomy of causes, repeat offenders, and the auto-written post-mortems."""
         from . import forensics as _fx
         esc = html.escape
@@ -2958,12 +2959,12 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Failure forensics", body)
 
     @app.get("/roster-doc")
-    def roster_doc_page():
+    def roster_doc_page() -> str:
         from . import roster as _roster
         return _wrap("Unit roster", _roster.html_view(cfg, _roster.latest_status(cfg)))
 
     @app.get("/ship-preview")
-    def ship_preview_page():
+    def ship_preview_page() -> str:
         from . import sync as _sync
         appq = (request.args.get("app") or "").strip() or (cfg.apps[0].name if cfg.apps else "")
         # Skinned with the EU-39 design tokens injected by _wrap; the purple "ship" accent
@@ -3066,7 +3067,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Ship to production", body)
 
     @app.get("/chat")
-    def chat_page():
+    def chat_page() -> str:
         try:
             from . import decisions
             npend = len(decisions.load(cfg))
@@ -3189,7 +3190,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Chat with the CTO", body)
 
     @app.get("/group")
-    def group_page():
+    def group_page() -> str:
         officer = (request.args.get("officer") or "").strip()
         # EU-287: a lightweight typing indicator (not a banner) — the officer(s) triage picked are
         # composing. `_state['grouping']` already tracks the in-flight window (set in group_api below).
@@ -3253,12 +3254,12 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Group room — the unit", body)
 
     @app.get("/api/group-thread")
-    def group_thread_api():
+    def group_thread_api() -> Response:
         from flask import Response
         return Response(_group_inner(cfg), mimetype="text/html")
 
     @app.post("/api/group")
-    def group_api():
+    def group_api() -> Response | tuple[Response, int]:
         from urllib.parse import quote
 
         from flask import jsonify
@@ -3293,7 +3294,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect(_dest)
 
     @app.get("/api/chat-thread")
-    def chat_thread_api():
+    def chat_thread_api() -> Response:
         from flask import Response
         try:
             offset = max(int(request.args.get("offset") or 0), 0)
@@ -3302,7 +3303,7 @@ def create_app(cfg: Config, port: int = 8787):
         return Response(_chat_inner(cfg, offset=offset), mimetype="text/html")
 
     @app.post("/api/chat")
-    def chat_api():
+    def chat_api() -> Response:
         text = (request.form.get("text") or "").strip()
         tid = (request.form.get("ticket") or "").strip()
         if text:
@@ -3331,7 +3332,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/chat")
 
     @app.post("/api/answer")
-    def answer_api():
+    def answer_api() -> Response:
         """Ship the Commander's answer to a parked ticket straight from the Needs-you page.
 
         The reply is classified (orchestrator/intent.py) and routed to the matching action, so a
@@ -3505,7 +3506,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/needs")
 
     @app.post("/needs/resolve")
-    def needs_resolve():
+    def needs_resolve() -> Response:
         """Dismiss a pending decision without re-running the ticket.
 
         Pops the entry from pending_decisions.json (same as resolving a Telegram reply, but
@@ -3524,7 +3525,7 @@ def create_app(cfg: Config, port: int = 8787):
         return redirect("/needs")
 
     @app.get("/report")
-    def report_form():
+    def report_form() -> str:
         apps = "".join(f"<option>{html.escape(a.name)}</option>" for a in cfg.apps)
         form = (
             "<form method=post action=/api/report enctype=multipart/form-data>"
@@ -3538,7 +3539,7 @@ def create_app(cfg: Config, port: int = 8787):
         return _wrap("Report a problem", form)
 
     @app.post("/api/report")
-    def report_api():
+    def report_api() -> Response:
         app_name = request.form.get("app") or (cfg.apps[0].name if cfg.apps else "")
         # EU-64: claim THIS project's run slot (per-project TOCTOU guard + the cross-project parallel
         # cap). A second run on the SAME project is refused; other projects are unaffected.

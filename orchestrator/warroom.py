@@ -20,7 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional, TypedDict
 
 from . import cockpit_views as CV
 from . import dashboard as D
@@ -146,10 +146,18 @@ def _daily_token_burn(cfg, days: int = 14) -> list[float]:
 # dashboard._audit_cache keys on — so a burst of SSE board frames / open tabs share ONE JSON parse of
 # the merged history instead of re-parsing it every frame. The cached dict is read-only for all callers
 # (kpis, roster, _merges_per_day); none mutate it, so sharing one instance is safe.
-_scan_cache: dict[str, tuple[tuple, dict[str, Any]]] = {}   # audit path -> (sig, scan result)
+class _ScanResult(TypedDict):
+    """The memoized single-pass audit scan shape (_scan): last-seen ts + count per event
+    kind, plus per-calendar-day merged counts for the KPI trend sparkline."""
+    last: dict[str, datetime]
+    count: dict[str, int]
+    merged_by_day: dict[str, int]
 
 
-def _scan(audit_path: str | Path) -> dict[str, Any]:
+_scan_cache: dict[str, tuple[tuple, _ScanResult]] = {}   # audit path -> (sig, scan result)
+
+
+def _scan(audit_path: str | Path) -> _ScanResult:
     """One pass over the raw audit: last-seen ts + count per event kind, and a per-calendar-day count
     of 'merged' events (``merged_by_day``) for the KPI trend sparkline. Cheap and used by every panel.
 
@@ -1025,7 +1033,7 @@ def _fmt_tokens(n: int) -> str:
 # --------------------------------------------------------------------------- #
 # Render
 
-def _esc(s: Any) -> str:
+def _esc(s: object) -> str:
     return html.escape(str(s))
 
 

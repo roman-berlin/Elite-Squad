@@ -25,7 +25,6 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 try:  # POSIX advisory file locking; absent on Windows.
     import fcntl
@@ -61,7 +60,7 @@ class AuditLog:
         self._live_window_days = live_window_days
         self._rotate_backoff_until = 0.0
 
-    def record(self, event: str, **fields: Any) -> None:
+    def record(self, event: str, **fields: object) -> None:
         row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event}
         row.update({k: _coerce(v) for k, v in fields.items()})
         line = json.dumps(row, default=str) + "\n"
@@ -172,7 +171,7 @@ def _ts_epoch(ts: str) -> float | None:
     return None
 
 
-def _coerce(v: Any) -> Any:
+def _coerce(v: object) -> object:
     if dataclasses.is_dataclass(v) and not isinstance(v, type):
         return dataclasses.asdict(v)
     return v

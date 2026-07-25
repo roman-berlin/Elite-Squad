@@ -378,7 +378,7 @@ def _sse(event: str, data: str) -> str:
 _RUN_APP: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("run_app", default=None)
 
 
-def set_run_app(app_key: str | None):
+def set_run_app(app_key: str | None) -> contextvars.Token[str | None]:
     """Bind this (async) context's stdout attribution to ``app_key``; returns the reset token."""
     return _RUN_APP.set(app_key)
 
@@ -395,7 +395,7 @@ class _Tee:
     def __init__(self, real):
         self._real = real
 
-    def write(self, s: str):
+    def write(self, s: str) -> None:
         self._real.write(s)
         # EU-104: tag each captured line with the currently-active project so per-tab live-feed
         # panels can filter to their own project's output. EU-272: the run-scoped ContextVar wins
@@ -421,10 +421,10 @@ class _Tee:
                 except Exception:  # noqa: BLE001 — log writes must never abort a run
                     pass
 
-    def flush(self):
+    def flush(self) -> None:
         self._real.flush()
 
-    def isatty(self):
+    def isatty(self) -> bool:
         return getattr(self._real, "isatty", lambda: False)()
 
 
