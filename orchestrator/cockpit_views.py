@@ -96,13 +96,75 @@ def _back_home() -> str:
     return f"/?app={html.escape(appq)}" if appq else "/"
 
 
+def _back_btn(home_url: str) -> str:
+    """Shared floating back-to-cockpit button (EU-542).
+
+    Renders a small ``position:fixed`` arrow-back link above all page content so it stays
+    visible at ANY scroll depth — exactly what the Commander asked for ("a back to cockpit
+    arrow button that will move with the chat"). Theme tokens only (no hex literals), so it
+    re-skins from the single :root block and is correct in dark AND light. Keyboard
+    accessible: a real ``<a>``, tab-focusable, Enter navigates, ``--ring`` on focus-visible.
+
+    The PM's EU-542 placement call is baked in:
+      * a subtle token-based translucent backdrop (color-mix over ``--panel2`` + blur, gated
+        behind @supports with a solid token fallback) so any mid-scroll overlap stays legible;
+      * below 560px width it collapses to an icon-only 38px disc so the message column is
+        never covered;
+      * offsets and the caller-side clearance both include ``env(safe-area-inset-*)`` so a
+        notched device never overlaps the button OR the content under it.
+    Callers clear the footprint below the button: ``_wrap`` pads the body's top, the /tasks
+    route indents the dashboard header.
+    """
+    return (
+        "<style>"
+        ".backbtn{position:fixed;z-index:100;"
+        "top:calc(16px + env(safe-area-inset-top,0px));"
+        "left:calc(16px + env(safe-area-inset-left,0px));"
+        "display:inline-flex;align-items:center;gap:9px;padding:11px 16px;"
+        "background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-pill);"
+        "color:var(--ink);font-size:13.5px;font-weight:650;text-decoration:none;"
+        "transition:all var(--t-fast);box-shadow:var(--shadow-2);animation:bbeu542 .22s ease-out}"
+        "@keyframes bbeu542{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}"
+        # Translucent token backdrop — the @supports gate keeps older browsers on the solid
+        # token background above instead of a fully transparent (unreadable) button.
+        "@supports(background:color-mix(in srgb,red 50%,blue)){"
+        ".backbtn{background:color-mix(in srgb,var(--panel2) 85%,transparent);"
+        "backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px)}}"
+        ".backbtn svg{width:17px;height:17px;transition:transform var(--t-fast);flex:none}"
+        ".backbtn:hover{background:var(--line);border-color:var(--accent);color:var(--accent);"
+        "transform:translateX(-3px);box-shadow:var(--shadow-3)}"
+        ".backbtn:hover svg{transform:translateX(-2px)}"
+        ".backbtn:active{transform:translateX(-1px)}"
+        ".backbtn:focus-visible{outline:none;box-shadow:var(--ring)}"
+        # Narrow screens: icon-only 38px disc tucked into the corner, hugging the safe area.
+        "@media(max-width:560px){"
+        ".backbtn{top:calc(10px + env(safe-area-inset-top,0px));"
+        "left:calc(10px + env(safe-area-inset-left,0px));width:38px;height:38px;padding:0;"
+        "justify-content:center}"
+        ".backbtn .bbl{display:none}"
+        ".backbtn svg{width:19px;height:19px}}"
+        "@media(prefers-reduced-motion:reduce){.backbtn{animation:none;transition:none}}"
+        "</style>"
+        f"<a class='backbtn' href='{home_url}' aria-label='Back to cockpit'>"
+        f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
+        f"stroke-linecap='round' stroke-linejoin='round' aria-hidden=true>"
+        f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg><span class=bbl>cockpit</span></a>"
+    )
+
+
 def _wrap(title: str, inner: str) -> str:
+    """Page chrome with a **floating** back-to-cockpit button (EU-542)."""
+    # body top-padding clears the fixed button's footprint (PM EU-542 call): 66px ≥ the
+    # desktop pill's bottom edge (16px offset + ~46px box), and still ≥ the 38px mobile disc
+    # (10px offset) — plus the safe-area inset on notched devices, so the first heading /
+    # chat bubble / timestamp always starts BELOW the button and is never obscured.
     return ("<!doctype html><meta charset=utf-8><title>" + html.escape(title) + "</title>"
             + _token_css() +
             "<style>*{box-sizing:border-box}"
             "body{background:radial-gradient(1100px 440px at 80% -10%,rgba(77,124,255,.08),transparent 60%),"
             "var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"
-            "\"Segoe UI\",Inter,sans-serif;margin:0;padding:22px 30px}a{color:var(--info)}"
+            "\"Segoe UI\",Inter,sans-serif;margin:0;"
+            "padding:calc(66px + env(safe-area-inset-top,0px)) 30px}a{color:var(--info)}"
             ".rep{white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);"
             "border-radius:var(--r-lg);padding:16px}"
             "textarea,select,input{background:var(--panel);border:1px solid var(--line2);color:var(--ink);"
@@ -110,21 +172,9 @@ def _wrap(title: str, inner: str) -> str:
             "button{background:var(--accent);border:0;color:#fff;border-radius:var(--r-md);padding:9px 16px;"
             "font-weight:650;cursor:pointer}"
             "a:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible,"
-            "input:focus-visible{outline:none;box-shadow:var(--ring)}"
-            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
-            "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
-            "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;"
-            "transition:all var(--t-fast);margin-bottom:16px;box-shadow:var(--shadow-1)}"
-            ".backbtn svg{width:18px;height:18px;transition:transform var(--t-fast);flex:none}"
-            ".backbtn:hover{background:var(--line);border-color:var(--accent);color:var(--accent);"
-            "transform:translateX(-3px);box-shadow:var(--shadow-2)}"
-            ".backbtn:hover svg{transform:translateX(-2px)}"
-            ".backbtn:active{transform:translateX(-1px)}"
-            ".backbtn:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
-            f"<a class='backbtn' href='{_back_home()}' aria-label='Back to cockpit'>"
-            f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-            f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a> "
-            f"<h2>{html.escape(title)}</h2>{inner}")
+            "input:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
+            + _back_btn(_back_home())
+            + f"<h2>{html.escape(title)}</h2>{inner}")
 
 
 def _working(msg: str, secs: int = 5) -> str:

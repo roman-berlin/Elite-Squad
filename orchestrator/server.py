@@ -51,6 +51,7 @@ from .cockpit_views import (  # noqa: F401
     _CHAT_STYLE,
     _actbar,
     _actbtn,
+    _back_btn,
     _bug_desc,
     _bug_title,
     _charged,
@@ -1016,12 +1017,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             f"href='/tasks?app={html.escape(a.name)}'>{html.escape(a.name)}</a>"
             for a in cfg.apps)
         back = (
+            # Floating back button (EU-542) via the shared partial — the SAME fixed pill as the
+            # _wrap pages, so the log can be left from any scroll depth. The dashboard <header>
+            # gets extra left padding so the float parks in its left corner WITHOUT covering the
+            # page title (150px clears the ~110px desktop pill + its 16px offset; 60px clears the
+            # 38px mobile disc + its 10px offset — both plus the safe-area inset). The project
+            # chip row stays in normal flow below the header, untouched by the float.
+            _back_btn(_home) +
             "<style>"
-            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:10px 16px;"
-            "background:var(--panel);border:1px solid var(--line2);border-radius:9px;"
-            "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;margin:0}"
-            ".backbtn svg{width:18px;height:18px;flex:none}"
-            ".backbtn:hover{border-color:var(--accent);color:var(--accent)}"
+            "header{padding-left:calc(150px + env(safe-area-inset-left,0px))}"
             ".tasknav{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 30px 0}"
             ".pchips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}"
             ".pchips .plabel{color:var(--dim);font-size:12px}"
@@ -1029,12 +1033,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             "color:var(--dim);font-size:13px;font-weight:600;text-decoration:none}"
             ".pchip:hover{border-color:var(--accent);color:var(--ink)}"
             ".pchip.on{background:var(--accentbg);border-color:var(--accent);color:var(--ink)}"
+            "@media(max-width:560px){"
+            "header{padding-left:calc(60px + env(safe-area-inset-left,0px));padding-right:16px}"
+            ".tasknav{padding:12px 16px 0}}"
             "</style>"
             "<div class=tasknav>"
-            f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
-            "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
-            "stroke-linecap='round' stroke-linejoin='round'>"
-            "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>"
             f"<div class=pchips><span class=plabel>Project:</span>{chips}</div>"
             "</div>")
         return page.replace("</header>", "</header>" + back, 1)
