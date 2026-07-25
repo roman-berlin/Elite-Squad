@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-526 · Elite-Unit · • Constants (_GC_INTERVAL_HOURS, _GC_SENTINEL_NAME) placed exactly where the ticket specifies, next to STATE_DIR_NAME/_CLONE_DEPTH.
 - 2026-07-25 · EU-477 · Elite-Unit · • Spec met: live_runs() is the shared live-subset computation; active_run() is a faithful thin wrapper (EU-130 triage + EU-448 phase derivation moved verbatim into _run_obj_for). · 🔗 (no UI — `.venv/bin/python tests/run_all.py`, or targeted: `tests/warroom_live_runs_test.py` + `tests/warroom_triage_test.py` + `tests/eu448_stage_bar_test.py` + `tests/eu486_multi_card_test.py` + `tests/render_board_multi_run_test.py`)
 - 2026-07-25 · EU-519 · Elite-Unit · • `_green_test_claim()` now strips quoted context via `reviewer._strip_quoted_context` before scanning, mirroring the existing RED-admission pattern (same local-import convention used elsewhere in gate.py, no… · 🔗 (no UI — verify with `python3 tests/gate_vs_builder_test.py`; functional verification: `gate_vs_builder_verdict("The fixture asserts `all tests pass`", gate_passed=False)` returns `None`)
 - 2026-07-25 · EU-517 · Elite-Unit · • Wiring is minimal and exactly scoped to the ticket: each field passed through `_strip_quoted_context` before the three existing regexes, original `text.strip()` still returned on a hit. · 🔗 (no UI — `python3 orchestrator.py` import smoke check, or `python3 tests/eu517_reviewer_quoted_admission_test.py`)
