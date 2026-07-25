@@ -96,3 +96,30 @@ model-selection algorithm on a single data point would be over-fitting. The 30-m
 accumulating passes-per-merge / escalation-rate; if the favourable signal holds over ~10 tickets,
 THEN promote it to a documented/coded default. If escalations climb or the burn spikes, revert to
 `qwen3.7-plus` (one registry update).
+
+## Confirmation — 2026-07-25 01:58 (KEEP max-preview: CONFIRMED, no longer provisional)
+
+The ~10-ticket bar is cleared. Since the 2026-07-24 18:15 switch, `qwen3.8-max-preview` as builder
+(Opus planner/reviewer) produced:
+
+| Metric | max-preview (10 tickets) | qwen3.7-plus baseline (3 tickets) |
+| --- | --- | --- |
+| Merged | **10 / 10 (100%)** | 2 / 3 (67%) |
+| Escalated (builder↔reviewer disagreement) | **0** | 1 |
+| Sent to QA | 0 | 0 |
+| Avg build passes / merge | **1.5** | 1.5 |
+| Quota (Token-Plan 5h/7d) | healthy — HTTP 200 throughout | — |
+
+Merged run: EU-479, EU-480, EU-486, EU-487, EU-488, EU-500, EU-501, EU-496, EU-502, EU-503.
+**10:0 merge-to-escalation.** The hypothesis held — a stronger builder that lands first-pass beats a
+cheaper one bounced 2–3×; avg passes/merge stayed ~1.5 with zero reviewer escalations, so the higher
+per-build cost is not repaid by rebuilds *and* it isn't lowering the bar (Opus reviewer still gates).
+
+**Decision: `qwen3.8-max-preview` is the CONFIRMED builder default** (was provisional). Still NOT a
+code change: "use the strongest available secondary" is a *configuration* fact (registry secondary →
+the top-tier record + `_HYBRID_BUILD_TAGS = {"builder"}`), not a branch to hard-code — there is no
+auto-select-strongest heuristic to write for a 2-model setup, and adding one would be premature. The
+one-line revert path stands: registry secondary → `qwen3.7-plus` if escalations climb or burn spikes.
+
+**Still open:** a true Qwen-vs-GLM A/B on cost+quality when the GLM weekly cap resets (2026-07-27) —
+this run only proves max-preview beats its own 3.7-plus baseline, not that it beats GLM-5.2.

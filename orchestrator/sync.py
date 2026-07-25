@@ -38,13 +38,17 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import NotRequired, TypedDict
 
 from .config import Config
 
 STATE_DIR_NAME = ".unit-state"   # the dedicated state clone, sibling of audit.jsonl (gitignored)
 STATE_BRANCH = "unit-state"      # orphan branch: carries only shared/, never code
 _CLONE_DEPTH = "50"              # shallow — we only ever need the tip of the state branch
+
+# EU-526 — git gc throttle plumbing (no invocation yet; just the due-decision layer).
+_GC_INTERVAL_HOURS = 24          # minimum seconds between successive ``git gc`` calls
+_GC_SENTINEL_NAME = ".last_gc"   # untracked sentinel: survives ``reset --hard FETCH_HEAD``
 
 
 def _safe_host(raw: str) -> str:
@@ -232,6 +236,92 @@ def ensure_state_clone(cfg: Config) -> Path | None:
     return sd
 
 
+# EU-526 — git gc throttle plumbing (decision layer only; invocation follows in a later ticket).
+
+def _gc_sentinel(cfg: Config) -> Path:
+    """Path to the ``.last_gc`` sentinel inside the state clone."""
+    return state_dir(cfg) / _GC_SENTINEL_NAME
+
+
+def _gc_is_due(cfg: Config, force: bool = False) -> bool:
+    """Decide whether a ``git gc`` run is due.
+
+    Returns **True** when:
+    * ``force=True`` (caller explicitly requested it), or
+    * the sentinel file is missing (fresh clone, never gc'd), or
+    * the sentinel's mtime is older than ``_GC_INTERVAL_HOURS``, or
+    * any OSError occurs reading the sentinel (best-effort — don't crash sync over a stale fs).
+
+    Returns **False** when the sentinel exists and was touched within the throttle window.
+    Never spawns a subprocess.
+    """
+    if force:
+        return True
+    try:
+        p = _gc_sentinel(cfg)
+        st = p.stat()
+        age = time.time() - st.st_mtime
+        return age >= _GC_INTERVAL_HOURS * 3600
+    except OSError:
+        return True  # absent or unreadable → safe to gc
+
+
+def _mark_gc_done(cfg: Config) -> None:
+    """Touch the ``.last_gc`` sentinel to refresh its mtime.
+
+    Best-effort: an OSError is swallowed so a failed sentinel write can never
+    crash a future sync run.  Uses ``Path.touch()`` which updates mtime on
+    an existing file — exactly the "refresh the throttle clock" semantics
+    required.
+    """
+    try:
+        p = _gc_sentinel(cfg)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+    except OSError:
+        pass  # sidecar-style best-effort: failure must not crash sync
+
+
+# EU-527 — run ``git gc`` inside the state clone, throttled by the sentinel.
+
+
+def gc_state_clone(cfg: Config, force: bool = False) -> dict[str, bool | str]:
+    """Run ``git gc --prune=now`` in the ``.unit-state`` clone.
+
+    Throttled behind ``_gc_is_due()`` so that real git-gc only fires once per
+    ``_GC_INTERVAL_HOURS`` window unless *force* overrides.  A missing .unit-state
+    directory (no clone yet) is treated as "skip" rather than an error.
+
+    Never raises.  Returns one of::
+
+        {"ok": True,  "ran": True}            # gc ran and exited cleanly
+        {"ok": True,  "ran": False, "reason": "..."}  # skipped (not due / no clone)
+        {"ok": False, "ran": True,  "error": "..."}   # subprocess failed or raised
+    """
+    sd = state_dir(cfg)
+
+    # Guard against running inside a non-existent clone.
+    if not (sd / ".git").exists():
+        return {"ok": True, "ran": False, "reason": "no-clone"}
+
+    # Only proceed when due (or forced).
+    if not _gc_is_due(cfg, force):
+        return {"ok": True, "ran": False, "reason": "not-due"}
+
+    try:
+        result = _git(sd, "gc", "--prune=now")
+        if result.returncode == 0:
+            _mark_gc_done(cfg)
+            return {"ok": True, "ran": True}
+        else:
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            msg = stderr or stdout or f"returncode={result.returncode}"
+            return {"ok": False, "ran": True, "error": msg[:300]}
+    except Exception as e:  # noqa: BLE001 — must never raise, mirrors EU-496 compaction contract
+        return {"ok": False, "ran": True, "error": str(e)[:300]}
+
+
 def compact_state_branch(cfg: Config) -> dict[str, bool | str | None]:
     """Rebuild the ``unit-state`` branch's history into a single commit.
 
@@ -286,23 +376,294 @@ def compact_state_branch(cfg: Config) -> dict[str, bool | str | None]:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# EU-496 — throttle compact_state_branch behind a cadence gate
+# ---------------------------------------------------------------------------
+
+
+def _compact_sidecar(cfg: Config) -> Path:
+    """Sidecar path for tracking the last successful state-compaction timestamp."""
+    return Path(cfg.audit_path).parent / "last_state_compact.txt"
+
+
+def _state_commit_count(cfg: Config) -> int | None:
+    """The TRUE commit count of the ``unit-state`` branch, or None when it can't be known.
+
+    The state clone bootstraps shallow (``--depth 50``), so a raw ``rev-list --count`` caps at 50
+    and the default threshold (150) could NEVER fire. Complete the history first — a one-time
+    ``fetch --unshallow``; git removes the shallow graft so every later sync skips straight to the
+    (local, cheap) count and ordinary fetches stay incremental. Best-effort: an offline unshallow
+    simply leaves the count capped for this cycle (the cadence leg still covers it), and any
+    git / FS failure yields None so the gate skips without ever failing the sync.
+
+    Counts the LOCAL ``unit-state`` ref, which ``git_sync`` keeps at the fetched tip via its
+    ``reset --hard FETCH_HEAD`` and which ``compact_state_branch_now`` advances to the compacted
+    tip after a successful compaction — counting a ref nobody maintains would go stale-high the
+    moment a compaction force-pushes (the clone is left on ``tmp-compact``), re-firing the gate
+    on every subsequent sync.
+    """
+    sd = ensure_state_clone(cfg)
+    if sd is None:
+        return None
+    try:
+        shallow = _git(sd, "rev-parse", "--is-shallow-repository")
+        if shallow.returncode == 0 and (shallow.stdout or "").strip() == "true":
+            # One-time. rc deliberately ignored: offline, the clone stays shallow and the count
+            # stays capped at the depth — leg (a) just skips this cycle, the cadence leg covers it.
+            _git(sd, "fetch", "--unshallow", "origin", STATE_BRANCH)
+        r = _git(sd, "rev-list", "--count", STATE_BRANCH)
+        return int((r.stdout or "").strip()) if r.returncode == 0 else None
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _should_compact_state(cfg: Config) -> bool:
+    """Decide whether ``compact_state_branch(cfg)`` should run now.
+
+    Returns True when **either**:
+    (a) the ``unit-state`` branch's TRUE history exceeds ``GENERAL_STATE_COMPACT_THRESHOLD``
+        commits (default 150 — the clone is unshallowed before counting, so the threshold is
+        actually reachable, not capped at the depth-50 shallow window), or
+    (b) more than ``GENERAL_STATE_COMPACT_DAYS`` (default 7) have elapsed since the last
+        successful compaction, tracked in the sidecar file.
+
+    Re-evaluated on EVERY call — deliberately no process-lifetime cache, so a long-lived cockpit
+    process calling ``git_sync`` repeatedly can never freeze the throttle on a stale verdict.
+    Best-effort — any git / filesystem error returns False so that a stale sidecar or missing
+    branch never prevents the rest of the sync from completing. Also returns False when
+    ``pull_only()`` is set (the VPS has no push credentials; compaction requires force-push).
+    """
+    if pull_only():
+        return False
+    try:
+        threshold = int(os.environ.get("GENERAL_STATE_COMPACT_THRESHOLD", "150"))
+        days = int(os.environ.get("GENERAL_STATE_COMPACT_DAYS", "7"))
+    except ValueError:
+        return False
+
+    # (a) Commit-count leg — the branch's true history (unshallowed), not the shallow window.
+    count = _state_commit_count(cfg)
+    above = count is not None and count > threshold
+
+    # (b) Weekly cadence leg — read the sidecar file (best-effort).
+    cadence = False
+    try:
+        last_ts = float(_compact_sidecar(cfg).read_text(encoding="utf-8", errors="replace").strip())
+        cadence = (time.time() - last_ts) >= days * 86400
+    except (OSError, ValueError):
+        pass  # absent / unreadable → never compacted here → don't storm a fresh clone
+
+    return above or cadence
+
+
+def compact_state_branch_now(cfg: Config) -> None:
+    """Run ``compact_state_branch(cfg)`` with best-effort error handling.
+
+    Never raises into the caller. On success: (1) advances the LOCAL ``unit-state`` ref to the
+    compacted tip — the clone is left on ``tmp-compact`` and the stale ref would otherwise keep
+    the commit-count leg over threshold, re-firing compaction on EVERY subsequent sync — and
+    (2) writes the current epoch into the sidecar so the cadence leg skips until the next window
+    (EU-496 bookkeeping).
+    """
+    sd = ensure_state_clone(cfg)
+    if sd is None:
+        return  # no origin → silently skip (same signal as _should_compact_state=False)
+    rc = compact_state_branch(cfg)
+    if not rc["ok"]:
+        return
+    _git(sd, "update-ref", f"refs/heads/{STATE_BRANCH}", "HEAD")
+    try:
+        _compact_sidecar(cfg).write_text(str(int(time.time())), encoding="utf-8")
+    except OSError:
+        pass  # sidecar write failure must not crash sync
+
+
+def _tail_window(text: str, max_records: int, max_bytes: int) -> str:
+    """Return the newest-complete-record tail of *text* bounded by *max_records* / *max_bytes*.
+
+    Walks backwards from the end, keeping only complete newline-delimited jsonl records.
+    **Always retains at least the final record** (the newest event), even if that single
+    record alone would overflow ``max_bytes`` — this is what preserves EU-428 freshness
+    (``peer_ages`` / ``STALE_PEER_S`` can always find a recent ``ts``).
+
+    When the source already fits within both bounds the text is returned *byte-identical*
+    (no reformatting, no added/stripped trailing newline), so callers testing verbatim
+    copies on small files remain unaffected.
+
+    Bounds come from environment variables::
+
+        GENERAL_PUBLISH_MAX_RECORDS   # default 2000
+        GENERAL_PUBLISH_MAX_BYTES     # default 1 MiB
+
+    Invalid values silently fall back to defaults — never raise on the best-effort sync path.
+
+    .. note:: Trade-off: the peer host (VPS cockpit) sees only the recent window of this
+       host's audit via ``shared/<host>.jsonl``. Full history remains intact in the publisher's
+       own local ``audit.jsonl``. This is intentional: the shared copy is a lightweight signal,
+       not a full replica.
+    """
+    if not text:
+        return ""
+
+    # Fast path: source fits entirely — return byte-identical (no allocation churn).
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError:
+        encoded = text.encode("utf-8", errors="replace")
+
+    n_lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+    if n_lines <= max_records and len(encoded) <= max_bytes:
+        return text
+
+    lines = text.split("\n")  # ['l1', 'l2', '', ...] for trailing-newline JSONL
+    total = len(lines)
+
+    # Start from the very end and walk backward, consuming records.
+    pos = total
+    records_kept = 0
+    byte_count = 0
+
+    while pos > 0:
+        j = pos - 1
+        # Strip any trailing empty element produced by a final "\n"
+        while j >= 0 and not lines[j]:
+            j -= 1
+        if j < 0:
+            break
+        chunk_size = len(lines[j].encode("utf-8")) + 1  # +1 for "\n"
+        if records_kept == 0 or records_kept < max_records and byte_count + chunk_size <= max_bytes:
+            byte_count += chunk_size
+            records_kept += 1
+            pos = j
+        else:
+            break
+
+    # Edge case: after dropping below the record limit, the byte limit may
+    # still be exceeded (a single large record dominates). Trim from the left.
+    while records_kept > 1 and byte_count > max_bytes:
+        i = 0
+        while i < pos and not lines[i]:
+            i += 1
+        if i >= pos:
+            break
+        removed = len(lines[i].encode("utf-8")) + 1
+        byte_count -= removed
+        records_kept -= 1
+        pos = i + 1
+
+    # Ensure at least one record survives (preserves freshness guarantee).
+    if records_kept == 0 and pos < total:
+        pos = 0
+
+    # Reassemble, preserving the original trailing-newline pattern.
+    result_parts = lines[pos:]
+    result = "\n".join(result_parts)
+
+    # Force trailing newline if the source had one (JSONL contract).
+    if text.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
+    return result
+
+
+def _get_publish_bounds() -> tuple[int, int]:
+    """Read GENERAL_PUBLISH_MAX_RECORDS and GENERAL_PUBLISH_MAX_BYTES, falling back to safe
+    defaults on ValueError. Returns (max_records, max_bytes)."""
+    try:
+        max_records = max(1, int(os.environ.get("GENERAL_PUBLISH_MAX_RECORDS", "2000")))
+    except (ValueError, TypeError):
+        max_records = 2000
+    try:
+        max_bytes = max(1, int(os.environ.get("GENERAL_PUBLISH_MAX_BYTES", str(1 << 20))))
+    except (ValueError, TypeError):
+        max_bytes = 1 << 20
+    return max_records, max_bytes
+
+
 def publish(cfg: Config, sd: Path | None = None) -> Path:
-    """Copy this machine's live ``audit.jsonl`` into ``shared/<host>.jsonl`` in the state clone."""
+    """Publish this host's most-recent audit events to ``shared/<host>.jsonl`` in the state clone.
+
+    The published file is a **bounded tail window** of the live ``audit.jsonl``:
+    only the newest *N* complete records (up to ~M bytes) are shipped, configured via
+    ``GENERAL_PUBLISH_MAX_RECORDS`` (default 2000) and ``GENERAL_PUBLISH_MAX_BYTES`` (default 1 MiB).
+    A growing source audit does NOT make the published file grow past the bound — each publish
+    overwrites with the latest tail window.
+
+    **Trade-off:** the peer host (e.g. VPS cockpit reading ``shared/<host>.jsonl``) sees only the
+    recent window of this host's audit. Full history remains intact in the publisher's own local
+    ``audit.jsonl``, available to the local cockpit and the ``general sync`` command. This is
+    deliberate: the shared file is a lightweight freshness signal, not a full audit replica.
+
+    The newest event is always present in the published file — even a single massive record
+    is kept whole, preserving ``peer_ages()`` / ``STALE_PEER_S`` freshness guarantees.
+
+    Single-writer invariant: only ``shared/<host>.jsonl`` is written. Other hosts' files are
+    untouched.
+    """
     sd = sd or state_dir(cfg)
     dst = sd / "shared" / f"{host_id(cfg)}.jsonl"
     dst.parent.mkdir(parents=True, exist_ok=True)
     src = Path(cfg.audit_path)
-    dst.write_text(src.read_text(encoding="utf-8") if src.exists() else "", encoding="utf-8")
+    raw = src.read_text(encoding="utf-8") if src.exists() else ""
+    max_records, max_bytes = _get_publish_bounds()
+    dst.write_text(_tail_window(raw, max_records, max_bytes), encoding="utf-8")
     return dst
 
 
-def git_sync(cfg: Config) -> dict[str, Any]:
+# Result shapes of the sync/promote operations below — fixed keys, documented once here so call
+# sites read a named contract instead of a loose mapping.
+class GitSyncStatus(TypedDict):
+    host: str
+    pulled: bool
+    pushed: bool | None
+    hosts: list[str]
+    error: str | None
+    gc: NotRequired[dict[str, bool | str]]
+
+
+class ServerStatePullStatus(TypedDict):
+    attempted: bool
+    pulled: bool
+    error: str | None
+
+
+class ServerAuditPullStatus(TypedDict):
+    attempted: bool
+    pulled: bool
+    host: str | None
+    error: str | None
+
+
+class PromoteStatus(TypedDict):
+    ok: bool
+    ahead_before: int
+    pushed: bool
+    error: str | None
+
+
+class AppPromoteStatus(TypedDict):
+    ahead: int
+    base: str
+    prot: str
+    error: str | None
+
+
+class AppShipStatus(TypedDict):
+    ok: bool
+    ahead_before: int
+    pushed: bool
+    error: str | None
+    base: str
+    prot: str
+    app: str
+
+
+def git_sync(cfg: Config) -> GitSyncStatus:
     """Exchange ``shared/`` with the remote: pull every host's latest, publish ours, push it back.
 
     Returns ``{host, pulled, pushed, hosts, error}``. Best-effort — a failure to push (e.g. the server
     has no credentials) still leaves ``pulled`` true, so the server has the Mac's data either way.
     """
-    out: dict[str, Any] = {"host": host_id(cfg), "pulled": False, "pushed": False,
+    out: GitSyncStatus = {"host": host_id(cfg), "pulled": False, "pushed": False,
                            "hosts": [], "error": None}
     sd = ensure_state_clone(cfg)
     if sd is None:
@@ -324,35 +685,51 @@ def git_sync(cfg: Config) -> dict[str, Any]:
             # 403, clean exit 0). Our own audit is still read locally by dashboard.audit_lines.
             out["hosts"] = [p.stem for p in shared_files(cfg)]
             out["pushed"] = None
-            return out
-
-        # 2) Publish our own audit and stage ONLY it. Single-writer: a host owns exactly
-        #    shared/<its-host>.jsonl — never `git add shared` (which would stage a peer/server file we
-        #    pulled in over SSH, e.g. pull_server_audit's shared/<server>.jsonl, and push it back,
-        #    breaking the single-writer invariant and making that host read its own audit doubled).
-        publish(cfg, sd)
-        out["hosts"] = [p.stem for p in shared_files(cfg)]
-        _git(sd, "add", f"shared/{host_id(cfg)}.jsonl")
-        if _git(sd, "diff", "--cached", "--quiet").returncode == 0:
-            out["pushed"] = True   # nothing staged since last sync — already in step with remote
-            return out
-
-        # 3) Commit + push. On a race, rebase our single commit onto the remote tip and retry once.
-        _git(sd, "commit", "-m", f"sync: {host_id(cfg)} audit")
-        push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
-        if push.returncode != 0:
-            _git(sd, "fetch", "origin", STATE_BRANCH)
-            _git(sd, "rebase", "FETCH_HEAD")
-            push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
-        out["pushed"] = push.returncode == 0
-        if not out["pushed"]:
-            out["error"] = (push.stderr or push.stdout or "push failed").strip()[:200]
+        else:
+            # 2) Publish our own audit and stage ONLY it. Single-writer: a host owns exactly
+            #    shared/<its-host>.jsonl — never `git add shared` (which would stage a peer/server
+            #    file we pulled in over SSH, and push it back, breaking the single-writer invariant).
+            publish(cfg, sd)
+            out["hosts"] = [p.stem for p in shared_files(cfg)]
+            _git(sd, "add", f"shared/{host_id(cfg)}.jsonl")
+            if _git(sd, "diff", "--cached", "--quiet").returncode == 0:
+                out["pushed"] = True   # nothing staged since last sync — already in step with remote
+            else:
+                # 3) Commit + push. On a race, rebase our single commit onto the remote tip and retry once.
+                _git(sd, "commit", "-m", f"sync: {host_id(cfg)} audit")
+                push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
+                if push.returncode != 0:
+                    _git(sd, "fetch", "origin", STATE_BRANCH)
+                    _git(sd, "rebase", "FETCH_HEAD")
+                    push = _git(sd, "push", "origin", f"HEAD:{STATE_BRANCH}")
+                out["pushed"] = push.returncode == 0
+                if not out["pushed"]:
+                    out["error"] = (push.stderr or push.stdout or "push failed").strip()[:200]
     except (subprocess.SubprocessError, OSError) as e:
         out["error"] = str(e)[:200]
+
+    # ── EU-496: throttle & wrap compaction best-effort (after all pull/push paths) ──
+    # Compaction must never fail the calling sync — any exception is caught AND logged with its
+    # detail (type + message): a bare "swallowed" line hid the cause and made a wedged compaction
+    # undiagnosable from the sync cron log.
+    try:
+        if _should_compact_state(cfg):
+            compact_state_branch_now(cfg)
+    except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
+        print(f"[sync] compaction exception swallowed: {type(e).__name__}: {e}", flush=True)
+
+    # ── EU-530: invoke per-sync gc_state_clone (throttled sentinel makes it a no-op 99% of time) ──
+    # Same best-effort pattern: caught and reported in the sync dict, never raised into caller.
+    try:
+        out["gc"] = gc_state_clone(cfg)
+    except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
+        out["gc"] = {"ok": False, "ran": True, "error": str(e)[:300]}
+        print(f"[sync] gc exception swallowed: {type(e).__name__}: {e}", flush=True)
+
     return out
 
 
-def pull_server_state(cfg: Config) -> dict[str, Any]:
+def pull_server_state(cfg: Config) -> ServerStatePullStatus:
     """Mac-side server→Mac bridge over SSH: copy the server's officer-canonical living log down so the
     Mac's builds read the latest server-learned lessons. One-directional and read-only on the server —
     we just `scp` a file out, so the server never needs git write access.
@@ -360,7 +737,7 @@ def pull_server_state(cfg: Config) -> dict[str, Any]:
     No-op unless ``GENERAL_SERVER_SSH`` (e.g. ``ubuntu@1.2.3.4``) is set and we're not the server itself
     (``GENERAL_SYNC_PULL_ONLY``). ``GENERAL_SERVER_REPO`` overrides the remote repo dir (default
     ``General``). Best-effort: any SSH hiccup is reported, never fatal."""
-    out: dict[str, Any] = {"attempted": False, "pulled": False, "error": None}
+    out: ServerStatePullStatus = {"attempted": False, "pulled": False, "error": None}
     host = os.environ.get("GENERAL_SERVER_SSH", "").strip()
     if not host or pull_only():
         return out
@@ -381,7 +758,7 @@ def pull_server_state(cfg: Config) -> dict[str, Any]:
     return out
 
 
-def pull_server_audit(cfg: Config) -> dict[str, Any]:
+def pull_server_audit(cfg: Config) -> ServerAuditPullStatus:
     """Mac-side server→Mac AUDIT bridge over SSH: scp the server's live ``audit.jsonl`` down so the Mac
     cockpit MIRRORS the server's runs (EU-181).
 
@@ -398,7 +775,7 @@ def pull_server_audit(cfg: Config) -> dict[str, Any]:
     ``GENERAL_SERVER_REPO`` (default ``General``) + ``GENERAL_SERVER_AUDIT`` (default
     ``state/audit.jsonl``, relative to the repo) locate the remote file; ``GENERAL_SERVER_HOST_ID``
     (default ``server``, sanitised) names the local file. Best-effort — any hiccup is reported, never fatal."""
-    out: dict[str, Any] = {"attempted": False, "pulled": False, "host": None, "error": None}
+    out: ServerAuditPullStatus = {"attempted": False, "pulled": False, "host": None, "error": None}
     host = os.environ.get("GENERAL_SERVER_SSH", "").strip()
     if not host or pull_only():
         return out
@@ -437,14 +814,14 @@ def can_promote() -> bool:
     return os.environ.get("GENERAL_COCKPIT_PROMOTE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def promote(cfg: Config) -> dict[str, Any]:
+def promote(cfg: Config) -> PromoteStatus:
     """Promote ``dev`` -> ``main`` on the REMOTE (the server auto-deploys ``main``) **without touching
     the working tree** — the unit constantly writes runtime files, so a dirty tree must never block a
     deploy (it was the old checkout-based version's "stuck spinner"). Pushes ``dev`` straight onto
     ``main``, **fast-forward only**; if they've diverged the push is rejected (never forced).
     ``{ok, ahead_before, pushed, error}``."""
     repo = _repo_root(cfg)
-    out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None}
+    out: PromoteStatus = {"ok": False, "ahead_before": 0, "pushed": False, "error": None}
     if not can_promote():
         out["error"] = "promote not allowed on this cockpit"
         return out
@@ -504,12 +881,12 @@ def promote(cfg: Config) -> dict[str, Any]:
 # This is the user's own product (e.g. Automatixy), not the unit's own code.
 # ---------------------------------------------------------------------------
 
-def app_promote_status(app) -> dict[str, Any]:
+def app_promote_status(app) -> AppPromoteStatus:
     """How far an app's base branch (DEV) is ahead of its protected branch (MAIN) — work that's tested
     on DEV but not yet shipped to production. ``{ahead, base, prot, error}``."""
     repo = Path(app.repo_path).expanduser()
     base, prot = app.base_branch, app.protected_branch
-    out: dict[str, Any] = {"ahead": 0, "base": base, "prot": prot, "error": None}
+    out: AppPromoteStatus = {"ahead": 0, "base": base, "prot": prot, "error": None}
     try:
         r = _git(repo, "rev-list", "--count", f"{prot}..{base}")
         out["ahead"] = int((r.stdout or "0").strip() or "0") if r.returncode == 0 else 0
@@ -542,7 +919,7 @@ def app_promote_commits(app, limit: int = 300) -> list[dict[str, str]]:
     return out
 
 
-def promote_app(app) -> dict[str, Any]:
+def promote_app(app) -> AppShipStatus:
     """Ship an app's DEV -> MAIN (production): a **real merge** of DEV into MAIN (MAIN keeps its own
     commits — e.g. earlier PR merges — and DEV's commits are added), then push MAIN. Done in a throwaway
     git worktree so the user's (often dirty) checkout is never touched, and so it works even when DEV
@@ -550,7 +927,7 @@ def promote_app(app) -> dict[str, Any]:
     and we say so — ship via a PR. The cockpit Ship button. ``{ok, ahead_before, pushed, error, ...}``."""
     repo = Path(app.repo_path).expanduser()
     base, prot = app.base_branch, app.protected_branch
-    out: dict[str, Any] = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
+    out: AppShipStatus = {"ok": False, "ahead_before": 0, "pushed": False, "error": None,
                            "base": base, "prot": prot, "app": app.name}
     if not can_promote():
         out["error"] = "shipping is disabled on this cockpit (read-only box)"

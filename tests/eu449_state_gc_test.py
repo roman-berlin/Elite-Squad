@@ -1,0 +1,718 @@
+"""EU-526 — _gc_is_due / _mark_gc_done / _gc_sentinel plumbing tests.
+
+Real tmp sentinel files (mtime via os.utime). Zero git subprocesses.
+Follows the harness convention of tests/eu449_state_compact_test.py.
+
+Checks:
+  AC1 — fresh clone, no sentinel → True
+  AC2 — after _mark_gc_done(), sentinel fresh → False
+  AC3 — force=True always returns True
+  AC4 — mtime boundary: old→True, fresh→False
+  AC5 — constants exist + no subprocess spawned (monkeypatch _git)
+
+EU-529 adds a REAL-clone integration test (test_gc_state_clone_real_repo_packs_loose_objects):
+a genuine throwaway git repo (no network) proves loose objects drop after gc_state_clone(force=True).
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import types
+from pathlib import Path
+
+# ── SDK stub (tests/eu449_state_compact_test.py convention) ───────────────
+sdk = types.ModuleType("claude_agent_sdk")
+
+
+class _D:
+    def __init__(s, *a, **k):
+        pass
+
+    def __call__(s, *a, **k):
+        return s
+
+
+sdk.__getattr__ = lambda n: _D
+sys.modules["claude_agent_sdk"] = sdk
+sys.path.insert(0, ".")
+
+from orchestrator import sync  # noqa: E402
+from orchestrator.config import AppConfig, Config  # noqa: E402
+
+# EU-529 — pristine reference to the REAL ``_git`` captured before any mocked section
+# below swaps in a stub. The real-repo integration test forces this back in so its
+# ``gc_state_clone`` call drives the actual git binary even if a stub leaked upstream.
+_REAL_GIT = sync._git
+
+results: list[tuple[str, bool, str]] = []
+
+
+def chk(name: str, cond, detail: str = "") -> None:
+    results.append((name, bool(cond), str(detail) if not cond else ""))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+_INTERVAL_S = sync._GC_INTERVAL_HOURS * 3600
+
+
+def _make_cfg(root):
+    """Build a Config whose audit_path lives under *root*."""
+    return Config(
+        apps=[AppConfig(name="automatixy", repo_path=str(root), base_branch="DEV",
+                        protected_branch="MAIN", backlog_backend="none")],
+        audit_path=str(root / "audit.jsonl"),
+        use_worktree=False,
+    )
+
+
+def _ensure_clean(cfg):
+    """Remove .unit-state/ so the next _gc_* call starts from zero."""
+    sd = sync.state_dir(cfg)
+    if sd.exists():
+        shutil.rmtree(sd, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC5 (constants) — verified before dependent helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+chk("AC5: _GC_INTERVAL_HOURS == 24",
+    sync._GC_INTERVAL_HOURS == 24, f"got {sync._GC_INTERVAL_HOURS}")
+chk("AC5: _GC_SENTINEL_NAME == '.last_gc'",
+    sync._GC_SENTINEL_NAME == ".last_gc", f"got {sync._GC_SENTINEL_NAME!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC1 — fresh clone with no .unit-state/.last_gc → True
+# ═══════════════════════════════════════════════════════════════════════════
+
+root_a = Path(tempfile.mkdtemp(prefix="eu526-a-"))
+cfg_a = _make_cfg(root_a)
+
+# state_dir(cfg_a) should not exist (no .unit-state created yet)
+sd_a = sync.state_dir(cfg_a)
+_chk_a = sd_a.exists()
+chk("AC1 precondition: no .unit-state dir present",
+    not _chk_a, f".unit-state unexpectedly exists at {sd_a}")
+
+chk("AC1: _gc_is_due(cfg) → True when sentinel is absent",
+    sync._gc_is_due(cfg_a) is True, f"got {sync._gc_is_due(cfg_a)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC2 — after _mark_gc_done() → sentinel exists, within window → False
+# ═══════════════════════════════════════════════════════════════════════════
+
+root_b = Path(tempfile.mkdtemp(prefix="eu526-b-"))
+cfg_b = _make_cfg(root_b)
+_ensure_clean(cfg_b)
+
+sync._mark_gc_done(cfg_b)
+sentinel_b = sync._gc_sentinel(cfg_b)
+chk("AC2: _mark_gc_done creates the sentinel file on disk",
+    sentinel_b.is_file(), f"path={sentinel_b} exists={sentinel_b.exists()}")
+
+chk("AC2: _gc_is_due(cfg) → False immediately after _mark_gc_done()",
+    sync._gc_is_due(cfg_b) is False, f"got {sync._gc_is_due(cfg_b)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC3 — force=True overrides regardless of sentinel state
+# ═══════════════════════════════════════════════════════════════════════════
+
+# With fresh sentinel present (right after _mark_gc_done)
+chk("AC3a: _gc_is_due(cfg, force=True) → True with fresh sentinel",
+    sync._gc_is_due(cfg_b, force=True) is True,
+    f"got {sync._gc_is_due(cfg_b, force=True)}")
+
+# With NO sentinel at all
+root_c = Path(tempfile.mkdtemp(prefix="eu526-c-"))
+cfg_c = _make_cfg(root_c)
+chk("AC3b: _gc_is_due(cfg, force=True) → True with no sentinel",
+    sync._gc_is_due(cfg_c, force=True) is True,
+    f"got {sync._gc_is_due(cfg_c, force=True)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC4 — mtime boundary: old sentinel → True; recent (but < interval) → False
+# ═══════════════════════════════════════════════════════════════════════════
+
+root_d = Path(tempfile.mkdtemp(prefix="eu526-d-"))
+cfg_d = _make_cfg(root_d)
+_ensure_clean(cfg_d)
+sd_d = sync.state_dir(cfg_d)
+sd_d.mkdir(parents=True, exist_ok=True)
+sentinel_d = sd_d / sync._GC_SENTINEL_NAME
+
+# AC4a: backdate sentinel past the interval threshold
+sentinel_d.touch()
+stale_time = time.time() - (_INTERVAL_S + 60)
+os.utime(sentinel_d, (stale_time, stale_time))
+chk("AC4a: _gc_is_due(cfg) → True when mtime > interval old",
+    sync._gc_is_due(cfg_d) is True,
+    f"got {sync._gc_is_due(cfg_d)}, aged by {_INTERVAL_S + 60:.0f}s vs {_INTERVAL_S:.0f}s threshold")
+
+# AC4b: set mtime to interval - 1h (still within the throttle window)
+fresh_time = time.time() - (_INTERVAL_S - 3600)
+os.utime(sentinel_d, (fresh_time, fresh_time))
+chk("AC4b: _gc_is_due(cfg) → False when mtime < interval old",
+    sync._gc_is_due(cfg_d) is False,
+    f"got {sync._gc_is_due(cfg_d)}, aged by {_INTERVAL_S - 3600:.0f}s vs {_INTERVAL_S:.0f}s threshold")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC5 (subprocess guard) — _git must never be called by these helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+root_e = Path(tempfile.mkdtemp(prefix="eu526-e-"))
+cfg_e = _make_cfg(root_e)
+_ensure_clean(cfg_e)
+
+real_git = sync._git
+_git_calls = []
+
+
+def _recorder_fail(cwd, *a, **kw):
+    """Recorder that records the call AND makes the test fail if invoked."""
+    _git_calls.append(a)
+    raise AssertionError(f"_gc_is_due / _mark_gc_done must not spawn subprocesses — _git called with: {a}")
+
+
+try:
+    sync._git = _recorder_fail
+
+    # All three code paths that _gc_is_due can take:
+    r_absent = sync._gc_is_due(cfg_e)                    # OSError path → True
+    sync._mark_gc_done(cfg_e)                             # creates sentinel via pathlib
+    r_present = sync._gc_is_due(cfg_e)                   # stat + compare → False
+    r_force = sync._gc_is_due(cfg_e, force=True)         # short-circuit → True
+
+    chk("AC5c: _gc_is_due / _mark_gc_done never call _git (no subprocess)",
+        len(_git_calls) == 0, f"_git was called {len(_git_calls)} times: {_git_calls}")
+
+    # Sanity: values are still correct despite monkeypatch
+    chk("AC5d: values still correct with _git monkeypatched",
+        r_absent is True and r_present is False and r_force is True,
+        f"got absent={r_absent} present={r_present} force={r_force}")
+
+finally:
+    sync._git = real_git
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EU-527 — gc_state_clone integration (stubbed _git, sentinel-driven flow)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _CP:
+    """Minimal fake ``CompletedProcess[str]`` for stubbing _git."""
+
+    def __init__(self, rc=0, stdout="", stderr="") -> None:
+        self.returncode = rc
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _success_stub(cwd, *a, **kw) -> _CP:
+    return _CP(rc=0, stdout="")
+
+
+def _fail_stub(cwd, *a, **kw) -> _CP:
+    return _CP(rc=1, stdout="", stderr="fatal: gc failed")
+
+
+def _raise_stub(cwd, *a, **kw) -> None:
+    # Deliberately NOT an OSError / subprocess.SubprocessError: a
+    # UnicodeDecodeError is exactly what _git's text=True decoding can raise
+    # on non-UTF8 git output. AC6 uses this stub to prove the broadened
+    # `except Exception` catch in gc_state_clone really swallows it.
+    raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+# ── AC1: gc fires when due (no sentinel), calls _mark_gc_done after success ──
+
+root_1 = Path(tempfile.mkdtemp(prefix="eu527-a1-"))
+cfg_1 = _make_cfg(root_1)
+sd_1 = sync.state_dir(cfg_1)
+sd_1.mkdir(parents=True, exist_ok=True)
+(sd_1 / ".git").mkdir(exist_ok=True)          # simulate existing clone
+real_git = sync._git
+_g1_calls = []
+
+
+def _recorder_1(cwd, *a, **kw) -> _CP:
+    _g1_calls.append((cwd, a, kw))
+    return _success_stub(cwd, *a, **kw)
+
+
+try:
+    sync._git = _recorder_1
+    r = sync.gc_state_clone(cfg_1)
+
+    chk("EU-527 AC1a: returns ok=True, ran=True on successful gc",
+        r.get("ok") is True and r.get("ran") is True,
+        f"got {r}")
+
+    chk("EU-527 AC1b: _git called exactly once with correct args",
+        len(_g1_calls) == 1,
+        f"called {len(_g1_calls)} times: {_g1_calls}")
+
+    chk("EU-527 AC1c: _git called with state_dir cwd and ('gc', '--prune=now')",
+        _g1_calls[0][0] == sd_1 and _g1_calls[0][1] == ("gc", "--prune=now"),
+        f"cwd={_g1_calls[0][0]} args={_g1_calls[0][1]}")
+
+    chk("EU-527 AC1d: _mark_gc_done was called (sentinel exists)",
+        sync._gc_sentinel(cfg_1).is_file(),
+        f"sentinel missing at {sync._gc_sentinel(cfg_1)}")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC2: skipped when not due (sentinel fresh) ──
+
+root_2 = Path(tempfile.mkdtemp(prefix="eu527-a2-"))
+cfg_2 = _make_cfg(root_2)
+sd_2 = sync.state_dir(cfg_2)
+sd_2.mkdir(parents=True, exist_ok=True)
+(sd_2 / ".git").mkdir(exist_ok=True)
+sync._mark_gc_done(cfg_2)                    # make it "not due"
+real_git = sync._git
+_g2_calls = []
+
+
+def _recorder_2(cwd, *a, **kw) -> _CP:
+    _g2_calls.append((cwd, a, kw))
+    return _success_stub(cwd, *a, **kw)
+
+
+try:
+    sync._git = _recorder_2
+    r = sync.gc_state_clone(cfg_2)
+
+    chk("EU-527 AC2a: returns ok=True, ran=False when not due",
+        r.get("ok") is True and r.get("ran") is False,
+        f"got {r}")
+
+    chk("EU-527 AC2b: does NOT call _git when not due",
+        len(_g2_calls) == 0,
+        f"_git called {len(_g2_calls)} times")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC3: force=True bypasses throttle and fires gc ──
+
+root_3 = Path(tempfile.mkdtemp(prefix="eu527-a3-"))
+cfg_3 = _make_cfg(root_3)
+sd_3 = sync.state_dir(cfg_3)
+sd_3.mkdir(parents=True, exist_ok=True)
+(sd_3 / ".git").mkdir(exist_ok=True)
+sync._mark_gc_done(cfg_3)                    # fresh sentinel → normally not due
+real_git = sync._git
+_g3_calls = []
+
+
+def _recorder_3(cwd, *a, **kw) -> _CP:
+    _g3_calls.append((cwd, a, kw))
+    return _success_stub(cwd, *a, **kw)
+
+
+try:
+    sync._git = _recorder_3
+    r = sync.gc_state_clone(cfg_3, force=True)
+
+    chk("EU-527 AC3a: force=True fires gc even when sentinel is fresh",
+        r.get("ok") is True and r.get("ran") is True,
+        f"got {r}")
+
+    chk("EU-527 AC3b: _git called once with force=True despite fresh sentinel",
+        len(_g3_calls) == 1,
+        f"called {len(_g3_calls)} times")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC4: _git raising → caught, no sentinel refresh ──
+
+root_4 = Path(tempfile.mkdtemp(prefix="eu527-a4-"))
+cfg_4 = _make_cfg(root_4)
+sd_4 = sync.state_dir(cfg_4)
+sd_4.mkdir(parents=True, exist_ok=True)
+(sd_4 / ".git").mkdir(exist_ok=True)
+real_git = sync._git
+
+
+def _raising_stubs_4(cwd, *a, **kw) -> None:
+    raise OSError("disk full")
+
+
+try:
+    sync._git = _raising_stubs_4
+    r = sync.gc_state_clone(cfg_4)
+
+    chk("EU-527 AC4a: returns ok=False with error string when _git raises",
+        r.get("ok") is False and "disk full" in str(r.get("error", "")),
+        f"got {r}")
+
+    chk("EU-527 AC4b: _mark_gc_done NOT called on failure (sentinel absent or old)",
+        sync._gc_sentinel(cfg_4).exists() is False or
+        time.time() - sync._gc_sentinel(cfg_4).stat().st_mtime < 1,
+        "sentinel unexpectedly created/touched after failure")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC5: _git returning nonzero rc → error dict, no sentinel refresh ──
+
+root_5 = Path(tempfile.mkdtemp(prefix="eu527-a5-"))
+cfg_5 = _make_cfg(root_5)
+sd_5 = sync.state_dir(cfg_5)
+sd_5.mkdir(parents=True, exist_ok=True)
+(sd_5 / ".git").mkdir(exist_ok=True)
+real_git = sync._git
+_g5_calls = []
+
+
+def _fail_recorder(cwd, *a, **kw) -> _CP:
+    _g5_calls.append((cwd, a, kw))
+    return _fail_stub(cwd, *a, **kw)
+
+
+try:
+    sync._git = _fail_recorder
+    r = sync.gc_state_clone(cfg_5)
+
+    chk("EU-527 AC5a: returns ok=False when _git returns nonzero rc",
+        r.get("ok") is False,
+        f"got {r}")
+
+    chk("EU-527 AC5b: error includes stderr text",
+        "gc failed" in str(r.get("error", "")),
+        f"error={r.get('error')}")
+
+    chk("EU-527 AC5c: sentinel NOT refreshed after nonzero-return failure",
+        sync._gc_sentinel(cfg_5).exists() is False or
+        time.time() - sync._gc_sentinel(cfg_5).stat().st_mtime < 1,
+        "sentinel unexpectedly touched after failed gc")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC6: _git raising a NON-OSError/SubprocessError → broad catch swallows it ──
+
+root_6 = Path(tempfile.mkdtemp(prefix="eu527-a6-"))
+cfg_6 = _make_cfg(root_6)
+sd_6 = sync.state_dir(cfg_6)
+sd_6.mkdir(parents=True, exist_ok=True)
+(sd_6 / ".git").mkdir(exist_ok=True)
+real_git = sync._git
+
+try:
+    sync._git = _raise_stub              # raises UnicodeDecodeError (a ValueError)
+    try:
+        r = sync.gc_state_clone(cfg_6)
+        _propagated = None
+    except Exception as exc:             # noqa: BLE001 — test must detect ANY propagation
+        r = {}
+        _propagated = exc
+
+    chk("EU-527 AC6a: UnicodeDecodeError from _git is swallowed, never propagates",
+        _propagated is None,
+        f"gc_state_clone raised {type(_propagated).__name__}: {_propagated}")
+
+    chk("EU-527 AC6b: returns ok=False with the decode error reported",
+        r.get("ok") is False and "invalid start byte" in str(r.get("error", "")),
+        f"got {r}")
+
+    chk("EU-527 AC6c: _mark_gc_done NOT called after raised failure (no sentinel)",
+        sync._gc_sentinel(cfg_6).exists() is False,
+        f"sentinel unexpectedly present at {sync._gc_sentinel(cfg_6)}")
+
+finally:
+    sync._git = real_git
+
+
+# ── Also verify the skip-due-no-clone path ──
+
+root_nc = Path(tempfile.mkdtemp(prefix="eu527-noclone-"))
+cfg_nc = _make_cfg(root_nc)
+sd_nc = sync.state_dir(cfg_nc)
+sd_nc.mkdir(parents=True, exist_ok=True)   # dir exists but NO .git
+
+_r_nc = sync.gc_state_clone(cfg_nc)
+chk("EU-527: skips with 'no-clone' when .git is missing",
+    _r_nc.get("ok") is True and _r_nc.get("ran") is False and _r_nc.get("reason") == "no-clone",
+    f"got {_r_nc}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EU-529 — REAL-clone integration test: loose objects drop after gc_state_clone
+#
+# Deliberately NOT mocked: builds a genuine throwaway git repo in a tmpdir (no
+# network, no dependence on the real .unit-state clone), generates loose objects
+# by committing small files, then proves the real `git gc --prune=now` that
+# gc_state_clone(force=True) runs packs them away — the loose-object count read
+# from real `git count-objects -v` strictly decreases (to 0) while the branch and
+# a tracked sentinel file (stand-in for shared/mac.jsonl) are left untouched.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _loose_count(repo: Path) -> int:
+    """Parse the loose-object ``count:`` field out of REAL ``git count-objects -v`` output."""
+    r = subprocess.run(["git", "count-objects", "-v"], cwd=str(repo),
+                       capture_output=True, text=True, check=True)
+    for line in r.stdout.splitlines():
+        key, _, val = line.partition(":")
+        if key.strip() == "count":
+            return int(val.strip())
+    raise AssertionError(f"no 'count:' field in git count-objects -v output: {r.stdout!r}")
+
+
+def test_gc_state_clone_real_repo_packs_loose_objects() -> None:
+    """Prove gc_state_clone(force=True) packs loose objects in a REAL git repo."""
+    root = Path(tempfile.mkdtemp(prefix="eu529-realrepo-"))
+    # _make_cfg(root) points audit_path at root/audit.jsonl → state_dir(cfg) resolves
+    # to root/.unit-state, so THAT is the directory we make the real repo in.
+    sd = root / sync.STATE_DIR_NAME
+    try:
+        sd.mkdir(parents=True, exist_ok=True)
+
+        def git(*a: str) -> None:
+            subprocess.run(["git", *a], cwd=str(sd), capture_output=True,
+                           text=True, check=True)
+
+        # ── 1. a genuine repo on the real state branch (stand-in for unit-state) ──
+        git("init", "-q", "-b", sync.STATE_BRANCH, ".")
+        git("config", "user.email", "eu529@localhost")
+        git("config", "user.name", "EU-529 real-repo test")
+        git("config", "commit.gpgsign", "false")  # never block on a signing key
+
+        # ── 2. commit a handful of small files → loose objects ──
+        for i in range(5):
+            (sd / f"loose_{i}.txt").write_text(f"eu529 loose object payload {i}\n")
+        # tracked sentinel standing in for shared/mac.jsonl — must survive byte-identical
+        (sd / "shared").mkdir(parents=True, exist_ok=True)
+        sentinel_rel = "shared/mac.jsonl"
+        sentinel_bytes = (
+            b'{"event":"ticket_start","ticket_id":"EU-529","ts":"2026-07-25T00:00:00"}\n'
+        )
+        (sd / sentinel_rel).write_bytes(sentinel_bytes)
+        git("add", "-A")
+        git("commit", "-q", "-m", "seed loose objects + sentinel")
+        pre_sentinel = (sd / sentinel_rel).read_bytes()
+
+        # ── 3. churn: rewrite the files so old versions become unreachable loose objects ──
+        for i in range(5):
+            (sd / f"loose_{i}.txt").write_text(f"eu529 mutated payload {i} -- second revision\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "churn to create unreachable loose objects")
+
+        # ── measure loose objects BEFORE gc ──
+        loose_before = _loose_count(sd)
+        chk("EU-529 precond: real .git dir present (repo recognised as a clone)",
+            (sd / ".git").exists(), f"no .git at {sd}")
+        chk("EU-529 precond: loose objects exist before gc (count > 0)",
+            loose_before > 0, f"loose_before={loose_before}")
+
+        cfg = _make_cfg(root)
+
+        # Drive gc through the REAL git binary: swap in the pristine _git for the call
+        # so a stub leaked from a mocked section above can't silently no-op the gc.
+        saved_git = sync._git
+        sync._git = _REAL_GIT
+        try:
+            r = sync.gc_state_clone(cfg, force=True)
+        finally:
+            sync._git = saved_git
+
+        chk("EU-529: gc_state_clone(force=True) → ok=True, ran=True on the real repo",
+            r.get("ok") is True and r.get("ran") is True, f"got {r}")
+
+        # ── measure loose objects AFTER gc ──
+        loose_after = _loose_count(sd)
+        chk("EU-529 AC2: loose-object count STRICTLY decreases after gc",
+            loose_after < loose_before,
+            f"before={loose_before} after={loose_after}")
+        chk("EU-529 AC2 (ideal): all loose objects packed — count hits 0",
+            loose_after == 0, f"before={loose_before} after={loose_after}")
+
+        # ── branch survived (gc packs objects, never deletes branches) ──
+        br = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                             f"refs/heads/{sync.STATE_BRANCH}"],
+                            cwd=str(sd), capture_output=True, text=True)
+        chk(f"EU-529 AC3a: branch '{sync.STATE_BRANCH}' still present after gc",
+            br.returncode == 0 and bool(br.stdout.strip()),
+            f"rc={br.returncode} out={br.stdout.strip()!r} err={br.stderr.strip()!r}")
+
+        # ── tracked sentinel byte-identical (gc must not touch working-tree files) ──
+        sentinel_path = sd / sentinel_rel
+        post_sentinel = sentinel_path.read_bytes() if sentinel_path.exists() else None
+        chk("EU-529 AC3b: tracked sentinel (shared/mac.jsonl) byte-identical after gc",
+            post_sentinel == pre_sentinel,
+            f"pre={pre_sentinel!r} post={post_sentinel!r}")
+
+    finally:
+        # AC4: always clean up the tmpdir — even if an assertion/setup step raised above.
+        shutil.rmtree(root, ignore_errors=True)
+
+
+test_gc_state_clone_real_repo_packs_loose_objects()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EU-530 — end-to-end wiring: git_sync must CALL gc_state_clone and report its dict
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── AC1: normal sync with gc present → out["gc"] == {"ok":True,"ran":True} + sentinel created ──
+
+root_1 = Path(tempfile.mkdtemp(prefix="eu530-a1-"))
+cfg_1 = _make_cfg(root_1)
+
+sd_1 = root_1 / ".unit-state"
+sd_1.mkdir(parents=True)
+(sd_1 / ".git").mkdir(exist_ok=True)          # fake clone so ensure_state_clone short-circuits
+
+real_git = sync._git
+_g1_calls = []
+
+
+def _recorder_1(cwd, *a, **kw):               # replaces EVERY _git call; always succeeds
+    _g1_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+try:
+    sync._git = _recorder_1
+    out = sync.git_sync(cfg_1)                # ← the function under test
+
+    chk("EU-530 AC1a: git_sync returns a 'gc' key",
+        "gc" in out, f"keys={list(out.keys())}")
+
+    chk("EU-530 AC1b: gc ok=True ran=True (sentinel absent → fired)",
+        out.get("gc") == {"ok": True, "ran": True},
+        f"got {out.get('gc')}")
+
+    # Verify _git WAS called with gc args (the wiring fires it)
+    chk("EU-530 AC1c: _git called with ('gc', '--prune=now') among other cmds",
+        ("gc", "--prune=now") in [x[0] for x in _g1_calls],
+        f"calls={[c[0] for c in _g1_calls]}")
+
+    chk("EU-530 AC1d: .last_gc sentinel exists after sync",
+        sync._gc_sentinel(cfg_1).is_file(),
+        f"sentinel missing at {sync._gc_sentinel(cfg_1)}")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC2: fresh sentinel → per-sync gc is a no-op (throttle prevents _git gc) ──
+
+root_2 = Path(tempfile.mkdtemp(prefix="eu530-a2-"))
+cfg_2 = _make_cfg(root_2)
+
+sd_2 = root_2 / ".unit-state"
+sd_2.mkdir(parents=True)
+(sd_2 / ".git").mkdir(exist_ok=True)
+sync._mark_gc_done(cfg_2)                    # fresh sentinel → normally NOT due
+
+real_git = sync._git
+_g2_calls = []
+
+
+def _recorder_2(cwd, *a, **kw):
+    _g2_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+try:
+    sync._git = _recorder_2
+    out = sync.git_sync(cfg_2)
+
+    chk("EU-530 AC2a: gc key present with ran=False",
+        out.get("gc") == {"ok": True, "ran": False, "reason": "not-due"},
+        f"got {out.get('gc')}")
+
+    # ZERO _git("gc", ...) calls — throttle prevents the call entirely
+    gc_calls = [(a,) for a, kw in _g2_calls if a[0] == "gc"]
+    chk("EU-530 AC2b: _git('gc',…) NOT called when throttle blocks",
+        len(gc_calls) == 0,
+        f"{len(gc_calls)} gc calls in {[x[0] for x in _g2_calls]}")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC3: raising gc_state_clone → swallowed, reported in out["gc"], no propagation ──
+
+root_3 = Path(tempfile.mkdtemp(prefix="eu530-a3-"))
+cfg_3 = _make_cfg(root_3)
+
+sd_3 = root_3 / ".unit-state"
+sd_3.mkdir(parents=True)
+(sd_3 / ".git").mkdir(exist_ok=True)
+
+real_git = sync._git
+real_gc = sync.gc_state_clone
+_g3_calls = []
+
+
+def _recorder_3(cwd, *a, **kw):
+    _g3_calls.append((a, kw))
+    return _CP(rc=0)                            # everything except gc succeeds
+
+
+def _failing_gc(cfg, force=False):             # simulates a real subprocess failure
+    raise OSError("broken reflog")
+
+
+try:
+    sync._git = _recorder_3
+    sync.gc_state_clone = _failing_gc           # replace ONLY gc_layer
+    out = sync.git_sync(cfg_3)                  # ← MUST NOT propagate
+
+    chk("EU-530 AC3a: no exception propagates from raising gc_state_clone",
+        isinstance(out, dict) and out.get("pulled") is not None,
+        "exception propagated (no dict returned)")
+
+    chk("EU-530 AC3b: out['gc'] carries error, ok=False",
+        out.get("gc", {}).get("ok") is False and
+        "broken reflog" in str(out.get("gc", {}).get("error", "")),
+        f"got {out.get('gc')}")
+
+    # pulled/pushed unaffected — the main path completed
+    chk("EU-530 AC3c: pulling succeeded despite gc failure",
+        out.get("pulled") is True,
+        f"pulled={out.get('pulled')}")
+
+finally:
+    sync._git = real_git
+    sync.gc_state_clone = real_gc
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Report
+# ═══════════════════════════════════════════════════════════════════════════
+
+total = len(results)
+passed = sum(1 for _, ok, _ in results if ok)
+
+print(f"\n{'='*72}")
+print(f"  EU-526 — GC THROTTLE PLUMBING  ({passed}/{total} checks passed)")
+print(f"{'='*72}")
+for name, ok, detail in results:
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if detail else ""))
+print("-" * 72)
+print(f"  RESULT:", "ALL GREEN" if passed == total else f"{total - passed} FAIL")
+print(f"{'='*72}\n")
+
+sys.exit(0 if passed == total else 1)

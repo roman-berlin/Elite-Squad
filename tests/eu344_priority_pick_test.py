@@ -101,4 +101,18 @@ ok("(5) base-hold drop emits a pick_skip audit event with tickets + reason",
    'audit.record("pick_skip"' in src and "base-hold" in src,
    "the picker layer still drops held tickets silently")
 
+# (6) THE ROOT-CAUSE PIN. This test's whole premise was "the adapter honours ORDER BY priority DESC,
+# Rank ASC" — but that was FALSE for 10 days: the live JQL emitted only `ORDER BY Rank ASC` (board
+# drag-order) since the initial commit, so EU-344 hardened the picker to preserve a priority order
+# the window never carried. The symptom recurred on 2026-07-25. Pin the JQL itself so the premise is
+# now verified, not assumed — the picker guards above only matter if the window is truly priority-ordered.
+from orchestrator.backlog import jira  # noqa: E402
+_ad = types.SimpleNamespace(project="EU", assignee=None, only_mine=False,
+                            require_label=False, label="autodev", status_map={})
+_jql = jira.JiraAdapter._jql_for_status(_ad, "To Do")
+ok("(6) the adapter JQL actually orders by priority first, then board Rank",
+   _jql.rstrip().endswith("ORDER BY priority DESC, Rank ASC"), _jql)
+ok("(6b) priority outranks Rank in the sort key (Highest-first, not drag-order-first)",
+   _jql.index("priority DESC") < _jql.index("Rank ASC"), _jql)
+
 print(f"\n{checks}/{checks} passed")

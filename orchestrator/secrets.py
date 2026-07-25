@@ -33,9 +33,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from . import locking
+
+if TYPE_CHECKING:
+    from .config import Config
 
 _EMPTY_STORE = {"secrets": {}}
 
@@ -56,7 +59,7 @@ class Secrets:
     ``ModelRegistry.__init__`` (model_registry.py:88-93) so tests are hermetic with tmp stores.
     """
 
-    def __init__(self, cfg: Any = None, path: Optional[str | Path] = None):
+    def __init__(self, cfg: Config | None = None, path: Optional[str | Path] = None):
         if path is not None:
             self._path = Path(path)
         else:
@@ -139,7 +142,7 @@ class Secrets:
         return removed
 
     @staticmethod
-    def presence_display(_value: Any = None) -> str:
+    def presence_display(_value: object = None) -> str:
         """A presence-only display helper: always the same 8-bullet mask, regardless of what (if
         anything) is passed in. Never derived from, or reveals anything about, the real value —
         that is the point: callers use this to render "a credential is set" without a code path

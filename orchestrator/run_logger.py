@@ -18,7 +18,10 @@ import datetime
 import shutil
 import threading
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Config
 
 # ---------------------------------------------------------------------------
 # Module-level handle registry
@@ -39,7 +42,7 @@ _UNSET: object = object()
 # Public helpers
 # ---------------------------------------------------------------------------
 
-def log_root(cfg: Any) -> Path:
+def log_root(cfg: Config) -> Path:
     """Resolve the log root directory from *cfg*.
 
     Uses ``cfg.log_folder`` when present, otherwise falls back to ``'logs/'``.
@@ -51,7 +54,7 @@ def log_root(cfg: Any) -> Path:
     return (base / folder).resolve()
 
 
-def _prepare_log_path(cfg: Any, app_name: str | None, ticket_key: str | None) -> Path:
+def _prepare_log_path(cfg: Config, app_name: str | None, ticket_key: str | None) -> Path:
     """Compute (and mkdir) the dated per-ticket log path, purging old day-folders first.
 
     Path: ``<log_root>/<app>/<YYYY-MM-DD>/<TICKET>-<HHMMSS>.log``.  Shared by
@@ -89,7 +92,7 @@ def _resolve_key(app_name: str | None, run_key: object) -> object:
     return (app_name if app_name else None) if run_key is _UNSET else run_key
 
 
-def open_run_log(cfg: Any, app_name: str | None, ticket_key: str | None,
+def open_run_log(cfg: Config, app_name: str | None, ticket_key: str | None,
                  *, run_key: object = _UNSET) -> Path:
     """Open a log file for a new run and register it in the handle registry.
 
@@ -156,7 +159,7 @@ def drain_log_path() -> str | None:
     return None
 
 
-def write_note_log(cfg: Any, app_name: str | None, ticket_key: str | None, note: str) -> Path:
+def write_note_log(cfg: Config, app_name: str | None, ticket_key: str | None, note: str) -> Path:
     """Write a standalone dated per-ticket log file containing *note* — NO handle registered.
 
     EU-253: when more than one run is active, ``_Tee.write`` collapses line attribution to

@@ -11,7 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field, fields as _dc_fields
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 def _known_only(cls, data: dict, *, where: str) -> dict:
@@ -54,7 +54,7 @@ _EFFORT_ALIASES = {
 }
 
 
-def normalize_effort(value: Any, default: str = "high") -> str:
+def normalize_effort(value: object, default: str = "high") -> str:
     """Map any human spelling of an effort level to a valid SDK EffortLevel.
     e.g. 'ultra'/'ultracode' -> 'xhigh', 'maximum' -> 'max'. Unknown -> default."""
     if value is None:
@@ -128,7 +128,7 @@ class AppConfig:
     # (the framework stays inert until an app opts a command in). See smoke.py.
     smoke_command: Optional[str] = None
     backlog_backend: str = "jira"       # "jira" | "notion" | "none"
-    backlog: dict[str, Any] = field(default_factory=dict)
+    backlog: dict[str, object] = field(default_factory=dict)
     # runtime-resolved working dir for officers + gate (the worktree in isolated mode).
     # None -> use repo_path. Set automatically at run start; not normally in YAML.
     workdir: Optional[str] = None

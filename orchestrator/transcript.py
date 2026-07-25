@@ -14,7 +14,10 @@ import json
 import re
 import threading
 from pathlib import Path
-from typing import Any, IO
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Config
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -27,7 +30,7 @@ _transcript_context: contextvars.ContextVar[tuple[str, str, str, str] | None] = 
 
 # Module-level config reference for transcript_enabled checks
 # Set by set_transcript_context when cfg is provided
-_transcript_config: contextvars.ContextVar[Any] = contextvars.ContextVar(
+_transcript_config: contextvars.ContextVar[Config | None] = contextvars.ContextVar(
     "transcript_config", default=None
 )
 
@@ -41,7 +44,7 @@ _lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def set_transcript_context(app: str, ticket: str, timestamp: str, officer: str,
-                          cfg: Any = None) -> None:
+                          cfg: Config | None = None) -> None:
     """Set the per-run transcript context for the current async context.
 
     This should be called once at the start of each officer run so transcript
@@ -65,7 +68,7 @@ def clear_transcript_context() -> None:
     _transcript_config.set(None)
 
 
-def write_tool_use(tool_name: str, input_data: Any) -> None:
+def write_tool_use(tool_name: str, input_data: object) -> None:
     """Write a tool use record to the transcript (if enabled).
 
     Captures the FULL untruncated tool input. Secrets are redacted before write.
@@ -169,7 +172,7 @@ def close_transcript(app: str, ticket: str, timestamp: str, officer: str) -> Non
 # Internals
 # ---------------------------------------------------------------------------
 
-def _write_record(app: str, ticket: str, timestamp: str, officer: str, record: dict, cfg: Any) -> None:
+def _write_record(app: str, ticket: str, timestamp: str, officer: str, record: dict, cfg: Config) -> None:
     """Write a JSONL record to the transcript file.
 
     Thread-safe and best-effort.
@@ -189,7 +192,7 @@ def _write_record(app: str, ticket: str, timestamp: str, officer: str, record: d
             pass
 
 
-def _open_transcript_file(app: str, ticket: str, timestamp: str, officer: str, cfg: Any) -> IO[str]:
+def _open_transcript_file(app: str, ticket: str, timestamp: str, officer: str, cfg: Config | None) -> IO[str]:
     """Open a transcript file for writing.
 
     Path: logs/<app>/<date>/<TICKET>-<HHMMSS>-<officer>.jsonl
@@ -225,7 +228,7 @@ def _close_handle(key: tuple) -> None:
             pass
 
 
-def _redact_secrets(data: Any) -> Any:
+def _redact_secrets(data: object) -> object:
     """Redact secrets from data before writing to transcript.
 
     Patterns to redact:

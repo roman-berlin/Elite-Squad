@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TypedDict
 
 from claude_agent_sdk import ClaudeAgentOptions
 
@@ -110,6 +110,15 @@ repo-wide sweeps that no single careful pass can land.
 """
 
 
+class PlannerResultDict(TypedDict):
+    """The serialized PlannerResult shape (to_dict) handed to the Builder and the audit."""
+    verdict: str
+    approach: str
+    testable_ac: list[str]
+    in_scope_files: list[str]
+    answer: str
+
+
 @dataclass
 class PlannerResult:
     """Structured plan for one ticket. Fail-safe default is a BUILD with empty fields (the Builder
@@ -128,7 +137,7 @@ class PlannerResult:
     provider: str = ""
     model_version: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> PlannerResultDict:
         return {"verdict": self.verdict, "approach": self.approach,
                 "testable_ac": self.testable_ac, "in_scope_files": self.in_scope_files,
                 "answer": self.answer}
@@ -194,7 +203,7 @@ def _first_json_object(text: str) -> dict | None:
     return None
 
 
-def _str_list(v: Any) -> list[str]:
+def _str_list(v: object) -> list[str]:
     """Coerce a JSON value into a clean list of non-empty strings (tolerates a comma string)."""
     if isinstance(v, list):
         return [str(x).strip() for x in v if str(x).strip()]

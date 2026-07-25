@@ -20,7 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional, TypedDict
 
 from . import cockpit_views as CV
 from . import dashboard as D
@@ -146,10 +146,18 @@ def _daily_token_burn(cfg, days: int = 14) -> list[float]:
 # dashboard._audit_cache keys on — so a burst of SSE board frames / open tabs share ONE JSON parse of
 # the merged history instead of re-parsing it every frame. The cached dict is read-only for all callers
 # (kpis, roster, _merges_per_day); none mutate it, so sharing one instance is safe.
-_scan_cache: dict[str, tuple[tuple, dict[str, Any]]] = {}   # audit path -> (sig, scan result)
+class _ScanResult(TypedDict):
+    """The memoized single-pass audit scan shape (_scan): last-seen ts + count per event
+    kind, plus per-calendar-day merged counts for the KPI trend sparkline."""
+    last: dict[str, datetime]
+    count: dict[str, int]
+    merged_by_day: dict[str, int]
 
 
-def _scan(audit_path: str | Path) -> dict[str, Any]:
+_scan_cache: dict[str, tuple[tuple, _ScanResult]] = {}   # audit path -> (sig, scan result)
+
+
+def _scan(audit_path: str | Path) -> _ScanResult:
     """One pass over the raw audit: last-seen ts + count per event kind, and a per-calendar-day count
     of 'merged' events (``merged_by_day``) for the KPI trend sparkline. Cheap and used by every panel.
 
@@ -687,62 +695,69 @@ def _detect_current_triage(cfg, current_ticket_id: Optional[str] = None,
     return result
 
 
-def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Optional[dict]:
-    """The live run if one is going, else the most recent run as 'last run'.
+# The freshness window EVERY "is this run live right now" heuristic shares (EU-477): a run
+# with no audit activity inside it reads as crashed/interrupted, not live. `_run_in_flight`
+# (the newest-run boolean) and `live_runs` (the full per-ticket live subset) both default to
+# it so the two can never drift apart.
+_LIVE_WITHIN_S = 150
 
-    EU-130: When autopilot is active (active=True) and processing tickets through prebuild
-    triage, this function returns a synthetic run object showing the CURRENT triage activity
-    instead of the last completed pipeline. This prevents the cockpit from showing stale
-    'Working · Land' cards for tickets that already merged hours ago.
+
+def _synthetic_triage_run(t: dict, current_triage: dict, fallback_ticket_id: str) -> dict:
+    """The EU-130 synthetic run object showing CURRENT prebuild triage activity.
+
+    Moved verbatim out of ``active_run`` (EU-477) so ``live_runs`` — the shared live-subset
+    computation — can pre-empt the live set with it exactly the way ``active_run`` always
+    did: when autopilot is triaging new tickets (EU-113, EU-114) while the task list still
+    shows an old completed run (EU-109 that merged at 16:16), the cockpit shows the CURRENT
+    triage instead of a stale 'Working · Land' card. ``t`` is the newest scoped task (its
+    app seeds the synthetic row); ``fallback_ticket_id`` is its ticket id, used when the
+    triage event carries none.
     """
-    ts = _scope(tasks, app)
-    if not ts:
-        return None
-    # "live" means a run is genuinely in flight (a manual Run or Autopilot), NOT merely
-    # that an old audit row lacks a terminal event (e.g. an interrupted ticket). Otherwise a
-    # stopped attempt would show as forever-running.
-    t = ts[0]                               # newest task (newest-first) = current or last run
-    live = bool(active)
+    triage_ticket_id = current_triage.get("ticket_id") or fallback_ticket_id
+    triage_phase = current_triage.get("triage_phase", "triaging")
+    triage_verdict = current_triage.get("triage_verdict", "UNKNOWN")
+
+    # Build a minimal run object that _run_html can render with triage UI
+    # Use live=True so it renders as an active run, not "last run"
+    result = {
+        "live": True,
+        "ticket": triage_ticket_id,
+        "app": str(t.get("app") or ""),  # Use the current app
+        "branch": "",  # No branch yet in triage
+        "passes": 0,
+        "verdict": "",
+        "outcome": None,  # No terminal outcome - triage is in progress
+        "cost": 0.0,
+        "phases": [],  # Empty phases - triage replaces the phase bar
+        "reached": 0,
+        "failed_phase": None,
+        "sparkline": [],  # No sparkline for triage state
+        "triage_phase": triage_phase,
+        "triage_verdict": triage_verdict,
+        # EU-477 compat keys (see _run_obj_for): every run object live_runs() emits carries
+        # the raw-task id + start time the EU-486 multi-card loop reads off each element.
+        "ticket_id": triage_ticket_id,
+        "started": None,
+    }
+    if current_triage.get("triage_reason"):
+        result["triage_reason"] = current_triage["triage_reason"]
+    if current_triage.get("triage_new_tickets"):
+        result["triage_new_tickets"] = current_triage["triage_new_tickets"]
+
+    return result
+
+
+def _run_obj_for(cfg, t: dict, ts: list[dict], live: bool) -> dict:
+    """Build the Active-run panel dict for ONE scoped task (EU-477).
+
+    The exact run-object shape ``active_run`` has always produced per run — ``ticket``,
+    ``app``, ``phases``/``reached``, ``failed_phase``, ``sparkline``, optional triage
+    fields — extracted so ``live_runs`` can build one per live task and ``active_run`` is
+    a thin wrapper over ``live_runs()[0]``.  ``t`` is the task to render; ``ts`` is the
+    full scoped history (newest-first) the sparkline is derived from; ``live`` selects the
+    EU-448 live-phase derivation (True) vs the idle/last-run structural path (False).
+    """
     ticket_id = str(t.get("ticket_id") or "")
-
-    # EU-130: When autopilot is active, check for CURRENT prebuild triage activity first.
-    # This catches the case where autopilot is triaging new tickets (EU-113, EU-114) while
-    # the task list still shows an old completed run (EU-109 that merged at 16:16).
-    # We only do this check when active=True to avoid showing stale triage events in idle mode.
-    if live and ticket_id and ticket_id != "—":
-        # Look for current triage activity (different ticket)
-        # No time filtering - the function uses event ordering to detect current activity
-        current_triage = _detect_current_triage(cfg, ticket_id)
-        if current_triage:
-            # Construct a synthetic run object showing the current triage state
-            triage_ticket_id = current_triage.get("ticket_id") or ticket_id
-            triage_phase = current_triage.get("triage_phase", "triaging")
-            triage_verdict = current_triage.get("triage_verdict", "UNKNOWN")
-
-            # Build a minimal run object that _run_html can render with triage UI
-            # Use live=True so it renders as an active run, not "last run"
-            result = {
-                "live": True,
-                "ticket": triage_ticket_id,
-                "app": str(t.get("app") or ""),  # Use the current app
-                "branch": "",  # No branch yet in triage
-                "passes": 0,
-                "verdict": "",
-                "outcome": None,  # No terminal outcome - triage is in progress
-                "cost": 0.0,
-                "phases": [],  # Empty phases - triage replaces the phase bar
-                "reached": 0,
-                "failed_phase": None,
-                "sparkline": [],  # No sparkline for triage state
-                "triage_phase": triage_phase,
-                "triage_verdict": triage_verdict,
-            }
-            if current_triage.get("triage_reason"):
-                result["triage_reason"] = current_triage["triage_reason"]
-            if current_triage.get("triage_new_tickets"):
-                result["triage_new_tickets"] = current_triage["triage_new_tickets"]
-
-            return result
 
     # Approximate phase from what's been recorded so far.
     has_build = any(d.get("build_summary") or d.get("tools") for d in t.get("passes_list", []))
@@ -843,6 +858,12 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
         "reached": reached,
         "failed_phase": failed_phase,
         "sparkline": sparkline,  # EU-76: list[int] oldest→newest, for trend chart
+        # EU-477 compat keys: render_board's EU-486 multi-card loop reads the raw-task id
+        # (`lt.get("ticket_id")` to scope each card's history) and the raw start time
+        # (`run.get("started")` for the per-card elapsed timer) off every element
+        # live_runs() emits, so each run object carries them alongside the render fields.
+        "ticket_id": str(t.get("ticket_id") or ""),
+        "started": t.get("started"),
     }
 
     # EU-130: Add triage phase fields if detected
@@ -857,47 +878,48 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     return result
 
 
-def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = 150) -> bool:
-    """True when a run is genuinely live RIGHT NOW even though the cockpit didn't start it — e.g. a build
-    kicked off by the Needs-you answer box, /unblock, or autopilot in another process. Heuristic: the
-    newest run for this project has NO terminal outcome AND the audit shows activity within the last
-    `within_s` seconds. Time-bounded so a crashed/interrupted attempt stops reading as live."""
-    ts = _scope(tasks, app)
-    if not ts or ts[0].get("outcome"):     # no runs, or the newest one already finished
-        return False
-    try:
-        for line in reversed(D.audit_lines(cfg.audit_path)):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            dt = D._parse_ts(ev.get("ts", ""))
-            if dt:
-                return (datetime.now().timestamp() - dt.timestamp()) < within_s
-    except Exception:  # noqa: BLE001
-        return False
-    return False
+def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
+              within_s: int = _LIVE_WITHIN_S) -> list[dict]:
+    """The FULL set of genuinely-live runs for *app* as run-object dicts, newest-first,
+    capped at ``max_concurrent_builders`` (config.py).
 
+    EU-477 (generalises the EU-486 detection helper): the single shared live-subset
+    computation behind ``active_run()`` — a thin wrapper over ``live_runs()[0]`` — and
+    ``render_board``'s multi-card loop.  Each element carries the SAME run-object shape
+    ``active_run`` has always produced per run (``ticket``, ``app``, ``phases``/``reached``,
+    ``sparkline``, optional triage fields — plus the ``ticket_id``/``started`` compat keys
+    the multi-card loop reads), so downstream renderers don't need to know about the
+    multi-run case.
 
-def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool) -> list[dict]:
-    """Return all genuinely live runs for *app*, ordered newest-first, capped at max_concurrent_builders.
+    A task counts as live when it has NO terminal outcome (``outcome`` unset) AND its OWN
+    audit activity falls within the shared ``within_s`` freshness window — the
+    ``_run_in_flight`` ~150 s idle-cutoff heuristic applied per-ticket instead of only to
+    ``ts[0]``.  Stale rows drop out of the live set — INCLUDING the newest scoped task:
+    a run silent for >150 s reads as crashed/interrupted (the written AC of EU-477), and
+    ``active_run`` renders it as an idle 'last run' via its fallback instead.
 
-    EU-486: drives the multi-card loop in ``render_board`` — one Active-run card per live run.
-    Calls ``D.audit_lines`` once (one-pass scan for last-activity timestamps) then filters the
-    already-loaded ``tasks``; no extra audit-file loads per frame.
+    EU-130: when the newest scoped run has CURRENT prebuild triage activity for a DIFFERENT
+    ticket, the single synthetic triage run pre-empts the live subset — the branch
+    ``active_run`` has always run first, moved here unchanged.
 
-    Scoring heuristic mirrors ``_run_in_flight``'s freshness check (~150 s): collect the last
-    activity timestamp per ticket_id from the full audit stream, then keep a task when it has NO
-    terminal outcome AND (is the newest scoped task OR its own recent audit activity).  The
-    ``tasks`` list is already newest-first from ``load_tasks``, so the output preserves that
-    ordering before applying the cap.
+    ``active=False`` → ``[]`` (idle boards render the 'last run' via ``active_run``'s
+    fallback).  One ``D.audit_lines`` pass — cached on (size, mtime_ns) — so no extra
+    audit-file loads per frame.
     """
     ts = _scope(tasks, app)
-    if not ts:
+    if not ts or not active:
         return []
+
+    # EU-130: current prebuild triage pre-empts the live subset. This ran FIRST in the old
+    # active_run (before the ts[0] selection), so it runs before the live-subset filter here:
+    # it catches autopilot triaging new tickets while the task list still shows an old
+    # completed run — and it must fire even when ts[0] is terminal or stale. No time
+    # filtering — the function uses event ordering to detect current activity.
+    ticket_id = str(ts[0].get("ticket_id") or "")
+    if ticket_id and ticket_id != "—":
+        current_triage = _detect_current_triage(cfg, ticket_id)
+        if current_triage:
+            return [_synthetic_triage_run(ts[0], current_triage, ticket_id)]
 
     now = datetime.now().timestamp()
 
@@ -923,23 +945,73 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool) -> list[
     except Exception:  # noqa: BLE001
         pass
 
-    # Filter: keep tasks with no terminal outcome AND fresh activity.
+    # Filter: keep tasks with no terminal outcome AND fresh activity of their OWN —
+    # no always-include-ts[0] exception (EU-477 AC: a stale newest run drops out too).
     result: list[tuple[float, dict]] = []          # (score, task) for sorting
     for t in ts:
         if t.get("outcome"):
-            continue                                  # terminal → skip
+            continue                                  # terminal → not live
         tid = str(t.get("ticket_id") or "")
         score = last_ts.get(tid, 0.0)
-        # Include if this is the newest scoped task (always live on multi-card boards),
-        # or if its own audit activity falls within the freshness window.
-        if active and (t is ts[0] or (now - score) < 150):
+        if (now - score) < within_s:
             result.append((score, t))
 
     # Sort newest-first by last-activity timestamp (descending).
     result.sort(key=lambda x: x[0], reverse=True)
-    # Apply cap.
+    # Cap so stale/orphaned rows can't flood callers.
     cap = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
-    return [r[1] for r in result[:cap]]
+    return [_run_obj_for(cfg, t, ts, live=True) for _, t in result[:cap]]
+
+
+def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Optional[dict]:
+    """The live run if one is going, else the most recent run as 'last run'.
+
+    EU-477: a THIN wrapper over ``live_runs()`` — the single shared live-subset
+    computation.  When at least one run is genuinely live it returns ``live_runs()[0]``
+    (the newest live run, full run-object shape — EU-130 triage synthesis and EU-448
+    live-phase derivation included, unchanged, now computed inside ``live_runs`` /
+    ``_run_obj_for``).  When nothing is live it falls back to the newest scoped run
+    rendered as an idle 'last run' (``live=False``) — the historical contract the cockpit
+    has always relied on for its last-run panel.  ``None`` only when the app has no runs
+    at all.
+    """
+    ts = _scope(tasks, app)
+    if not ts:
+        return None
+    lives = live_runs(cfg, tasks, app, active)
+    if lives:
+        return lives[0]
+    # No genuinely-live run: show the newest one as 'last run' (idle structural path).
+    return _run_obj_for(cfg, ts[0], ts, live=False)
+
+
+def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = _LIVE_WITHIN_S) -> bool:
+    """True when a run is genuinely live RIGHT NOW even though the cockpit didn't start it — e.g. a build
+    kicked off by the Needs-you answer box, /unblock, or autopilot in another process. Heuristic: the
+    newest run for this project has NO terminal outcome AND the audit shows activity within the last
+    `within_s` seconds. Time-bounded so a crashed/interrupted attempt stops reading as live.
+
+    EU-477: ``live_runs()`` generalises exactly this heuristic to the FULL per-ticket live subset
+    (and shares the ``_LIVE_WITHIN_S`` window); this cheap newest-run boolean stays as the
+    ``render_board`` inflight flag for runs the cockpit didn't start."""
+    ts = _scope(tasks, app)
+    if not ts or ts[0].get("outcome"):     # no runs, or the newest one already finished
+        return False
+    try:
+        for line in reversed(D.audit_lines(cfg.audit_path)):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            dt = D._parse_ts(ev.get("ts", ""))
+            if dt:
+                return (datetime.now().timestamp() - dt.timestamp()) < within_s
+    except Exception:  # noqa: BLE001
+        return False
+    return False
 
 
 def _fmt_dur(secs: float) -> str:
@@ -961,7 +1033,7 @@ def _fmt_tokens(n: int) -> str:
 # --------------------------------------------------------------------------- #
 # Render
 
-def _esc(s: Any) -> str:
+def _esc(s: object) -> str:
     return html.escape(str(s))
 
 

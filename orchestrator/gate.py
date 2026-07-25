@@ -827,16 +827,22 @@ _GREEN_NEGATION_RE = re.compile(
 
 def _green_test_claim(text: str) -> str | None:
     """The matched GREEN phrase if ``text`` makes an explicit tests-passed claim (not negated), else
-    None. Returns the whole line carrying the claim so the mismatch reason names a readable sentence."""
-    for m in _GREEN_TEST_CLAIM_RE.finditer(text or ""):
-        prefix = text[max(0, m.start() - 28):m.start()]
+    None. Returns the whole line carrying the claim so the mismatch reason names a readable sentence.
+
+    Strips markdown quoted-context (fences, inline backticks, blockquotes) via
+    ``reviewer._strip_quoted_context`` BEFORE scanning, so the Builder cannot false-fire the
+    EU-442 'GREEN claim vs RED gate' mismatch by quoting an example / fixture."""
+    from .reviewer import _strip_quoted_context
+    cleaned = _strip_quoted_context(text or "")
+    for m in _GREEN_TEST_CLAIM_RE.finditer(cleaned):
+        prefix = cleaned[max(0, m.start() - 28):m.start()]
         if _GREEN_NEGATION_RE.search(prefix):
             continue
-        start = text.rfind("\n", 0, m.start()) + 1
-        end = text.find("\n", m.end())
+        start = cleaned.rfind("\n", 0, m.start()) + 1
+        end = cleaned.find("\n", m.end())
         if end == -1:
-            end = len(text)
-        return text[start:end].strip()[:300]
+            end = len(cleaned)
+        return cleaned[start:end].strip()[:300]
     return None
 
 
