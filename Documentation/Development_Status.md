@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-582 · Elite-Unit · • Failure-card gating (_ep and not qa) is correct and mutually exclusive with the progress strip and report card — no contradictory UI. · 🔗 / (QA section control bar — post `/api/qa?app=alpha` with a stubbed patrol that raises to see "QA failed during Phase 1" card with Retry button)
 - 2026-07-25 · EU-581 · Elite-Unit · • All ACs met: persistent report card renders finding count + Jira /browse/ links + verdict, persists across reloads, dismiss flips qa_dismissed and hides it, zero-findings shows 'no new findings', Telegram path… · 🔗 / (QA report card appears after running QA from cockpit)
 - 2026-07-25 · EU-580 · Elite-Unit · • Backend /api/qa-status and qa/qa_started/qa_phase state keys exist and match the poll script's field names — wiring is real end-to-end.
 - 2026-07-25 · EU-579 · Elite-Unit · • AC1–AC4 all satisfied: endpoint never 500s on defaults, findings come from real FilingResult.filed via PatrolSummary, verdict is ship_review()'s exact returned decision text, regression test covers shape + stale-reset.
