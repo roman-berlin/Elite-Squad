@@ -46,6 +46,10 @@ STATE_DIR_NAME = ".unit-state"   # the dedicated state clone, sibling of audit.j
 STATE_BRANCH = "unit-state"      # orphan branch: carries only shared/, never code
 _CLONE_DEPTH = "50"              # shallow — we only ever need the tip of the state branch
 
+# EU-526 — git gc throttle plumbing (no invocation yet; just the due-decision layer).
+_GC_INTERVAL_HOURS = 24          # minimum seconds between successive ``git gc`` calls
+_GC_SENTINEL_NAME = ".last_gc"   # untracked sentinel: survives ``reset --hard FETCH_HEAD``
+
 
 def _safe_host(raw: str) -> str:
     """Filesystem-safe host token: alnum / - / _ only, lowercased; every other char (space, '/', '.')
@@ -230,6 +234,52 @@ def ensure_state_clone(cfg: Config) -> Path | None:
     _set_identity(sd)
     (sd / "shared").mkdir(parents=True, exist_ok=True)
     return sd
+
+
+# EU-526 — git gc throttle plumbing (decision layer only; invocation follows in a later ticket).
+
+def _gc_sentinel(cfg: Config) -> Path:
+    """Path to the ``.last_gc`` sentinel inside the state clone."""
+    return state_dir(cfg) / _GC_SENTINEL_NAME
+
+
+def _gc_is_due(cfg: Config, force: bool = False) -> bool:
+    """Decide whether a ``git gc`` run is due.
+
+    Returns **True** when:
+    * ``force=True`` (caller explicitly requested it), or
+    * the sentinel file is missing (fresh clone, never gc'd), or
+    * the sentinel's mtime is older than ``_GC_INTERVAL_HOURS``, or
+    * any OSError occurs reading the sentinel (best-effort — don't crash sync over a stale fs).
+
+    Returns **False** when the sentinel exists and was touched within the throttle window.
+    Never spawns a subprocess.
+    """
+    if force:
+        return True
+    try:
+        p = _gc_sentinel(cfg)
+        st = p.stat()
+        age = time.time() - st.st_mtime
+        return age >= _GC_INTERVAL_HOURS * 3600
+    except OSError:
+        return True  # absent or unreadable → safe to gc
+
+
+def _mark_gc_done(cfg: Config) -> None:
+    """Touch the ``.last_gc`` sentinel to refresh its mtime.
+
+    Best-effort: an OSError is swallowed so a failed sentinel write can never
+    crash a future sync run.  Uses ``Path.touch()`` which updates mtime on
+    an existing file — exactly the "refresh the throttle clock" semantics
+    required.
+    """
+    try:
+        p = _gc_sentinel(cfg)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+    except OSError:
+        pass  # sidecar-style best-effort: failure must not crash sync
 
 
 def compact_state_branch(cfg: Config) -> dict[str, bool | str | None]:
