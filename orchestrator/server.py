@@ -2228,9 +2228,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 _po = None
                 try:
                     from . import decisions as _dec
-                    _po = _dec.parse_options(_qfull) or _dec.synthesize_options(_qfull)
+                    _po = _dec.ensure_options(_qfull)
                 except Exception:  # noqa: BLE001
-                    _po = None
+                    _po = _dec._default_card(str(d.get("why") or "(no question on file)"))
                 if _po:
                     # EU-564: the headline must never start with a raw ticket id — parse_options
                     # already strips it from the summary; strip again here to guard every source
@@ -2290,35 +2290,6 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         f"<input type=hidden name=ticket value='{tid}'>"
                         "<button class='nbtn x'>Dismiss</button></form></div>"
                         "</div>")
-                    continue
-                _raw = _dec.summarize_question(_qfull) or str(d.get("why") or "(no question on file)")
-                # EU-564: the headline IS the plain-language summary — summarize_question already
-                # strips a leading ticket id, cuts command/test walls, and folds at a word boundary
-                # (never mid-word; fixes the EU-508 'once pe…' cutoff). The 'Full context' expander
-                # is gated on truncation: it appears whenever the summary differs from the raw
-                # question (id stripped / wall cut / folded), so nothing is ever lost or cut off.
-                _hl_trunc = bool(_qfull) and ((_raw != _qfull) or _raw.endswith("…"))
-                _brief = html.escape(_raw)
-                _full = ("<details><summary>Full context</summary>"
-                         f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
-                         "</div></div></details>"
-                         if _hl_trunc else "")
-                out.append(
-                    "<div class=ncard>"
-                    f"<div class=q><span class='nbadge dec'>Decision</span>{_brief}</div>"
-                    f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
-                    f"{_full}"
-                    "<form method=post action=/api/answer class=nrow>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    f"<input type=hidden name=app value='{dapp}'>"
-                    "<input type=text name=text placeholder='Answer the squad — your decision re-runs the ticket with it baked in'>"
-                    "<button class='nbtn send'>Ship answer</button></form>"
-                    # Dismiss without re-running — marks question handled, removes from inbox.
-                    "<div class=nrow>"
-                    "<form method=post action=/needs/resolve style='margin:0'>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    "<button class='nbtn x'>Dismiss</button></form></div>"
-                    "</div>")
             out.append("</div>")
 
         # ── 2. Errored runs — tickets that ended errored / escalated ──────────
