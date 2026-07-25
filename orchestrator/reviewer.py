@@ -206,6 +206,38 @@ _RESOLVED_CTX_RE = re.compile(
 )
 
 
+def _strip_quoted_context(text: str) -> str:
+    """Remove markdown quoted-context spans from *text*, returning cleaned prose.
+
+    Strips three kinds of quoted context (replacing each removed span with a single space):
+
+    1. **Triple-backtick fenced code blocks** (`` ``` `` … `` ``` ``), including
+       language-tagged fences like `` ```python ``. Non-greedy body so short fences
+       don't swallow unrelated text. An UNTERMINATED opening fence (no closing `` ``` ``)
+       strips from the fence to end-of-text — conservative, because unclosed fence
+       content is still quoted context.
+    2. **Inline single-backtick spans** (`` `…` ``). Run AFTER fences so a fence's own
+       backticks aren't half-eaten by the inline pattern.
+    3. **Markdown blockquote lines** (lines starting with optional whitespace then ``>``).
+
+    Order matters: fences → inline backticks → blockquotes. Pure text-transform with no
+    module-level state and no side effects.
+
+    ``None`` and empty string return ``''`` (no-op guard on the first line)."""
+    if not text:
+        return ''
+    # 1. Triple-backtick fenced blocks (language tag tolerated after opening fence).
+    #    DOTALL so '.' matches newlines inside the body; non-greedy so short fences
+    #    don't swallow past their closing triple-backtick. Un-ended fence strips
+    #    conservatively to EOF.
+    text = re.sub(r"```[^\n`]*\n?.*?```", ' ', text, flags=re.DOTALL)
+    # 2. Inline single-backtick spans (one or more non-backtick chars).
+    text = re.sub(r"`[^`\n]+`", ' ', text)
+    # 3. Blockquote lines (optional leading whitespace + '>' + rest of line).
+    text = re.sub(r"^[ \t]*>.*$", ' ', text, flags=re.MULTILINE)
+    return text
+
+
 def _admitted_red_test_note(build_artifact: BuildArtifact | None) -> str | None:
     """The offending sentence if the Builder's handoff (diff_digest/decisions/open_questions/caveats)
     admits a genuinely UNRESOLVED failing/skipped/broken test, else None. A STRONG signal fires on its
