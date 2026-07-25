@@ -388,13 +388,134 @@ def compact_state_branch_now(cfg: Config) -> None:
         pass  # sidecar write failure must not crash sync
 
 
+def _tail_window(text: str, max_records: int, max_bytes: int) -> str:
+    """Return the newest-complete-record tail of *text* bounded by *max_records* / *max_bytes*.
+
+    Walks backwards from the end, keeping only complete newline-delimited jsonl records.
+    **Always retains at least the final record** (the newest event), even if that single
+    record alone would overflow ``max_bytes`` — this is what preserves EU-428 freshness
+    (``peer_ages`` / ``STALE_PEER_S`` can always find a recent ``ts``).
+
+    When the source already fits within both bounds the text is returned *byte-identical*
+    (no reformatting, no added/stripped trailing newline), so callers testing verbatim
+    copies on small files remain unaffected.
+
+    Bounds come from environment variables::
+
+        GENERAL_PUBLISH_MAX_RECORDS   # default 2000
+        GENERAL_PUBLISH_MAX_BYTES     # default 1 MiB
+
+    Invalid values silently fall back to defaults — never raise on the best-effort sync path.
+
+    .. note:: Trade-off: the peer host (VPS cockpit) sees only the recent window of this
+       host's audit via ``shared/<host>.jsonl``. Full history remains intact in the publisher's
+       own local ``audit.jsonl``. This is intentional: the shared copy is a lightweight signal,
+       not a full replica.
+    """
+    if not text:
+        return ""
+
+    # Fast path: source fits entirely — return byte-identical (no allocation churn).
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError:
+        encoded = text.encode("utf-8", errors="replace")
+
+    n_lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+    if n_lines <= max_records and len(encoded) <= max_bytes:
+        return text
+
+    lines = text.split("\n")  # ['l1', 'l2', '', ...] for trailing-newline JSONL
+    total = len(lines)
+
+    # Start from the very end and walk backward, consuming records.
+    pos = total
+    records_kept = 0
+    byte_count = 0
+
+    while pos > 0:
+        j = pos - 1
+        # Strip any trailing empty element produced by a final "\n"
+        while j >= 0 and not lines[j]:
+            j -= 1
+        if j < 0:
+            break
+        chunk_size = len(lines[j].encode("utf-8")) + 1  # +1 for "\n"
+        if records_kept == 0 or records_kept < max_records and byte_count + chunk_size <= max_bytes:
+            byte_count += chunk_size
+            records_kept += 1
+            pos = j
+        else:
+            break
+
+    # Edge case: after dropping below the record limit, the byte limit may
+    # still be exceeded (a single large record dominates). Trim from the left.
+    while records_kept > 1 and byte_count > max_bytes:
+        i = 0
+        while i < pos and not lines[i]:
+            i += 1
+        if i >= pos:
+            break
+        removed = len(lines[i].encode("utf-8")) + 1
+        byte_count -= removed
+        records_kept -= 1
+        pos = i + 1
+
+    # Ensure at least one record survives (preserves freshness guarantee).
+    if records_kept == 0 and pos < total:
+        pos = 0
+
+    # Reassemble, preserving the original trailing-newline pattern.
+    result_parts = lines[pos:]
+    result = "\n".join(result_parts)
+
+    # Force trailing newline if the source had one (JSONL contract).
+    if text.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
+    return result
+
+
+def _get_publish_bounds() -> tuple[int, int]:
+    """Read GENERAL_PUBLISH_MAX_RECORDS and GENERAL_PUBLISH_MAX_BYTES, falling back to safe
+    defaults on ValueError. Returns (max_records, max_bytes)."""
+    try:
+        max_records = max(1, int(os.environ.get("GENERAL_PUBLISH_MAX_RECORDS", "2000")))
+    except (ValueError, TypeError):
+        max_records = 2000
+    try:
+        max_bytes = max(1, int(os.environ.get("GENERAL_PUBLISH_MAX_BYTES", str(1 << 20))))
+    except (ValueError, TypeError):
+        max_bytes = 1 << 20
+    return max_records, max_bytes
+
+
 def publish(cfg: Config, sd: Path | None = None) -> Path:
-    """Copy this machine's live ``audit.jsonl`` into ``shared/<host>.jsonl`` in the state clone."""
+    """Publish this host's most-recent audit events to ``shared/<host>.jsonl`` in the state clone.
+
+    The published file is a **bounded tail window** of the live ``audit.jsonl``:
+    only the newest *N* complete records (up to ~M bytes) are shipped, configured via
+    ``GENERAL_PUBLISH_MAX_RECORDS`` (default 2000) and ``GENERAL_PUBLISH_MAX_BYTES`` (default 1 MiB).
+    A growing source audit does NOT make the published file grow past the bound — each publish
+    overwrites with the latest tail window.
+
+    **Trade-off:** the peer host (e.g. VPS cockpit reading ``shared/<host>.jsonl``) sees only the
+    recent window of this host's audit. Full history remains intact in the publisher's own local
+    ``audit.jsonl``, available to the local cockpit and the ``general sync`` command. This is
+    deliberate: the shared file is a lightweight freshness signal, not a full audit replica.
+
+    The newest event is always present in the published file — even a single massive record
+    is kept whole, preserving ``peer_ages()`` / ``STALE_PEER_S`` freshness guarantees.
+
+    Single-writer invariant: only ``shared/<host>.jsonl`` is written. Other hosts' files are
+    untouched.
+    """
     sd = sd or state_dir(cfg)
     dst = sd / "shared" / f"{host_id(cfg)}.jsonl"
     dst.parent.mkdir(parents=True, exist_ok=True)
     src = Path(cfg.audit_path)
-    dst.write_text(src.read_text(encoding="utf-8") if src.exists() else "", encoding="utf-8")
+    raw = src.read_text(encoding="utf-8") if src.exists() else ""
+    max_records, max_bytes = _get_publish_bounds()
+    dst.write_text(_tail_window(raw, max_records, max_bytes), encoding="utf-8")
     return dst
 
 
