@@ -115,7 +115,7 @@ chk("(5d) the Other free-text fallback stays", "Other — type your own decision
 chk("(5e) the brief problem line heads the card", "The date column can be rendered two ways" in body)
 chk("(6) an unstructured decision keeps the classic free-text card",
     "Just tell me what to do here." in body
-    and "Answer the unit — your decision re-runs the ticket" in body)
+    and "Answer the squad — your decision re-runs the ticket" in body)
 
 # ── (8) synthesized options for the pre-format backlog classes ──
 WALL = ("Base branch 'dev' is RED before any build — the gate fails on the clean base tree. "
