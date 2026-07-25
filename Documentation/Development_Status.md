@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-540 · Elite-Unit · • AC1: theme tokens (--panel/--ink/--dim/--well/--line2) all defined in both light+dark :root — legible in both modes.
 - 2026-07-26 · EU-583 · Elite-Unit · • Test-only diff correctly verifies the QA progress-strip + report-card feature end-to-end for a verify-and-close ticket. · 🔗 (no UI — `python3 tests/eu583_qa_e2e_test.py` verifies full lifecycle; smoke-test manually: POST /api/qa then watch home page cycle through Phase 1/2 → Phase 2/2 → Findings Report card with clickable Jira links → Dismiss removes it)
 - 2026-07-25 · EU-582 · Elite-Unit · • Failure-card gating (_ep and not qa) is correct and mutually exclusive with the progress strip and report card — no contradictory UI. · 🔗 / (QA section control bar — post `/api/qa?app=alpha` with a stubbed patrol that raises to see "QA failed during Phase 1" card with Retry button)
 - 2026-07-25 · EU-581 · Elite-Unit · • All ACs met: persistent report card renders finding count + Jira /browse/ links + verdict, persists across reloads, dismiss flips qa_dismissed and hides it, zero-findings shows 'no new findings', Telegram path… · 🔗 / (QA report card appears after running QA from cockpit)
