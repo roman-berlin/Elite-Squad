@@ -13003,3 +13003,5 @@
 {"ts": "2026-07-25T04:51:03+0300", "event": "token_burn_report", "ticket_id": "EU-513", "payload": {"planner": 421774, "builder": 2975990, "reviewer": 307472}, "total": 3705236}
 {"ts": "2026-07-25T04:51:03+0300", "event": "ticket_start", "ticket_id": "EU-514", "app": "Elite-Unit", "branch": "autodev/EU-514-verify-close-hybrid-a-hard-capped-second", "dry_run": false, "ephemeral": false}
 {"ts": "2026-07-25T04:51:04+0300", "event": "ticket_transition", "ticket_id": "EU-514", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-07-25T04:56:33+0300", "event": "agent_call", "tag": "planner", "model": "claude-fable-5", "provider": "Anthropic", "model_version": "claude-fable-5", "input_tokens": 233744, "output_tokens": 6951, "cost_usd": 1.438831, "duration_s": 93.92, "turns": 9, "ticket_id": "EU-514"}
+{"ts": "2026-07-25T04:56:33+0300", "event": "planner", "ticket_id": "EU-514", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 2, "cost_usd": 1.438831, "provider": "Anthropic", "model": "claude-fable-5"}
