@@ -13022,3 +13022,5 @@
 {"ts": "2026-07-25T05:20:24+0300", "event": "hybrid_mode", "builder_backend": "f6be0ded-2b6d-4721-9fc1-4aabee7cee5b", "main_backend": "opus"}
 {"ts": "2026-07-25T05:20:25+0300", "event": "ticket_start", "ticket_id": "EU-472", "app": "Elite-Unit", "branch": "autodev/EU-472-bound-what-sync-publish-ships-publish-a-", "dry_run": false, "ephemeral": false}
 {"ts": "2026-07-25T05:20:26+0300", "event": "ticket_transition", "ticket_id": "EU-472", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-07-25T05:25:24+0300", "event": "agent_call", "tag": "planner", "model": "claude-fable-5", "provider": "Anthropic", "model_version": "claude-fable-5", "input_tokens": 75467, "output_tokens": 3091, "cost_usd": 0.793198, "duration_s": 44.63, "turns": 4, "ticket_id": "EU-472"}
+{"ts": "2026-07-25T05:25:24+0300", "event": "planner", "ticket_id": "EU-472", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 2, "cost_usd": 0.793198, "provider": "Anthropic", "model": "claude-fable-5"}
