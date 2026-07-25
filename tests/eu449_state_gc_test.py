@@ -9,9 +9,13 @@ Checks:
   AC3 — force=True always returns True
   AC4 — mtime boundary: old→True, fresh→False
   AC5 — constants exist + no subprocess spawned (monkeypatch _git)
+
+EU-529 adds a REAL-clone integration test (test_gc_state_clone_real_repo_packs_loose_objects):
+a genuine throwaway git repo (no network) proves loose objects drop after gc_state_clone(force=True).
 """
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -36,6 +40,11 @@ sys.path.insert(0, ".")
 
 from orchestrator import sync  # noqa: E402
 from orchestrator.config import AppConfig, Config  # noqa: E402
+
+# EU-529 — pristine reference to the REAL ``_git`` captured before any mocked section
+# below swaps in a stub. The real-repo integration test forces this back in so its
+# ``gc_state_clone`` call drives the actual git binary even if a stub leaked upstream.
+_REAL_GIT = sync._git
 
 results: list[tuple[str, bool, str]] = []
 
@@ -443,6 +452,120 @@ _r_nc = sync.gc_state_clone(cfg_nc)
 chk("EU-527: skips with 'no-clone' when .git is missing",
     _r_nc.get("ok") is True and _r_nc.get("ran") is False and _r_nc.get("reason") == "no-clone",
     f"got {_r_nc}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EU-529 — REAL-clone integration test: loose objects drop after gc_state_clone
+#
+# Deliberately NOT mocked: builds a genuine throwaway git repo in a tmpdir (no
+# network, no dependence on the real .unit-state clone), generates loose objects
+# by committing small files, then proves the real `git gc --prune=now` that
+# gc_state_clone(force=True) runs packs them away — the loose-object count read
+# from real `git count-objects -v` strictly decreases (to 0) while the branch and
+# a tracked sentinel file (stand-in for shared/mac.jsonl) are left untouched.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _loose_count(repo: Path) -> int:
+    """Parse the loose-object ``count:`` field out of REAL ``git count-objects -v`` output."""
+    r = subprocess.run(["git", "count-objects", "-v"], cwd=str(repo),
+                       capture_output=True, text=True, check=True)
+    for line in r.stdout.splitlines():
+        key, _, val = line.partition(":")
+        if key.strip() == "count":
+            return int(val.strip())
+    raise AssertionError(f"no 'count:' field in git count-objects -v output: {r.stdout!r}")
+
+
+def test_gc_state_clone_real_repo_packs_loose_objects() -> None:
+    """Prove gc_state_clone(force=True) packs loose objects in a REAL git repo."""
+    root = Path(tempfile.mkdtemp(prefix="eu529-realrepo-"))
+    # _make_cfg(root) points audit_path at root/audit.jsonl → state_dir(cfg) resolves
+    # to root/.unit-state, so THAT is the directory we make the real repo in.
+    sd = root / sync.STATE_DIR_NAME
+    try:
+        sd.mkdir(parents=True, exist_ok=True)
+
+        def git(*a: str) -> None:
+            subprocess.run(["git", *a], cwd=str(sd), capture_output=True,
+                           text=True, check=True)
+
+        # ── 1. a genuine repo on the real state branch (stand-in for unit-state) ──
+        git("init", "-q", "-b", sync.STATE_BRANCH, ".")
+        git("config", "user.email", "eu529@localhost")
+        git("config", "user.name", "EU-529 real-repo test")
+        git("config", "commit.gpgsign", "false")  # never block on a signing key
+
+        # ── 2. commit a handful of small files → loose objects ──
+        for i in range(5):
+            (sd / f"loose_{i}.txt").write_text(f"eu529 loose object payload {i}\n")
+        # tracked sentinel standing in for shared/mac.jsonl — must survive byte-identical
+        (sd / "shared").mkdir(parents=True, exist_ok=True)
+        sentinel_rel = "shared/mac.jsonl"
+        sentinel_bytes = (
+            b'{"event":"ticket_start","ticket_id":"EU-529","ts":"2026-07-25T00:00:00"}\n'
+        )
+        (sd / sentinel_rel).write_bytes(sentinel_bytes)
+        git("add", "-A")
+        git("commit", "-q", "-m", "seed loose objects + sentinel")
+        pre_sentinel = (sd / sentinel_rel).read_bytes()
+
+        # ── 3. churn: rewrite the files so old versions become unreachable loose objects ──
+        for i in range(5):
+            (sd / f"loose_{i}.txt").write_text(f"eu529 mutated payload {i} -- second revision\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "churn to create unreachable loose objects")
+
+        # ── measure loose objects BEFORE gc ──
+        loose_before = _loose_count(sd)
+        chk("EU-529 precond: real .git dir present (repo recognised as a clone)",
+            (sd / ".git").exists(), f"no .git at {sd}")
+        chk("EU-529 precond: loose objects exist before gc (count > 0)",
+            loose_before > 0, f"loose_before={loose_before}")
+
+        cfg = _make_cfg(root)
+
+        # Drive gc through the REAL git binary: swap in the pristine _git for the call
+        # so a stub leaked from a mocked section above can't silently no-op the gc.
+        saved_git = sync._git
+        sync._git = _REAL_GIT
+        try:
+            r = sync.gc_state_clone(cfg, force=True)
+        finally:
+            sync._git = saved_git
+
+        chk("EU-529: gc_state_clone(force=True) → ok=True, ran=True on the real repo",
+            r.get("ok") is True and r.get("ran") is True, f"got {r}")
+
+        # ── measure loose objects AFTER gc ──
+        loose_after = _loose_count(sd)
+        chk("EU-529 AC2: loose-object count STRICTLY decreases after gc",
+            loose_after < loose_before,
+            f"before={loose_before} after={loose_after}")
+        chk("EU-529 AC2 (ideal): all loose objects packed — count hits 0",
+            loose_after == 0, f"before={loose_before} after={loose_after}")
+
+        # ── branch survived (gc packs objects, never deletes branches) ──
+        br = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                             f"refs/heads/{sync.STATE_BRANCH}"],
+                            cwd=str(sd), capture_output=True, text=True)
+        chk(f"EU-529 AC3a: branch '{sync.STATE_BRANCH}' still present after gc",
+            br.returncode == 0 and bool(br.stdout.strip()),
+            f"rc={br.returncode} out={br.stdout.strip()!r} err={br.stderr.strip()!r}")
+
+        # ── tracked sentinel byte-identical (gc must not touch working-tree files) ──
+        sentinel_path = sd / sentinel_rel
+        post_sentinel = sentinel_path.read_bytes() if sentinel_path.exists() else None
+        chk("EU-529 AC3b: tracked sentinel (shared/mac.jsonl) byte-identical after gc",
+            post_sentinel == pre_sentinel,
+            f"pre={pre_sentinel!r} post={post_sentinel!r}")
+
+    finally:
+        # AC4: always clean up the tmpdir — even if an assertion/setup step raised above.
+        shutil.rmtree(root, ignore_errors=True)
+
+
+test_gc_state_clone_real_repo_packs_loose_objects()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
