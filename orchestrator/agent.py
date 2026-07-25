@@ -652,6 +652,12 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     from .models import OPUS
     from . import backends as _backends
 
+    # Get the configured model — hoisted ABOVE the GLM branch (EU-511 review) so the cap-failover
+    # success path's print and audit record can reference it without UnboundLocalError (the binding
+    # used to live below the GLM block, which silently swallowed the `glm_cap_failover_activated`
+    # audit event and made the print a latent crash for empty-tag callers).
+    model = getattr(options, "model", "") or ""
+
     # EU-189: under a GLM run there is no Sonnet-cap → native-Opus fallback (that semantics is
     # Anthropic-only and would burn the Max subscription the operator chose GLM to avoid). Read the
     # run's backend from cfg first (robust — cfg is passed by builder/reviewer) then the contextvar;
@@ -660,16 +666,58 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
     # this call so the seam in _run_agent_unrouted actually applies GLM instead of silently running
     # Opus — keeps the cfg-view and the contextvar-view of the backend consistent (security review).
     if _backends.is_glm(cfg):
+        # EU-511: cap-only one-shot GLM → main-model retry. Mirror the Sonnet→Opus pattern:
+        # snapshot options BEFORE the GLM call (the seam's apply() rebinds options.env/model
+        # on the passed object to aim it at z.ai, so the retry needs the pre-GLM copy), then
+        # attempt once; only if plan_limit_kind=="cap" do ONE retry on NATIVE. Transient blips,
+        # clean successes, and plain errors pass through unchanged — no backoff, no new state.
+        _snapshot_options = __import__("copy").copy(options)
+
         _tok = None if _backends.current() == _backends.GLM else _backends.set_backend(_backends.GLM)
         try:
-            return await run_agent(prompt, options, tag=tag, ticket_id=ticket_id,
-                                   pass_number=pass_number, routing_tier=routing_tier)
+            glm_result = await run_agent(prompt, options, tag=tag, ticket_id=ticket_id,
+                                         pass_number=pass_number, routing_tier=routing_tier)
         finally:
             if _tok is not None:
                 _backends.reset_backend(_tok)
 
-    # Get the configured model
-    model = getattr(options, "model", "") or ""
+        # Only trigger failover on a hard cap exhaustion — transient 429/529 and all other
+        # outcomes pass through unchanged to preserve EU-189 / EU-210 semantics.
+        if glm_result.plan_limit_kind != "cap":
+            return glm_result
+
+        # Plan-limit cap hit — retry ONCE on the native/main backend. Reset contextvar so
+        # current_for_tag resolves NATIVE (applied inside _run_agent_unrouted). No hybrid
+        # interference needed: if is_glm(cfg) was True here, hybrid main≠opus never entered
+        # this branch anyway (see is_glm resolution in backends.py).
+        _ntok = None if _backends.current() == _backends.NATIVE else _backends.set_backend(_backends.NATIVE)
+        try:
+            native_result = await run_agent(prompt, _snapshot_options, tag=tag,
+                                            ticket_id=ticket_id, pass_number=pass_number)
+        finally:
+            if _ntok is not None:
+                _backends.reset_backend(_ntok)
+
+        # EU-82: all models capped → return original GLM result so upstream pause handling
+        # sees the real signal. Broken retry (auth/network) proves nothing about the cap.
+        if native_result.is_plan_limit or native_result.is_error:
+            return glm_result
+
+        # Native succeeded where GLM was capped — return it. Persist NOTHING: next call
+        # starts on GLM again (per-call, auto-exits). Mirrors lines 760-766 for Sonnet→Opus.
+        print(f"  · GLM cap on {tag or model} — this pass ran on main model (no weekly pin)", flush=True)
+        if _AUDIT_SINK is not None:
+            try:
+                extra = {}
+                if ticket_id:
+                    extra["ticket_id"] = str(ticket_id)
+                if pass_number is not None:
+                    extra["pass_number"] = pass_number
+                _AUDIT_SINK.record("glm_cap_failover_activated", tag=tag or "", model=model,
+                                   reason="cap", error=glm_result.final, **extra)
+            except Exception:  # noqa: BLE001 — instrumentation must never break a run
+                pass
+        return native_result
 
     # The Sonnet-cap → one-shot-Opus fallback only applies to Sonnet calls.
     is_sonnet = model and "sonnet" in model.lower()

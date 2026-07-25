@@ -192,9 +192,14 @@ chk("GLM run: exactly ONE SDK call (no Opus probe)", len(CALLS) == 1)
 chk("GLM run: served model was glm-4.6", CALLS and CALLS[0]["model"] == "glm-4.6")
 chk("GLM run: call aimed at z.ai", CALLS and "z.ai" in CALLS[0]["env"].get("ANTHROPIC_BASE_URL", "").lower())
 
-# GLM, cap error: STILL exactly ONE call — the guard suppresses the native-Opus probe.
+# GLM, cap error: TWO calls — EU-511 added a native retry when GLM hits a hard cap.
+# The first call is at z.ai; the second is on the native backend with the original model
+# (mirrors the Sonnet→Opus pattern). Both calls return capped here, so the original GLM
+# result is returned upstream (same as EU-82 all-models-cap handling).
 asyncio.run(_drive("glm", _Cfg("glm"), cap=True))
-chk("GLM run under cap: still ONE call (guard suppresses Opus probe)", len(CALLS) == 1)
+chk("GLM run under cap: TWO calls (EU-511 native retry on GLM cap)", len(CALLS) == 2)
+chk("GLM run under cap: 2nd call ran on native (not z.ai env)",
+    len(CALLS) == 2 and "z.ai" not in CALLS[1]["env"].get("ANTHROPIC_BASE_URL", ""))
 
 # Control — native Sonnet under a cap DOES probe Opus: TWO calls. Proves the guard is what differs.
 asyncio.run(_drive("opus", _Cfg("opus"), cap=True))
