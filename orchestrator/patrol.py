@@ -42,21 +42,42 @@ def _first_line(text: str) -> str:
     return "(no report)"
 
 
+class PatrolSummary(str):
+    """The patrol's Telegram summary string — with the filed ticket keys attached.
+
+    EU-579: ``patrol()`` returns this so the cockpit can surface the REAL Jira keys a run
+    filed (each officer's ``FilingResult.filed``) without re-parsing the summary text.
+    It IS the summary str — every existing caller and test stub keeps working unchanged;
+    ``.filed`` is the extra. A caller that stubs ``patrol()`` with a plain str simply
+    carries no ``.filed``, so readers must use ``getattr(summary, "filed", [])``."""
+
+    filed: list[str]
+
+    def __new__(cls, text: str, filed: list[str]) -> "PatrolSummary":
+        obj = str.__new__(cls, text)
+        obj.filed = list(filed)
+        return obj
+
+
 async def patrol(cfg: Config, app_name: str, officers=None, do_file: bool = True, audit=None) -> str:
     """Run the recon officers over one app, file (or propose) their findings, and report a muster
-    line each. `officers` = subset of keys (None = all three). Returns the Telegram-style summary."""
+    line each. `officers` = subset of keys (None = all three). Returns the Telegram-style summary
+    as a ``PatrolSummary`` — a str that also carries ``.filed`` (the Jira keys newly created this
+    run, EU-579)."""
     app = cfg.app(app_name)
     roster = [o for o in PATROL_OFFICERS if (not officers or o[0] in officers)]
     print(f"\n🛰️  Patrol — {app_name}: {', '.join(o[1] for o in roster)}"
           + ("" if do_file else "  (propose-only)") + "\n", flush=True)
 
     lines = []
+    filed_keys: list[str] = []   # EU-579: Jira keys newly created this run (→ PatrolSummary.filed)
     filed_t = deduped_t = failed_t = proposed_t = 0
     failures: list[tuple[str, str, str]] = []   # (officer_label, finding_title, error)
     for key, label, fname in roster:
         try:
             report = await _inspect(key, cfg, app_name, audit)
             clean, _block, result = filing.present(report, app, key, do_file)
+            filed_keys.extend(result.filed)
             Path(cfg.audit_path).with_name(fname).write_text(clean, encoding="utf-8")
             head = _first_line(clean)
             if not do_file:
@@ -99,7 +120,7 @@ async def patrol(cfg: Config, app_name: str, officers=None, do_file: bool = True
     else:
         tally = f"{proposed_t} proposed"
     print(f"\n  patrol complete — {tally}\n", flush=True)
-    return summary
+    return PatrolSummary(summary, filed_keys)
 
 
 def _escalate_failures(cfg: Config, app_name: str, failures: list[tuple[str, str, str]]) -> None:
