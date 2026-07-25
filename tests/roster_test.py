@@ -77,7 +77,7 @@ for _name in _recon_src:
 # --- html cockpit view ---
 html = roster.html_view(cfg, "all quiet")
 chk("html view renders the tree", "Chain of command" in html and "CTO" in html)
-chk("html view renders the officer table", "Officers &amp; duties" in html and "Security Engineer" in html)
+chk("html view renders the engineer table", "Engineers &amp; duties" in html and "Security Engineer" in html)
 chk("html view shows the status", "all quiet" in html)
 chk("html view escapes (no raw angle injection)", "<script>" not in roster.html_view(cfg, "<script>x"))
 
