@@ -1697,7 +1697,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             _actbtn("/api/council", "&#128172; Hold a council now"))
         intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
-                 "use the <a href='/group'>Group room</a>.</p>")
+                 "<a href=\"/chat\">chat with the CTO</a>.</p>")
         if not hist:
             return _wrap("Daily Council", acts + intro + top
                          + "<p style='color:#8a909c'>No councils yet.</p>")

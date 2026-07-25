@@ -1140,17 +1140,14 @@ _CHAT_STYLE = ("<style>"
 def _chat_tabs(active: str, npend: int = 0) -> str:
     badge = f'<span class=cbadge>{npend}</span>' if npend else ""
     g = "on" if active == "general" else ""
-    gr = "on" if active == "group" else ""
-    return (f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a>'
-            f'<a class="ctab {gr}" href="/group">&#128101; Group room</a></div>')
+    return f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a></div>'
 
 
 def _group_inner(cfg: Config) -> str:
     from . import council
     msgs = council.group_messages(cfg, limit=30)   # EU-287: window to the recent messages, not the whole log
     if not msgs:
-        return ('<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant engineers '
-                'weigh in. (The CTO is your 1:1 chat.)</div>')
+        return '<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant engineers weigh in.</div>'
     out = ""
     for who, text in msgs:
         side = "you" if who == "you" else "unit"
