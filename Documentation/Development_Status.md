@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-516 · Elite-Unit · • All 6 ACs met: importable, inline-backtick/fence/blockquote spans stripped, plain prose untouched, None/'' guarded. • New public function is fully typed (-> str) and covered by a dedicated test file exercising every… · 🔗 (no UI — `from orchestrator.reviewer import _strip_quoted_context; print(_strip_quoted_context('...'))` in a python shell)
 - 2026-07-25 · EU-463 · Elite-Unit · • Iteration-1 self-trip is genuinely fixed: import-line exclusion + reworded prose mean this diff no longer matches its own explicit-Any/typing gate (verified line-by-line).
 - 2026-07-25 · EU-472 · Elite-Unit · • Bounded tail window correctly caps published shared/<host>.jsonl by records/bytes; growth test confirms no unbounded growth. · 🔗 (no UI — verify on Mac cockpit: after several publish cycles, `shared/mac.jsonl` stays ≤ configured bound even as local `audit.jsonl` grows; confirm VPS sees recent events without STALE marker)
 - 2026-07-25 · EU-514 · Elite-Unit · • Verify-and-close ticket: adds a genuine e2e cap-failover integration test, no production code changed. · 🔗 (no UI — `python3 tests/eu514_e2e_cap_failover_test.py` standalone or verify via `python3 tests/run_all.py` that eu514 reports 26/26 passed inside the 471-harness sweep)
