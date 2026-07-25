@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import os
+import time
 from pathlib import Path
 
 from . import dashboard as D
@@ -654,6 +655,39 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
             ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
 
+    # QA progress strip: live two-phase indicator while a QA run is in flight.
+    # Reuses the same poll-and-reload pattern as deploy_strip; points at /api/qa-status.
+    # Server-side rendered so a mid-run refresh shows the correct current phase.
+    qa_strip = ""
+    if _state.get("qa"):
+        _qs = _state.get("qa_started") or 0
+        _qelapsed = int(time.time() - _qs) if isinstance(_qs, (int, float)) else 0
+        _mm, _ss = divmod(_qelapsed, 60)
+        # None+active = claim-time race window → show phase 1.
+        # qlabel carries a LITERAL '&': the single html.escape() below encodes it once
+        # (a pre-escaped '&amp;' here would double-escape to '&amp;amp;' in the browser).
+        if _state.get("qa_phase") == "ship_review":
+            qlabel = "Phase 2/2 — ship verdict"
+        else:
+            qlabel = "Phase 1/2 — inspecting dev & filing findings"
+        # NOTE: the inline script is ONE self-contained snippet — keep each JS string
+        # literal inside a single Python string (iter-1 split 'Phase 1/2…' across two
+        # Python literals, which produced unparseable JS), and end with exactly one
+        # IIFE close `})();`. The '&' inside the JS string literal stays literal too:
+        # <script> content is raw text, HTML entities are NOT decoded there.
+        qa_strip = (
+            f'<div class="qa-strip"><span id=qaphase>{html.escape(qlabel)}</span>'
+            f' <span id=qaelapsed>{_mm:02d}:{_ss:02d}</span></div>'
+            "<script>(function(){var el=document.getElementById('qaphase');"
+            "var ta=document.getElementById('qaelapsed');function p(){fetch('/api/qa-status')"
+            ".then(function(r){return r.json()}).then(function(d){"
+            "if(el){el.textContent=(d.phase==='ship_review')"
+            "?'Phase 2/2 — ship verdict':'Phase 1/2 — inspecting dev & filing findings'}"
+            "var m=Math.floor(d.elapsed_s/60);var s=d.elapsed_s%60;"
+            "if(ta){ta.textContent=String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')}"
+            "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
+            ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
+
     # EU-103: per-project autopilot controls — read from the per-app run-state.
     # State is resolved here (not in the template) so the HTML is a pure string.
     ap_status: dict = {"on": False, "stopping": False, "mode": None, "external": False}
@@ -838,6 +872,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
 .tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
+.qa-strip{{display:flex;align-items:center;gap:10px;padding:9px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline);color:#cfe0ff;font-size:13px;font-weight:650}}
+.qa-strip #qaelapsed{{font-variant-numeric:tabular-nums;color:var(--dim);font-weight:400}}
 .deploybar .dspin{{width:18px;height:18px;border:3px solid var(--accentline);border-top-color:var(--accent);border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
 .deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
 .deploybar .dsub{{color:var(--dim);font-weight:400;font-size:12px}}
@@ -894,7 +930,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <span class=grow></span>
   {status}
 </div>
-{deploy_strip}"""
+{deploy_strip}{qa_strip}"""
 
 
 def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
