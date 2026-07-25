@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-569 · Elite-Unit · • Test-only diff — correct for a verify-and-close integration ticket run last after EU-564..568 landed. · 🔗 /needs
 - 2026-07-25 · EU-565 · Elite-Unit · • All 4 ACs met: ensure_options 3-tier fallback (parse→synthesize→default) wired into /needs, old free-text-only branch deleted; render loop emits 2-4 numbered buttons with one ★. · 🔗 /needs (the Decisions section — look for cards where questions are plain prose like "Which approach should we take…" — they must show numbered option buttons with ★ markers, never a bare text input with "Answer the squad…")
 - 2026-07-25 · EU-568 · Elite-Unit · • All 4 ACs met: COUNCIL_SHIP_QUESTION='Is dev ready to promote to main?', QA/answer card copy scrubbed to 'the squad', new denylist test added. · 🔗 /needs (the page with needs-you cards showing decision options, parked tickets, and QA status strip)
 - 2026-07-25 · EU-567 · Elite-Unit · • Correctly traced the ticket's example ('QA running for Elite-Unit…') to _state['last_msg'] at server.py:1809 — the only source of that text — and confirmed the /needs page is the only render site, so scope is right.
