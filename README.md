@@ -2,7 +2,7 @@
 
 *(engine codename: “The General”; brand guide: Documentation/BRAND.md)*
 
-You give an order. The **General** (the orchestrator) commands two officers — the
+You give an order. The **General** (the orchestrator) commands two engineers — the
 **Builder** (Claude Code) and the **Reviewer** (a second, read-only Claude) — to
 implement it on a feature branch, test it, review it, and land it on your app's
 `dev` branch only if `dev` stays green. You remain the only one who merges
@@ -74,7 +74,7 @@ cp config.example.yaml config.yaml   # add your apps (repo_path, dev branch, gat
 
 ### Auth — using your Max plan (no API key)
 
-The officers run on Claude Code, so they use the same login. On a **Max/Pro plan**:
+The engineers run on Claude Code, so they use the same login. On a **Max/Pro plan**:
 
 ```bash
 claude            # then: /login  — sign in with your Max account (one time, in a browser)
@@ -177,8 +177,8 @@ config.yaml             your apps (from config.example.yaml)
 orchestrator/
   main.py        CLI: task / ticket / drain / doctor
   loop.py        build -> gate -> review -> land-on-dev / retry / escalate
-  builder.py     Builder officer (Agent SDK, full tools)
-  reviewer.py    Reviewer officer (Agent SDK, read-only, JSON verdict)
+  builder.py     Builder engineer (Agent SDK, full tools)
+  reviewer.py    Reviewer engineer (Agent SDK, read-only, JSON verdict)
   agent.py       shared Agent SDK runner
   gate.py        runs your tests/lint (branch, then dev)
   git_ops.py     branch / diff / keep-green merge / PR ; main is protected

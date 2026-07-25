@@ -70,7 +70,7 @@ ALLOWLIST = {"orchestrator/officers.py"}
 #     so ONLY a bare "Engineer" standing in for the retired Field-Engineer officer is flagged.
 BARE_PERSONA_PATTERN = re.compile(
     r"\bProvost\b|\bInspector\b"
-    r"|(?<!QA )(?<!Security )(?<!Test )(?<!Frontend )(?<!Software )\bEngineer\b(?! \|)(?!</th>)"
+    r"|(?<!QA )(?<!Security )(?<!Test )(?<!Frontend )(?<!Software )\bEngineer\b(?! \|)(?!</th>)(?!-)"
 )
 
 

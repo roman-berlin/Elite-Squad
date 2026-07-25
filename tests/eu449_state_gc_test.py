@@ -569,6 +569,217 @@ test_gc_state_clone_real_repo_packs_loose_objects()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# EU-528 — git_sync() wiring: gc_state_clone behind the throttle, non-fatal
+#
+# Stubbed _git / gc_state_clone; belt-and-suspenders try/except at call site.
+# Tests placed BEFORE EU-530 which exercises the full live integration path.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── AC1: normal sync with clone → out["gc"] present + pre-existing keys intact ──
+
+root_1 = Path(tempfile.mkdtemp(prefix="eu528-a1-"))
+cfg_1 = _make_cfg(root_1)
+
+sd_1 = root_1 / sync.STATE_DIR_NAME
+sd_1.mkdir(parents=True)
+(sd_1 / ".git").mkdir(exist_ok=True)          # fake clone so ensure_state_clone doesn't try real git
+
+real_git = sync._git
+_g1_calls = []
+
+
+def _recorder_1(cwd, *a, **kw):
+    _g1_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+try:
+    sync._git = _recorder_1
+    out = sync.git_sync(cfg_1)
+
+    chk("EU-528 AC1a: out contains 'gc' key",
+        "gc" in out, f"keys={list(out.keys())}")
+
+    chk("EU-528 AC1b: out has all pre-existing keys with original meaning",
+        all(k in out for k in ("host", "pulled", "pushed", "hosts", "error")),
+        f"missing={[k for k in ('host','pulled','pushed','hosts','error') if k not in out]}")
+
+    chk("EU-528 AC1c: gc value is gc_state_clone's return dict",
+        isinstance(out.get("gc"), dict) and "ok" in out["gc"],
+        f"got {out.get('gc')}")
+
+    # Ensure existing keys were NOT altered (pulled set via fetch path, hosts set)
+    chk("EU-528 AC1d: pulled is True (fetch succeeded)",
+        out.get("pulled") is True, f"pulled={out.get('pulled')}")
+
+    chk("EU-528 AC1e: hosts list populated from shared_files",
+        isinstance(out.get("hosts"), list),
+        f"hosts={out.get('hosts')}")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC2: raising gc_state_clone → swallowed, out still has pulled/pushed ──
+
+root_2 = Path(tempfile.mkdtemp(prefix="eu528-a2-"))
+cfg_2 = _make_cfg(root_2)
+
+sd_2 = root_2 / sync.STATE_DIR_NAME
+sd_2.mkdir(parents=True)
+(sd_2 / ".git").mkdir(exist_ok=True)
+
+real_git = sync._git
+real_gc = sync.gc_state_clone
+_g2_calls = []
+
+
+def _recorder_2(cwd, *a, **kw):
+    _g2_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+def _failing_gc(cfg, force=False):
+    raise RuntimeError("boom")
+
+
+try:
+    sync._git = _recorder_2
+    sync.gc_state_clone = _failing_gc
+
+    # MUST NOT propagate the exception
+    out = sync.git_sync(cfg_2)
+
+    chk("EU-528 AC2a: out returned even though gc raised",
+        isinstance(out, dict) and "pulled" in out,
+        "no dict returned (exception propagated)")
+
+    chk("EU-528 AC2b: out['gc']['ok'] is False on exception",
+        out.get("gc", {}).get("ok") is False,
+        f"got {out.get('gc')}")
+
+    chk("EU-528 AC2c: error message captured in gc dict",
+        "boom" in str(out.get("gc", {}).get("error", "")),
+        f"error={out.get('gc',{}).get('error')}")
+
+    chk("EU-528 AC2d: pulled/pushed unaffected by gc failure",
+        out.get("pulled") is True,
+        f"pulled={out.get('pulled')} pushed={out.get('pushed')}")
+
+finally:
+    sync._git = real_git
+    sync.gc_state_clone = real_gc
+
+
+# ── AC3: gc_state_clone returning failure dict → additive, never fatal ──
+
+root_3 = Path(tempfile.mkdtemp(prefix="eu528-a3-"))
+cfg_3 = _make_cfg(root_3)
+
+sd_3 = root_3 / sync.STATE_DIR_NAME
+sd_3.mkdir(parents=True)
+(sd_3 / ".git").mkdir(exist_ok=True)
+
+real_git = sync._git
+real_gc = sync.gc_state_clone
+_g3_calls = []
+
+
+def _recorder_3(cwd, *a, **kw):
+    _g3_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+def _failing_gc_dict(cfg, force=False):
+    return {"ok": False, "ran": True, "error": "gc failed"}
+
+
+try:
+    sync._git = _recorder_3
+    sync.gc_state_clone = _failing_gc_dict
+
+    out = sync.git_sync(cfg_3)
+
+    chk("EU-528 AC3a: out returned with failing gc_state_clone",
+        isinstance(out, dict),
+        "no dict returned")
+
+    chk("EU-528 AC3b: out['gc'] carries the failure dict verbatim",
+        out.get("gc") == {"ok": False, "ran": True, "error": "gc failed"},
+        f"got {out.get('gc')}")
+
+    chk("EU-528 AC3c: pull/push unaffected by failing gc",
+        out.get("pulled") is True,
+        f"pulled={out.get('pulled')}")
+
+finally:
+    sync._git = real_git
+    sync.gc_state_clone = real_gc
+
+
+# ── AC4: unit-state branch never deleted, mac.jsonl never touched
+# Stub _git, invoke gc_state_clone DIRECTLY (isolating it from the rest of the
+# git_sync path), and assert the _git args it passes are exactly
+# ('gc','--prune=now') — so no branch-delete args and no 'mac.jsonl' can ever
+# appear on this call path.
+
+root_4 = Path(tempfile.mkdtemp(prefix="eu528-a4-"))
+cfg_4 = _make_cfg(root_4)
+
+sd_4 = root_4 / sync.STATE_DIR_NAME
+sd_4.mkdir(parents=True)
+(sd_4 / ".git").mkdir(exist_ok=True)
+
+real_git = sync._git
+_g4_call = []  # single-call recorder for gc_state_clone isolation
+
+
+def _recorder_4(cwd, *a, **kw):
+    _g4_call.append((a, kw))
+    return _CP(rc=0)
+
+
+try:
+    sync._git = _recorder_4
+    r = sync.gc_state_clone(cfg_4)  # direct invocation — captures ONLY gc's _git args
+
+    all_args: list[tuple[str, ...]] = [call[0] for call in _g4_call]
+    merged_flat: list[str] = []
+    for pair in all_args:
+        merged_flat.extend(pair)
+
+    branch_del_pairs = [(merged_flat[i], merged_flat[i + 1])
+                        for i in range(len(merged_flat) - 1)]
+
+    chk("EU-528 AC4a: no ('branch', '-D') pair in gc's _git calls",
+        ("branch", "-D") not in branch_del_pairs,
+        f"found in {[p for p in branch_del_pairs if p == ('branch', '-D')]}")
+
+    chk("EU-528 AC4b: no ('branch', '-d') pair in gc's _git calls",
+        ("branch", "-d") not in branch_del_pairs,
+        f"found in {[p for p in branch_del_pairs if p == ('branch', '-d')]}")
+
+    # gc_state_clone only runs 'git gc --prune=now' — nothing near mac.jsonl
+    chk("EU-528 AC4c: gc _git arg contains no 'mac.jsonl'",
+        "mac.jsonl" not in "".join(merged_flat),
+        f"found in args: {[a for a in merged_flat if 'mac.jsonl' in a]}")
+
+    # No branch arg at all — the gc command never names a branch, let alone deletes one
+    chk(f"EU-528 AC4d: '{sync.STATE_BRANCH}' never appears in branch-delete context",
+        not any(p[0] == "branch" and p[1].lower() in ("-d", "-D") for p in branch_del_pairs),
+        f"branch-delete pairs: {branch_del_pairs}")
+
+    # The single gc _git call must be exactly ("gc","--prune=now")
+    chk("EU-528 AC4e: gc_state_clone calls _git once with exactly ('gc','--prune=now')",
+        len(_g4_call) == 1 and _g4_call[0][0] == ("gc", "--prune=now"),
+        f"got {[(a,) for a, kw in _g4_call]}")
+
+finally:
+    sync._git = real_git
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # EU-530 — end-to-end wiring: git_sync must CALL gc_state_clone and report its dict
 # ═══════════════════════════════════════════════════════════════════════════
 
