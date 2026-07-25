@@ -86,6 +86,10 @@ Everything under `Documentation/` (these are the only files there — keep this 
   (builder) during the GLM weekly-cap outage. The working QwenCloud Token-Plan Anthropic endpoint,
   which model ids each plan actually serves, the Opus-reviewer quality baseline, and the flagship
   (`qwen3.8-max-preview`) builder experiment with its provisional KEEP decision.
+- `Documentation/UX_AUDIT_2026-07-25.md` — the 2026-07-25 12-agent deep UX/UI audit of every cockpit
+  surface (33 surfaces, 156 raw findings → 14 filed tickets): the two P0s (per-project action results
+  never rendered; the live-log panel writing into a detached node), the 7-High/6-Medium/1-Low plan,
+  and the EU-543 prerequisite note.
 - `Documentation/EU-480_MULTI_RUN_BOARD_VERIFICATION.md` — EU-480 (2026-07-24): the verify & close
   of the multi-run Active-run panel (EU-458 epic): per-AC evidence mapping EU-485/486/487/488 to
   AC1–AC3 + the `max_concurrent_builders` cap, the full-gate integration pass (463/463 harnesses,
