@@ -569,6 +569,137 @@ test_gc_state_clone_real_repo_packs_loose_objects()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# EU-530 — end-to-end wiring: git_sync must CALL gc_state_clone and report its dict
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── AC1: normal sync with gc present → out["gc"] == {"ok":True,"ran":True} + sentinel created ──
+
+root_1 = Path(tempfile.mkdtemp(prefix="eu530-a1-"))
+cfg_1 = _make_cfg(root_1)
+
+sd_1 = root_1 / ".unit-state"
+sd_1.mkdir(parents=True)
+(sd_1 / ".git").mkdir(exist_ok=True)          # fake clone so ensure_state_clone short-circuits
+
+real_git = sync._git
+_g1_calls = []
+
+
+def _recorder_1(cwd, *a, **kw):               # replaces EVERY _git call; always succeeds
+    _g1_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+try:
+    sync._git = _recorder_1
+    out = sync.git_sync(cfg_1)                # ← the function under test
+
+    chk("EU-530 AC1a: git_sync returns a 'gc' key",
+        "gc" in out, f"keys={list(out.keys())}")
+
+    chk("EU-530 AC1b: gc ok=True ran=True (sentinel absent → fired)",
+        out.get("gc") == {"ok": True, "ran": True},
+        f"got {out.get('gc')}")
+
+    # Verify _git WAS called with gc args (the wiring fires it)
+    chk("EU-530 AC1c: _git called with ('gc', '--prune=now') among other cmds",
+        ("gc", "--prune=now") in [x[0] for x in _g1_calls],
+        f"calls={[c[0] for c in _g1_calls]}")
+
+    chk("EU-530 AC1d: .last_gc sentinel exists after sync",
+        sync._gc_sentinel(cfg_1).is_file(),
+        f"sentinel missing at {sync._gc_sentinel(cfg_1)}")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC2: fresh sentinel → per-sync gc is a no-op (throttle prevents _git gc) ──
+
+root_2 = Path(tempfile.mkdtemp(prefix="eu530-a2-"))
+cfg_2 = _make_cfg(root_2)
+
+sd_2 = root_2 / ".unit-state"
+sd_2.mkdir(parents=True)
+(sd_2 / ".git").mkdir(exist_ok=True)
+sync._mark_gc_done(cfg_2)                    # fresh sentinel → normally NOT due
+
+real_git = sync._git
+_g2_calls = []
+
+
+def _recorder_2(cwd, *a, **kw):
+    _g2_calls.append((a, kw))
+    return _CP(rc=0)
+
+
+try:
+    sync._git = _recorder_2
+    out = sync.git_sync(cfg_2)
+
+    chk("EU-530 AC2a: gc key present with ran=False",
+        out.get("gc") == {"ok": True, "ran": False, "reason": "not-due"},
+        f"got {out.get('gc')}")
+
+    # ZERO _git("gc", ...) calls — throttle prevents the call entirely
+    gc_calls = [(a,) for a, kw in _g2_calls if a[0] == "gc"]
+    chk("EU-530 AC2b: _git('gc',…) NOT called when throttle blocks",
+        len(gc_calls) == 0,
+        f"{len(gc_calls)} gc calls in {[x[0] for x in _g2_calls]}")
+
+finally:
+    sync._git = real_git
+
+
+# ── AC3: raising gc_state_clone → swallowed, reported in out["gc"], no propagation ──
+
+root_3 = Path(tempfile.mkdtemp(prefix="eu530-a3-"))
+cfg_3 = _make_cfg(root_3)
+
+sd_3 = root_3 / ".unit-state"
+sd_3.mkdir(parents=True)
+(sd_3 / ".git").mkdir(exist_ok=True)
+
+real_git = sync._git
+real_gc = sync.gc_state_clone
+_g3_calls = []
+
+
+def _recorder_3(cwd, *a, **kw):
+    _g3_calls.append((a, kw))
+    return _CP(rc=0)                            # everything except gc succeeds
+
+
+def _failing_gc(cfg, force=False):             # simulates a real subprocess failure
+    raise OSError("broken reflog")
+
+
+try:
+    sync._git = _recorder_3
+    sync.gc_state_clone = _failing_gc           # replace ONLY gc_layer
+    out = sync.git_sync(cfg_3)                  # ← MUST NOT propagate
+
+    chk("EU-530 AC3a: no exception propagates from raising gc_state_clone",
+        isinstance(out, dict) and out.get("pulled") is not None,
+        "exception propagated (no dict returned)")
+
+    chk("EU-530 AC3b: out['gc'] carries error, ok=False",
+        out.get("gc", {}).get("ok") is False and
+        "broken reflog" in str(out.get("gc", {}).get("error", "")),
+        f"got {out.get('gc')}")
+
+    # pulled/pushed unaffected — the main path completed
+    chk("EU-530 AC3c: pulling succeeded despite gc failure",
+        out.get("pulled") is True,
+        f"pulled={out.get('pulled')}")
+
+finally:
+    sync._git = real_git
+    sync.gc_state_clone = real_gc
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Report
 # ═══════════════════════════════════════════════════════════════════════════
 

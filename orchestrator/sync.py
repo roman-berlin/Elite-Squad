@@ -670,6 +670,14 @@ def git_sync(cfg: Config) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
         print(f"[sync] compaction exception swallowed: {type(e).__name__}: {e}", flush=True)
 
+    # ── EU-530: invoke per-sync gc_state_clone (throttled sentinel makes it a no-op 99% of time) ──
+    # Same best-effort pattern: caught and reported in the sync dict, never raised into caller.
+    try:
+        out["gc"] = gc_state_clone(cfg)
+    except Exception as e:  # noqa: BLE001 — strictly best-effort by contract, never re-raise
+        out["gc"] = {"ok": False, "ran": True, "error": str(e)[:300]}
+        print(f"[sync] gc exception swallowed: {type(e).__name__}: {e}", flush=True)
+
     return out
 
 
