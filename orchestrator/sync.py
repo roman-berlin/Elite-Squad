@@ -282,6 +282,46 @@ def _mark_gc_done(cfg: Config) -> None:
         pass  # sidecar-style best-effort: failure must not crash sync
 
 
+# EU-527 — run ``git gc`` inside the state clone, throttled by the sentinel.
+
+
+def gc_state_clone(cfg: Config, force: bool = False) -> dict[str, bool | str]:
+    """Run ``git gc --prune=now`` in the ``.unit-state`` clone.
+
+    Throttled behind ``_gc_is_due()`` so that real git-gc only fires once per
+    ``_GC_INTERVAL_HOURS`` window unless *force* overrides.  A missing .unit-state
+    directory (no clone yet) is treated as "skip" rather than an error.
+
+    Never raises.  Returns one of::
+
+        {"ok": True,  "ran": True}            # gc ran and exited cleanly
+        {"ok": True,  "ran": False, "reason": "..."}  # skipped (not due / no clone)
+        {"ok": False, "ran": True,  "error": "..."}   # subprocess failed or raised
+    """
+    sd = state_dir(cfg)
+
+    # Guard against running inside a non-existent clone.
+    if not (sd / ".git").exists():
+        return {"ok": True, "ran": False, "reason": "no-clone"}
+
+    # Only proceed when due (or forced).
+    if not _gc_is_due(cfg, force):
+        return {"ok": True, "ran": False, "reason": "not-due"}
+
+    try:
+        result = _git(sd, "gc", "--prune=now")
+        if result.returncode == 0:
+            _mark_gc_done(cfg)
+            return {"ok": True, "ran": True}
+        else:
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            msg = stderr or stdout or f"returncode={result.returncode}"
+            return {"ok": False, "ran": True, "error": msg[:300]}
+    except Exception as e:  # noqa: BLE001 — must never raise, mirrors EU-496 compaction contract
+        return {"ok": False, "ran": True, "error": str(e)[:300]}
+
+
 def compact_state_branch(cfg: Config) -> dict[str, bool | str | None]:
     """Rebuild the ``unit-state`` branch's history into a single commit.
 
