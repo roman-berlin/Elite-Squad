@@ -31,7 +31,7 @@ interrupts you for the calls that are genuinely yours. The register is modern de
 | run / drain (visible copy) | **mission** / "working the queue" | soft-touch, where it reads naturally |
 | Full squad / Elite squad | *(unchanged — already on-brand)* | squad selector |
 | Needs you | *(unchanged — already on-brand)* | KPI, page |
-| officer(s) | **engineer(s)** | user-facing docs (README, SQUAD_HQ); internal code/docs keep "officer" per OFFICER_NAMING.md |
+| officer(s) | **engineer(s)** | all user-facing surfaces incl. cockpit, generated ROSTER.md, CLI --help; internal code/docs keep "officer" per OFFICER_NAMING.md |
 
 **What deliberately stays**: internal identifiers, module names (`warroom.py`), audit event
 names, officer names (per `OFFICER_NAMING.md`), the `./general` CLI, and code comments —

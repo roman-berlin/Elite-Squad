@@ -32,7 +32,7 @@ from . import auth_probe, scrum
 # tests/eu260_org_reality_test.py enforces both directions.
 _OFFICER_ROWS: list[tuple[str, str, str, str | None]] = [
     ("general", "Orchestrator", "Chairs the unit, talks 1:1 with you, synthesises the daily council, "
-     "and routes your guidance to the officers.", "discussion_model"),
+     "and routes your guidance to the engineers.", "discussion_model"),
     ("adjutant", "S-1 · Personnel", "Owns the roster — proposes hires/retirements when a real "
      "capability gap appears (you approve and apply). Speaks at the daily council; propose-only.",
      "discussion_model"),
@@ -94,8 +94,8 @@ def build_doc(cfg: Config, status: str = "") -> str:
     out = [f"# Elite Unit — Roster", "", f"_As of {time.strftime('%Y-%m-%d %H:%M')}._", ""]
     if status.strip():
         out += ["> " + status.strip().replace("\n", " "), ""]
-    out += ["## Chain of command", "", mermaid_chart(), "", "## Officers", "",
-            "| Officer | Role | Model | Duty |", "|---|---|---|---|"]
+    out += ["## Chain of command", "", mermaid_chart(), "", "## Engineers", "",
+            "| Engineer | Role | Model | Duty |", "|---|---|---|---|"]
     for name, role, duty, mattr in _OFFICERS:
         out.append(f"| **{name}** | {role} | {_model_for(cfg, mattr)} | {duty} |")
     out += ["", "_Living document — regenerated daily after the council. Structure & duties are read "
@@ -157,8 +157,8 @@ def html_view(cfg: Config, status: str = "") -> str:
         parts.append(f'<div class=rstatus>📋 {esc(status)}</div>')
     parts.append('<div class=rsec>Chain of command</div>')
     parts.append("".join(tree))
-    parts.append('<div class=rsec>Officers &amp; duties</div>')
-    parts.append(f'<table class=rtbl><tr><th>Officer</th><th>Role</th><th>Model</th><th>Duty</th></tr>{rows}</table>')
+    parts.append('<div class=rsec>Engineers &amp; duties</div>')
+    parts.append(f'<table class=rtbl><tr><th>Engineer</th><th>Role</th><th>Model</th><th>Duty</th></tr>{rows}</table>')
     parts.append('</div>')
     return "".join(parts)
 

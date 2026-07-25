@@ -1,6 +1,6 @@
 """CLI entrypoint — the CTO you command from the terminal.
 
-The CTO directs two officers (the Builder and the Reviewer) across your unit
+The CTO directs engineers across your unit
 of apps, and lands passing work on dev. You stay in command of dev -> main.
 
   general doctor                              # one-time preflight: config, keys, repos
@@ -34,7 +34,7 @@ from .contracts import Outcome
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="general",
-        description="CTO — commands the Builder and Reviewer officers across your apps")
+        description="CTO — commands the Builder and Reviewer engineers across your apps")
     p.add_argument("--config", default="config.yaml", help="path to config.yaml (default: ./config.yaml)")
     p.add_argument("--live", action="store_true", help="disable dry-run: push, merge to dev, write to Jira")
     p.add_argument("--max-tickets", type=int, default=None, help="override max_tickets_per_run")
@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("standup", help="daily-meeting report (shipped / needs-you / decisions)")
     st.add_argument("--telegram", action="store_true", help="also send it to Telegram")
     sub.add_parser("daily", help="light daily stand-up: deterministic digest + one CTO synthesis (cheap; the deep council is weekly)")
-    cnl = sub.add_parser("council", help="deep WEEKLY council (officers muster, brief you) — for the daily use `daily`")
+    cnl = sub.add_parser("council", help="deep WEEKLY council (engineers muster, brief you) — for the daily use `daily`")
     cnl.add_argument("--topic", help="run an ad-hoc improvement muster focused on this topic")
     cg = sub.add_parser("cron-guard",
         help="wrap a cron job: timestamp + rotate council/cron.log, alert Telegram on repeated failure (EU-432)")
@@ -97,11 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="one Mac->VPS cross-host watch tick: SSH-probe the VPS + content-check the daily brief, "
              "alert from the Mac (EU-433). No-op without GENERAL_SERVER_SSH.")
     sub.add_parser("scribe", help="Technical Writer: fold recent council + runs into Unit Memory (memory/UNIT.md)")
-    sub.add_parser("roster", help="regenerate the living roster (officers + engineers + hierarchy chart) -> ROSTER.md")
+    sub.add_parser("roster", help="regenerate the living roster (engineers + hierarchy chart) -> ROSTER.md")
     sub.add_parser("memory", help="print the unit's living protocol (memory/UNIT.md)")
-    mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (officers debate, the CTO decides)")
+    mtg = sub.add_parser("meeting", help="convene an ad-hoc meeting on a topic (engineers debate, the CTO decides)")
     mtg.add_argument("--topic", required=True, help="what the meeting is about")
-    mtg.add_argument("--officers", help="comma-separated officer names/keys to attend (default: all relevant)")
+    mtg.add_argument("--officers", help="comma-separated engineer names/keys to attend (default: all relevant)")
     mtg.add_argument("--rounds", type=int, default=None, help="discussion rounds (default: council_rounds)")
     sub.add_parser("sync", help="exchange the audit log with the other machine (Mac<->server) so both cockpits agree")
     pmp = sub.add_parser("pm", help="Product Manager (S-5): decide a product/IA question, or escalate a critical one to you")
@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     pmp.add_argument("ticket")
     pmp.add_argument("question", nargs="?", default="")
     pmp.add_argument("--telegram", action="store_true", help="also send an ESCALATE proposal to Telegram")
-    sr = sub.add_parser("ship-review", help="ready-to-prod review: Release Manager certifies + officers debate -> GO/NO-GO (you promote to MAIN)")
+    sr = sub.add_parser("ship-review", help="ready-to-prod review: Release Manager certifies + engineers debate -> GO/NO-GO (you promote to MAIN)")
     sr.add_argument("app", nargs="?", help="app to review (default: first configured)")
     sct = sub.add_parser("scout", help="QA Engineer (S-2): smoke-test DEV in a browser (e2e / a11y) and report")
     sct.add_argument("app")
