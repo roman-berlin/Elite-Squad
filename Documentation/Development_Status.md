@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-564 · Elite-Unit · • AC1 met: leading ticket-id stripped via anchored match in summarize_question/parse_options + defensively in every render path.
 - 2026-07-25 · EU-536 · Elite-Unit · • `grep -n '[Oo]fficer' README.md SQUAD_HQ.md` verified zero hits directly — AC1 met. • BRAND.md terminology map now has an explicit, unambiguous officer(internal)/engineer(user-facing) row — AC2 met. · 🔗 (no UI — verify the three doc files render "engineer" instead of "officer" when served; e.g. open README.md or SQUAD_HQ.md directly, confirm `grep '[Oo]fficer'` returns nothing)
 - 2026-07-25 · EU-535 · Elite-Unit · • All server.py render strings + Telegram/council-brief literals rebranded officer→engineer; remaining 'officer' hits are code identifiers, wire keys, or comments (exempt).
 - 2026-07-25 · EU-534 · Elite-Unit · • Rebrand complete: zero user-facing 'officer' strings left in warroom.py; the 5 remaining hits are identifiers/keys (import, OFFICER_NAMES comments, /group?officer= param) — all correctly preserved. · 🔗 /warroom
