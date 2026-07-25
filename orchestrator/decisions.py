@@ -567,6 +567,87 @@ def synthesize_options(question: str) -> dict | None:
     return None
 
 
+# EU-565: normalize parsed/synthesized options so every card gets 2-4 buttons
+
+
+def normalize_parse_options(po: dict | None) -> dict | None:
+    """Deduplicate options by lowercased text, keep the first recommended, cap at 4.
+
+    After parsing/synthesis, guarantees: zero duplicates, exactly one (or zero) recommended,
+    max 4 options (keeps the recommended one regardless of order), and sequential ``n`` values.
+    Returns a new dict (or the same dict if no cleanup needed)."""
+    if not po:
+        return po
+    raw = list(po.get("options", []))
+    seen: dict[str, dict] = {}
+    for o in raw:
+        key = o["text"].lower()
+        if key not in seen:
+            seen[key] = {"n": len(seen) + 1, "text": o["text"],
+                         "recommended": o.get("recommended", False),
+                         "synthesized": o.get("synthesized", False)}
+        else:
+            seen[key]["recommended"] |= o.get("recommended", False)
+    opts = list(seen.values())
+
+    # Exactly-one-recommended: 0 → mark first; 2+ → keep first recommended, clear rest.
+    rec_indices = [i for i, o in enumerate(opts) if o["recommended"]]
+    if len(rec_indices) != 1:
+        if rec_indices:
+            keep = rec_indices[0]
+            for i, o in enumerate(opts):
+                o["recommended"] = (i == keep)
+        else:
+            opts[0]["recommended"] = True
+            rec_indices = [0]
+
+    # Cap at 4, always keeping the recommended option.
+    k = len(opts)
+    if k > 4:
+        ridx = rec_indices[0] if rec_indices else 0
+        extras = [(i, o) for i, o in enumerate(opts) if i != ridx]
+        sorted_extras = sorted(extras, key=lambda x: x[1].get("synthesized", False), reverse=True)
+        drop_set = {idx for idx, _ in sorted_extras[: k - 4]}
+        opts = [o for idx, o in enumerate(opts) if idx not in drop_set]
+        opts = [{**o, "n": j + 1} for j, o in enumerate(opts)]
+
+    result = dict(po, options=opts)
+    return result
+
+
+def _default_card(summary: str) -> dict:
+    """Default option set for an unstructured question — guaranteed 3 distinct options, one recommended."""
+    title = _fold_word_boundary(summary, 120) if len(summary) > 60 else summary
+    return {"summary": title,
+            "options": [{"n": 1, "text": "Proceed as proposed (RECOMMENDED)", "recommended": True},
+                        {"n": 2, "text": "Re-scope: split into smaller tickets", "recommended": False},
+                        {"n": 3, "text": "Hold — I will answer with more direction", "recommended": False}],
+            "synthesized": True}
+
+
+def ensure_options(question: str) -> dict:
+    """Always return a parse_options-shaped dict with 2-4 numbered options and exactly one recommended.
+
+    Three-tier fallback: (1) try ``parse_options``, (2) fall back to ``synthesize_options``,
+    (3) on None from both, build a generic default set. On non-empty questions this always
+    returns a valid dict — never None. Empty/whitespace questions get a minimal fallback card.
+    Result is normalized via :func:`normalize_parse_options`."""
+    # Tier 1: explicit option list
+    _parsed = parse_options(question)
+    if _parsed:
+        return normalize_parse_options(_parsed)
+    # Tier 2: known synthesis classes
+    _synth = synthesize_options(question)
+    if _synth:
+        return normalize_parse_options(_synth)
+    # Tier 3: synthesize a summary for defaults
+    _sum = summarize_question(str(question or "")) or "(no question on file)"
+    opts = default_options_from_summary(_sum)
+    if opts and len(set(o["text"].lower() for o in opts)) >= 2:
+        return normalize_parse_options({"summary": _sum, "options": opts})
+    return _default_card(_sum)
+
+
 def expand_option_reply(question: str, answer: str) -> str:
     """A bare '2' / 'option 2' reply against a structured question becomes the full option text
     (so the Jira comment and the re-run spec carry the decision, not a bare digit). Any other
@@ -618,6 +699,41 @@ def is_explicit_reply(text: str) -> bool:
         return True
     ticket_id, _ = parse_reply(text)
     return ticket_id is not None
+
+
+def default_options_from_summary(summary: str) -> list[dict] | None:
+    """EU-565: heuristic default options when parse_options and synthesize_options both return None.
+
+    Analyzes the summary for contextual cues (approvals, fixes, scope-splitting, retries, queries)
+    and returns a structured option set with a context-appropriate recommended choice plus two
+    safe fallbacks. Returns ``None`` if the summary is too short or ambiguous to produce distinct
+    options."""
+    q = summary.lower()
+    if not q or len(q) < 3:
+        return None
+
+    # Determine recommendation from contextual cues in the question.
+    if any(w in q for w in ("approve", "recommend", "propose")):
+        rec_text = "Approve as proposed"
+    elif any(w in q for w in ("fix", "patch", "resolve", "bug")):
+        rec_text = "Apply the fix directly"
+    elif any(w in q for w in ("split", "scope", "break")):
+        rec_text = "Split into smaller tickets first"
+    elif any(w in q for w in ("retry", "rerun", "rebuild")):
+        rec_text = "Retry the current approach"
+    elif any(w in q for w in ("what", "which", "how", "should", "consider")):
+        rec_text = "Use your best judgment"
+    else:
+        rec_text = "Proceed as proposed"
+
+    # Two additional safe action-oriented options.
+    opts = [
+        {"n": 1, "text": rec_text, "recommended": True},
+        {"n": 2, "text": "Re-scope: split into smaller tickets", "recommended": False},
+        {"n": 3, "text": "Hold — provide more direction", "recommended": False},
+    ]
+
+    return opts
 
 
 def _file_out_of_scope_resume(cfg, resolved: dict) -> None:
