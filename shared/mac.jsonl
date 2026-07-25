@@ -12938,3 +12938,12 @@
 {"ts": "2026-07-25T02:47:35+0300", "event": "ticket_transition", "ticket_id": "EU-475", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
 {"ts": "2026-07-25T02:54:00+0300", "event": "agent_call", "tag": "planner", "model": "claude-fable-5", "provider": "Anthropic", "model_version": "claude-fable-5", "input_tokens": 322354, "output_tokens": 10556, "cost_usd": 1.88168, "duration_s": 141.5, "turns": 13, "ticket_id": "EU-475"}
 {"ts": "2026-07-25T02:54:00+0300", "event": "planner", "ticket_id": "EU-475", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 4, "cost_usd": 1.88168, "provider": "Anthropic", "model": "claude-fable-5"}
+{"ts": "2026-07-25T03:09:35+0300", "event": "agent_call", "tag": "scrum-lead", "model": "claude-sonnet-5", "provider": "Anthropic", "model_version": "claude-sonnet-5", "input_tokens": 32282, "output_tokens": 1774, "cost_usd": 0.358645, "duration_s": 19.58, "turns": 1}
+{"ts": "2026-07-25T03:11:20+0300", "event": "agent_call", "tag": "scrum", "model": "claude-sonnet-5", "provider": "Anthropic", "model_version": "claude-sonnet-5", "input_tokens": 269762, "output_tokens": 8769, "cost_usd": 0.93012, "duration_s": 104.94, "turns": 8}
+{"ts": "2026-07-25T03:11:27+0300", "event": "ticket_transition", "ticket_id": "EU-475", "wanted": "Done", "landed": "Done", "outcome": "matched"}
+{"ts": "2026-07-25T03:11:27+0300", "event": "scrum_split", "ticket_id": "EU-475", "reason": "turn-limit", "into": ["EU-511", "EU-512", "EU-513", "EU-514"]}
+{"ts": "2026-07-25T03:11:28+0300", "event": "fragment_injection", "ticket_id": "EU-475", "fragment_count": 4, "fragment_keys": ["EU-511", "EU-512", "EU-513", "EU-514"]}
+{"ts": "2026-07-25T03:11:28+0300", "event": "ticket_start", "ticket_id": "EU-511", "app": "Elite-Unit", "branch": "autodev/EU-511-add-cap-only-one-shot-glm-main-retry-in-", "dry_run": false, "ephemeral": false}
+{"ts": "2026-07-25T03:11:29+0300", "event": "ticket_transition", "ticket_id": "EU-511", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-07-25T03:12:58+0300", "event": "agent_call", "tag": "planner", "model": "claude-fable-5", "provider": "Anthropic", "model_version": "claude-fable-5", "input_tokens": 194988, "output_tokens": 6211, "cost_usd": 1.18123, "duration_s": 88.14, "turns": 6, "ticket_id": "EU-511"}
+{"ts": "2026-07-25T03:12:58+0300", "event": "planner", "ticket_id": "EU-511", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 2, "cost_usd": 1.18123, "provider": "Anthropic", "model": "claude-fable-5"}
