@@ -155,7 +155,7 @@ def _test_page_title_and_breadcrumb() -> None:
     resp = _CLIENT.get("/merge-stats")
     body = resp.get_data(as_text=True)
     chk("page has 'Merge statistics' title", "Merge statistics" in body, body[:300])
-    chk("page has a back-to-cockpit breadcrumb", "backbtn" in body and "cockpit</a>" in body, body[:600])
+    chk("page has a back-to-cockpit breadcrumb", "backbtn" in body and "aria-label='Back to cockpit'" in body, body[:600])
 
 
 _test_page_title_and_breadcrumb()
