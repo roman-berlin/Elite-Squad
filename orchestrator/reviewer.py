@@ -246,7 +246,11 @@ def _admitted_red_test_note(build_artifact: BuildArtifact | None) -> str | None:
 
     EU-267: ``caveats`` is scanned too. The builder now routes limitation/caveat language into its own
     field (uncapped by diff_digest's 500-char ceiling); an unresolved-test admission that lands there
-    must still trip this backstop, not slip past it because it wasn't in diff_digest."""
+    must still trip this backstop, not slip past it because it wasn't in diff_digest.
+
+    EU-517: each field is passed through :py:func:`_strip_quoted_context` before regex matching, so
+    quoted/example context (backtick-enclosed text, fenced blocks) no longer trips the scanner.
+    Returns original ``text.strip()`` on a hit — never the stripped variant."""
     if build_artifact is None:
         return None
     fields = ([build_artifact.diff_digest] + list(build_artifact.decisions or [])
@@ -254,9 +258,12 @@ def _admitted_red_test_note(build_artifact: BuildArtifact | None) -> str | None:
     for text in fields:
         if not text:
             continue
-        if _UNRESOLVED_STRONG_RE.search(text):
+        cleaned = _strip_quoted_context(text)
+        if not cleaned:
+            continue
+        if _UNRESOLVED_STRONG_RE.search(cleaned):
             return text.strip()
-        if _WEAK_RED_TEST_RE.search(text) and not _RESOLVED_CTX_RE.search(text):
+        if _WEAK_RED_TEST_RE.search(cleaned) and not _RESOLVED_CTX_RE.search(cleaned):
             return text.strip()
     return None
 
