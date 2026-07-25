@@ -510,6 +510,22 @@ def _fold_word_boundary(text: str, limit: int) -> str:
     return cut.rstrip() + "…"
 
 
+# --------------------------------------------------------------------------- #
+# EU-566: option-button label folding — word-boundary-safe with fold-flag for
+# tooltip population (full detail in title attr; truncation display-only).
+
+def fold_option_label(text: str, limit: int = 110) -> tuple[str, bool]:
+    """Fold *text* to *limit* chars at a word boundary, appending '…'.
+    Returns ``(label, was_folded)`` — the folded string plus a boolean flag
+    indicating whether any truncation occurred.  When *text* fits within
+    *limit* it is returned verbatim with ``was_folded=False``.
+    No HTML escaping — caller (server.py) handles that."""
+    if len(text) <= limit:
+        return (text, False)
+    folded = _fold_word_boundary(text, limit)
+    return (folded, True)
+
+
 # The known UNSTRUCTURED question classes (stored before the EU-337 format, or produced by
 # deterministic loop paths) → a brief + 1-3 synthesized options, one recommended. The option
 # text is written as an actionable instruction, because choosing it ships through /api/answer:
