@@ -1,8 +1,8 @@
 """War Room — the Elite Unit's command cockpit (data + render).
 
 `general serve` mounts this at `/`. It turns the audit log, the blocked-tickets
-file, the officers' report files and the council history into a single live
-command view: KPIs, the active run with its phase bar, the officer roster, and
+file, the engineers' report files and the council history into a single live
+command view: KPIs, the active run with its phase bar, the engineer roster, and
 the unit's activity feed — scoped to whichever Jira project/app you pick.
 
 Design: this module is defensive end-to-end — every file read is guarded so a
@@ -29,9 +29,9 @@ from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 
 # --------------------------------------------------------------------------- #
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
-# from the officer key (builder=field_engineer, reviewer=inspector). Display names are
+# from the engineer key (builder=field_engineer, reviewer=inspector). Display names are
 # NEVER hard-coded below — they're resolved from the single source of truth via display(), so renaming an
-# officer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
+# engineer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
 _OFFICER_KEY = {
     "general": "general", "pm": "pm",
     "builder": "field_engineer", "reviewer": "inspector", "scout": "scout",
@@ -53,7 +53,7 @@ _OFFICER_ROLES = [
 # The roster: (key, display name, role line). Display name resolved from officers.OFFICER_NAMES (SOT).
 _OFFICERS = [(key, _display(_OFFICER_KEY[key]), role) for key, role in _OFFICER_ROLES]
 
-# cockpit key -> the officer's display name (the council name a click consults). Derived from the SAME
+# cockpit key -> the engineer's display name (the council name a click consults). Derived from the SAME
 # source of truth, so it can never drift from the board labels above. (general opens /chat, not /group.)
 _GROUP_NAME = {key: _display(ik) for key, ik in _OFFICER_KEY.items() if key != "general"}
 
@@ -446,7 +446,7 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
     # An active run means the Builder/Reviewer are on duty right now.
     on_duty = {"builder", "reviewer"} if active else set()
 
-    # roster key -> the officer's council name (so a click consults that exact officer). Read from the
+    # roster key -> the engineer's council name (so a click consults that exact engineer). Read from the
     # single source of truth (see _GROUP_NAME) so it never drifts from the board / roster labels.
     group_name = _GROUP_NAME
     out = []
@@ -458,7 +458,7 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
             dot = "recent"
         else:
             dot = "idle"
-        # The CTO is your 1:1 chat; every other officer opens a focused consult with just them.
+        # The CTO is your 1:1 chat; every other engineer opens a focused consult with just them.
         href = "/chat" if key == "general" else "/group?officer=" + quote(group_name.get(key, name))
         out.append({"name": name, "role": role, "dot": dot, "last": _rel(dt), "href": href})
     return out
@@ -488,7 +488,7 @@ def feed(cfg, tasks: list[dict], app: Optional[str], limit: int = 16) -> list[di
             continue
         tone, label = _FEED_META.get(out, ("muted", "in progress"))
         # The feed is a one-line-per-ticket activity strip: flatten any newlines and
-        # word-boundary-trim the note to keep each row tight (EU-33). Officer-report bullets
+        # word-boundary-trim the note to keep each row tight (EU-33). Engineer-report bullets
         # are rendered in full on the cockpit transcript (dashboard._detail_html), not here.
         note = (t.get("note") or "").strip().replace("\n", " ")
         items.append({
@@ -1545,16 +1545,16 @@ _TALK_HTML = (
     '<div class=tkbody><b>CTO</b><i>ask the orchestrator 1:1</i></div>'
     '<span class=tkarrow>&#8250;</span></a>'
     '<a class=talkbtn href="/group"><span class=tki>&#128101;</span>'
-    '<div class=tkbody><b>Group room</b><i>convene all the officers</i></div>'
+    '<div class=tkbody><b>Group room</b><i>convene all the engineers</i></div>'
     '<span class=tkarrow>&#8250;</span></a>'
     '</div>')
 
 
 def _md_to_html(text: str) -> str:
-    """Convert light markdown in officer text to HTML.
+    """Convert light markdown in engineer text to HTML.
 
     Lines starting with '• ' or '- ' are grouped into <ul class=fbullets><li>
-    elements so bullet-formatted officer reports render as proper lists rather
+    elements so bullet-formatted engineer reports render as proper lists rather
     than a wall of plain text. Other line-breaks become <br>. Blank lines flush
     the current paragraph/bullet group.
     """
@@ -1652,7 +1652,7 @@ def _live_phase(audit_path: str | Path, ticket_id: str | None = None) -> str:
     without one (a single-run cockpit) the old newest-anywhere behaviour is kept.
 
     Walks BACKWARDS to the newest event that names a phase, skipping uninformative ones (agent_call
-    fires for every officer). Returns "" when nothing is recognisable — the caller then just omits
+    fires for every engineer). Returns "" when nothing is recognisable — the caller then just omits
     the stage rather than guessing."""
     try:
         p = Path(audit_path)
@@ -1716,7 +1716,7 @@ def _runlog_placeholder(state: dict, active: bool, audit_path: str = "./state/au
             pass
     head = " &middot; ".join(bits) if bits else "run starting"
     return (f'<div class=logempty>&#9654; {head}<br><br>'
-            f'<span style="opacity:.7">No output yet — an officer\'s model call prints nothing '
+            f'<span style="opacity:.7">No output yet — an engineer\'s model call prints nothing '
             f'until it returns. The first pass is normally silent for several minutes.</span></div>')
 
 

@@ -1,0 +1,105 @@
+"""EU-534 — rebrand 'officer' → 'engineer' in warroom.py display strings.
+
+Scans orchestrator/warroom.py source and asserts:
+  1. GROUP room tooltip reads 'convene all the engineers', not officers.
+  2. Log-empty placeholder reads "an engineer's model call", not officer's.
+  3. The /group?officer= query-param key is UNCHANGED (server.py:3194 reads it).
+  4. Module-level identifiers (from .officers import, OFFICER_NAMES) are UNCHANGED.
+  5. Quoted-string regex hits on '[Oo]fficer' are ONLY the ?officer= param line — zero hits on
+     rendered copy, tooltips, docstrings, or prose comments.
+"""
+from __future__ import annotations
+
+import pathlib
+import re
+
+WARROOM = pathlib.Path(__file__).resolve().parent.parent / "orchestrator" / "warroom.py"
+
+
+def test_group_tooltip_uses_engineers():
+    """Group room tooltip must say 'convene all the engineers', not officers."""
+    src = WARROOM.read_text()
+    assert 'convene all the engineers' in src, (
+        "Expected group-room tooltip with 'convene all the engineers'")
+    assert 'convene all the officers' not in src, (
+        "Old 'convene all the officers' still present")
+
+
+def test_log_empty_uses_engineer():
+    """Log-empty placeholder must say an engineer's model call, not officer's."""
+    src = WARROOM.read_text()
+    # Source uses \' inside f-string; raw text has literal backslash-quote
+    expected = r"an engineer\'s model call prints nothing"
+    actual_bad = r"an officer\'s model call"
+    assert expected in src, f'Expected log-empty: {expected!r}'
+    assert actual_bad not in src, f'Old pattern still present: {actual_bad!r}'
+
+
+def test_group_param_key_unchanged():
+    """The /group?officer= URL param key must remain byte-for-byte."""
+    src = WARROOM.read_text()
+    assert '/group?officer=' in src, "/group?officer= param key was removed — server.py:3194 reads it"
+
+
+def test_identifiers_unchanged():
+    """Module import and OFFICER_NAMES references must stay as-is."""
+    src = WARROOM.read_text()
+    assert 'from .officers import' in src, ".officers import was renamed — breaks imports"
+    # OFFICER_KEY and OFFICER_ROLES dict names should be untouched too
+    assert '_OFFICER_KEY' in src, "_OFFICER_KEY identifier was renamed"
+    assert '_OFFICER_ROLES' in src, "_OFFICER_ROLES identifier was renamed"
+    assert '_OFFICERS' in src, "_OFFICERS identifier was renamed"
+
+
+def test_no_officer_in_display_strings():
+    """Explicit checks on every known 'officer' occurrence location in warroom.py.
+
+    After rebrand, none of these prose/comment/docstring lines should say 'officer'.
+    Also verifies the /group?officer= param line remains unchanged."""
+    src = WARROOM.read_text()
+
+    # --- Module docstring (part[1] from triple-quote split) ---
+    mod_doc = src.split('"""')[1]
+    assert 'engineer' in mod_doc, "Module docstring should mention 'engineer(s)'"
+    assert "officers'" not in mod_doc, "Old 'officers\'' still in module docstring"
+    assert 'officer roster' not in mod_doc, "Old 'officer roster' still in module docstring"
+
+    # --- Comment near _OFFICER_KEY ---
+    assert 'engineer is one edit in officers.OFFICER_NAMES' in src, \
+        "Comment near _OFFICER_KEY should say 'engineer is one edit'"
+    assert 'renaming an\n# officer' not in src, \
+        "Comment near _OFFICER_KEY should not mention renaming an officer"
+
+    # --- _md_to_html docstring ---
+    assert 'in engineer text' in src, \
+        "_md_to_html docstring should say 'in engineer text'"
+    assert 'bullet-formatted engineer reports' in src, \
+        "_md_to_html docstring should say 'bullet-formatted engineer reports'"
+    assert 'officer text' not in src, "Old 'officer text' still in _md_to_html docstring"
+    assert 'bullet-formatted officer' not in src, "Old 'bullet-formatted officer' still present"
+
+    # --- roster() function comments ---
+    assert 'the engineer\'s council name' in src, \
+        "roster() comment should say 'the engineer's council name'"
+    assert 'that exact engineer' in src, \
+        "roster() comment should say 'that exact engineer'"
+    assert 'every other engineer' in src, \
+        "roster() comment should say 'every other engineer'"
+
+    # --- feed() comment ---
+    assert 'Engineer-report bullets' in src, \
+        "feed() comment should say 'Engineer-report bullets'"
+    assert 'Officer-report bullets' not in src, \
+        "Old 'Officer-report bullets' still in feed()"
+
+    # --- phase_name() docstring ---
+    assert 'fires for every engineer' in src, \
+        "phase_name docstring should say 'fires for every engineer'"
+    assert 'fires for every officer' not in src, \
+        "Old 'fires for every officer' still in phase_name docstring"
+
+    # --- URL param key MUST remain ---
+    assert '/group?officer=' in src, "/group?officer= param key was removed — server.py:3194 reads it"
+
+    # --- Module import MUST remain ---
+    assert 'from .officers import' in src, ".officers import was renamed — breaks imports"
