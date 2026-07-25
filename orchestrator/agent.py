@@ -686,6 +686,33 @@ async def run_agent_with_fallback(prompt: str, options: ClaudeAgentOptions, tag:
         if glm_result.plan_limit_kind != "cap":
             return glm_result
 
+        # EU-512: audit the activation itself (same-pass cap-hit, before the Opus probe) so the
+        # cockpit can show WHY the unit retried the main model — best-effort, must never break a
+        # run. Mirrors the Sonnet-cap block at ~lines 772-782 but fires only on the GLM branch;
+        # emitted only here, never on the transient passthrough (returned above at line 687).
+        if _AUDIT_SINK is not None:
+            try:
+                extra = {}
+                if ticket_id:
+                    extra["ticket_id"] = str(ticket_id)
+                if pass_number is not None:
+                    extra["pass_number"] = pass_number
+                _AUDIT_SINK.record("glm_fallback_activated", tag=tag or "", model=model,
+                                   reason=glm_result.plan_limit_kind, error=glm_result.final,
+                                   **extra)
+            except Exception:  # noqa: BLE001 — instrumentation must never break a run
+                pass
+
+        # Best-effort Telegram notify so the Commander sees a GLM cap forced a same-pass retry on
+        # the main model. Uses deferred local-import to avoid cyclical import (loop.py imports
+        # agent). Only fires on the cap branch, at most once per call.
+        if cfg is not None:
+            try:
+                from . import loop as _loop
+                _loop._notify(cfg, f"GLM cap on {tag or model} — retrying this pass on the main model ({glm_result.plan_limit_kind})")
+            except Exception:  # noqa: BLE001 — notification must never break a run
+                pass
+
         # Plan-limit cap hit — retry ONCE on the native/main backend. Reset contextvar so
         # current_for_tag resolves NATIVE (applied inside _run_agent_unrouted). No hybrid
         # interference needed: if is_glm(cfg) was True here, hybrid main≠opus never entered
