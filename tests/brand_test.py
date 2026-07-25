@@ -82,6 +82,21 @@ chk("(7a) BRAND.md terminology map mentions officer→engineer split",
     bool(re.search(r'(?i)officer.*engineer', brand)),
     "Terminology map lacks officer→engineer row")
 
+# EU-537: render-level guards — cockpit roster surfaces & CLI help must not show "officer"
+# Run the separate render test and graft its results into this suite.
+import subprocess as _sub
+_r = _sub.run(
+    [sys.executable, "tests/eu537_render_brand_test.py"],
+    capture_output=True, text=True, timeout=15)
+if _r.returncode != 0:
+    for _ln in _r.stdout.splitlines():
+        if "[FAIL]" in _ln:
+            _m = re.search(r"\((.+?)\)", _ln)
+            det = _m.group(1).strip() if _m else ""
+            chk(f"(6b-e) EU-537 render tests passed ({det})", False, _ln.strip())
+else:
+    chk("(6b-e) EU-537 render tests passed", True)
+
 print("\n========== SQUAD BRAND QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

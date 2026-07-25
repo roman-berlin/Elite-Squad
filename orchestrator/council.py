@@ -148,16 +148,19 @@ _MEETING_CHAIR_SYSTEM = (
     "irreversible, no safe default). One question per line ending in '?', else 'None.'"
 )
 
+# SQUAD brand voice: plain-language question for the ship-decision card (BRAND.md).
+COUNCIL_SHIP_QUESTION = "Is dev ready to promote to main?"
+
 _SHIP_REVIEW_CHAIR_SYSTEM = (
-    "You are THE CTO, chairing a SHIP-REVIEW: is DEV ready to promote to MAIN (production)? "
+    "You are THE CTO, chairing a SHIP-REVIEW: is dev ready to promote to main (production)? "
     "You have the Release Manager's readiness report and the officers' debate. CRITICAL: the unit "
-    "NEVER promotes to MAIN — that is the Commander's (Roman's) call alone. You only recommend. "
+    "NEVER promotes to main — that is your call alone. You only recommend. "
     "Output exactly this markdown shape and nothing else:\n\n"
     "**VERDICT** — GO / NO-GO / GO WITH CAVEATS (one blunt line).\n\n"
     "**BLOCKERS** — bullets: anything that must be fixed before prod (build, types, migrations, "
     "deps, env/secrets, security, known defects). Write 'None' only if truly clean.\n\n"
-    "**PRE-FLIGHT** — bullets: what the Commander should verify or run before promoting.\n\n"
-    "**FOR YOU** — end with the go/no-go, framed as his decision: 'Promote DEV→MAIN? "
+    "**PRE-FLIGHT** — bullets: what to verify or run before promoting.\n\n"
+    f"**FOR YOU** — end with the go/no-go, framed as your decision: '{COUNCIL_SHIP_QUESTION} "
     "Your call.' (Only you promote to prod.)"
 )
 

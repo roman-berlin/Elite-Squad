@@ -189,6 +189,31 @@ def _link_merged_tickets(cfg, stats: dict) -> dict:
 # cockpit_state's run locks on purpose — a ceremony is not a run and must not contend with one.
 _flag_lock = threading.Lock()
 
+
+# SQUAD brand voice — plain-language copy for user-facing surfaces (Documentation/BRAND.md).
+# Internal identifiers and docstrings may still say "DEV→MAIN" or "readiness verdict";
+# only strings that ship to the cockpit/Telegram must follow the terminology map.
+QA_STATUS_TEMPLATE = (
+    "🔍 QA running for {app} — engineers inspect dev and check whether it is ready "
+    "to promote to main (results post here and to Telegram)."
+)
+
+# EU-567: pure classifier — status/in-progress messages are routed to a separate strip,
+# never mixed into the Needs-you decision cards. Default False so confirmations / errors
+# keep today's banner behaviour. Testable and importable from tests.
+def is_status_message(msg: str) -> bool:
+    """Whether ``msg`` describes a running/in-progress/status state with no pending decision."""
+    if not msg:
+        return False
+    low = msg.lower()
+    if low.startswith(("🔍", "⏳")):
+        return True
+    if any(kw in low for kw in (" running", " running.", " running,", " in progress",
+                                  "standup running", " inspect dev", " inspecting")):
+        return True
+    return False
+
+
 def _claim_flag(name: str, value=True) -> bool:
     """Compare-and-set a one-shot ceremony flag. True = the caller now OWNS the ceremony and must
     clear the flag when done; False = someone else already owns it, do nothing.
@@ -1776,22 +1801,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
     @app.post("/api/qa")
     def qa_api() -> Response:
-        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged. The two
-        buttons ran near-identical officer inspections of DEV (patrol: QA/Security/Release inspect
-        + FILE findings as Jira tickets; ship-review: the same lenses debating a DEV→MAIN GO/NO-GO),
-        so a single "Run QA" now does both as phases: patrol first (findings land on the board),
-        then the readiness verdict. The per-phase indicator flags (patrolling / shipreview) are
-        kept live during their phase so the cockpit star and the /council in-session banner keep
-        working unchanged."""
+        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged."""
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
             _state["last_msg"] = ("No project to QA — configure a product repo first.")
             return redirect("/")
         if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
-            _state["last_msg"] = (f"🔍 QA running for {app_name} — engineers inspect DEV and file "
-                                  "findings, then deliver the DEV→MAIN readiness verdict (posts "
-                                  "here and to Telegram).")
+            _state["last_msg"] = QA_STATUS_TEMPLATE.format(app=app_name)
 
             def _bg():
                 notes = []
@@ -2143,23 +2160,41 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ".nbadge.err{background:var(--badbg);color:var(--bad)}"    # errored    — red
             ".nbadge.prk{background:var(--warnbg);color:var(--warn)}"    # parked     — amber
             ".nbadge.opr{background:var(--okbg);color:var(--ok)}"    # open PR    — teal
+            # EU-567: dedicated status-strip — keeps running/in-progress notices out of Needs-you cards.
+            ".nstrip{margin:0 0 12px;padding:8px 12px;border-radius:9px;"
+            "border:1px dashed var(--line2);font-size:12.5px;color:var(--dim)}"
+            ".nstrip label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-right:6px;font-weight:700}"
             "</style>")
-        # One-shot confirmation banner (e.g. "Answer sent to AUTO-23…") — read + clear so it shows once.
+        # EU-567: classify last_msg — status runs go to .nstrip, confirmations/errors keep .nbanner.
         _m = _state.pop("last_msg", "") or ""
-        banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if _m else ""
+        is_st = is_status_message(_m)
+        banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if (_m and not is_st) else ""
+        nstrip = f"<div class=nstrip><label>Status</label>{html.escape(str(_m))}</div>" if is_st else ""
         sync_btn = ("<form method=post action=/api/needs-sync style='margin:0 0 14px'>"
                     "<button class='nbtn x' title='Check every item against live Jira NOW — items "
                     "whose ticket you already moved (Done/QA) or re-queued (To Do) in Jira are "
                     "cleared'>&#8635; Sync with Jira</button></form>")
         if not s.get("total"):
-            return _wrap("Needs you", style + banner + sync_btn
+            return _wrap("Needs you", style + banner + nstrip + sync_btn
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
-        out = [style, banner, sync_btn]
+        out = [style, banner, nstrip, sync_btn]
 
         # ── Unified inbox rows — grouped by category (EU-102) ────────────────
         from urllib.parse import quote
         from . import dashboard as _dash
         from collections import defaultdict
+        # EU-564: word-boundary-safe headline fold (mirrors decisions._fold_word_boundary) +
+        # truncated-flag so /needs renders a "Full context" expander whenever the headline was cut.
+        def _nh(text, limit=140):
+            if len(text) <= limit:
+                return text, False
+            c = text[:limit - 1]
+            if not text[limit - 1].isspace():
+                sp = c.rfind(" ")
+                if sp > 0:
+                    c = c[:sp]
+            folded = c.rstrip() + "…"
+            return folded, True
 
         # Real needs.summary() always provides typed ``rows``; tests (and any legacy caller) may
         # hand us only the per-stream keys, so rebuild rows from them when absent. Either way the
@@ -2197,27 +2232,48 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 except Exception:  # noqa: BLE001
                     _po = None
                 if _po:
-                    head = html.escape(_po["summary"]
-                                       or _dec.summarize_question(_qfull))
-                    # a synthesized card keeps the original text reachable — briefly headlined,
-                    # fully inspectable (2026-07-19: "unclear walls" order)
+                    # EU-564: the headline must never start with a raw ticket id — parse_options
+                    # already strips it from the summary; strip again here to guard every source
+                    # (synthesized briefs, cached/legacy rows).
+                    _raw = (_dec.strip_leading_ticket_key(_po["summary"] or "")
+                            or _dec.summarize_question(_qfull))
+                    # EU-564: word-boundary-safe fold on the headline; show Full context
+                    # whenever any truncation occurred (original bigger, or summary exceeds 140).
+                    _hl_text, _hl_folded = _nh(_raw)
+                    head = html.escape(_hl_text if _hl_folded else _raw)
+                    _h_trunc = _hl_folded or len(_qfull) > len(_raw)
+                    # A synthesized card keeps the original text reachable — briefly headlined,
+                    # fully inspectable (2026-07-19: "unclear walls" order; EU-564: also for
+                    # structured parse_options with summaries exceeding 140 chars).
                     _ctx = ("<details><summary>Full context</summary>"
                             f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
                             "</div></div></details>"
-                            if _po.get("synthesized") else "")
+                            if _h_trunc else "")
                     btns = ""
                     for o in _po["options"]:
                         _cls = "nbtn ok" if o["recommended"] else "nbtn x"
                         _star = "&#9733; " if o["recommended"] else ""
-                        _lbl = html.escape(o["text"][:110])
+                        _lbl, _folded = _dec.fold_option_label(o["text"], 110)
+                        _lbl_esc = html.escape(_lbl)
                         _val = html.escape(f"Option {o['n']}: {o['text']}")
+                        # EU-566: when folded, ship the FULL option text as title (tooltip);
+                        # otherwise keep the existing generic tooltip so short-label behaviour
+                        # does not regress.
+                        if _folded:
+                            _tip = html.escape(o["text"])
+                            _btn_title = (f"{_tip} — click to select\n\n"
+                                          "Ship this option — it lands as a Jira comment "
+                                          "and the ticket re-runs with it")
+                        else:
+                            _tip = None
+                            _btn_title = ("Ship this option — it lands as a Jira "
+                                          "comment and the ticket re-runs with it")
                         btns += (
                             "<form method=post action=/api/answer style='margin:0'>"
                             f"<input type=hidden name=ticket value='{tid}'>"
                             f"<input type=hidden name=app value='{dapp}'>"
                             f"<input type=hidden name=text value=\"{_val}\">"
-                            f"<button class='{_cls}' title='Ship this option — it lands as a Jira "
-                            f"comment and the ticket re-runs with it'>{_star}{o['n']}. {_lbl}</button></form>")
+                            f"<button class='{_cls}' title='{_btn_title}'>{_star}{o['n']}. {_lbl_esc}</button></form>")
                     out.append(
                         "<div class=ncard>"
                         f"<div class=q><span class='nbadge dec'>Decision</span>{head}</div>"
@@ -2235,12 +2291,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         "<button class='nbtn x'>Dismiss</button></form></div>"
                         "</div>")
                     continue
-                _brief = html.escape(_dec.summarize_question(_qfull)
-                                     or str(d.get("why") or "(no question on file)"))
+                _raw = _dec.summarize_question(_qfull) or str(d.get("why") or "(no question on file)")
+                # EU-564: the headline IS the plain-language summary — summarize_question already
+                # strips a leading ticket id, cuts command/test walls, and folds at a word boundary
+                # (never mid-word; fixes the EU-508 'once pe…' cutoff). The 'Full context' expander
+                # is gated on truncation: it appears whenever the summary differs from the raw
+                # question (id stripped / wall cut / folded), so nothing is ever lost or cut off.
+                _hl_trunc = bool(_qfull) and ((_raw != _qfull) or _raw.endswith("…"))
+                _brief = html.escape(_raw)
                 _full = ("<details><summary>Full context</summary>"
                          f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
                          "</div></div></details>"
-                         if len(_qfull) > 160 else "")
+                         if _hl_trunc else "")
                 out.append(
                     "<div class=ncard>"
                     f"<div class=q><span class='nbadge dec'>Decision</span>{_brief}</div>"
@@ -2249,7 +2311,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     f"<input type=hidden name=app value='{dapp}'>"
-                    "<input type=text name=text placeholder='Answer the unit — your decision re-runs the ticket with it baked in'>"
+                    "<input type=text name=text placeholder='Answer the squad — your decision re-runs the ticket with it baked in'>"
                     "<button class='nbtn send'>Ship answer</button></form>"
                     # Dismiss without re-running — marks question handled, removes from inbox.
                     "<div class=nrow>"
@@ -2281,7 +2343,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     "<form method=post action=/api/answer class=nrow>"
                     f"<input type=hidden name=ticket value='{tid}'>"
                     f"<input type=hidden name=app value='{tapp}'>"
-                    "<input type=text name=text placeholder='Answer the unit — your directive re-runs the ticket'>"
+                    "<input type=text name=text placeholder='Answer the squad — your directive re-runs the ticket'>"
                     "<button class='nbtn send'>Ship answer</button></form>"
                     # Secondary: talk it through with the CTO, or clear the row.
                     f"<div class=nrow><a class='nbtn x' href='/chat?prefill={prefill}'>Discuss with the CTO</a>"
@@ -2297,11 +2359,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             for t in _items:
                 tid = html.escape(str(t.get("ticket_id") or ""))
                 tapp = html.escape(str(t.get("app") or ""))
-                why = html.escape(str(t.get("why") or "blocked — autopilot skipping"))
+                _why_raw = str(t.get("why") or "blocked — autopilot skipping")
+                # EU-564: word-boundary-safe headline + expander for long parked reasons.
+                _h_text, _h_trunc = _nh(_why_raw)
+                why = html.escape(_h_text)
+                _why_ctx = ("<details><summary>Full context</summary>"
+                            f"<div class=ndetail><div class=ndt>{html.escape(_why_raw[:4000])}"
+                            "</div></div></details>" if _h_trunc else "")
                 out.append(
                     "<div class=ncard>"
                     f"<div class=q><span class='nbadge prk'>Parked</span>{why}</div>"
                     f"<div class=meta>{tid}{(' &middot; ' + tapp) if tapp else ''}</div>"
+                    f"{_why_ctx}"
                     # Unblock removes the ticket from blocked_tickets.json so autopilot retries it.
                     "<div class=nrow>"
                     "<form method=post action=/api/unblock style='margin:0'>"
@@ -3502,7 +3571,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
         threading.Thread(target=_bg_clarify, daemon=True).start()
         _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; ticket moved to To Do "
-                              "and the unit is re-running it with your decision.")
+                              "and the squad is re-running it with your decision.")
         return redirect("/needs")
 
     @app.post("/needs/resolve")

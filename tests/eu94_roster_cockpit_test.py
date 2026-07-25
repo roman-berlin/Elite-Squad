@@ -88,8 +88,8 @@ for snippet in ["Orchestrator", "Builder", "Security", "Reviewer"]:
 # ── 4. Roster view structure ─────────────────────────────────────────────────
 chk("Roster page includes the chain-of-command section",
     "Chain of command" in page)
-chk("Roster page includes the Officers &amp; duties section",
-    "Officers" in page and "duties" in page.lower())
+chk("Roster page includes the Engineers &amp; duties section",
+    "Engineers" in page and "duties" in page.lower())
 
 # ── Report ────────────────────────────────────────────────────────────────────
 print("\n============ EU-94 ROSTER COCKPIT GATE ============")

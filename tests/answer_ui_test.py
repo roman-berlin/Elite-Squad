@@ -92,7 +92,7 @@ needs.summary = lambda c, a=None: {"total": 2,
                                       "outcome": "awaiting decision", "note": "product blocker"}]}
 body = client.get("/needs").get_data(as_text=True)
 chk("/needs decisions form ships to /api/answer", "action=/api/answer" in body)
-chk("/needs parked card has a Ship-answer box", "Ship answer" in body and "Answer the unit" in body)
+chk("/needs parked card has a Ship-answer box", "Ship answer" in body and "Answer the squad" in body)
 chk("/needs answer form carries the app", "value='automatixy'" in body)
 chk("/needs still offers Discuss + Dismiss", "Discuss with the CTO" in body and "Dismiss" in body)
 
