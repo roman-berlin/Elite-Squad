@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-25 · EU-519 · Elite-Unit · • `_green_test_claim()` now strips quoted context via `reviewer._strip_quoted_context` before scanning, mirroring the existing RED-admission pattern (same local-import convention used elsewhere in gate.py, no… · 🔗 (no UI — verify with `python3 tests/gate_vs_builder_test.py`; functional verification: `gate_vs_builder_verdict("The fixture asserts `all tests pass`", gate_passed=False)` returns `None`)
 - 2026-07-25 · EU-517 · Elite-Unit · • Wiring is minimal and exactly scoped to the ticket: each field passed through `_strip_quoted_context` before the three existing regexes, original `text.strip()` still returned on a hit. · 🔗 (no UI — `python3 orchestrator.py` import smoke check, or `python3 tests/eu517_reviewer_quoted_admission_test.py`)
 - 2026-07-25 · EU-516 · Elite-Unit · • All 6 ACs met: importable, inline-backtick/fence/blockquote spans stripped, plain prose untouched, None/'' guarded. • New public function is fully typed (-> str) and covered by a dedicated test file exercising every… · 🔗 (no UI — `from orchestrator.reviewer import _strip_quoted_context; print(_strip_quoted_context('...'))` in a python shell)
 - 2026-07-25 · EU-463 · Elite-Unit · • Iteration-1 self-trip is genuinely fixed: import-line exclusion + reworded prose mean this diff no longer matches its own explicit-Any/typing gate (verified line-by-line).
