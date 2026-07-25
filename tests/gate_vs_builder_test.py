@@ -137,6 +137,44 @@ chk("AC5 the Builder is NOT retried (the contradiction breaks the pass loop on p
     builder_calls[0] == 1, f"builder calls={builder_calls[0]}")
 
 # --------------------------------------------------------------------------- #
+# EU-519 — Quoted / example context must NOT trigger GREEN mismatch.
+# The mirror-image of EU-481's RED false-positive class.
+# --------------------------------------------------------------------------- #
+
+# EU-519 AC1: inline backtick-quoted green phrase → no mismatch (returns None).
+r_q1 = gate_vs_builder_verdict(
+    "The fixture asserts the log line `all tests pass` is ignored.", gate_passed=False)
+chk("EU-519 quoted inline-backtick 'all tests pass' vs red-gate → None",
+    r_q1 is None, repr(r_q1))
+
+# EU-519 AC1b: blockquote-quoted green phrase → no mismatch.
+r_q2 = gate_vs_builder_verdict(
+    "Example transcript:\n> all tests pass\nhandled as fixture input.", gate_passed=False)
+chk("EU-519 blockquoted 'all tests pass' vs red-gate → None",
+    r_q2 is None, repr(r_q2))
+
+# EU-519 AC1c: fenced code-block containing green phrase → no mismatch.
+r_q3 = gate_vs_builder_verdict(
+    "Here is an example:\n```console\nall tests pass\n```\nThat was the old behavior.",
+    gate_passed=False)
+chk("EU-519 fenced-block 'all tests pass' vs red-gate → None",
+    r_q3 is None, repr(r_q3))
+
+# EU-519 AC2: genuine unquoted GREEN claim still fires (EU-151 protection preserved).
+r_g1 = gate_vs_builder_verdict("All tests pass now.", gate_passed=False)
+chk("EU-519 genuine unquoted 'All tests pass now.' vs red-gate still fires",
+    r_g1 is not None, repr(r_g1))
+
+# EU-519 AC3: genuine claim OUTSIDE a quote fires even when a quote also exists.
+r_m1 = gate_vs_builder_verdict(
+    "All tests pass. Log excerpt: `2 tests failed` was the pre-fix state.",
+    gate_passed=False)
+chk("EU-519 genuine claim plus quoted phrase → fires on the genuine claim",
+    r_m1 is not None, repr(r_m1))
+chk("EU-519 mixed claim identifies the real GREEN line",
+    r_m1 and "pass" in r_m1.lower(), repr(r_m1))
+
+# --------------------------------------------------------------------------- #
 print("\n========== GATE VS BUILDER VERDICT QA (EU-442) ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
