@@ -64,8 +64,8 @@ chk("cockpit nav bar contains the Roster link (/roster-doc)",
     'href="/roster-doc"' in bar)
 chk("Roster is a top-level btn (not only inside a dropdown)",
     'class="btn" href="/roster-doc"' in bar)
-chk("Roster nav button title mentions officers",
-    "Officers" in bar)
+chk("Roster nav button title mentions engineers",
+    "Engineers" in bar)
 
 # ── 2. /roster-doc page: every officer with their duty ───────────────────────
 client = server.create_app(cfg).test_client()

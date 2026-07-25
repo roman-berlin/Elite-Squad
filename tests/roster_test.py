@@ -105,7 +105,7 @@ from orchestrator import cockpit_views, sync as _sync
 _sync.can_promote = lambda: False   # keep the bar off git/network
 bar = cockpit_views._control_bar(scfg, "automatixy")
 chk("Roster button present in the top nav bar", 'href="/roster-doc"' in bar, "missing /roster-doc link")
-chk("Roster nav link carries the descriptive title", "Officers" in bar, "missing title attr")
+chk("Roster nav link carries the descriptive title", "Engineers" in bar, "missing title attr")
 
 print("\n================== ROSTER QA ==================")
 passed = sum(1 for _, ok, _ in results if ok)

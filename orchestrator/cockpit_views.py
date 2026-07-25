@@ -128,7 +128,7 @@ def _wrap(title: str, inner: str) -> str:
 
 def _working(msg: str, secs: int = 5) -> str:
     """A live 'working…' panel: spinner + indeterminate progress bar + auto-refresh, so a long
-    officer task (drill/council/scribe/standup) shows progress instead of a dead 'reload later'."""
+    engineer task (drill/council/scribe/standup) shows progress instead of a dead 'reload later'."""
     return (
         "<style>.wk{display:flex;flex-direction:column;gap:13px;align-items:flex-start;max-width:560px}"
         ".wkrow{display:flex;align-items:center;gap:12px}"
@@ -200,7 +200,7 @@ def _card(title: str, body: str, freshness: str | None = None) -> str:
 
 
 def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
-    """A single on-page officer-action button (POST form). These actions used to live in the
+    """A single on-page engineer-action button (POST form). These actions used to live in the
     'Unit' toolbar menu; they now sit on the page that shows their result, so each activity
     appears exactly once."""
     hidden = f'<input type=hidden name=app value="{html.escape(app)}">' if app else ""
@@ -210,7 +210,7 @@ def _actbtn(action: str, label: str, app: str = "", confirm: str = "") -> str:
 
 
 def _actbar(*items: str) -> str:
-    """A row of on-page officer-action controls. Buttons render via ``_btn`` (EU-297); this
+    """A row of on-page engineer-action controls. Buttons render via ``_btn`` (EU-297); this
     style block adds only the ``actbtn`` tone/colour on top of the shared ``.btn`` base."""
     return ("<style>.actbar{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}"
             ".btn{font:inherit;font-weight:600;cursor:pointer;text-decoration:none;"
@@ -883,7 +883,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <span class=tclabel>nav</span>
     <div class=tcrow>
       {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
-      <a class="btn" href="/roster-doc" title="Officers &amp; duties — the full unit roster">&#128101; Roster</a>
+      <a class="btn" href="/roster-doc" title="Engineers &amp; duties — the full unit roster">&#128101; Roster</a>
       {open_logs_html}
       {_btn(f"&#128203; Task log{fr_tasks}", tag="a", attrs=' href="/tasks" title="Every run — Today / week / month scoping, transcripts, Jira links"')}
       {_btn(f"&#128172; Daily{fr_council}", tag="a", attrs=' href="/council" title="The daily muster — DONE / NEXT / NEEDS YOU + failure causes"')}
@@ -969,7 +969,7 @@ def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
     pending_html = f'<div class=pending>{cards}</div>' if cards else ""
 
     if not bubbles and not cards:
-        bubbles = ('<div class=cempty>No messages yet. When an officer needs a decision it shows '
+        bubbles = ('<div class=cempty>No messages yet. When an engineer needs a decision it shows '
                    'up here — or send the CTO a message below.</div>')
     load_earlier = ""
     if start > 0:
@@ -1033,7 +1033,7 @@ def _group_inner(cfg: Config) -> str:
     from . import council
     msgs = council.group_messages(cfg, limit=30)   # EU-287: window to the recent messages, not the whole log
     if not msgs:
-        return ('<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant officers '
+        return ('<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant engineers '
                 'weigh in. (The CTO is your 1:1 chat.)</div>')
     out = ""
     for who, text in msgs:
