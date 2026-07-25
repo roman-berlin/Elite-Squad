@@ -75,6 +75,9 @@ check("audit records one patrol event w/ findings=3, filed=3, deduped=0, failed=
       and audit.events[0][1].get("findings") == 3 and audit.events[0][1].get("filed") == 3
       and audit.events[0][1].get("deduped") == 0 and audit.events[0][1].get("failed") == 0,
       str(audit.events))
+check("EU-579: summary carries the REAL filed Jira keys (the cockpit qa_findings source)",
+      isinstance(summary, str) and getattr(summary, "filed", None) == ["AUTO-101", "AUTO-102", "AUTO-103"],
+      repr(getattr(summary, "filed", None)))
 scout_md = (d / "scout-report.md").read_text(encoding="utf-8")
 check("officer report written, ===TICKETS=== block stripped",
       "Scout recon of DEV" in scout_md and "===TICKETS===" not in scout_md)
@@ -118,6 +121,8 @@ check("DEDUPE: reports 'already-open', never 'new' or 'filed'",
 check("DEDUPE: audit filed=0, deduped=2, failed=0",
       audit5.events[0][1].get("filed") == 0 and audit5.events[0][1].get("deduped") == 2
       and audit5.events[0][1].get("failed") == 0, str(audit5.events))
+check("EU-579: DEDUPE created nothing new — .filed stays empty (no stale keys surface)",
+      getattr(summary5, "filed", None) == [], repr(getattr(summary5, "filed", None)))
 
 # ===================== FAILURE path: create_task raises =====================
 # AC: reports "✗ failed", escalates to Telegram + Needs-you; audit failed:>=1.

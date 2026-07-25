@@ -1801,7 +1801,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
     @app.post("/api/qa")
     def qa_api() -> Response:
-        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged."""
+        """2026-07-19 (Commander order): ONE QA action — Patrol and Ship-review merged.
+
+        EU-579: tracks run-state (phase, elapsed, findings, verdict) for live polling
+        via GET /api/qa-status."""
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
@@ -1809,29 +1812,49 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             return redirect("/")
         if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
             _state["last_msg"] = QA_STATUS_TEMPLATE.format(app=app_name)
+            # EU-579: RESET run-state at claim time — a new run must never show stale values.
+            _state["qa_started"] = time.time()
+            _state["qa_phase"] = None
+            _state["qa_error_phase"] = None
+            _state["qa_findings"] = []
+            _state["qa_verdict"] = ""
+            _state["qa_dismissed"] = True
 
             def _bg():
                 notes = []
                 try:
+                    _state["qa_phase"] = "patrol"
                     _state["patrolling"] = True
                     try:
                         from . import patrol as patrol_mod
-                        asyncio.run(patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                        summary = asyncio.run(
+                            patrol_mod.patrol(cfg, app_name, do_file=True, audit=audit))
+                        # EU-579: patrol() returns a PatrolSummary(str) carrying .filed —
+                        # the REAL Jira keys this run filed. getattr: a stub returning a
+                        # plain str carries no .filed → empty findings, never a crash.
+                        _state["qa_findings"] = list(getattr(summary, "filed", []) or [])
                         notes.append("patrol done — findings filed as Jira tickets")
                     finally:
                         _state["patrolling"] = False
+                    _state["qa_phase"] = "ship_review"
                     _state["shipreview"] = True
                     try:
                         from . import council
-                        asyncio.run(council.ship_review(cfg, app_name, audit=audit))
+                        verdict = asyncio.run(
+                            council.ship_review(cfg, app_name, audit=audit))
+                        _state["qa_verdict"] = verdict
                         notes.append("ship verdict posted (see /council + Telegram)")
                     finally:
                         _state["shipreview"] = False
                     _state["last_result"] = f"✓ QA finished for {app_name} — " + "; ".join(notes)
+                    _state["qa_error_phase"] = None  # EU-579: clear prior error on success
+                    _state["qa_dismissed"] = False  # EU-579: new report just landed
                 except Exception as exc:  # noqa: BLE001
                     _state["last_result"] = f"QA failed: {exc}" + (
                         f" (completed: {'; '.join(notes)})" if notes else "")
+                    _state["qa_error_phase"] = _state.get("qa_phase")  # EU-579
                 finally:
+                    _state["qa_phase"] = None
                     _state["qa"] = False
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/")
@@ -1842,6 +1865,26 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         from flask import jsonify
         # EU-204: promote and ship-main endpoints removed; this now always returns inactive
         return jsonify({"active": False, "kind": "", "msg": _state.get("last_result", "")})
+
+    @app.get("/api/qa-status")
+    def qa_status_api() -> Response:
+        """EU-579: live state for the QA patrol + ship-review background job. Polls for
+        progress (phase, elapsed) and post-run result (findings, verdict). Safe defaults
+        mean it never 500s when no QA has ever run."""
+        from flask import jsonify
+        st = _state
+        active = bool(st.get("qa"))
+        started = st.get("qa_started") or 0
+        elapsed_s = int(time.time() - started) if active else 0
+        return jsonify({
+            "active": active,
+            "phase": st.get("qa_phase"),
+            "elapsed_s": elapsed_s,
+            "findings": list(st.get("qa_findings") or []),
+            "verdict": st.get("qa_verdict") or "",
+            "error_phase": st.get("qa_error_phase"),
+            "dismissed": bool(st.get("qa_dismissed")),
+        })
 
     @app.get("/merge-stats")
     def merge_stats_page() -> str:
@@ -2228,9 +2271,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 _po = None
                 try:
                     from . import decisions as _dec
-                    _po = _dec.parse_options(_qfull) or _dec.synthesize_options(_qfull)
+                    _po = _dec.ensure_options(_qfull)
                 except Exception:  # noqa: BLE001
-                    _po = None
+                    _po = _dec._default_card(str(d.get("why") or "(no question on file)"))
                 if _po:
                     # EU-564: the headline must never start with a raw ticket id — parse_options
                     # already strips it from the summary; strip again here to guard every source
@@ -2290,35 +2333,6 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         f"<input type=hidden name=ticket value='{tid}'>"
                         "<button class='nbtn x'>Dismiss</button></form></div>"
                         "</div>")
-                    continue
-                _raw = _dec.summarize_question(_qfull) or str(d.get("why") or "(no question on file)")
-                # EU-564: the headline IS the plain-language summary — summarize_question already
-                # strips a leading ticket id, cuts command/test walls, and folds at a word boundary
-                # (never mid-word; fixes the EU-508 'once pe…' cutoff). The 'Full context' expander
-                # is gated on truncation: it appears whenever the summary differs from the raw
-                # question (id stripped / wall cut / folded), so nothing is ever lost or cut off.
-                _hl_trunc = bool(_qfull) and ((_raw != _qfull) or _raw.endswith("…"))
-                _brief = html.escape(_raw)
-                _full = ("<details><summary>Full context</summary>"
-                         f"<div class=ndetail><div class=ndt>{html.escape(_qfull[:4000])}"
-                         "</div></div></details>"
-                         if _hl_trunc else "")
-                out.append(
-                    "<div class=ncard>"
-                    f"<div class=q><span class='nbadge dec'>Decision</span>{_brief}</div>"
-                    f"<div class=meta>{tid}{(' &middot; ' + dapp) if dapp else ''}</div>"
-                    f"{_full}"
-                    "<form method=post action=/api/answer class=nrow>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    f"<input type=hidden name=app value='{dapp}'>"
-                    "<input type=text name=text placeholder='Answer the squad — your decision re-runs the ticket with it baked in'>"
-                    "<button class='nbtn send'>Ship answer</button></form>"
-                    # Dismiss without re-running — marks question handled, removes from inbox.
-                    "<div class=nrow>"
-                    "<form method=post action=/needs/resolve style='margin:0'>"
-                    f"<input type=hidden name=ticket value='{tid}'>"
-                    "<button class='nbtn x'>Dismiss</button></form></div>"
-                    "</div>")
             out.append("</div>")
 
         # ── 2. Errored runs — tickets that ended errored / escalated ──────────
