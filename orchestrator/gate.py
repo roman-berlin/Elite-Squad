@@ -849,20 +849,25 @@ def _green_test_claim(text: str) -> str | None:
 def _red_test_admission(text: str) -> str | None:
     """The offending line if ``text`` admits a genuinely UNRESOLVED failing/skipped/broken test, else
     None. Applies reviewer.py's exact STRONG / WEAK-vs-RESOLVED logic (imported, not re-derived) so
-    the orchestrator has ONE red-admission parser and the two cannot drift."""
-    from .reviewer import _RESOLVED_CTX_RE, _UNRESOLVED_STRONG_RE, _WEAK_RED_TEST_RE
-    m = _UNRESOLVED_STRONG_RE.search(text or "")
+    the orchestrator has ONE red-admission parser and the two cannot drift.
+
+    Strips markdown quoted-context (fences, inline backticks, blockquotes) via
+    ``reviewer._strip_quoted_context`` BEFORE scanning, so the Builder cannot false-fire the
+    EU-442 'RED admission vs GREEN gate' mismatch by quoting an example / fixture (EU-520)."""
+    from .reviewer import _RESOLVED_CTX_RE, _UNRESOLVED_STRONG_RE, _WEAK_RED_TEST_RE, _strip_quoted_context
+    cleaned = _strip_quoted_context(text or "")
+    m = _UNRESOLVED_STRONG_RE.search(cleaned)
     if not m:
-        weak = _WEAK_RED_TEST_RE.search(text or "")
-        if weak and not _RESOLVED_CTX_RE.search(text or ""):
+        weak = _WEAK_RED_TEST_RE.search(cleaned)
+        if weak and not _RESOLVED_CTX_RE.search(cleaned):
             m = weak
     if not m:
         return None
-    start = text.rfind("\n", 0, m.start()) + 1
-    end = text.find("\n", m.end())
+    start = cleaned.rfind("\n", 0, m.start()) + 1
+    end = cleaned.find("\n", m.end())
     if end == -1:
-        end = len(text)
-    return text[start:end].strip()[:300]
+        end = len(cleaned)
+    return cleaned[start:end].strip()[:300]
 
 
 def gate_vs_builder_verdict(build_summary: str, gate_passed: bool) -> str | None:

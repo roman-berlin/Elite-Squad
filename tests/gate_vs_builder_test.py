@@ -175,6 +175,51 @@ chk("EU-519 mixed claim identifies the real GREEN line",
     r_m1 and "pass" in r_m1.lower(), repr(r_m1))
 
 # --------------------------------------------------------------------------- #
+# EU-520 — Quoted / example context must NOT trigger RED admission mismatch.
+# The mirror-image of EU-519: when a Builder summary quotes 'tests still failing'
+# inside backticks/fences/blockquotes with a GREEN gate, the _red_test_admission()
+# scanner must ignore those fixtures.  Genuine first-person RED admissions must
+# still fire (the existing AC2 pin covers the bare case; this adds mixed-context).
+# --------------------------------------------------------------------------- #
+
+# EU-520 AC1: inline-backtick quoted red phrase → no mismatch (returns None).
+r_eu1 = gate_vs_builder_verdict(
+    "The parser must ignore the phrase `the test suite is still red` when it appears quoted.",
+    gate_passed=True)
+chk("EU-520 AC1 inline-backtick quoted 'test suite is still red' vs green-gate → None",
+    r_eu1 is None, repr(r_eu1))
+
+# EU-520 AC1b: fenced code-block containing red-admission phrase → no mismatch.
+r_eu2 = gate_vs_builder_verdict(
+    "Here is an example:\n```\ntests still failing\n```\nThat was the old behavior.",
+    gate_passed=True)
+chk("EU-520 AC1b fenced-block 'tests still failing' vs green-gate → None",
+    r_eu2 is None, repr(r_eu2))
+
+# EU-520 AC1c: blockquote-quoted red-admission phrase → no mismatch.
+r_eu3 = gate_vs_builder_verdict(
+    "Example:\n> tests still failing\nhandled as fixture.",
+    gate_passed=True)
+chk("EU-520 AC1c blockquoted 'tests still failing' vs green-gate → None",
+    r_eu3 is None, repr(r_eu3))
+
+# EU-520 AC2: genuine unquoted RED admission still fires (existing AC2 pin — must stay green).
+r_eu4 = gate_vs_builder_verdict("Tests still failing in the auth suite.", gate_passed=True)
+chk("EU-520 AC2 genuine unquoted red admission vs green-gate still fires",
+    r_eu4 is not None, repr(r_eu4))
+chk("EU-520 AC2 reason names the Builder's RED admission",
+    r_eu4 and "red" in r_eu4.lower(), repr(r_eu4))
+
+# EU-520 AC3: genuine admission alongside a quoted phrase → still fires (strip must not swallow real).
+r_eu5 = gate_vs_builder_verdict(
+    "Tests still failing. The old log said `all tests pass`.",
+    gate_passed=True)
+chk("EU-520 AC3 genuine admission plus quoted phrase → fires on the real admission",
+    r_eu5 is not None, repr(r_eu5))
+chk("EU-520 AC3 mismatch identifies the genuine RED line",
+    r_eu5 and "fail" in r_eu5.lower(), repr(r_eu5))
+
+# --------------------------------------------------------------------------- #
 print("\n========== GATE VS BUILDER VERDICT QA (EU-442) ==========")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
