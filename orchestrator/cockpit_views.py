@@ -1199,7 +1199,11 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
                 '</div>'
             )
 
-        util = float(data.get("utilization", 0.0))
+        # EU-540: plan-probe rows carry 'utilization' (fraction); glm_budget_status()/budget_status()
+        # carry 'pct' as a fraction (used/cap) with no 'utilization' key. Prefer 'utilization' when
+        # present (plan rows), else fall back to 'pct' so the GLM gauge reflects real ledger burn
+        # instead of a dead 0%. Both are 0.0–1.0 fractions here.
+        util = float(data.get("utilization", data.get("pct", 0.0)) or 0.0)
         pct = int(util * 100)
         wpct = min(100, max(0, pct))
         tone, aria_label = _gauge_tone(util)
@@ -1286,21 +1290,21 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
     return (
         "<style>"
         ".dualprov{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:6px 0 20px}"
-        ".provcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:16px 18px}"
+        ".provcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}"
         ".phead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}"
-        ".pname{color:#e9ecf1;font-size:15px;font-weight:700}"
-        ".pbrand{color:#6b7480;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
+        ".pname{color:var(--ink);font-size:15px;font-weight:700}"
+        ".pbrand{color:var(--dim);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
         ".pstatus{display:flex;align-items:center;gap:8px;margin-bottom:10px}"
         ".picon{font-size:14px}.picon.ok{color:#3fb950}.picon.warn{color:#d99a2b}.picon.bad{color:#f0676b}"
-        ".pstat{color:#8a929f;font-size:12px;font-weight:500;text-transform:uppercase}"
-        ".ppct{color:#e9ecf1;font-size:13px;font-weight:600;margin-left:auto}"
+        ".pstat{color:var(--dim);font-size:12px;font-weight:500;text-transform:uppercase}"
+        ".ppct{color:var(--ink);font-size:13px;font-weight:600;margin-left:auto}"
         ".pgauge{margin:12px 0}"
-        ".pgbar{height:10px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+        ".pgbar{height:10px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
         ".pgfill{display:block;height:100%;transition:width .3s ease}"
         ".pgfill.g{background:#3fb950}.pgfill.a{background:#d99a2b}.pgfill.r{background:#f0676b}"
-        ".premain{color:#6b7480;font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
-        ".pmeta{color:#6b7480;font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
-        ".pnote{color:#8a929f;font-size:12px;margin-top:8px}"
+        ".premain{color:var(--dim);font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
+        ".pmeta{color:var(--dim);font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
+        ".pnote{color:var(--dim);font-size:12px;margin-top:8px}"
         "@media(max-width:680px){.dualprov{grid-template-columns:1fr}}"
         "</style>"
         '<div class=dualprov>'

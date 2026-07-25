@@ -2464,31 +2464,33 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         style = (
             "<style>"
             ".ugrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:6px 0 20px}"
-            ".ucard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:15px 17px}"
-            ".ut{color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
-            ".ubig{color:#e9ecf1;font-size:30px;font-weight:750;margin:7px 0 2px}.ubig .us{font-size:13px;color:#6b7480;font-weight:500}"
-            ".umeta{color:#6b7480;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+            ".ucard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 17px}"
+            ".ut{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
+            ".ubig{color:var(--ink);font-size:30px;font-weight:750;margin:7px 0 2px}.ubig .us{font-size:13px;color:var(--dim);font-weight:500}"
+            ".umeta{color:var(--dim);font-size:12px;font-family:ui-monospace,Menlo,monospace}"
             ".umodels{width:100%;border-collapse:collapse;margin-top:11px;font-size:12px}"
-            ".umodels th{color:#6b7480;text-align:left;font-weight:600;padding:3px 6px;border-bottom:1px solid #232936}"
-            ".umodels td{color:#c3cad6;padding:3px 6px;border-bottom:1px solid #1a1f2a}"
+            ".umodels th{color:var(--dim);text-align:left;font-weight:600;padding:3px 6px;border-bottom:1px solid var(--line)}"
+            ".umodels td{color:var(--ink);padding:3px 6px;border-bottom:1px solid var(--line2)}"
             ".umodels .r{text-align:right;font-family:ui-monospace,Menlo,monospace}"
-            ".budget{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
-            ".budget .bl{color:#e9ecf1;font-size:13px;margin-bottom:9px}"
-            ".bar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+            ".budget{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
+            ".budget .bl{color:var(--ink);font-size:13px;margin-bottom:9px}"
+            ".bar{height:9px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
             ".bar .fill{display:block;height:100%}.bar .fill.ok{background:#3b6cff}.bar .fill.warn{background:#d99a2b}.bar .fill.over{background:#f0676b}"
-            ".bnote{color:#8a929f;font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:#8a929f}"
+            ".bnote{color:var(--dim);font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:var(--dim)}"
             # EU-77 — live Claude Max subscription-limits panel (the real ceiling), green→amber→red.
-            ".plan{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
-            ".plan .ph{color:#e9ecf1;font-size:13px;font-weight:650;display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
-            ".plan .ps{color:#6b7480;font-size:11px;font-weight:500}"
+            ".plan{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
+            ".plan .ph{color:var(--ink);font-size:13px;font-weight:650;display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
+            ".plan .ps{color:var(--dim);font-size:11px;font-weight:500}"
             ".plan .pl{margin-top:13px}"
-            ".plan .plh{display:flex;justify-content:space-between;align-items:baseline;color:#c3cad6;font-size:12px;margin-bottom:5px}"
-            ".plan .plh .pp{font-family:ui-monospace,Menlo,monospace;color:#e9ecf1;font-weight:650}"
-            ".plan .pm{color:#6b7480;font-size:11px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}"
-            ".pbar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+            ".plan .plh{display:flex;justify-content:space-between;align-items:baseline;color:var(--ink);font-size:12px;margin-bottom:5px}"
+            ".plan .plh .pp{font-family:ui-monospace,Menlo,monospace;color:var(--ink);font-weight:650}"
+            ".plan .pm{color:var(--dim);font-size:11px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}"
+            ".pbar{height:9px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
             ".pbar .pf{display:block;height:100%}"
             ".pbar .pf.g{background:#3fb950}.pbar .pf.a{background:#d99a2b}.pbar .pf.r{background:#f0676b}"
-            ".plan .pnote{color:#8a929f;font-size:12px;margin-top:8px}"
+            ".plan .pnote{color:var(--dim);font-size:12px;margin-top:8px}"
+            # EU-540 — qwen quota line (compact, dim)
+            ".qwen-q{color:var(--dim);font-size:11.5px;margin:8px 0;font-family:ui-monospace,Menlo,monospace}"
             "</style>")
 
         # EU-77 — the REAL Claude Max ceiling (session / weekly · all models / per-model), read live.
@@ -2573,11 +2575,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # one shows the real plan cap, the other the unit's self-imposed budget. Best-effort probe.
         plan = plan_panel(_usage.plan_usage(cfg))
 
-        # EU-122: Dual-provider budget gauge — shows Claude + GLM side-by-side with low-watermark indicators
-        # GLM usage data is None for now (placeholder) until backend integration is added
-        dual_gauge = _dual_provider_gauge(cfg, _usage.plan_usage(cfg), glm_usage=None)
+        # EU-122 / EU-540: Dual-provider budget gauge — Claude + GLM side-by-side, live data.
+        # Pass real glm_budget_status() instead of placeholder None so the secondary gauge
+        # shows actual numbers from the ledger, not a dead 0%. glm_budget_status() carries the
+        # fraction as 'pct' (no 'utilization' key); _provider_card falls back to 'pct'. The GLM
+        # daily ceiling resets at midnight, so annotate resets_in for the card's meta line.
+        glm_usage = {**_usage.glm_budget_status(cfg), "resets_in": "midnight"}
+        dual_gauge = _dual_provider_gauge(cfg, _usage.plan_usage(cfg), glm_usage=glm_usage)
+        # EU-540: one compact Qwen Token-Plan quota line under the dual-gauge if available
+        qwen_line = ""
+        try:
+            qw = _usage.qwen_quota_status(cfg)
+            if qw:
+                qwen_line = f'<div class="qwen-q">Qwen Token-Plan: {html.escape(qw)}</div>'
+        except Exception:  # noqa: BLE001 — never break render on quota read failure
+            pass
 
-        body = (style + dual_gauge + plan + budget + mixbanner + "<div class=ugrid>"
+        body = (style + dual_gauge + qwen_line + plan + budget + mixbanner + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
@@ -2597,13 +2611,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         style = (
             "<style>"
             ".budgetpage{max-width:900px;margin:0 auto;padding:20px 0}"
-            ".bhead{color:#e9ecf1;font-size:22px;font-weight:700;margin-bottom:18px}"
-            ".bsubhead{color:#8a929f;font-size:14px;margin-bottom:24px}"
+            ".bhead{color:var(--ink);font-size:22px;font-weight:700;margin-bottom:18px}"
+            ".bsubhead{color:var(--dim);font-size:14px;margin-bottom:24px}"
             "</style>")
 
-        # Get current usage data for both providers
+        # EU-540: pass real GLM budget status instead of placeholder None. glm_budget_status()
+        # carries the fraction as 'pct'; _provider_card falls back to 'pct' for the gauge width.
         claude_usage = _usage.plan_usage(cfg)
-        glm_usage = None  # Placeholder until GLM backend integration is added
+        glm_usage = {**_usage.glm_budget_status(cfg), "resets_in": "midnight"}
 
         # Render the dual-provider gauge
         dual_gauge = _dual_provider_gauge(cfg, claude_usage, glm_usage)
