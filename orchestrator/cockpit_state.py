@@ -34,9 +34,10 @@ _STATE_KEYS = ("active", "last_msg", "last_result", "dry_run",
                "last_activity", "run_started", "stop_event", "log_seq",
                "autopilot_mode", "autopilot_on", "log_path",
                "plan_limit_hit", "plan_limit_reset_at",
-               # EU-579: QA run-state fields — set/reset/tracked by qa_api()._bg
+               # EU-579/582: QA run-state fields — set/reset/tracked by qa_api()._bg
                "qa_started", "qa_phase", "qa_error_phase",
-               "qa_findings", "qa_verdict", "qa_dismissed")
+               "qa_findings", "qa_verdict", "qa_dismissed",
+               "qa_app")   # EU-582: remembers the app that ran QA (for retry after failure)
 
 
 def _new_state() -> dict:
@@ -45,9 +46,10 @@ def _new_state() -> dict:
             "last_activity": None, "run_started": None, "stop_event": None, "log_seq": 0,
             "autopilot_mode": None, "autopilot_on": False, "log_path": None,
             "plan_limit_hit": False, "plan_limit_reset_at": None,
-            # EU-579: QA run-state defaults
+            # EU-579/582: QA run-state defaults
             "qa_started": None, "qa_phase": None, "qa_error_phase": None,
-            "qa_findings": [], "qa_verdict": "", "qa_dismissed": True}
+            "qa_findings": [], "qa_verdict": "", "qa_dismissed": True,
+            "qa_app": None}   # EU-582
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions

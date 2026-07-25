@@ -1819,6 +1819,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             _state["qa_findings"] = []
             _state["qa_verdict"] = ""
             _state["qa_dismissed"] = True
+            _state["qa_app"] = app_name  # EU-582: remember which app ran QA (retry after failure)
 
             def _bg():
                 notes = []

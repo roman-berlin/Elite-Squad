@@ -725,6 +725,49 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
             ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
 
+    # QA failure state (EU-582): shown when a QA run completed with an error phase,
+    # but NO active run is in flight (the progress strip covers it while qa is truthy).
+    # Displays plain-language failure description + any partial findings + one-click Retry.
+    qa_failure_html = ""
+    _ep = _state.get("qa_error_phase")
+    if _ep and not _state.get("qa"):   # error exists AND no active run running
+        # Map internal phase name → human label matching the progress strip wording.
+        if _ep == "ship_review":
+            _phase_label = "Phase 2 (ship verdict)"
+        else:
+            # Everything else (including bare "patrol" or whatever future phases get added)
+            # maps to Phase 1 with the same wording as the progress strip.
+            _phase_label = "Phase 1 (inspecting dev & filing findings)"
+        _error_msg = html.escape(_state.get("last_result", "") or "")
+        qa_failure_html = (
+            '<div role=status style="background:var(--badbg);border:1px solid var(--badline);'
+            'border-radius:var(--r-lg);padding:var(--s-3) var(--s-4);margin:0 0 14px">'
+            '<div style="font-weight:700;color:var(--bad);margin-bottom:var(--s-2)"'
+            f'>&#9888; QA failed during {_phase_label}: {_error_msg}</div>'
+        )
+        # Render partial findings (already filed by a surviving phase).
+        _partial_findings = list(_state.get("qa_findings") or [])
+        if _partial_findings:
+            _base_url = D._jira_base_for(cfg, app0)
+            _f_links = "".join(
+                f'<a href="{html.escape(_base_url)}/browse/{html.escape(k)}" '
+                f'target=_blank rel=noopener>{html.escape(k)}</a>'
+                for k in _partial_findings
+            )
+            _n = len(_partial_findings)
+            qa_failure_html += (
+                f'<div style="margin-bottom:var(--s-2);font-size:var(--t-sm)">'
+                f'{_n} finding{"s" if _n != 1 else ""} already filed: {_f_links}</div>')
+        # One-click retry form: POST /api/qa with hidden app field.
+        _retry_app = _state.get("qa_app") or app0
+        qa_failure_html += (
+            '<form method=post action=/api/qa style="margin-top:var(--s-2);margin-bottom:0">'
+            f'<input type=hidden name=app value="{html.escape(_retry_app)}">'
+            '<button type=submit style="font-size:var(--t-xs);font-weight:600;padding:'
+            '4px 10px;border-radius:var(--r-sm);background:var(--bad);color:var(--badtxt);'
+            'border:none;cursor:pointer">&#128260; Retry</button></form>'
+            '</div>')
+
     # EU-103: per-project autopilot controls — read from the per-app run-state.
     # State is resolved here (not in the template) so the HTML is a pure string.
     ap_status: dict = {"on": False, "stopping": False, "mode": None, "external": False}
@@ -967,7 +1010,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <span class=grow></span>
   {status}
 </div>
-{deploy_strip}{qa_strip}{qa_report_html}"""
+{deploy_strip}{qa_strip}{qa_report_html}{qa_failure_html}"""
 
 
 def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
