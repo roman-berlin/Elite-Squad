@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-601 · Elite-Unit · • `_needs_specialist` exists, is importable, and is NOT called from `respond_to_commander` (grep-confirmed) — matches AC exactly. · 🔗 (no UI — importable function check: `python3 -c "from orchestrator.council import _needs_specialist; import inspect; print('coroutine:', inspect.iscoroutinefunction(_needs_specialist))"` + run_all.py full pass green)
 - 2026-07-26 · EU-606 · Elite-Unit · • 3 group-only harnesses deleted in full; chat_test.py stripped of all group-room stubs/asserts and docstring clause, keeping only the 1:1 CTO coverage. · 🔗 (no UI — `python3 tests/run_all.py` confirms green on the reduced suite)
 - 2026-07-26 · EU-600 · Elite-Unit · • Helper is correctly isolated: never called from respond_to_commander or anywhere else (verified via grep). • Reuses _group_options/_officer_key/COUNCIL exactly as instructed — no new officer-dispatch path.
 - 2026-07-26 · EU-594 · Elite-Unit · • Group room card (_TALK_HTML), tab (_chat_tabs), and council nudge link all removed — CTO is the only visible entry.
