@@ -1118,7 +1118,7 @@ def _kpi_html(cards: list[dict]) -> str:
             # false "needs-you" signal, just with the number fixed.
             open_attr = " open" if findings else ""
             out.append(
-                f'<details class="kpi {tone}"{open_attr}>'
+                f'<details id="secpanel" class="kpi {tone}"{open_attr}>'
                 f'<summary class=kpisum><div class=kv>{kv_text}</div>'
                 f'<div class=kl>{_esc(c["label"])}</div></summary>'
                 f'{issues_html}'
@@ -2528,8 +2528,13 @@ white-space:pre-wrap;word-break:break-word}
 .logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
 /* EU-200: live run log panel - same styles as logbox */
 .runlog{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--console-ink);background:var(--console);
-margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
-white-space:pre-wrap;word-break:break-word}
+margin:0;padding:13px 16px;white-space:pre-wrap;word-break:break-word}
+/* EU-549: the #runlog DIV is the ONE scroll container. The inner <pre class=runlog> the JS renders
+   matches .runlog too, so both used to be 380px + overflow:auto — a scrollbox nested inside a
+   scrollbox (the inner pre captured the wheel and the outer panel never moved). Sizing + scroll now
+   live on div.runlog alone; the inner pre grows to fit its lines. */
+div.runlog{height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto}
+div.runlog pre.runlog{height:auto;overflow:visible;padding:0}
 .runlog .lg-b{color:var(--warn)}.runlog .lg-ok{color:var(--ok)}.runlog .lg-dim{color:var(--faint)}
 .runlog .logempty{color:var(--dim);font-style:italic;padding:13px 16px;}
 details.collapse{padding:0}
@@ -2600,7 +2605,7 @@ font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);bor
   {{AUTOPILOT}}
   {{HEALTHPILL}}
   <button id=themetoggle class=themebtn type=button title="Toggle light / dark" onclick="uiTheme()">&#9681;</button>
-  <span class=gen><span id=streamdot class="sdot off" title="live stream"></span>live · {{GEN}}</span>
+  <span class=gen><span id=streamdot class="sdot off" title="live stream"></span>live · <span id=gentime>{{GEN}}</span></span>
 </header>
 {{HEALTHBAR}}
 {{BAR}}
@@ -2620,13 +2625,13 @@ document.addEventListener("click",function(e){
 // Collapsible Activity panel + resizable log panels live INSIDE #board, which the SSE feed re-renders
 // every frame — so persist their state and re-apply it after each refresh (otherwise it resets).
 function saveUi(){try{
-  ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
+  ["actpanel","blpanel","secpanel"].forEach(function(id){var p=document.getElementById(id);
     if(p)localStorage.setItem("ui.open."+id,p.open?"1":"0");});
-  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+  ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);
     if(el)localStorage.setItem("ui.scroll."+id,el.scrollTop);});
 }catch(e){}}
 function applyUi(){try{
-  ["actpanel","blpanel"].forEach(function(id){var p=document.getElementById(id);
+  ["actpanel","blpanel","secpanel"].forEach(function(id){var p=document.getElementById(id);
     if(p){var v=localStorage.getItem("ui.open."+id);
       if(v==="0")p.removeAttribute("open");else if(v==="1")p.setAttribute("open","");
       p.addEventListener("toggle",saveUi);}});
@@ -2643,11 +2648,14 @@ function applyBoard(html){
   // if you were at the bottom (following live output) we keep you pinned there; otherwise we restore
   // your exact scroll position instead of jumping to the top/bottom.
   var keep={};
-  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+  ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);
     if(el)keep[id]={top:el.scrollTop,bottom:_atBottom(el)};});
+  // Focus guard — skip frame while user is typing so innerHTML doesn't wipe text or lose focus.
+  var ae=document.activeElement;
+  if(ae&&(ae.tagName==="TEXTAREA"||ae.tagName==="INPUT")&&b.contains(ae))return;
   b.innerHTML=html;
   applyUi();
-  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
+  ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
     if(el&&k)el.scrollTop=k.bottom?el.scrollHeight:k.top;
     else if(el&&id==="logbox")el.scrollTop=el.scrollHeight;});
 }
@@ -2665,7 +2673,7 @@ function startStream(){
   if(typeof(EventSource)==="undefined"){setDot("off");fallback();return;}
   try{
     _es=new EventSource("/api/stream?app="+encodeURIComponent(APP));
-    _es.addEventListener("board",function(e){applyBoard(e.data);setDot("on");});
+    _es.addEventListener("board",function(e){applyBoard(e.data);setDot("on");var g=document.getElementById("gentime");if(g)g.textContent=new Date().toLocaleTimeString();});
     _es.onopen=function(){setDot("on");if(_poll){clearInterval(_poll);_poll=null;}};
     _es.onerror=function(){setDot("off");if(_es){_es.close();_es=null;}fallback();setTimeout(startStream,4000);};
   }catch(e){setDot("off");fallback();}
@@ -2675,6 +2683,11 @@ scrollLog();
 startStream();
 // EU-200: Live run log streaming
 (function(){
+  var _runlogDone=false;
+  // EU-549: the one dim status line shown while the stream reconnects. Plain text, NOT markup —
+  // the leading · gets it the lg-dim class through renderRunlogLines' untouched dim branch, so the
+  // buffer never carries raw HTML and every line still goes through the escaper.
+  var RECONNECT_NOTE="· stream lost — reconnecting…";
   var runlogPanel=document.getElementById("runlog");
   if(!runlogPanel)return;
 
@@ -2699,7 +2712,10 @@ startStream();
   var _runlogPoll=null;
 
   function renderRunlogLines(){
-    if(!runlogPanel)return;
+    // EU-549: re-query on every call — the board's innerHTML swap detaches the node captured once
+    // at startup, so writing to that cached reference rendered into a dead copy forever.
+    var rp=document.getElementById("runlog");
+    if(!rp)return;
     if(runlogBuffer.length===0){
       /* 2026-07-22: do NOT overwrite here. The server renders a live status placeholder
          (stage / elapsed / last step) and refreshes it with the board; blanking it back to
@@ -2721,7 +2737,12 @@ startStream();
       return'<span class="'+cls+'">'+line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")+'</span>';
     }).join("\\n");
 
-    runlogPanel.innerHTML='<pre class=runlog>'+linesHtml+'</pre>';
+    // EU-549: the _atBottom scroll-keep pattern from applyBoard — pin to the bottom only if the
+    // user was already there; otherwise leave their reading position alone (new lines land on
+    // top, EU-637, so a top-anchored view needs no adjustment at all).
+    var wasAtBottom=_atBottom(rp);
+    rp.innerHTML='<pre class=runlog>'+linesHtml+'</pre>';
+    if(wasAtBottom)rp.scrollTop=rp.scrollHeight;
   }
 
   function startRunlogStream(){
@@ -2733,6 +2754,9 @@ startStream();
       runlogEs=new EventSource(runlogUrl);
       runlogEs.addEventListener("log",function(e){
         runlogBuffer.unshift(e.data);
+        // EU-549: a real line arrived — drop any stale reconnect notice so it doesn't sit
+        // in the panel after the stream recovered.
+        runlogBuffer=runlogBuffer.filter(function(l){return l!==RECONNECT_NOTE;});
         // Keep buffer size manageable (last 1000 lines)
         if(runlogBuffer.length>1000){
           runlogBuffer=runlogBuffer.slice(0,1000);
@@ -2740,19 +2764,25 @@ startStream();
         renderRunlogLines();
       });
       runlogEs.addEventListener("done",function(e){
+        _runlogDone=true;
         if(runlogEs){
           runlogEs.close();
           runlogEs=null;
         }
-      });
-      runlogEs.addEventListener("error",function(e){
-        console.error("Run log stream error:",e.data);
       });
       runlogEs.onerror=function(){
-        if(runlogEs){
-          runlogEs.close();
-          runlogEs=null;
+        // EU-549: reconnect like the board stream does (its 4s retry) instead of closing and never
+        // coming back. One dim status line says what's happening; it's deduped so repeated errors
+        // don't stack it, and removed again the moment a real line lands. After a normal 'done'
+        // the stream stays closed.
+        if(_runlogDone)return;
+        if(runlogEs){runlogEs.close();runlogEs=null;}
+        if(runlogBuffer.indexOf(RECONNECT_NOTE)<0){
+          runlogBuffer.unshift(RECONNECT_NOTE);
         }
+        if(runlogBuffer.length>1000){runlogBuffer=runlogBuffer.slice(0,1000);}
+        renderRunlogLines();
+        setTimeout(startRunlogStream,4000);
       };
     }catch(e){
       console.error("Failed to start run log stream:",e);
@@ -2766,6 +2796,9 @@ startStream();
   var originalApplyBoard=applyBoard;
   applyBoard=function(html){
     originalApplyBoard(html);
+    // EU-549: re-render buffered lines every frame so the live panel stays alive
+    // (the old cached node was detached by innerHTML swap).
+    renderRunlogLines();
     // Restart log stream with new log path — or a new per-card ticket filter (EU-487:
     // the newest card changed, or the board flipped between single- and multi-card).
     var newPanel=document.getElementById("runlog");
@@ -2778,6 +2811,7 @@ startStream();
         if(pathChanged)logPath=newPath;
         logTicket=newTicket;
         runlogBuffer=[];
+        _runlogDone=false; // EU-549: a freshly started stream may reconnect on error again
         if(runlogEs){
           runlogEs.close();
           runlogEs=null;
