@@ -1044,11 +1044,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             log_path = st.get("log_path")
             waited = 0.0
             # 2026-07-22: fall back to the SHARED drain stream when no per-ticket log appears.
-            # A CONCURRENT drain (max_concurrent_builders > 1) never calls open_run_log — loop.py's
-            # EU-380 branch writes a pointer NOTE instead and leaves state['log_path'] unset — so
-            # this panel sat on "Waiting for run output…" for 60s and then said "No active run log"
-            # for EVERY run, while the build was streaming happily to the process stdout the note
-            # points at. Tail that stream instead of showing the operator nothing.
+            # A CONCURRENT drain (max_concurrent_builders > 1) opens its per-ticket log handles
+            # under (app, slot) TUPLE keys (EU-635) and stores log_path on that tuple-keyed state —
+            # so state['log_path'] on the app-NAME key this panel reads stays unset (one app tab
+            # can't choose between two co-scheduled tickets). Before EU-635 no handle existed at
+            # all (a pointer NOTE instead). Either way this panel would sit on "Waiting for run
+            # output…" for 60s and then say "No active run log" while the build streams happily to
+            # the process stdout. Tail that stream instead of showing the operator nothing.
             drain_fallback = ""
             tail_from_end = False
             while not log_path and waited < 60.0:
