@@ -653,6 +653,62 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         data = _rl.read_day_log(cfg, app_name or None, date_str)
         return jsonify(data)
 
+    @app.get("/logs/days")
+    def days_list_api() -> Response:
+        """EU-629: list every day-folder under an app's log root, newest first.
+
+        Query param:
+            app : project name (slugified, resolved against log_root)
+
+        Security:
+            Path traversal guard mirrors ``/api/day-log`` and ``/api/open-logs``: resolved path
+            must stay under ``log_root(cfg)``; anything outside returns 403.
+
+        Cross-platform: no OS-specific gating. Works on macOS, Linux, and Windows.
+
+        Returns a minimal HTML page (``text/html``, 200).  An empty/missing day folder shows an
+        "No logs yet" message rather than raising 404/500.  Each day is an ``<a href="/logs/day?…">``
+        link (the target route is the next sub-ticket).
+        """
+        from . import run_logger as _rl
+
+        app_name = (request.args.get("app") or "").strip()
+        root = _rl.log_root(cfg)
+        app_slug = _rl._safe_slug(app_name or "default")
+        requested = (root / app_slug).resolve()
+
+        # Path traversal guard: resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+
+        safe_app = html.escape(app_name or "(none)")
+        empty_html = (
+            "<html><head><title>Logs — {}</title></head>"
+            "<body><h1>Logs</h1><p>No logs found for <strong>{}</strong>.</p>"
+            '<p><a href="/">Back</a></p></body></html>').format(safe_app, safe_app)
+        if not requested.is_dir():
+            return Response(empty_html, status=200, mimetype="text/html")
+
+        days = sorted((p.name for p in requested.iterdir() if p.is_dir()), reverse=True)
+
+        if not days:
+            return Response(empty_html, status=200, mimetype="text/html")
+
+        link_items = []
+        for d in days:
+            href = "/logs/day?app={}&date={}".format(
+                html.escape(app_name or "default"), html.escape(d))
+            link_items.append("<li><a href=\"{}\">{}</a></li>".format(href, d))
+        links_html = "<ul>\n{}\n</ul>".format("".join(link_items))
+        list_html = (
+            "<html><head><title>Logs — {}</title></head>"
+            "<body><h1>Logs</h1>{}"
+            '<p><a href="/">Back</a></p></body></html>').format(safe_app, links_html)
+        return Response(list_html, status=200, mimetype="text/html")
+
     @app.get("/api/autopilot")
     def autopilot_status_api() -> Response:
         """Live autopilot state: PID-based daemon check + in-memory cockpit flags.

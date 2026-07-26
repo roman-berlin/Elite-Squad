@@ -340,6 +340,105 @@ chk("read-only GETs stay unguarded (EU-254 contract preserved)",
     r_board.status_code == 200, f"status={r_board.status_code}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-629 — GET /logs/days : day-list view route
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+_reset()
+del srv.threading  # drop any module-level swap; fall back to real threading
+
+from orchestrator import run_logger as _rl  # noqa: E402
+
+_log_root = _rl.log_root(cfg)
+_app_dir = _log_root / "alpha"             # safe slug of "alpha" is "alpha"
+_app_dir.mkdir(parents=True, exist_ok=True)
+
+_day_a = _app_dir / "2026-07-01"
+_day_b = _app_dir / "2026-07-03"
+_day_c = _app_dir / "2026-07-02"
+_day_a.mkdir(parents=True, exist_ok=True)
+_day_b.mkdir(parents=True, exist_ok=True)
+_day_c.mkdir(parents=True, exist_ok=True)
+# A non-directory MUST NOT appear in the listing.
+(_app_dir / "not-a-day.txt").write_text("x", encoding="utf-8")
+
+c = srv.create_app(cfg).test_client()
+
+# --- 1) three day folders → 200 HTML, newest first ---
+r = c.get("/logs/days?app=alpha")
+chk("GET /logs/days?app=alpha returns 200 HTML", r.status_code == 200, f"status={r.status_code}")
+body = r.get_data(as_text=True)
+chk("Content-Type contains text/html (EU-629/1)", "text/html" in r.content_type, repr(r.content_type))
+# Verify newest-first order by index comparison; .index() raises if absent → fail gracefully.
+try:
+    _i3 = body.index("2026-07-03")
+    _i2 = body.index("2026-07-02")
+    _i1 = body.index("2026-07-01")
+    _ok_order = _i3 < _i2 < _i1
+except ValueError:
+    _ok_order = False
+chk("dates appear newest-first (EU-629/1)", _ok_order,
+    f"order check failed (b={len(body)} chars)")
+
+# --- 2) each day has an href link to /logs/day ---
+for d in ("2026-07-01", "2026-07-02", "2026-07-03"):
+    chk(f"/logs/day link present for {d} (EU-629/2)",
+        f'/logs/day?app=alpha&date={d}' in body,
+        f"href missing from body")
+
+# --- 3a) no app param → empty state 200 ---
+r_blank = c.get("/logs/days")
+chk("no app param → 200 with empty state (EU-629/3a)",
+    r_blank.status_code == 200, f"status={r_blank.status_code}")
+
+# --- 3b) unknown app → empty state 200 ---
+r_unk = c.get("/logs/days?app=nonexistent")
+chk("unknown app → 200 with empty state (EU-629/3b)",
+    r_unk.status_code == 200, f"status={r_unk.status_code}")
+
+# --- 4) path traversal → 403 ---
+# _safe_slug("..") → ".." (dots survive), resolves outside root → 403.
+r_trav = c.get("/logs/days?app=..")
+chk("app=.. → 403 (EU-629/4a)", r_trav.status_code == 403, f"status={r_trav.status_code}")
+
+# _safe_slug("../..") → "__..__" (slashes → underscores); no real traversal,
+# so we get 200-empty-state — NOT a 403. This matches /api/day-log behaviour.
+r_trav2 = c.get("/logs/days?app=../..")
+chk("app=../.. → safe slug '__..__', not 403 (slash stripped by _safe_slug)",
+    r_trav2.status_code == 200, f"unexpected status={r_trav2.status_code}")
+
+# --- 5) files under app dir are NOT listed (is_dir filter) ---
+chk("file entry excluded (is_dir filter, EU-629/5)",
+    "not-a-day.txt" not in body,
+    f"file leaked into listing")
+
+# --- 6) handler source must NOT contain platform/Darwin guard ---
+# Create a fresh app and inspect only the days_list_api function body (exclude docstring).
+_fresh = srv.create_app(cfg)
+_days_func = _fresh.view_functions.get("days_list_api")
+if _days_func is not None:
+    _full_src = inspect.getsource(_days_func)
+    # Strip docstring (first string-literal block) so false-positives in comments are ignored.
+    _after_doc = _full_src.lstrip()
+    _dq = _after_doc.find('"""')
+    _sq = _after_doc.find("'''")
+    if _dq != -1 and (_sq == -1 or _dq < _sq):
+        _end = _after_doc.find('"""', _dq + 3)
+        _handler_src = _after_doc[_end + 3:] if _end != -1 else ""
+    elif _sq != -1:
+        _end = _after_doc.find("'''", _sq + 3)
+        _handler_src = _after_doc[_end + 3:] if _end != -1 else ""
+    else:
+        _handler_src = _after_doc
+else:
+    _handler_src = "<route not yet defined>"
+
+chk("days handler lacks platform.system call (EU-629/6)",
+     "platform.system" not in _handler_src,
+     repr(_handler_src))
+chk("days handler lacks 'Darwin' literal (EU-629/6)",
+     "Darwin" not in _handler_src,
+     repr(_handler_src))
+
 srv.threading = _stub_threading(_real_thread)
 
 print("\n============ EU-361 COCKPIT SERVER CORRECTNESS QA ============")
