@@ -1,7 +1,7 @@
 """Cockpit templates / view helpers — the inline-HTML builders.
 
 Split out of ``server.py`` (F16: decompose templates/routes/state) so the presentation
-layer (page chrome, the control bar, the chat/group renderers, action buttons) lives
+layer (page chrome, the control bar, the chat renderer, action buttons) lives
 apart from the Flask route handlers. These functions take plain data + ``Config`` and
 return HTML strings — they never touch ``request``/``redirect``. ``server`` re-exports
 them, so ``server._control_bar`` / ``server._wrap`` etc. stay valid for callers and tests.

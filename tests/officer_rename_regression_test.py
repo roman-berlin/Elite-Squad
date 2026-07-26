@@ -208,7 +208,7 @@ check("config.officer_display is the same function", config.officer_display is d
 check("unknown key falls back to itself", display("nope_not_real") == "nope_not_real")
 check("empty key falls back to itself", display("") == "")
 
-# === 5. LABEL MAPS RESOLVE TO THE SOT — board / roster / group-room labels == display(key) =====
+# === 5. LABEL MAPS RESOLVE TO THE SOT — board / roster labels == display(key) ================
 # Stronger than "no retired name": every programmatic human-facing officer label must RESOLVE to
 # display(internal_key). So if a future OFFICER_NAMES rename isn't mirrored in a label, or someone
 # re-hard-codes a name, the label DIVERGES from the SOT and this goes red — catching STALE/divergent
@@ -223,7 +223,7 @@ for (key, *_r), (name, *_n) in zip(roster._OFFICER_ROWS, roster._OFFICERS):
 check("roster derives every label (rows count == officers count)",
       len(roster._OFFICER_ROWS) == len(roster._OFFICERS))
 
-# warroom.py — cockpit board roster AND the group-room consult map both resolve via _OFFICER_KEY
+# warroom.py — cockpit board roster resolves via _OFFICER_KEY
 # (cockpit key -> internal officers key), so builder/reviewer/drill map to field_engineer/inspector/…
 for uikey, name, _role in warroom._OFFICERS:
     ik = warroom._OFFICER_KEY.get(uikey, uikey)

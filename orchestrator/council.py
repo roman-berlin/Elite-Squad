@@ -331,8 +331,8 @@ def _honest_commander_section(cfg: Config, text: str) -> str:
 
 
 def latest_focus(cfg: Config) -> str:
-    """The FOCUS line of the most recent council/daily — grounds the group room in today's
-    priority. '' when no transcript or no FOCUS line exists."""
+    """The FOCUS line of the most recent council/daily — provides context for the CTO chat.
+    '' when no transcript or no FOCUS line exists."""
     import re as _re
     try:
         for rec in history(cfg, limit=3):

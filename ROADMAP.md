@@ -3,7 +3,7 @@
 The durable plan. The live task list in Cowork mirrors this, but this file is the source of
 truth (version-controlled, reviewable on GitHub). Update it as we ship.
 
-Last updated: 2026-06-20.
+Last updated: 2026-07-26.
 
 ## Shipped
 
@@ -349,6 +349,8 @@ Last updated: 2026-06-20.
   explicitly owns **onboarding** new officers/soldiers and **refresher** drills for existing ones —
   the unit's training officer. Plus the Mac launcher now runs under `caffeinate` so the scheduled
   10:00 council isn't skipped by sleep. Verified by the dashboard QA harness (59/59).
+  **Superseded 2026-07-25:** the Group room was removed (EU-541) — the CTO chat (`/chat`) is now the
+  single entry point; the CTO consults a specialist engineer internally when a question needs one.
 
 - **Run controls & guardrails (QA pass)** — three safety/visibility fixes from a War-Room QA
   sweep: (1) **confirm before anything live** — a LIVE free-task run, a LIVE ticket-develop, and

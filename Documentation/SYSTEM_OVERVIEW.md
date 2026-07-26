@@ -216,8 +216,9 @@ ring buffer (`server.py:46-64`) and pushed to the browser via Server-Sent Events
 - **Activity** — recent steps (collapsible).
 - **Needs-you** (`/needs`, `server.py:1074`) — questions from the CTO, officer recommendations to
   approve, and runs that need you; **badge** count from `needs.count` (`server.py:160-165`).
-- **Talk-to-the-unit** — `/chat` (1:1 with the CTO, `server.py:1626`) and `/group` (the whole unit,
-  `server.py:1648`).
+- **Talk-to-the-unit** — `/chat` (1:1 with the CTO, `server.py:3177`) is the single entry point
+  (the group room was removed 2026-07-25). When a question needs a specialist, the CTO consults one
+  internally and answers in the same thread (`council.respond_to_commander`).
 
 **Action buttons** (`server._control_bar`, `server.py:142-367`):
 | Button | Endpoint | What it does |
@@ -460,7 +461,6 @@ All live beside `audit_path` (the repo root) and are **gitignored** unless noted
 | `commander_notes.md` | `council.add_commander_note` (`council.py:172-179`) | Q/A standing guidance from chat |
 | `council/*.md` + `council/index.jsonl` | `council._save_transcript` (`council.py:830-846`) | Council/meeting/standup transcripts |
 | `last-standup.md` | `council` (`council.py:764-766`) | Latest stand-up |
-| `group_chat.jsonl` | `council._append_group` (`council.py:686-689`) | Group-room thread |
 | `autonomy.json` | `events._save` (`events.py:33-37`) | Autonomy cooldown state |
 | `memory/UNIT.md` | Commander + Technical Writer-region (`memory.py`) | **Versioned** doctrine |
 | `memory/UNIT.live.md` | `memory.update_log` (`memory.py:143-152`) | Gitignored living lessons log |
