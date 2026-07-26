@@ -665,6 +665,61 @@ chk("day_view handler still lacks platform.system call (EU-631/5)",
 chk("day_view handler still lacks 'Darwin' literal (EU-631/5)",
     "Darwin" not in _handler_src_631, repr(_handler_src_631))
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-632 — GET /logs/day?ticket= : the warroom's per-run 'open log' link pre-scopes the day
+# view to that run's ticket (AC2). The 2026-08-15 fixture day holds three tickets
+# (EU-630 / EU-631 / EU-632), so a filter must select exactly one of them.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# --- 1) ticket=EU-631 → only EU-631's entries, visibly scoped ---
+r_scope = c.get("/logs/day?app=alpha&date=2026-08-15&ticket=EU-631")
+chk("GET /logs/day?...&ticket=EU-631 → 200 (EU-632/1)",
+    r_scope.status_code == 200, f"status={r_scope.status_code}")
+scope_body = r_scope.get_data(as_text=True)
+chk("scoped page shows the ticket's own entries (EU-632/1)",
+    "Gate passed for EU-631" in scope_body and "PR approved" in scope_body,
+    "EU-631 entries missing from the scoped page")
+chk("scoped page hides other tickets' entries (EU-632/1)",
+    "Running build steps for EU-630" not in scope_body
+    and "Script injection attempt" not in scope_body,
+    "another ticket's entries leaked into the scoped page")
+chk("scoped page visibly names the active ticket (EU-632/1)",
+    "ticket" in scope_body.lower() and "EU-631" in scope_body,
+    "no visible ticket scope marker")
+chk("scoped page offers a 'show all entries' escape hatch (EU-632/1)",
+    'href="/logs/day?app=alpha&date=2026-08-15"' in scope_body,
+    "no un-scoped link back to the full day")
+chk("scoped download link carries the ticket param (EU-632/1)",
+    "/logs/day?app=alpha&date=2026-08-15&format=txt&ticket=EU-631" in scope_body,
+    "download href dropped the ticket scope")
+
+# --- 2) unfiltered path unchanged (regression guard on EU-630) ---
+chk("no ticket param → every entry still renders (EU-632/2)",
+    "Running build steps for EU-630" in body_pop
+    and "Gate passed for EU-631" in body_pop
+    and "Script injection attempt" in body_pop,
+    "unfiltered day view lost entries")
+chk("no ticket param → no scope marker (EU-632/2)",
+    "show all entries" not in body_pop.lower(),
+    "scope UI leaked into the unfiltered page")
+
+# --- 3) ticket with no entries → 200 ticket-aware empty state, not 404/500 ---
+r_scope_none = c.get("/logs/day?app=alpha&date=2026-08-15&ticket=EU-000")
+chk("ticket with no entries → 200 (EU-632/3)",
+    r_scope_none.status_code == 200, f"status={r_scope_none.status_code}")
+none_body = r_scope_none.get_data(as_text=True)
+chk("empty-scope message names the ticket (EU-632/3)",
+    "EU-000" in none_body and "no log entries" in none_body.lower(),
+    repr(none_body[:300]))
+
+# --- 4) format=txt honors the same scope (download matches the page) ---
+r_scope_txt = c.get("/logs/day?app=alpha&date=2026-08-15&ticket=EU-631&format=txt")
+scope_txt = r_scope_txt.get_data(as_text=True)
+chk("format=txt honors the ticket scope (EU-632/4)",
+    "Gate passed for EU-631" in scope_txt
+    and "Running build steps for EU-630" not in scope_txt,
+    repr(scope_txt[:200]))
+
 print("\n============ EU-361 COCKPIT SERVER CORRECTNESS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

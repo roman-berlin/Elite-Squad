@@ -713,11 +713,17 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     def day_view() -> Response:
         """EU-630: render one day's consolidated log as HTML.
             EU-631: ``format=txt`` returns plain-text downloadable attachment.
+            EU-632: ``ticket=<id>`` scopes the rendered entries to that ticket.
 
         Query params:
             app : project name (slugified, resolved against log_root)
             date: ``YYYY-MM-DD`` — validated with ``datetime.date.fromisoformat``
             format: ``txt`` — when set, returns a plain-text attachment instead of HTML
+            ticket: optional — when set, only entries attributed to that ticket are rendered
+                (HTML *and* TXT), and the page visibly reports the scope with a "show all
+                entries" escape hatch. The warroom's per-run 'open log' link carries this so
+                the day view lands pre-scoped to the run's ticket (EU-632 AC2). Absent →
+                every entry for the day renders (EU-630 behaviour, unchanged).
 
         Security:
             Path traversal guard mirrors ``/api/day-log`` and ``/logs/days``: resolved path
@@ -741,6 +747,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
         date_str = date_param
         app_name = (request.args.get("app") or "").strip()
+        # EU-632: optional ticket scope (the warroom's per-run link carries it).
+        ticket_param = (request.args.get("ticket") or "").strip()
 
         root = _rl.log_root(cfg)
         app_slug = _rl._safe_slug(app_name or "default")
@@ -754,9 +762,19 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                             mimetype="text/plain")
 
         data = _rl.read_day_log(cfg, app_name or None, date_str)
+        if ticket_param:
+            # Entries carry the ticket slug parsed off the log FILENAME (<TICKET>-<HHMMSS>.log);
+            # match both the raw param and its slug form so "EU 632"-style ids still land.
+            _wanted = {ticket_param, _rl._safe_slug(ticket_param)}
+            data["entries"] = [e for e in data["entries"]
+                               if (e.get("ticket") or "") in _wanted]
         safe_app = html.escape(app_name or "(none)")
         safe_date = html.escape(date_str)
+        safe_ticket = html.escape(ticket_param)
         app_slug_val = str(app_slug)
+        # Scope suffix shared by the TXT filename and the download link.
+        ticket_suffix = ("-" + _rl._safe_slug(ticket_param)) if ticket_param else ""
+        ticket_query = ("&ticket=" + html.escape(ticket_param)) if ticket_param else ""
 
         # EU-631: plain-text download when format=txt is requested.
         fmt = (request.args.get("format") or "").strip().lower()
@@ -765,7 +783,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 return Response(
                     "", status=200, mimetype="text/plain",
                     headers={"Content-Disposition":
-                             f'attachment; filename="day-log-{app_slug_val}-{date_str}.txt"'})
+                             f'attachment; filename="day-log-{app_slug_val}-{date_str}{ticket_suffix}.txt"'})
             txt_lines = []
             for e in data["entries"]:
                 ticket = e.get("ticket") or "—"
@@ -775,14 +793,27 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             return Response(
                 "\n".join(txt_lines), status=200, mimetype="text/plain",
                 headers={"Content-Disposition":
-                         f'attachment; filename="day-log-{app_slug_val}-{date_str}.txt"'})
+                         f'attachment; filename="day-log-{app_slug_val}-{date_str}{ticket_suffix}.txt"'})
+
+        # EU-632: when a ticket scope is active, "Back to days" is joined by a "show all
+        # entries" link that drops the ticket param — the scope is always visible and always
+        # reversible (AC2: the per-run link lands on a page pre-scoped to its ticket).
+        show_all_html = (' <a href="/logs/day?app={}&date={}">Show all entries</a>'.format(
+            html.escape(app_name or ""), safe_date) if ticket_param else "")
 
         if not data["entries"]:
+            if ticket_param:
+                empty_msg = ("No log entries found for ticket <strong>{}</strong> on "
+                             "<strong>{}</strong>.").format(safe_ticket, safe_date)
+            else:
+                empty_msg = ("No log entries found for <strong>{}</strong>."
+                             ).format(safe_date)
             empty = (
                 "<html><head><title>Day Log — {}</title></head>"
-                "<body><h1>Day Log</h1><p>No log entries found for <strong>{}</strong>.</p>"
-                '<p><a href="/logs/days?app={}" >Back to days</a></p>'
-                "</body></html>").format(safe_app, safe_date, html.escape(app_name or ""))
+                "<body><h1>Day Log</h1><p>{}</p>"
+                '<p><a href="/logs/days?app={}" >Back to days</a>{}</p>'
+                "</body></html>").format(safe_app, empty_msg,
+                                         html.escape(app_name or ""), show_all_html)
             return Response(empty, status=200, mimetype="text/html")
 
         lines = []
@@ -792,14 +823,21 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             text = html.escape(e.get("text") or "")
             lines.append("<li>[{}] [{}] {}</li>".format(ticket, stage, text))
         entry_html = "<ol>\n{}\n</ol>".format("\n".join(lines))
-        download_href = ("/logs/day?app={}&date={}&format=txt").format(
-            html.escape(app_name or ""), html.escape(date_str))
+        # The download carries the active scope so the TXT matches what's on screen.
+        download_href = ("/logs/day?app={}&date={}&format=txt{}").format(
+            html.escape(app_name or ""), html.escape(date_str), ticket_query)
+        scope_note = ('<p>Scoped to ticket <strong>{}</strong> — '
+                      '<a href="/logs/day?app={}&date={}">show all entries</a></p>'.format(
+                          safe_ticket, html.escape(app_name or ""), safe_date)
+                      if ticket_param else "")
+        h1_scope = (" — ticket " + safe_ticket) if ticket_param else ""
         detail = (
             "<html><head><title>Day Log — {}</title></head>"
-            "<body><h1>Day Log — {}</h1>{}"
+            "<body><h1>Day Log — {}{}</h1>{}{}"
             '<p><a href="/logs/days?app={}">Back to days</a> | '
             '<a href="{}">⬇ download .txt</a></p>'
-            "</body></html>").format(safe_app, safe_date, entry_html,
+            "</body></html>").format(safe_app, safe_date, h1_scope,
+                                     scope_note, entry_html,
                                      html.escape(app_name or ""), download_href)
         return Response(detail, status=200, mimetype="text/html")
 

@@ -1436,21 +1436,28 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
         extra = ""
         spark_html = ""
 
-    # EU-106: per-run 'open log' link — shown only when log_path is set by the BE subtask.
-    # Rendered as a small anchor right after the phase bar so it's near the run context.
+    # EU-106 / EU-632: per-run 'open log' link → real nav to /logs/day?app=&date=&ticket=
+    # (was /api/open-logs fetch-and-forget).  Derive date from log_path parent folder (YYYY-MM-DD);
+    # fall back to today when the parent isn't an ISO date (shared drain log edge case).  The
+    # &ticket= param pre-scopes the day view to THIS run's entries (server.py day_view filters on
+    # it — EU-632 iteration 2).
     log_link = ""
     if log_path:
-        # EU-487: the card's own ticket id rides along as the log's filter param, same as
-        # the runhead attribute — the shared drain log is scoped per card, never split.
         ticket_q = f"&ticket={quote(str(log_ticket))}" if log_ticket else ""
-        # 2026-07-19: fetch(), never navigate — the same fix as the toolbar Open-logs button;
-        # as a plain link this replaced the cockpit tab with the endpoint's raw JSON.
+        _lp = Path(log_path)
+        try:
+            _d = str(date.fromisoformat(_lp.parent.name))
+        except (ValueError, IndexError):
+            _d = str(date.today())
+        # Parenthesised: run["app"] wins whenever present; the path-depth guard only governs
+        # the FALLBACK derivation (an unparenthesised `a or b if c else d` would bind as
+        # `(a or b) if c else d` and return "default" despite a truthy run["app"]).
+        _app = run.get("app") or (_lp.parent.parent.name if len(_lp.parts) >= 3 else "default")
         log_link = (
             f'<div style="margin-top:9px;padding-bottom:2px">'
-            f'<a href="/api/open-logs?path={quote(str(log_path))}{ticket_q}" '
-            f'onclick="fetch(this.href);return false" '
+            f'<a href="/logs/day?app={quote(str(_app))}&date={_d}{ticket_q}" '
             f'style="font-size:11.5px;color:var(--info);font-family:var(--mono);font-weight:600" '
-            f'title="Open this run log in Finder">&#128194; open log</a></div>'
+            f'title="View this run\'s day log">&#128194; open log</a></div>'
         )
 
     # Build the phase bar and metadata based on whether we're in triage or normal run
