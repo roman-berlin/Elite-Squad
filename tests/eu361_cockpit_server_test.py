@@ -340,7 +340,385 @@ chk("read-only GETs stay unguarded (EU-254 contract preserved)",
     r_board.status_code == 200, f"status={r_board.status_code}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-629 — GET /logs/days : day-list view route
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+_reset()
+del srv.threading  # drop any module-level swap; fall back to real threading
+
+from orchestrator import run_logger as _rl  # noqa: E402
+
+_log_root = _rl.log_root(cfg)
+_app_dir = _log_root / "alpha"             # safe slug of "alpha" is "alpha"
+_app_dir.mkdir(parents=True, exist_ok=True)
+
+_day_a = _app_dir / "2026-07-01"
+_day_b = _app_dir / "2026-07-03"
+_day_c = _app_dir / "2026-07-02"
+_day_a.mkdir(parents=True, exist_ok=True)
+_day_b.mkdir(parents=True, exist_ok=True)
+_day_c.mkdir(parents=True, exist_ok=True)
+# A non-directory MUST NOT appear in the listing.
+(_app_dir / "not-a-day.txt").write_text("x", encoding="utf-8")
+
+c = srv.create_app(cfg).test_client()
+
+# --- 1) three day folders → 200 HTML, newest first ---
+r = c.get("/logs/days?app=alpha")
+chk("GET /logs/days?app=alpha returns 200 HTML", r.status_code == 200, f"status={r.status_code}")
+body = r.get_data(as_text=True)
+chk("Content-Type contains text/html (EU-629/1)", "text/html" in r.content_type, repr(r.content_type))
+# Verify newest-first order by index comparison; .index() raises if absent → fail gracefully.
+try:
+    _i3 = body.index("2026-07-03")
+    _i2 = body.index("2026-07-02")
+    _i1 = body.index("2026-07-01")
+    _ok_order = _i3 < _i2 < _i1
+except ValueError:
+    _ok_order = False
+chk("dates appear newest-first (EU-629/1)", _ok_order,
+    f"order check failed (b={len(body)} chars)")
+
+# --- 2) each day has an href link to /logs/day ---
+for d in ("2026-07-01", "2026-07-02", "2026-07-03"):
+    chk(f"/logs/day link present for {d} (EU-629/2)",
+        f'/logs/day?app=alpha&date={d}' in body,
+        f"href missing from body")
+
+# --- 3a) no app param → empty state 200 ---
+r_blank = c.get("/logs/days")
+chk("no app param → 200 with empty state (EU-629/3a)",
+    r_blank.status_code == 200, f"status={r_blank.status_code}")
+
+# --- 3b) unknown app → empty state 200 ---
+r_unk = c.get("/logs/days?app=nonexistent")
+chk("unknown app → 200 with empty state (EU-629/3b)",
+    r_unk.status_code == 200, f"status={r_unk.status_code}")
+
+# --- 4) path traversal → 403 ---
+# _safe_slug("..") → ".." (dots survive), resolves outside root → 403.
+r_trav = c.get("/logs/days?app=..")
+chk("app=.. → 403 (EU-629/4a)", r_trav.status_code == 403, f"status={r_trav.status_code}")
+
+# _safe_slug("../..") → "__..__" (slashes → underscores); no real traversal,
+# so we get 200-empty-state — NOT a 403. This matches /api/day-log behaviour.
+r_trav2 = c.get("/logs/days?app=../..")
+chk("app=../.. → safe slug '__..__', not 403 (slash stripped by _safe_slug)",
+    r_trav2.status_code == 200, f"unexpected status={r_trav2.status_code}")
+
+# --- 5) files under app dir are NOT listed (is_dir filter) ---
+chk("file entry excluded (is_dir filter, EU-629/5)",
+    "not-a-day.txt" not in body,
+    f"file leaked into listing")
+
+# --- 6) handler source must NOT contain platform/Darwin guard ---
+# Create a fresh app and inspect only the days_list_api function body (exclude docstring).
+_fresh = srv.create_app(cfg)
+_days_func = _fresh.view_functions.get("days_list_api")
+if _days_func is not None:
+    _full_src = inspect.getsource(_days_func)
+    # Strip docstring (first string-literal block) so false-positives in comments are ignored.
+    _after_doc = _full_src.lstrip()
+    _dq = _after_doc.find('"""')
+    _sq = _after_doc.find("'''")
+    if _dq != -1 and (_sq == -1 or _dq < _sq):
+        _end = _after_doc.find('"""', _dq + 3)
+        _handler_src = _after_doc[_end + 3:] if _end != -1 else ""
+    elif _sq != -1:
+        _end = _after_doc.find("'''", _sq + 3)
+        _handler_src = _after_doc[_end + 3:] if _end != -1 else ""
+    else:
+        _handler_src = _after_doc
+else:
+    _handler_src = "<route not yet defined>"
+
+chk("days handler lacks platform.system call (EU-629/6)",
+     "platform.system" not in _handler_src,
+     repr(_handler_src))
+chk("days handler lacks 'Darwin' literal (EU-629/6)",
+     "Darwin" not in _handler_src,
+     repr(_handler_src))
+
 srv.threading = _stub_threading(_real_thread)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-630 — GET /logs/day : day-detail HTML view (chronological render of read_day_log entries)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+_reset()
+del srv.threading  # drop any module-level swap; fall back to real threading
+
+from orchestrator import run_logger as _rl  # noqa: E402
+
+_log_root = _rl.log_root(cfg)
+_app_dir = _log_root / "alpha"
+_app_dir.mkdir(parents=True, exist_ok=True)
+
+# Build a populated day: 3 log files sharing the same time-suffix so they sort by filename.
+_day = _app_dir / "2026-08-15"
+_day.mkdir(parents=True, exist_ok=True)
+
+# All three files share the same -120000 suffix → same sort-key → filename tiebreak.
+_t1 = _day / "EU-630-120000.log"
+_t2 = _day / "EU-631-120000.log"
+_t3 = _day / "EU-632-120000.log"
+
+_t1.write_text("[Build]\nRunning build steps for EU-630\n", encoding="utf-8")
+_t2.write_text("[Gate]\nGate passed for EU-631\n[Review]\nPR approved\n", encoding="utf-8")
+_t3.write_text('Script injection attempt: <script>alert("xss")</script>\n', encoding="utf-8")
+
+c = srv.create_app(cfg).test_client()
+
+
+# --- 1) 200 HTML showing every entry from read_day_log in order ---
+r_pop = c.get("/logs/day?app=alpha&date=2026-08-15")
+chk("GET /logs/day?app=alpha&date=YYYY-MM-DD returns 200 (EU-630/1)",
+    r_pop.status_code == 200, f"status={r_pop.status_code}")
+body_pop = r_pop.get_data(as_text=True)
+chk("Content-Type contains text/html (EU-630/1)",
+    "text/html" in r_pop.content_type, repr(r_pop.content_type))
+# Verify chronological order: each known entry must appear AFTER the previous one.
+_order_checks = [
+    ("Running build steps for EU-630",   "EU-631"),
+    ("Gate passed for EU-631",            "PR approved"),
+    ('Script injection attempt: &lt;script&gt;', None),
+]
+try:
+    _order_ok = True
+    _prev = ""
+    for _text, _next_hint in _order_checks:
+        _pos = body_pop.index(_text)
+        if _prev and _pos < body_pop.index(_prev):
+            _order_ok = False
+            break
+        _prev = _text
+except ValueError:
+    _order_ok = False
+chk("entries appear in chronological order (EU-630/1)", _order_ok,
+    f"one of the {len(_order_checks)} known entries not found or out-of-order")
+
+# --- 2) Lines are prefixed [<ticket>] [<stage>] ---
+chk("[EU-630] [Build] present (EU-630/2)",
+    "[EU-630] [Build]" in body_pop, "ticket+stage prefix missing")
+chk("[EU-631] [Gate] present (EU-630/2)",
+    "[EU-631] [Gate]" in body_pop, "ticket+stage prefix missing")
+chk("[EU-631] [Review] present (EU-630/2)",
+    "[EU-631] [Review]" in body_pop, "second stage for EU-631 missing")
+chk('[EU-632] [—] present (EU-630/2)',
+    '[EU-632] [—]' in body_pop, "missing-stage fallback not rendered")
+
+# An entry with a completely empty stage renders [—]
+_empty_stage_day = _app_dir / "2026-08-16"
+_empty_stage_day.mkdir(parents=True, exist_ok=True)
+_empty_file = _empty_stage_day / "EU-999-130000.log"
+_empty_file.write_text("", encoding="utf-8")
+
+c_empty = srv.create_app(cfg).test_client()
+r_es = c_empty.get("/logs/day?app=alpha&date=2026-08-16")
+chk("empty log file → 200 (EU-630/2-empty)", r_es.status_code == 200,
+    f"status={r_es.status_code}")
+
+
+# --- 3a) malformed date → 400 ---
+r_bad = c.get("/logs/day?app=alpha&date=2026-13-99")
+chk("malformed date → 400 (EU-630/3a)",
+    r_bad.status_code == 400, f"status={r_bad.status_code}")
+
+# --- 3b) missing date param → 400 ---
+r_nom = c.get("/logs/day?app=alpha")
+chk("missing date param → 400 (EU-630/3b)",
+    r_nom.status_code == 400, f"status={r_nom.status_code}")
+
+# --- 3c) path traversal → 403 ---
+r_trav = c.get("/logs/day?app=..&date=2026-08-15")
+chk("app=.. → 403 (EU-630/3c)",
+    r_trav.status_code == 403, f"status={r_trav.status_code}")
+
+# --- 3d) ../.. safe slug → 200 empty-state (NOT 403) ---
+r_safe = c.get("/logs/day?app=../..&date=2026-08-15")
+chk("app=../.. → safe slug '__..__', 200 empty-state (EU-630/3d)",
+    r_safe.status_code == 200, f"unexpected status={r_safe.status_code}")
+
+# --- 4) nonexistent day → 200 with 'no log entries' message ---
+r_miss = c.get("/logs/day?app=alpha&date=1999-01-01")
+chk("nonexistent day → 200 (EU-630/4)",
+    r_miss.status_code == 200, f"status={r_miss.status_code}")
+miss_body = r_miss.get_data(as_text=True)
+chk("nonexistent day shows 'no log entries' (EU-630/4)",
+    "no log entries" in miss_body.lower(),
+    repr(miss_body[:300]))
+
+# --- 5) HTML-escaped injection in log text ---
+chk("<script> NOT present raw in body (EU-630/5)",
+    "<script>" not in body_pop, "raw script tag leaked")
+chk("&lt;script&gt; present (escaped) (EU-630/5)",
+    "&lt;script&gt;" in body_pop, "HTML entities not escaped")
+
+# --- 6) handler source lacks platform/Darwin guard ---
+_fresh = srv.create_app(cfg)
+_dv_func = _fresh.view_functions.get("day_view")
+if _dv_func is not None:
+    _full_src = inspect.getsource(_dv_func)
+    _lstripped = _full_src.lstrip()
+    _dq = _lstripped.find('"""')
+    _sq = _lstripped.find("'''")
+    if _dq != -1 and (_sq == -1 or _dq < _sq):
+        _end = _lstripped.find('"""', _dq + 3)
+        _handler_src = _lstripped[_end + 3:] if _end != -1 else ""
+    elif _sq != -1:
+        _end = _lstripped.find("'''", _sq + 3)
+        _handler_src = _lstripped[_end + 3:] if _end != -1 else ""
+    else:
+        _handler_src = _lstripped
+else:
+    _handler_src = "<route not yet defined>"
+    chk("day_view route exists (EU-630/6)", False, "view_functions['day_view'] is None")
+
+_chk_src = inspect.getsource(srv.create_app(cfg).view_functions["day_view"])
+_lstripped_src = _chk_src.lstrip()
+_dq_s = _lstripped_src.find('"""')
+_sq_s = _lstripped_src.find("'''")
+if _dq_s != -1 and (_sq_s == -1 or _dq_s < _sq_s):
+    _end_s = _lstripped_src.find('"""', _dq_s + 3)
+    _handler_src_631 = _lstripped_src[_end_s + 3:] if _end_s != -1 else ""
+elif _sq_s != -1:
+    _end_s = _lstripped_src.find("'''", _sq_s + 3)
+    _handler_src_631 = _lstripped_src[_end_s + 3:] if _end_s != -1 else ""
+else:
+    _handler_src_631 = _lstripped_src
+del _lstripped_src, _dq_s, _sq_s, _end_s  # noqa: F841
+
+chk("day_view handler lacks platform.system call (EU-630/6)",
+    "platform.system" not in _handler_src_631,
+    repr(_handler_src_631))
+chk("day_view handler lacks 'Darwin' literal (EU-630/6)",
+    "Darwin" not in _handler_src_631,
+    repr(_handler_src_631))
+
+srv.threading = _stub_threading(_real_thread)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-631 — GET /logs/day?format=txt : plain-text download affordance
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# --- 1) format=txt returns 200 with text/plain + Content-Disposition attachment header ---
+r_txt = c.get("/logs/day?app=alpha&date=2026-08-15&format=txt")
+chk("GET /logs/day?...&format=txt → 200 (EU-631/1)",
+    r_txt.status_code == 200, f"status={r_txt.status_code}")
+chk("Content-Type contains text/plain (EU-631/1)",
+    "text/plain" in (r_txt.content_type or ""), repr(r_txt.content_type))
+cd_header = dict(r_txt.headers).get("Content-Disposition", "")
+chk("Content-Disposition present (EU-631/1)",
+    "attachment" in cd_header, repr(cd_header))
+chk("Content-Disposition filename ends .txt (EU-631/1)",
+    cd_header.endswith(".txt'") or cd_header.endswith('.txt"'), repr(cd_header))
+
+# --- 2) TXT body has same entries, same order, PLAIN TEXT (no html escaping) ---
+txt_body = r_txt.get_data(as_text=True)
+# Entries must appear in chronological order: build(EU-630) → Gate(EU-631) → Review(EU-631)
+_t1_pos = txt_body.index("Running build steps for EU-630")
+_t2_gate_pos = txt_body.index("Gate passed for EU-631")
+_t2_rvew_pos = txt_body.index("PR approved")
+_order_ok_631 = _t1_pos < _t2_gate_pos < _t2_rvew_pos
+chk("TXT entries in chronological order (EU-631/2)",
+    _order_ok_631, "entries out of order")
+# Script injection is raw, NOT html-escaped
+chk("Raw <script> in TXT body (not escaped) (EU-631/2)",
+    '<script>alert("xss")</script>' in txt_body,
+    repr(txt_body[txt_body.index('Script'):]))
+chk("&lt; NOT in TXT body (plain-text, no escaping) (EU-631/2)",
+    "&lt;script&gt;" not in txt_body, "unexpected HTML entities in plaintext")
+
+# --- 3a) malformed date → 400 (same as HTML) ---
+r_bad_txt = c.get("/logs/day?app=alpha&date=2026-13-99&format=txt")
+chk("malformed date+format=txt → 400 (EU-631/3a)",
+    r_bad_txt.status_code == 400, f"status={r_bad_txt.status_code}")
+
+# --- 3b) path traversal → 403 (same as HTML) ---
+r_trav_txt = c.get("/logs/day?app=..&date=2026-08-15&format=txt")
+chk("app=..+format=txt → 403 (EU-631/3b)",
+    r_trav_txt.status_code == 403, f"status={r_trav_txt.status_code}")
+
+# --- 4) nonexistent day → 200 with attachment headers, empty body ---
+r_miss_txt = c.get("/logs/day?app=alpha&date=1999-01-01&format=txt")
+chk("nonexistent day+format=txt → 200 (EU-631/4)",
+    r_miss_txt.status_code == 200, f"status={r_miss_txt.status_code}")
+chk("Content-Disposition on empty txt day (EU-631/4)",
+    "attachment" in dict(r_miss_txt.headers).get("Content-Disposition", ""),
+    "missing attachment header on empty day")
+miss_txt_body = r_miss_txt.get_data(as_text=True)
+chk("Empty body (no HTML markup) on missing day (EU-631/4)",
+    miss_txt_body == "", repr(miss_txt_body[:200]))
+chk("No '<html>' in empty txt response (EU-631/4)",
+    "<html>" not in miss_txt_body, "HTML leaked into txt response")
+
+# --- 5) HTML view has download .txt link; handler source still lacks platform guard ---
+chk("download .txt link in HTML body (EU-631/5)",
+    '/logs/day?app=alpha&date=2026-08-15&format=txt' in body_pop,
+    "download link href missing from HTML")
+chk("'download' visible in HTML (EU-631/5)",
+    "download" in body_pop.lower(), "download label missing from HTML")
+# Re-check: handler still lacks Darwin/platform gating after adding format=txt
+chk("day_view handler still lacks platform.system call (EU-631/5)",
+    "platform.system" not in _handler_src_631, repr(_handler_src_631))
+chk("day_view handler still lacks 'Darwin' literal (EU-631/5)",
+    "Darwin" not in _handler_src_631, repr(_handler_src_631))
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-632 — GET /logs/day?ticket= : the warroom's per-run 'open log' link pre-scopes the day
+# view to that run's ticket (AC2). The 2026-08-15 fixture day holds three tickets
+# (EU-630 / EU-631 / EU-632), so a filter must select exactly one of them.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# --- 1) ticket=EU-631 → only EU-631's entries, visibly scoped ---
+r_scope = c.get("/logs/day?app=alpha&date=2026-08-15&ticket=EU-631")
+chk("GET /logs/day?...&ticket=EU-631 → 200 (EU-632/1)",
+    r_scope.status_code == 200, f"status={r_scope.status_code}")
+scope_body = r_scope.get_data(as_text=True)
+chk("scoped page shows the ticket's own entries (EU-632/1)",
+    "Gate passed for EU-631" in scope_body and "PR approved" in scope_body,
+    "EU-631 entries missing from the scoped page")
+chk("scoped page hides other tickets' entries (EU-632/1)",
+    "Running build steps for EU-630" not in scope_body
+    and "Script injection attempt" not in scope_body,
+    "another ticket's entries leaked into the scoped page")
+chk("scoped page visibly names the active ticket (EU-632/1)",
+    "ticket" in scope_body.lower() and "EU-631" in scope_body,
+    "no visible ticket scope marker")
+chk("scoped page offers a 'show all entries' escape hatch (EU-632/1)",
+    'href="/logs/day?app=alpha&date=2026-08-15"' in scope_body,
+    "no un-scoped link back to the full day")
+chk("scoped download link carries the ticket param (EU-632/1)",
+    "/logs/day?app=alpha&date=2026-08-15&format=txt&ticket=EU-631" in scope_body,
+    "download href dropped the ticket scope")
+
+# --- 2) unfiltered path unchanged (regression guard on EU-630) ---
+chk("no ticket param → every entry still renders (EU-632/2)",
+    "Running build steps for EU-630" in body_pop
+    and "Gate passed for EU-631" in body_pop
+    and "Script injection attempt" in body_pop,
+    "unfiltered day view lost entries")
+chk("no ticket param → no scope marker (EU-632/2)",
+    "show all entries" not in body_pop.lower(),
+    "scope UI leaked into the unfiltered page")
+
+# --- 3) ticket with no entries → 200 ticket-aware empty state, not 404/500 ---
+r_scope_none = c.get("/logs/day?app=alpha&date=2026-08-15&ticket=EU-000")
+chk("ticket with no entries → 200 (EU-632/3)",
+    r_scope_none.status_code == 200, f"status={r_scope_none.status_code}")
+none_body = r_scope_none.get_data(as_text=True)
+chk("empty-scope message names the ticket (EU-632/3)",
+    "EU-000" in none_body and "no log entries" in none_body.lower(),
+    repr(none_body[:300]))
+
+# --- 4) format=txt honors the same scope (download matches the page) ---
+r_scope_txt = c.get("/logs/day?app=alpha&date=2026-08-15&ticket=EU-631&format=txt")
+scope_txt = r_scope_txt.get_data(as_text=True)
+chk("format=txt honors the ticket scope (EU-632/4)",
+    "Gate passed for EU-631" in scope_txt
+    and "Running build steps for EU-630" not in scope_txt,
+    repr(scope_txt[:200]))
 
 print("\n============ EU-361 COCKPIT SERVER CORRECTNESS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)

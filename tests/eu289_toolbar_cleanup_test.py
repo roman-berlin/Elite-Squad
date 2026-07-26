@@ -11,7 +11,8 @@ Roman 2026-07-12, three simplifications, all in the same `_control_bar()` block:
      both still be reachable.
   3. The Reports menu de-dups: "Unit roster" duplicated the top-level Roster button, and
      "Token usage" / "Budget monitor" both covered the usage+budget report (/usage already
-     renders the budget-status and plan panels).
+     renders the budget-status and plan panels). (EU-642 later removed the top-level Roster
+     button outright, so the de-dup pin below is now a zero-/roster-doc-link pin.)
 
 These assertions are the AC, not the implementation: they pin what must be GONE, what must
 still be REACHABLE, and that no report is listed twice.
@@ -119,14 +120,19 @@ chk("the QA cluster exposes a single control (the merged Run QA form, no dropdow
 # ---------------------------------------------------------------------------
 # 3. Reports menu: no duplicate of a top-level button, no two items per report
 # ---------------------------------------------------------------------------
-chk("Roster survives as a top-level button (EU-68/EU-94 contract)",
-    'class="btn" href="/roster-doc"' in bar)
+# EU-642 (2026-07-26) removed the top-level Roster button entirely — the page stays
+# reachable at /roster-doc directly, but the toolbar carries no /roster-doc link at all.
+# The old EU-68/EU-94 "Roster survives as a top-level button" pin is superseded: the
+# de-dup criterion is now its strongest form, zero links anywhere in the bar.
+chk("EU-642: the top-level Roster button is gone (no class=\"btn\" /roster-doc link)",
+    'class="btn" href="/roster-doc"' not in bar,
+    "the retired Roster button is back in the toolbar")
 
-chk("the Reports menu no longer duplicates the top-level Roster button "
-    "(exactly one /roster-doc link in the whole bar)",
-    bar.count("/roster-doc") == 1,
-    f"found {bar.count('/roster-doc')} /roster-doc references — the Reports 'Unit roster' "
-    f"item still duplicates the top-level Roster button")
+chk("EU-642: no /roster-doc link anywhere in the bar "
+    "(top-level button and Reports-menu duplicate both gone)",
+    bar.count("/roster-doc") == 0,
+    f"found {bar.count('/roster-doc')} /roster-doc references — a Roster link "
+    f"is back in the toolbar")
 
 # 2026-07-19 (Commander order): the Reports dropdown was FLATTENED and /usage + /forensics left
 # the nav entirely — the Tokens KPI deep-links /usage, the Security-blocks KPI deep-links

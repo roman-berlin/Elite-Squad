@@ -92,9 +92,10 @@ chk("No ship button class in control bar",
     "Found: ship button class should not appear")
 
 # Verify the control bar still renders other elements (sanity check)
-# EU-289 removed "+ New task" (intake is Jira-only) — sentinel on Roster/Reports instead.
+# EU-289 removed "+ New task" (intake is Jira-only) and EU-642 removed the Roster
+# button — sentinel on the surviving Jira / Task log nav buttons instead.
 chk("Control bar still renders other elements",
-    "Roster" in bar_html and "Task log" in bar_html,
+    "Jira" in bar_html and "Task log" in bar_html,
     "Control bar should still have other buttons")
 
 # ── TEST: Verify with different app ──

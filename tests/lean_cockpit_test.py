@@ -1,12 +1,12 @@
-"""EU-106 lean cockpit + log-layout tests.
+"""EU-106 lean cockpit + log-layout tests (EU-632: dropped Mac gate on primary Open-logs button).
 
 (1) Panel-removal: render_board() must NOT contain the live-feed, activity, or tickets-to-work
     sections that were retired in EU-106; must still contain the needs-you panel and phase bar.
 (2) Log path layout: open_run_log() returns a path that matches the expected
     logs/<app>/<YYYY-MM-DD>/<ticket>-<HHMMSS>.log pattern under the configured log folder;
     the file must exist and be writable.
-(3) Mac gate: _control_bar() includes '📂 Open logs' link only when is_mac=True;
-    absent when is_mac=False.
+(3) EU-632: primary '📂 Open logs' always renders with href="/logs/days?app=...", no Mac gate.
+    Secondary Finder link via /api/open-logs only when is_mac=True.
 (4) Retention purge: _purge_old_logs() deletes day-folders older than retention_days and
     leaves recent ones untouched.
 """
@@ -211,9 +211,10 @@ with tempfile.TemporaryDirectory() as _tmp:
     _clean_log_registry()
 
 # ===========================================================================
-# 3. Mac gate
-#    _control_bar() includes the '📂 Open logs' button when is_mac=True,
-#    and omits it when is_mac=False.
+# 3. EU-632: Open-logs → real nav to /logs/days (no Mac gate on primary button)
+#    The primary '📂 Open logs' anchor always renders with href="/logs/days?app=..."
+#    as a real navigation.  When is_mac=True a tiny secondary "Finder" link via
+#    fetch('/api/open-logs') is appended; that secondary link must NOT appear off-Mac.
 # ===========================================================================
 with tempfile.TemporaryDirectory() as _tmp:
     _tmp_path = Path(_tmp)
@@ -226,22 +227,27 @@ with tempfile.TemporaryDirectory() as _tmp:
     bar_no_mac = cockpit_views._control_bar(cfg3, current_app="EU", healthy=True, is_mac=False)
 
     # The button text in the HTML is "&#128194; Open logs" (📂 is U+1F4C2 = &#128194;).
+    # Primary button is ALWAYS present (was mac-gated in EU-106).
     chk(
-        "mac gate: 'Open logs' button present when is_mac=True",
+        "Open logs button always present (is_mac=True)",
         "Open logs" in bar_mac,
-        bar_mac[:200] if "Open logs" not in bar_mac else "",
     )
     chk(
-        "mac gate: 'Open logs' button absent when is_mac=False",
-        "Open logs" not in bar_no_mac,
+        "Open logs button always present (is_mac=False — EU-632 fix)",
+        "Open logs" in bar_no_mac,
     )
-    # Also confirm the /api/open-logs endpoint URL appears in the Mac variant only.
+    # Primary href points at /logs/days, NOT at /api/open-logs.
     chk(
-        "mac gate: /api/open-logs href present when is_mac=True",
+        "primary href is /logs/days?app=EU",
+        'href="/logs/days?app=' in bar_mac and 'href="/logs/days?app=' in bar_no_mac,
+    )
+    # /api/open-logs should ONLY appear when is_mac=True (secondary Finder link).
+    chk(
+        "/api/open-logs present in mac variant (secondary Finder link)",
         "open-logs" in bar_mac,
     )
     chk(
-        "mac gate: /api/open-logs href absent when is_mac=False",
+        "/api/open-logs absent in non-mac variant (never the primary path)",
         "open-logs" not in bar_no_mac,
     )
 

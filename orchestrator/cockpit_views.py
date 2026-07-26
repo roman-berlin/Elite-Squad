@@ -619,10 +619,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                  is_mac: bool = False) -> str:
     """Render the cockpit's top control bar.
 
-    EU-106: ``is_mac`` — when True, a global '📂 Open logs' button is appended that calls
-    ``/api/open-logs?path=<cfg.log_folder>``.  The button is gated on macOS because the
-    ``open`` shell command is Darwin-specific; on non-Mac machines the button would call
-    an endpoint that returns 403.
+    EU-106 / EU-632: global '📂 Open logs' → real nav to ``/logs/days?app=<app>`` (works on
+    every OS). When ``is_mac=True``, a small secondary "reveal in Finder" link still fires
+    ``/api/open-logs`` via fetch() behind the scenes.
     """
     # "*" is the retired "All projects" selector — it is truthy but NOT a real app, so it must never
     # become app0 (every button below bakes app0 into an ?app= / hidden field; a literal "*" reaches
@@ -887,19 +886,24 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             '&#9654;&nbsp;Resume implementing</button></form>'
             '</div>')
 
-    # EU-106: global 'Open logs' button — macOS only (Darwin `open` command opens Finder).
-    # Calls /api/open-logs with the configured log folder so a single click reveals ALL run logs.
-    open_logs_html = ""
+    # EU-632: primary "Open logs" → REAL NAVIGATION to the in-cockpit day-list view
+    # (/logs/days?app=<app>) — a page to browse, not a fire-and-forget fetch().  Works on every
+    # OS, so the EU-106 Mac gate is GONE (the old /api/open-logs primary path 403'd off-Mac).
+    # Routed through the _btn partial like the rest of the nav cluster (EU-299 AC3).
+    # EU-106 remnant: a tiny secondary "Finder" reveal via fetch('/api/open-logs') stays,
+    # macOS-only (Darwin `open`) — a fallback, never the primary path.
+    app_q = html.escape(app0 or "")
+    open_logs_html = _btn(
+        "&#128194; Open logs", tag="a",
+        attrs=(' href="/logs/days?app=' + app_q + '" '
+               'title="Browse this project\'s run logs by day"'))
     if is_mac:
-        # 2026-07-19: fetch() instead of navigating (a plain link replaced the cockpit tab with
-        # the endpoint's raw JSON), and NO path param — the endpoint derives the log root itself
-        # (the button used to pass the raw "logs/" string, which the audit-anchored guard
-        # rejected with a 403: the button was 403-ing its own endpoint).
-        open_logs_html = _btn(
-            "&#128194; Open logs", tag="a",
-            attrs=(' href="/api/open-logs" '
-                   'onclick="fetch(this.href);return false" '
-                   'title="Open the run-logs folder in Finder"'))
+        open_logs_html += (
+            ' <a style="font-size:11px;color:var(--info)" '
+            'href="/api/open-logs" '
+            'onclick="fetch(this.href);return false" '
+            'title="Reveal the logs folder in Finder (macOS only)">Finder</a>'
+        )
 
     # Render plan-limit banner BEFORE the control bar (if active)
     plan_banner = _plan_limit_banner(_state, cfg)
@@ -1049,7 +1053,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <span class=tclabel>nav</span>
     <div class=tcrow>
       {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
-      <a class="btn" href="/roster-doc" title="Engineers &amp; duties — the full unit roster">&#128101; Roster</a>
       {open_logs_html}
       {_btn(f"&#128203; Task log{fr_tasks}", tag="a", attrs=' href="/tasks" title="Every run — Today / week / month scoping, transcripts, Jira links"')}
       {_btn(f"&#128172; Daily{fr_council}", tag="a", attrs=' href="/council" title="The daily muster — DONE / NEXT / NEEDS YOU + failure causes"')}

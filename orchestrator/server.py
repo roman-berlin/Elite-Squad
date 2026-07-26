@@ -288,20 +288,26 @@ def _note_model_fallback(why: str) -> None:
 
 
 def _ticket_line_ok(line: str, ticket: str | None) -> bool:
-    """EU-487: does one shared-drain-log line belong to THIS card's ticket?
+    """EU-487 / EU-639: does one shared-drain-log line belong to THIS card's ticket?
 
     The concurrent drain interleaves every build's stdout into ONE file (per-ticket log
     files are EU-444 — deliberately NOT built here); the only per-ticket attribution a raw
     stdout line carries is the ticket key the officer printed with it (``EU-444: builder
-    started``). A line passes when the requested ticket key appears anywhere in it. With no
-    ticket filter (the single-run cockpit — no ``ticket`` query param) EVERY line passes,
-    so the stream stays byte-identical to pre-EU-487. While a filter IS active, a line
-    carrying no ticket key at all is dropped: under interleaving, guessing its owner would
-    leak the other card's noise onto this one. Pure function of its two inputs — no state.
+    started``). A line passes when the requested ticket key appears as a whole token in it.
+    With no ticket filter (the single-run cockpit — no ``ticket`` query param) EVERY line
+    passes, so the stream stays byte-identical to pre-EU-487. While a filter IS active, a
+    line carrying no ticket key at all is dropped: under interleaving, guessing its owner
+    would leak the other card's noise onto this one. Pure function of its two inputs — no
+    state.
+
+    EU-639: ticket matching uses a regex word-boundary (``\b``) so ``EU-49`` matches
+    ``EU-49: …`` and ``for EU-49 on …`` but NOT ``EU-492: …``.  This prevents a shorter
+    ticket prefix from leaking the sibling ticket's lines onto the wrong panel.
     """
     if not ticket:
         return True
-    return ticket in line
+    import re
+    return bool(re.search(r"\b" + re.escape(ticket) + r"\b", line))
 
 
 def create_app(cfg: Config, port: int = 8787) -> Flask:
@@ -540,13 +546,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
         # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
         import platform as _platform
-        # EU-235: splice the '/models' nav link into the rendered bar. The link is owned by
-        # models_views (see add_models_nav_link's docstring for why it's injected here rather
-        # than edited into _control_bar) — the EU-293 nav-link finding, landed with the page.
+        # EU-643: the '/models' nav link renders DIRECTLY in the control bar (backend_control's
+        # "➕ Add model" button) — the EU-235 post-render splice (models_views.add_models_nav_link)
+        # was removed with its injection anchor (EU-642 took the anchor button out of the nav row,
+        # so the splice was a no-op carrying only a stale literal of the retired roster page URL).
         bar = (_result_banner(_state)
-               + models_views.add_models_nav_link(
-                   _control_bar(cfg, appq, h["healthy"],
-                                is_mac=_platform.system() == "Darwin")))
+               + _control_bar(cfg, appq, h["healthy"],
+                              is_mac=_platform.system() == "Darwin"))
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
         # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
         # unit-level actions, not per-project runs.)
@@ -652,6 +658,194 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
         data = _rl.read_day_log(cfg, app_name or None, date_str)
         return jsonify(data)
+
+    @app.get("/logs/days")
+    def days_list_api() -> Response:
+        """EU-629: list every day-folder under an app's log root, newest first.
+
+        Query param:
+            app : project name (slugified, resolved against log_root)
+
+        Security:
+            Path traversal guard mirrors ``/api/day-log`` and ``/api/open-logs``: resolved path
+            must stay under ``log_root(cfg)``; anything outside returns 403.
+
+        Cross-platform: no OS-specific gating. Works on macOS, Linux, and Windows.
+
+        Returns a minimal HTML page (``text/html``, 200).  An empty/missing day folder shows an
+        "No logs yet" message rather than raising 404/500.  Each day is an ``<a href="/logs/day?…">``
+        link (the target route is the next sub-ticket).
+        """
+        from . import run_logger as _rl
+
+        app_name = (request.args.get("app") or "").strip()
+        root = _rl.log_root(cfg)
+        app_slug = _rl._safe_slug(app_name or "default")
+        requested = (root / app_slug).resolve()
+
+        # Path traversal guard: resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+
+        safe_app = html.escape(app_name or "(none)")
+        empty_html = (
+            "<html><head><title>Logs — {}</title></head>"
+            "<body><h1>Logs</h1><p>No logs found for <strong>{}</strong>.</p>"
+            '<p><a href="/">Back</a></p></body></html>').format(safe_app, safe_app)
+        if not requested.is_dir():
+            return Response(empty_html, status=200, mimetype="text/html")
+
+        days = sorted((p.name for p in requested.iterdir() if p.is_dir()), reverse=True)
+
+        if not days:
+            return Response(empty_html, status=200, mimetype="text/html")
+
+        link_items = []
+        for d in days:
+            href = "/logs/day?app={}&date={}".format(
+                html.escape(app_name or "default"), html.escape(d))
+            link_items.append("<li><a href=\"{}\">{}</a></li>".format(href, d))
+        links_html = "<ul>\n{}\n</ul>".format("".join(link_items))
+        list_html = (
+            "<html><head><title>Logs — {}</title></head>"
+            "<body><h1>Logs</h1>{}"
+            '<p><a href="/">Back</a></p></body></html>').format(safe_app, links_html)
+        return Response(list_html, status=200, mimetype="text/html")
+
+    @app.get("/logs/day")
+    def day_view() -> Response:
+        """EU-630: render one day's consolidated log as HTML.
+            EU-631: ``format=txt`` returns plain-text downloadable attachment.
+            EU-632: ``ticket=<id>`` scopes the rendered entries to that ticket.
+
+        Query params:
+            app : project name (slugified, resolved against log_root)
+            date: ``YYYY-MM-DD`` — validated with ``datetime.date.fromisoformat``
+            format: ``txt`` — when set, returns a plain-text attachment instead of HTML
+            ticket: optional — when set, only entries attributed to that ticket are rendered
+                (HTML *and* TXT), and the page visibly reports the scope with a "show all
+                entries" escape hatch. The warroom's per-run 'open log' link carries this so
+                the day view lands pre-scoped to the run's ticket (EU-632 AC2). Absent →
+                every entry for the day renders (EU-630 behaviour, unchanged).
+
+        Security:
+            Path traversal guard mirrors ``/api/day-log`` and ``/logs/days``: resolved path
+            must stay under ``log_root(cfg)``; anything outside returns 403.
+
+        Returns a minimal HTML page (``text/html``, 200) or plain-text attachment
+        (``text/plain``, 200). Each entry is a line prefixed
+        ``[<ticket>] [<stage>] <text>``.  An empty or missing day returns a "no log entries"
+        message rather than raising 404/500 (HTML) or an empty attachment body (TXT).
+
+        Cross-platform: no OS-specific gating. Works on macOS, Linux, and Windows.
+        """
+        import datetime
+        from . import run_logger as _rl
+
+        # Validate date format upfront (pure parse, no IO yet).
+        try:
+            datetime.date.fromisoformat(date_param := request.args.get("date", "").strip())
+        except (ValueError, TypeError):
+            return Response("Bad 'date' parameter.", status=400, mimetype="text/plain")
+
+        date_str = date_param
+        app_name = (request.args.get("app") or "").strip()
+        # EU-632: optional ticket scope (the warroom's per-run link carries it).
+        ticket_param = (request.args.get("ticket") or "").strip()
+
+        root = _rl.log_root(cfg)
+        app_slug = _rl._safe_slug(app_name or "default")
+        requested = (root / app_slug / date_str).resolve()
+
+        # Path traversal guard: resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+
+        data = _rl.read_day_log(cfg, app_name or None, date_str)
+        if ticket_param:
+            # Entries carry the ticket slug parsed off the log FILENAME (<TICKET>-<HHMMSS>.log);
+            # match both the raw param and its slug form so "EU 632"-style ids still land.
+            _wanted = {ticket_param, _rl._safe_slug(ticket_param)}
+            data["entries"] = [e for e in data["entries"]
+                               if (e.get("ticket") or "") in _wanted]
+        safe_app = html.escape(app_name or "(none)")
+        safe_date = html.escape(date_str)
+        safe_ticket = html.escape(ticket_param)
+        app_slug_val = str(app_slug)
+        # Scope suffix shared by the TXT filename and the download link.
+        ticket_suffix = ("-" + _rl._safe_slug(ticket_param)) if ticket_param else ""
+        ticket_query = ("&ticket=" + html.escape(ticket_param)) if ticket_param else ""
+
+        # EU-631: plain-text download when format=txt is requested.
+        fmt = (request.args.get("format") or "").strip().lower()
+        if fmt == "txt":
+            if not data["entries"]:
+                return Response(
+                    "", status=200, mimetype="text/plain",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="day-log-{app_slug_val}-{date_str}{ticket_suffix}.txt"'})
+            txt_lines = []
+            for e in data["entries"]:
+                ticket = e.get("ticket") or "—"
+                stage = e.get("stage") or "—"
+                text = e.get("text") or ""
+                txt_lines.append("[{}] [{}] {}".format(ticket, stage, text))
+            return Response(
+                "\n".join(txt_lines), status=200, mimetype="text/plain",
+                headers={"Content-Disposition":
+                         f'attachment; filename="day-log-{app_slug_val}-{date_str}{ticket_suffix}.txt"'})
+
+        # EU-632: when a ticket scope is active, "Back to days" is joined by a "show all
+        # entries" link that drops the ticket param — the scope is always visible and always
+        # reversible (AC2: the per-run link lands on a page pre-scoped to its ticket).
+        show_all_html = (' <a href="/logs/day?app={}&date={}">Show all entries</a>'.format(
+            html.escape(app_name or ""), safe_date) if ticket_param else "")
+
+        if not data["entries"]:
+            if ticket_param:
+                empty_msg = ("No log entries found for ticket <strong>{}</strong> on "
+                             "<strong>{}</strong>.").format(safe_ticket, safe_date)
+            else:
+                empty_msg = ("No log entries found for <strong>{}</strong>."
+                             ).format(safe_date)
+            empty = (
+                "<html><head><title>Day Log — {}</title></head>"
+                "<body><h1>Day Log</h1><p>{}</p>"
+                '<p><a href="/logs/days?app={}" >Back to days</a>{}</p>'
+                "</body></html>").format(safe_app, empty_msg,
+                                         html.escape(app_name or ""), show_all_html)
+            return Response(empty, status=200, mimetype="text/html")
+
+        lines = []
+        for e in data["entries"]:
+            ticket = html.escape(e.get("ticket") or "—")
+            stage = html.escape(e.get("stage") or "—")
+            text = html.escape(e.get("text") or "")
+            lines.append("<li>[{}] [{}] {}</li>".format(ticket, stage, text))
+        entry_html = "<ol>\n{}\n</ol>".format("\n".join(lines))
+        # The download carries the active scope so the TXT matches what's on screen.
+        download_href = ("/logs/day?app={}&date={}&format=txt{}").format(
+            html.escape(app_name or ""), html.escape(date_str), ticket_query)
+        scope_note = ('<p>Scoped to ticket <strong>{}</strong> — '
+                      '<a href="/logs/day?app={}&date={}">show all entries</a></p>'.format(
+                          safe_ticket, html.escape(app_name or ""), safe_date)
+                      if ticket_param else "")
+        h1_scope = (" — ticket " + safe_ticket) if ticket_param else ""
+        detail = (
+            "<html><head><title>Day Log — {}</title></head>"
+            "<body><h1>Day Log — {}{}</h1>{}{}"
+            '<p><a href="/logs/days?app={}">Back to days</a> | '
+            '<a href="{}">⬇ download .txt</a></p>'
+            "</body></html>").format(safe_app, safe_date, h1_scope,
+                                     scope_note, entry_html,
+                                     html.escape(app_name or ""), download_href)
+        return Response(detail, status=200, mimetype="text/html")
 
     @app.get("/api/autopilot")
     def autopilot_status_api() -> Response:
@@ -920,11 +1114,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             log_path = st.get("log_path")
             waited = 0.0
             # 2026-07-22: fall back to the SHARED drain stream when no per-ticket log appears.
-            # A CONCURRENT drain (max_concurrent_builders > 1) never calls open_run_log — loop.py's
-            # EU-380 branch writes a pointer NOTE instead and leaves state['log_path'] unset — so
-            # this panel sat on "Waiting for run output…" for 60s and then said "No active run log"
-            # for EVERY run, while the build was streaming happily to the process stdout the note
-            # points at. Tail that stream instead of showing the operator nothing.
+            # A CONCURRENT drain (max_concurrent_builders > 1) opens its per-ticket log handles
+            # under (app, slot) TUPLE keys (EU-635) and stores log_path on that tuple-keyed state —
+            # so state['log_path'] on the app-NAME key this panel reads stays unset (one app tab
+            # can't choose between two co-scheduled tickets). Before EU-635 no handle existed at
+            # all (a pointer NOTE instead). Either way this panel would sit on "Waiting for run
+            # output…" for 60s and then say "No active run log" while the build streams happily to
+            # the process stdout. Tail that stream instead of showing the operator nothing.
             drain_fallback = ""
             tail_from_end = False
             while not log_path and waited < 60.0:
@@ -1351,7 +1547,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     # Views live in models_views.py (string builders — no templates/ dir in this repo). Every POST
     # below is automatically covered by the EU-254 _csrf_origin_guard before_request hook (it
     # guards ALL state-changing methods), which is where the abandoned WIP branch's EU-292 CSRF
-    # finding lands; the EU-293 nav-link finding lands via add_models_nav_link in index(). That
+    # finding lands; the EU-293 nav-link finding renders via backend_control's "➕ Add model"
+    # button in the control bar (EU-643 removed the old index() post-render splice). That
     # WIP branch (7d448e5) predates the landed secrets layer and is deliberately not merged.
     from .model_registry import ModelRegistry
     from .model_registry import _validate as _mr_validate

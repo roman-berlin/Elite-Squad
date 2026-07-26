@@ -141,8 +141,14 @@ if sig:
         "infra-signature" in labels and "autofiled" in labels, str(labels))
     chk("signature ticket carries the RAW evidence lines",
         "deadbeefcafe" in body and "SIG-A" in body and "SIG-B" in body, body[:400])
-    chk("signature ticket is a Bug at High priority", itype == "Bug" and prio == "High",
-        f"{itype} {prio}")
+    # EU-570 (2026-07-26) deliberately SUPERSEDES the original "High priority" expectation here.
+    # A tracker is excluded from the build queue by intake.is_tracker_ticket, so the unit never
+    # builds it; once the drain started honouring priority (a9577a1) a High tracker squatted at the
+    # top of the ready column forever and the board read as if priority ordering was broken. It is
+    # still a Bug (the type carries the meaning), but it files at Low and is parked out of To Do.
+    # The evidence + labels + Telegram note asserted around this line are unchanged.
+    chk("signature ticket is a Bug at LOW priority (EU-570: never squats the ready queue)",
+        itype == "Bug" and prio == "Low", f"{itype} {prio}")
 chk("crash_signature_filed audited", any(k == "crash_signature_filed" for k, _ in audits))
 chk("signature Telegram note sent", any("signature" in s.lower() for s in sent), str(sent))
 

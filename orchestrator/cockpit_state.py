@@ -401,6 +401,32 @@ def reset_run_app(token) -> None:
         pass
 
 
+# EU-635: run-log FILE routing — deliberately a SEPARATE ContextVar from _RUN_APP. The concurrent
+# drain registers each ticket's log handle under the (app.name, slot) TUPLE (two same-app slots
+# sharing one key would clobber each other's handle — the EU-272 hazard). But _RUN_APP's value
+# also feeds the _LOG ring-buffer append, bump_log_seq and per-tab UI filtering, which all want
+# the bare app.name — so the file-routing key gets its own var instead of widening _RUN_APP into
+# a tuple. _Tee.write uses this var for run_logger.write_line ONLY; unset (the serial path and
+# every non-concurrent caller) it falls back to app_key, byte-identical to pre-EU-635 behaviour.
+_RUN_LOG_KEY: "contextvars.ContextVar[object]" = contextvars.ContextVar("run_log_key", default=None)
+
+
+def set_run_log_key(log_key: object) -> contextvars.Token[object]:
+    """Bind this (async) context's run-log file routing to ``log_key``; returns the reset token.
+
+    ``log_key`` is the handle-registry key the concurrent _worker opened its per-ticket log under
+    (the ``(app.name, slot)`` tuple). Captured lines then route to THAT file while UI attribution
+    (_RUN_APP) stays the bare app name. Mirror of ``set_run_app`` (EU-272)."""
+    return _RUN_LOG_KEY.set(log_key)
+
+
+def reset_run_log_key(token) -> None:
+    try:
+        _RUN_LOG_KEY.reset(token)
+    except Exception:  # noqa: BLE001 — a cross-context reset must never crash a run teardown
+        pass
+
+
 class _Tee:
     """Mirror stdout to the real terminal AND the ring buffer (skips the noisy poll line)."""
     def __init__(self, real):
@@ -416,6 +442,13 @@ class _Tee:
         if app_key is None:
             runs = active_runs()
             app_key = runs[0] if len(runs) == 1 else None
+        # EU-635: the per-ticket log FILE routes through the separate _RUN_LOG_KEY ContextVar so a
+        # concurrent drain's (app.name, slot)-keyed handle actually receives this slot's lines.
+        # app_key (UI attribution for the _LOG append + bump_log_seq below) stays the bare app name.
+        # Unset → fall back to app_key: the exact pre-EU-635 lookup the serial path relies on.
+        log_key = _RUN_LOG_KEY.get()
+        if log_key is None:
+            log_key = app_key
         for line in s.splitlines():
             t = line.rstrip()
             if t and "/api/board" not in t and "GET /api/" not in t:
@@ -428,7 +461,7 @@ class _Tee:
                 # Lazy import avoids a circular dependency at module load time.
                 try:
                     from . import run_logger as _rl
-                    _rl.write_line(app_key, t)
+                    _rl.write_line(log_key, t)
                 except Exception:  # noqa: BLE001 — log writes must never abort a run
                     pass
 

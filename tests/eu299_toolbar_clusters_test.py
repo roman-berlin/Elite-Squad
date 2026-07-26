@@ -5,8 +5,9 @@ Acceptance criteria under test:
      each rendered as a cluster label styled with the `--t-xs` token, instead of one flat
      button row inside `.tbar`.
   2. Every existing action is preserved: the merged Run QA form (action=/api/qa — Patrol and
-     Ship-review folded into one, 2026-07-19), Jira link (/jira?app=), Roster link (/roster-doc), New-task Run
+     Ship-review folded into one, 2026-07-19), Jira link (/jira?app=), New-task Run
      form (/api/run), Autopilot forms (/api/autopilot), and the Reports menu links.
+     (EU-642 removed the Roster link /roster-doc from the bar — pinned absent below.)
   3. Buttons inside the clusters render through the `cockpit_views._btn` partial (shared `.btn`
      base + `_btn`'s inline `--r-xl`/`--s-*`/`--t-md` tokens) — no new hand-rolled button CSS.
   4. Cluster spacing/separation uses `--s-*` spacing tokens, not new ad-hoc px literals.
@@ -94,21 +95,41 @@ chk("merged QA form action present (action=/api/qa)", "action=/api/qa" in bar)
 chk("Run QA label glyph preserved", "&#128269; Run QA" in bar)
 chk("Jira link preserved (/jira?app=)", "/jira?app=automatixy" in bar)
 chk("Jira label glyph preserved", "&#128268; Jira" in bar)
-chk("Roster link preserved (/roster-doc)", 'href="/roster-doc"' in bar)
-chk("Roster still a top-level class=\"btn\" element (EU-68/EU-94 contract)",
-    'class="btn" href="/roster-doc"' in bar)
+chk("EU-642: Roster link is gone from the nav cluster (/roster-doc)",
+    'href="/roster-doc"' not in bar,
+    "the retired Roster nav button is back in the toolbar")
 # EU-289 retired the "+ New task" panel (intake is Jira-only), so EU-299's "preserve the Run
 # form verbatim" pins are superseded — tests/eu289_toolbar_cleanup_test.py now pins its ABSENCE.
 chk("Autopilot form preserved (/api/autopilot)", "action=/api/autopilot" in bar)
-chk("Open logs link preserved (is_mac=True)", "&#128194; Open logs" in bar and "open-logs" in bar)
+# EU-632: the primary Open-logs button is a REAL NAVIGATION to the in-cockpit day-list view
+# (href="/logs/days?app=<app>") and renders on EVERY OS — the EU-106 Mac gate is gone (the old
+# /api/open-logs fetch-and-forget primary path 403'd off-Mac). The macOS-only secondary
+# "Finder" reveal is pinned by tests/lean_cockpit_test.py.
+_open_logs_anchor = re.search(r"<a\b[^>]*>&#128194; Open logs</a>", bar)
+chk("Open logs primary href points at /logs/days?app= (EU-632)",
+    _open_logs_anchor is not None
+    and 'href="/logs/days?app=automatixy"' in _open_logs_anchor.group(0),
+    "the Open-logs anchor itself must navigate to the day-list view for the current app")
+chk("Open logs anchor is NOT the old /api/open-logs endpoint (EU-632)",
+    _open_logs_anchor is not None and "open-logs" not in _open_logs_anchor.group(0),
+    "the 403-off-Mac endpoint must not be the button's href")
+_bar_nomac = V._control_bar(_cfg, "automatixy", healthy=True, is_mac=False)
+_open_logs_nomac = re.search(r"<a\b[^>]*>&#128194; Open logs</a>", _bar_nomac)
+chk("Open logs button present off-Mac — no Mac gate (EU-632)",
+    _open_logs_nomac is not None
+    and 'href="/logs/days?app=automatixy"' in _open_logs_nomac.group(0),
+    "the day view works off-Mac; the button must render with is_mac=False too")
+chk("off-Mac bar carries no /api/open-logs affordance at all (EU-632)",
+    "open-logs" not in _bar_nomac,
+    "the Darwin-only Finder reveal must not render off-Mac")
 
 # EU-289 de-duped this menu: "Budget monitor" (/budget) merged into "Usage & budget" (/usage),
-# and the duplicate "Unit roster" item went (the top-level Roster btn above still covers
-# /roster-doc). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
+# and the duplicate "Unit roster" item went; EU-642 then removed the top-level Roster btn too
+# (pinned absent above). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
 # 2026-07-19 (Commander order): the Reports dropdown is FLATTENED — Task log / Daily / Memory
 # are top-level nav buttons; Usage left the bar (the Tokens KPI deep-links /usage) and Forensics
 # left too (its summary rides in the daily; the Security-blocks KPI deep-links /forensics).
-for _href in ("/tasks", "/council", "/memory", "/roster-doc"):
+for _href in ("/tasks", "/council", "/memory"):
     chk(f"nav link preserved as a top-level button: {_href}", f'href="{_href}"' in bar)
 for _gone in ("/usage", "/forensics"):
     chk(f"{_gone} left the nav bar (KPI deep-links remain the route)", f'href="{_gone}"' not in bar)

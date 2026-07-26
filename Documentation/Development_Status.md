@@ -2,6 +2,15 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-642 · Elite-Unit · • Production diff removes only the Roster nav anchor; Jira/Task log/Daily/Memory intact and in order.
+- 2026-07-26 · EU-633 · Elite-Unit · • Verify-and-close ticket; feature already landed via EU-629/630/631/632, so a test-only diff is correct scope.
+- 2026-07-26 · EU-639 · Elite-Unit · • Verify-and-close: e2e test genuinely drives the real seams (concurrent _worker → EU-635 per-ticket file routing → run_log_stream_api → _ticket_line_ok), not stubs. · 🔗 /warroom — verify the Live Run Log panels on any concurrent active-run cards
+- 2026-07-26 · EU-632 · Elite-Unit · • AC1: toolbar Open-logs → /logs/days?app=, Mac gate removed, verified on/off-Mac by eu299+lean_cockpit. · 🔗 /warroom — "📂 Open logs" in the toolbar navigates to `/logs/days?app=<app>` (verify off-Mac too, e.g. the VPS); a run card's "📂 open log" link lands on `/logs/day?...&ticket=<id>` showing only that ticket's entries with a "show all entries" link back.
+- 2026-07-26 · EU-637 · Elite-Unit · • All 4 functional ACs verified directly against source: unshift/slice(0,1000)/scrollTop-removal all correct, CSS classing + escaping + placeholder guard + done/error handlers untouched. · 🔗 /warroom (the EU-200 Live Run Log panel — verify newest streamed line renders at top; older lines scroll down naturally without auto-scroll)
+- 2026-07-26 · EU-631 · Elite-Unit · • Format=txt inherits the HTML route's date/traversal validation (verified: branch runs after both checks). • Content-Disposition filename uses slugged app + validated date — no header-injection risk. · 🔗 /logs/day?app=alpha&date=YYYY-MM-DD (toggle format=txt to verify the download control)
+- 2026-07-26 · EU-635 · Elite-Unit · • Implements PM decision (b) exactly: tuple-keyed open_run_log + additive _RUN_LOG_KEY ContextVar routing write_line only, UI attribution unchanged.
+- 2026-07-26 · EU-630 · Elite-Unit · • Guard/validation logic in the new /logs/day route is a verbatim, correct mirror of the already-reviewed /api/day-log guard — traversal, date-validation, and empty-day behavior all match. · 🔗 /logs/day?app=eu&date=YYYY-MM-DD
+- 2026-07-26 · EU-629 · Elite-Unit · • Route mirrors day_log_api's exact traversal-guard pattern (log_root → _safe_slug → relative_to → 403) — verified against source, correct.
 - 2026-07-26 · EU-618 · Elite-Unit · • All five ACs met: multi-run chronological merge, empty/missing day → 200 {entries:[]}, traversal guard mirroring /api/open-logs, and unit tests for merge/ordering, missing-stage fallback, empty day, and traversal.
 - 2026-07-26 · EU-598 · Elite-Unit · • All 3 ACs verified end-to-end across the epic: card removal (EU-594), CTO-only entry + internal consult with 'asked the X' note (EU-600), and this ticket's doc sweep (AC3).
 - 2026-07-26 · EU-608 · Elite-Unit · • `group_chat` + all 9 dead helpers + `_group_inner` deleted; grep confirms zero references in orchestrator/. · 🔗 /chat — verify group room link no longer appears in chat tabs or Talk panel

@@ -440,6 +440,22 @@ def _sig_state_file(cfg) -> Path:
     return Path(getattr(cfg, "audit_path", "./state/audit.jsonl")).with_name("signature_filed.json")
 
 
+def _sig_entry(val) -> tuple[float, str]:
+    """One ledger value -> (ts, ticket_key). EU-570 widened the entry from a bare float to
+    ``{"ts": float, "key": str}`` so a quiet signature's tracker can be retired by key. Both shapes
+    are accepted forever — a pre-EU-570 ledger is a dict of floats and must keep working (its
+    entries simply carry no key, so they are never auto-closed)."""
+    if isinstance(val, dict):
+        try:
+            return float(val.get("ts") or 0.0), str(val.get("key") or "")
+        except (TypeError, ValueError):
+            return 0.0, ""
+    try:
+        return float(val), ""
+    except (TypeError, ValueError):
+        return 0.0, ""
+
+
 def _sig_last_filed(cfg) -> dict:
     """{normalized signature: unix ts of the last ticket we filed for it}. Empty on any read
     problem — an unreadable ledger must never suppress a genuine new pattern (fail OPEN here:
@@ -447,18 +463,102 @@ def _sig_last_filed(cfg) -> dict:
     import json as _json
     try:
         data = _json.loads(_sig_state_file(cfg).read_text(encoding="utf-8"))
-        return {str(k): float(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): _sig_entry(v)[0] for k, v in data.items()}
     except (OSError, ValueError, TypeError):
         return {}
 
 
-def _mark_sig_filed(cfg, sig: str, when: float) -> None:
-    """Record that this signature's evidence up to ``when`` has been surfaced. Best-effort."""
+def _sig_filed_keys(cfg) -> dict:
+    """{normalized signature: the tracker's ticket key} for entries that carry one (EU-570)."""
+    import json as _json
+    try:
+        data = _json.loads(_sig_state_file(cfg).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        out = {}
+        for k, v in data.items():
+            _ts, key = _sig_entry(v)
+            if key:
+                out[str(k)] = key
+        return out
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _mark_sig_filed(cfg, sig: str, when: float, key: str = "") -> None:
+    """Record that this signature's evidence up to ``when`` has been surfaced. Best-effort.
+
+    EU-570: the tracker's ticket ``key`` is stored alongside the timestamp so a later sweep can
+    RETIRE the tracker once the signature goes quiet (see ``_retire_quiet_signatures``)."""
     from . import locking
 
     def _mut(d):
         d = d if isinstance(d, dict) else {}
-        d[str(sig)] = float(when)
+        d[str(sig)] = {"ts": float(when), "key": str(key)} if key else float(when)
+        return d
+    try:
+        locking.locked_rmw(_sig_state_file(cfg), _mut, default={}, corrupt_to_default=True)
+    except OSError:
+        pass
+
+
+def _retire_quiet_signatures(cfg, app_cfg, audit, live_sigs: set) -> list[str]:
+    """Close trackers whose signature stopped recurring — the LIFECYCLE half of EU-570.
+
+    An ``[infra-signature]`` tracker is excluded from the build queue by
+    ``intake.is_tracker_ticket``, so the unit can never close it the way it closes real work: it
+    files the ticket and then forgets it forever. 11 were filed by 2026-07-26 and every one was
+    closed BY HAND. A tracker's whole meaning is "this failure keeps happening"; once the failure
+    stops happening within the window, the ticket is answering a question nobody is asking.
+
+    ``live_sigs`` is the set of signatures with ANY occurrence inside the current
+    ``_SIG_WINDOW_DAYS`` window (computed by the sweep that calls this). A tracked signature absent
+    from it is quiet: close its ticket, drop it from the ledger so a genuine relapse files fresh.
+    Best-effort per tracker — one backlog hiccup must not abort the sweep or the caller."""
+    retired: list[str] = []
+    try:
+        keys = _sig_filed_keys(cfg)
+        quiet = {sig: key for sig, key in keys.items() if sig not in live_sigs}
+        if not quiet:
+            return retired
+        from .backlog.base import make_backlog
+        backlog = make_backlog(app_cfg)
+        for sig, key in quiet.items():
+            try:
+                ticket = backlog.get_task(key)
+                # Only retire something still OPEN — a hand-closed tracker just leaves the ledger.
+                if str(getattr(ticket, "status", "") or "").strip().lower() not in ("done", "closed"):
+                    backlog.add_comment(ticket, _CLOSE_NOTE.format(days=_SIG_WINDOW_DAYS))
+                    backlog.set_status(ticket, "Done")
+                    retired.append(key)
+                _forget_sig(cfg, sig)
+            except Exception:  # noqa: BLE001 - one tracker must not sink the sweep
+                continue
+        if retired and audit is not None:
+            audit.record("signature_trackers_retired", tickets=sorted(retired))
+        if retired:
+            _notify_line(f"🧹 Retired {len(retired)} quiet crash-signature tracker(s): "
+                         + ", ".join(sorted(retired)))
+    except Exception:  # noqa: BLE001 - forensics must never break a run
+        return retired
+    return retired
+
+
+_CLOSE_NOTE = ("[Squad] Closing automatically — this failure signature has not recurred in "
+               "{days} days, so the pattern this tracker reported is no longer live. Nothing was "
+               "fixed by this comment; the tracker simply expired. A genuine relapse files a fresh "
+               "ticket with new evidence.")
+
+
+def _forget_sig(cfg, sig: str) -> None:
+    """Drop a signature from the ledger so a genuine relapse files fresh evidence (EU-570)."""
+    from . import locking
+
+    def _mut(d):
+        d = d if isinstance(d, dict) else {}
+        d.pop(str(sig), None)
         return d
     try:
         locking.locked_rmw(_sig_state_file(cfg), _mut, default={}, corrupt_to_default=True)
@@ -594,20 +694,43 @@ def signature_sweep(cfg, audit=None, now: float | None = None) -> list[str]:
                     f"Raw evidence lines:\n\n{evidence}\n\n"
                     f"This is a cross-ticket pattern — fix the shared cause, not the individual "
                     f"tickets.")
+            # EU-570: severity LOW, not HIGH. A tracker is a REPORT the drain refuses to build
+            # (intake.is_tracker_ticket), so a High priority on it is a lie about build order — and
+            # once the drain started honouring priority (a9577a1) these squatted at the very top of
+            # the ready queue, making the board read as if priority ordering was broken. The
+            # evidence in the body is unchanged; only its claim on the build queue is dropped.
             key = _file_one(app_cfg, "infra-signature",
-                            {"title": title, "type": "Bug", "severity": "HIGH", "body": body},
+                            {"title": title, "type": "Bug", "severity": "LOW", "body": body},
                             audit=audit)
             if key:
                 filed.append(key)
+                # EU-570: park it OUT of the ready column immediately. 'Needs Human' is the unit's
+                # human-handoff state (the EU board maps it to Blocked) — exactly right for a report
+                # only the Commander can act on, and it keeps the tracker off the To Do list the
+                # drain and the daily's "Next up" both read. Best-effort: a transition failure just
+                # leaves it in the default column, which is the pre-EU-570 behaviour.
+                try:
+                    from .backlog.base import make_backlog
+                    _bl = make_backlog(app_cfg)
+                    _bl.set_status(_bl.get_task(key), "Needs Human")
+                except Exception:  # noqa: BLE001 - parking is a nicety, never a blocker
+                    pass
                 # Acknowledge exactly the evidence this ticket carries: a later sweep counts only
                 # rows NEWER than the newest row we just reported, so closing the ticket cannot
-                # resurrect it from the same failures.
-                _mark_sig_filed(cfg, sig, max((_row_ts(r) for r in rows), default=time.time()))
+                # resurrect it from the same failures. The key rides along so a later sweep can
+                # retire this tracker when the signature goes quiet (EU-570).
+                _mark_sig_filed(cfg, sig, max((_row_ts(r) for r in rows), default=time.time()),
+                                key=key)
                 if audit is not None:
                     audit.record("crash_signature_filed", filed=key, occurrences=len(rows),
                                  tickets=sorted(tickets), signature=sig[:160])
                 _notify_line(f"📋 Crash signature filed: {key} — {len(rows)}× across "
                              f"{len(tickets)} tickets in {_SIG_WINDOW_DAYS}d")
+        # EU-570 lifecycle: every signature still recurring inside the window is "live"; anything
+        # tracked but absent from `groups` has gone quiet, so its tracker is retired here. This runs
+        # on the sweep's own cadence, so the board self-cleans with no human action — the gap that
+        # left 11 trackers to be closed by hand.
+        _retire_quiet_signatures(cfg, app_cfg, audit, set(groups))
         return filed
     except Exception:  # noqa: BLE001 - forensics must never break a run
         return []

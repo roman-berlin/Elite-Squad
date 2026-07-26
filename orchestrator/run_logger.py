@@ -33,7 +33,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Module-level handle registry
 # ---------------------------------------------------------------------------
-# Keyed by app_key (str app name OR None for the legacy/default run-key).
+# Keyed by app_key (str app name, an (app.name, slot) tuple for the EU-635 concurrent drain,
+# OR None for the legacy/default run-key).
 # One open file handle per concurrent run; closed by close_run_log().
 # Guarded by _lock for thread safety (multiple apps can run concurrently).
 _log_handles: "dict[object, IO[str]]" = {}
@@ -92,9 +93,12 @@ def _resolve_key(app_name: str | None, run_key: object) -> object:
 
     EU-253: the registry key MUST match what ``cockpit_state._Tee.write`` looks up
     (``active_runs()[0]`` when exactly one run is active, else ``None``) or captured lines
-    land under a key nobody wrote a handle for and the file stays empty.  The ON-DISK PATH
-    is always derived from ``app_name`` (see ``_prepare_log_path``); only the in-memory
-    registry key follows ``run_key``.
+    land under a key nobody wrote a handle for and the file stays empty.  EU-635: under the
+    concurrent drain the key is the ``(app.name, slot)`` tuple and ``_Tee.write`` finds it via
+    the ``_RUN_LOG_KEY`` ContextVar the ``_worker`` sets per pick — same contract (the lookup
+    must match the registration), just a per-context lookup instead of the active-runs
+    heuristic.  The ON-DISK PATH is always derived from ``app_name`` (see ``_prepare_log_path``);
+    only the in-memory registry key follows ``run_key``.
     """
     return (app_name if app_name else None) if run_key is _UNSET else run_key
 
