@@ -36,9 +36,10 @@ memory._live_log = lambda *a, **k: "(stub lessons log)"
 
 client = server.create_app(cfg).test_client()
 
-# --- success path: Scribe finished (last_msg set, not scribing) -> banner shows once, then clears ---
+# --- success path: Scribe finished (last_result+record set, not scribing) -> banner shows once, then clears ---
 server._state["scribing"] = False
-server._state["last_msg"] = "✓ Scribe: Unit Memory updated — folded in 2 lessons."
+server._state["last_result"] = "✓ Scribe: Unit Memory updated — folded in 2 lessons."
+server._state["last_result_record"] = {"tone": "ok", "text": server._state["last_result"], "timestamp": 0}
 h1 = client.get("/memory").get_data(as_text=True)
 chk("scribe confirmation shows after the fold", "folded in 2 lessons" in h1)
 chk("buttons are back (not stuck on the working spinner)", "Update memory" in h1)
@@ -55,9 +56,12 @@ chk("mid-fold preserves last_msg (survives to the next refresh)",
     server._state.get("last_msg") == "✓ Scribe: Unit Memory updated — folded in 2 lessons.")
 server._state["scribing"] = False
 server._state.pop("last_msg", None)
+server._state.pop("last_result", None)
+server._state.pop("last_result_record", None)
 
 # --- error path is surfaced too (a silent failure was the original bug) ---
-server._state["last_msg"] = "scribe failed: boom"
+server._state["last_result"] = "scribe failed: boom"
+server._state["last_result_record"] = {"tone": "error", "text": "scribe failed: boom", "timestamp": 0}
 he = client.get("/memory").get_data(as_text=True)
 chk("scribe failure is surfaced, not swallowed", "scribe failed: boom" in he)
 

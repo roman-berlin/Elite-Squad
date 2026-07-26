@@ -1993,9 +1993,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             def _bg():
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
-                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Squad memory updated by the Technical Writer.")
+                    set_last_result(None, "ok", "✓ " + (str(msg).strip() or "Squad memory updated by the Technical Writer."))
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"scribe failed: {exc}"
+                    set_last_result(None, "error", f"scribe failed: {exc}")
                 finally:
                     _state["scribing"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -2015,11 +2015,26 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # log below — which the officers actually read.
         act = ("" if _state.get("scribing")
                else _actbar(_actbtn("/api/scribe", "&#128221; Update memory")))
-        # One-shot confirmation banner ("✓ Technical Writer folded … into Unit Memory") — shown once the Technical Writer
-        # finishes (not mid-fold), so the action visibly "took" instead of silently returning here.
-        _m = "" if _state.get("scribing") else (_state.pop("last_msg", "") or "")
-        banner = (f"<div style='background:#10371f;border:1px solid #1c5238;color:#7fe3a6;border-radius:9px;"
-                  f"padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
+        # One-shot confirmation banner — shown once the Technical Writer finishes (not mid-fold),
+        # so the action visibly "took". Reads from last_result+record with tone-based colour.
+        _rec = None
+        _m = ""
+        if not _state.get("scribing"):
+            _r = _state.pop("last_result", "") or ""
+            _rec = _state.pop("last_result_record", None)
+            _m = _r
+        if _m and _rec:
+            _tone = _rec.get("tone", "")
+            if _tone == "error":
+                _bg, _bd, _fg = "#4d1f1f", "#7a2e2e", "#f8a0a0"
+            else:
+                _bg, _bd, _fg = "#10371f", "#1c5238", "#7fe3a6"
+        elif _m:
+            _bg, _bd, _fg = "#10371f", "#1c5238", "#7fe3a6"
+        else:
+            _bg = _bd = _fg = ""
+        banner = (f"<div style='background:{_bg};border:1px solid {_bd};color:{_fg};"
+                  f"border-radius:9px;padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
                   f"{html.escape(str(_m))}</div>" if _m else "")
         # Doctrine (Commander-owned) + the FULL living lessons log. Officers only see the newest
         # PREAMBLE_LESSONS of the log in their prompt; the whole tail lives here for the Commander.
