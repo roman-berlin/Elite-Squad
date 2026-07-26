@@ -218,11 +218,7 @@ CEREMONIES = [
     ("/api/scribe", {}, "scribing"),
     ("/api/meeting", {"topic": "budget"}, "meeting"),
     ("/api/qa", {"app": "alpha"}, "qa"),
-    ("/api/group", {"text": "hello unit"}, "grouping"),
 ]
-
-from orchestrator import council as _council  # noqa: E402
-_council._append_group = lambda cfg, who, text: None   # the /api/group echo — no real store writes
 
 for route, data, flag in CEREMONIES:
     _reset()

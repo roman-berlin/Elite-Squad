@@ -1066,10 +1066,10 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Group chat — the Commander consults the unit. A cheap triage step (EU-287) routes to the 1–2
-# officers whose lane actually owns the message; everyone else stays silent — a real Telegram
-# group, not a roundtable where every officer writes a paragraph. The CTO is NOT in this room —
-# the Commander talks to the CTO 1:1 in /chat.
+# Specialist triage — one cheap call to pick AT MOST ONE officer whose lane
+# owns a Commander message (EU-601).  The roster is the LIVE set from
+# roster._OFFICER_ROWS only; retired officers never appear in the prompt so
+# they can never be returned, but we also validate the key as a belt guard.
 # --------------------------------------------------------------------------- #
 _GROUP_SYSTEM = (
     "You are an officer of an ELITE autonomous software unit in a GROUP CHAT with the Commander "
@@ -1085,30 +1085,26 @@ _GROUP_SYSTEM = (
     "can read; no invention. Do not write or edit files."
 )
 
-_TRIAGE_SYSTEM = (
-    "You are a fast triage classifier for an elite software unit's group chat. Given a message from "
-    "the Commander and the roster of officers with their lanes, pick AT MOST 2 officers whose lane "
-    "genuinely owns this message — the ones who should actually answer; most messages need only ONE. "
-    "If it's a greeting, small talk, or no lane clearly owns it, answer exactly 'NONE'. Output ONLY "
-    "the officer rank name(s) exactly as given, comma-separated if two, nothing else — no "
-    "explanation, no punctuation beyond the comma."
-)
-
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
-
-# --------------------------------------------------------------------------- #
-# Specialist triage — one cheap call to pick AT MOST ONE officer whose lane
-# owns a Commander message (EU-601).  The roster is the LIVE set from
-# roster._OFFICER_ROWS only; retired officers never appear in the prompt so
-# they can never be returned, but we also validate the key as a belt guard.
-# --------------------------------------------------------------------------- #
 _NEEDS_SPECIALIST_SYSTEM = (
     "You are a fast triage classifier for an elite software unit's group chat. Given a message from "
     "the Commander, pick EXACTLY ONE officer whose lane genuinely owns this message — or answer "
     "'NONE' if it's a greeting, small talk, or no lane clearly owns it. Output ONLY the officer rank "
     "name exactly as given below, nothing else — no explanation."
 )
+
+
+def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
+    return ClaudeAgentOptions(
+        model=cfg.discussion_model,           # Sonnet — a group brainstorm is many cheap turns
+        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}"
+        + ((f"\n\nToday's daily FOCUS (ground your takes in it): {latest_focus(cfg)}")
+           if latest_focus(cfg) else ""),
+        cwd=cwd, permission_mode="bypassPermissions",
+        allowed_tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
+        setting_sources=["project"], max_turns=5, effort="low")
 
 
 def _needs_specialist_prompt(message: str) -> str:
@@ -1121,43 +1117,14 @@ def _needs_specialist_prompt(message: str) -> str:
     ])
 
 
+
 def _brief(text: str, max_sentences: int = 2) -> str:
-    """Length guard (EU-287): trims a reply to at most `max_sentences` sentences so the group room
+    """Length guard: trims a reply to at most `max_sentences` sentences so the room
     reads like a chat, not a memo — even if a stubbed/verbose officer returns a multi-paragraph reply."""
     text = " ".join((text or "").split()).strip()
     if not text:
         return text
     return " ".join(_SENT_SPLIT.split(text)[:max_sentences]).strip()
-
-
-def _triage_prompt(message: str, tail: str) -> str:
-    roster = "\n".join(f"- {rank} ({lens_role})" for rank, lens_role, _ in COUNCIL)
-    parts = ["Officers and their lanes:", roster, ""]
-    if tail:
-        parts += ["Recent group chat (context):", tail, ""]
-    parts += [f'The Commander says to the group: "{message}"', "",
-              "Which officer(s) (at most 2) should answer? Reply with their rank name(s) only, or 'NONE'."]
-    return "\n".join(parts)
-
-
-async def _triage_officers(cfg: Config, message: str, tail: str) -> list[str]:
-    """Cheap Haiku triage (EU-287): picks at most 2 officer ranks whose lane owns `message`. Empty
-    list means no lane owner (greeting/small talk) — group_chat then falls back to the host officer."""
-    try:
-        run = await run_agent(
-            _triage_prompt(message, tail),
-            ClaudeAgentOptions(model=cfg.smalltalk_model, system_prompt=_TRIAGE_SYSTEM,
-                               cwd=_general_root(), permission_mode="bypassPermissions",
-                               allowed_tools=[], disallowed_tools=["Write", "Edit", "NotebookEdit",
-                                                                    "Bash", "Task", "Agent"],
-                               setting_sources=["project"], max_turns=1, effort="low"),
-            tag="group-triage")
-    except Exception:  # noqa: BLE001 — triage must never crash the room; treat as no lane owner
-        return []
-    text = (run.final or run.text or "").strip()
-    if not text or text.lower().rstrip(".!").strip() == "none":
-        return []
-    return [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()][:2]
 
 
 # Internal key set from the LIVE roster — retired keys are excluded by construction (the prompt
@@ -1185,139 +1152,6 @@ async def _needs_specialist(cfg: Config, message: str) -> str | None:
     rank = text.split("\n")[0].strip()
     key = _officer_key(rank)
     return key if key in _LIVE_KEYS else None
-
-
-def _match_officers(picks: list[str]) -> list[tuple[str, str, str]]:
-    """Match triage picks to COUNCIL officers by key/name, in pick order, capped at 2. Unlike
-    `_select_officers` (used for the explicit /group?officer= 1:1 mode, where 'no match' should mean
-    'show me everyone'), a triage miss must NOT fall back to the whole roster — that would silently
-    reopen the noisy whole-council path this ticket closes."""
-    out: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
-    for p in picks:
-        pl = str(p).lower().strip()
-        if not pl:
-            continue
-        for o in COUNCIL:
-            key = _officer_key(o[0])
-            if key in seen:
-                continue
-            if pl in o[0].lower() or pl in key or o[0].lower() in pl:
-                out.append(o)
-                seen.add(key)
-                break
-        if len(out) >= 2:
-            break
-    return out
-
-
-def _group_options(cfg: Config, voice: str, cwd: str) -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(
-        model=cfg.discussion_model,           # Sonnet — a group brainstorm is many cheap turns
-        system_prompt=memory.preamble() + f"{_GROUP_SYSTEM}\n\nYour lens — {voice}"
-        + ((f"\n\nToday's daily FOCUS (ground your takes in it): {latest_focus(cfg)}")
-           if latest_focus(cfg) else ""),
-        cwd=cwd, permission_mode="bypassPermissions",
-        allowed_tools=["Read", "Grep", "Glob"],
-        disallowed_tools=["Write", "Edit", "NotebookEdit", "Bash", "Task", "Agent"],
-        setting_sources=["project"], max_turns=5, effort="low")
-
-
-def _group_file(cfg: Config) -> Path:
-    return Path(cfg.audit_path).with_name("group_chat.jsonl")
-
-
-def group_messages(cfg: Config, limit: int = 200) -> list[tuple[str, str]]:
-    """The group thread as [(who, text)] — 'you' is the Commander, else an officer rank."""
-    p = _group_file(cfg)
-    if not p.exists():
-        return []
-    out: list[tuple[str, str]] = []
-    for line in p.read_text(encoding="utf-8").splitlines()[-limit:]:
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        out.append((r.get("who", ""), r.get("text", "")))
-    return out
-
-
-def _append_group(cfg: Config, who: str, text: str) -> None:
-    with _group_file(cfg).open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                            "who": who, "text": text.strip()}) + "\n")
-
-
-def _group_tail(cfg: Config, n: int = 12) -> str:
-    label = {"you": "Commander"}
-    return "\n".join(f"{label.get(w, w)}: {t}" for w, t in group_messages(cfg, limit=n))
-
-
-async def group_chat(cfg: Config, message: str, officers=None, audit=None,
-                     echo: bool = True) -> list[tuple[str, str]]:
-    """The Commander consults the unit — like a real Telegram group, not a roundtable (EU-287).
-
-    When `officers` is given (the explicit /group?officer= 1:1 mode), that officer alone answers —
-    unchanged, no triage. Otherwise a cheap Haiku triage picks the 1–2 officers whose lane actually
-    owns `message`; everyone else stays silent (no whole-council poll, no 'partly relevant' bystander
-    comments). Each reply is length-guarded to <=2 sentences. If triage finds no lane owner (a
-    greeting / small talk), the host officer answers in exactly one short sentence so the room is
-    never empty. Persists the exchange to group_chat.jsonl and returns the officers' replies as
-    [(rank, text)]. `echo=False` when the caller already recorded the Commander's message (so the
-    web UI can echo instantly)."""
-    digest = format_signals(collect_signals(cfg))
-    notes = recent_commander_notes(cfg)
-    tail = _group_tail(cfg, 12)
-    cwd = _general_root()
-    if echo:
-        _append_group(cfg, "you", message)        # the Commander's message leads the thread
-    if officers:
-        roster = _select_officers(officers)        # explicit 1:1 — that officer always answers
-    else:
-        picks = await _triage_officers(cfg, message, tail)
-        roster = _match_officers(picks)             # capped at 2; [] means no lane owner
-    replies: list[tuple[str, str]] = []
-    for rank, lens_role, voice in roster:
-        prompt = "\n".join([
-            f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
-            *([f"Standing guidance from the Commander:\n{notes}\n"] if notes else []),
-            *([f"Recent group chat:\n{tail}\n"] if tail else []),
-            *(["Fellow officers have already replied to this message:\n"
-               + "\n".join(f"— {w}: {t}" for w, t in replies) + "\n"] if replies else []),
-            f'The Commander says to the group: "{message}"', "",
-            "Reply per your rules: at most 2 short sentences, answer only if it's genuinely your "
-            "lane (or you were addressed 1:1), else 'PASS'.",
-        ])
-        run = await run_agent(prompt, _group_options(cfg, voice, cwd),
-                              tag="group-" + _officer_key(rank))
-        s = (run.final or run.text or "").strip()
-        if not s or s.lower().rstrip(".!").strip() in _SKIP:
-            continue
-        s = _brief(s, max_sentences=2)
-        replies.append((rank, s))
-        _append_group(cfg, rank, s)
-        print(f"  · {rank} weighed in", flush=True)
-    if not replies:
-        # Nobody claimed it (a greeting / small talk / off-lane aside) — the room must never look
-        # dead. The host officer answers warmly, in one short sentence, so the Commander always gets
-        # a reply.
-        rank, lens_role, voice = roster[0] if roster else COUNCIL[0]
-        prompt = "\n".join([
-            f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
-            *([f"Recent group chat:\n{tail}\n"] if tail else []),
-            f'The Commander says to the group: "{message}"', "",
-            "No formal lane owns this. Reply warmly in character, in exactly ONE short sentence. Do "
-            "NOT say PASS.",
-        ])
-        run = await run_agent(prompt, _group_options(cfg, voice, cwd), tag="group-host")
-        s = (run.final or run.text or "").strip()
-        if s and s.lower().rstrip(".!").strip() not in _SKIP:
-            s = _brief(s, max_sentences=1)
-            replies.append((rank, s))
-            _append_group(cfg, rank, s)
-    if audit is not None:
-        audit.record("group_chat", officers=[r for r, _ in replies])
-    return replies
 
 
 # --------------------------------------------------------------------------- #
