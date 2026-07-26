@@ -2715,7 +2715,6 @@ startStream();
     }).join("\\n");
 
     runlogPanel.innerHTML='<pre class=runlog>'+linesHtml+'</pre>';
-    runlogPanel.scrollTop=runlogPanel.scrollHeight;
   }
 
   function startRunlogStream(){
@@ -2726,10 +2725,10 @@ startStream();
       if(logTicket){runlogUrl+="&ticket="+encodeURIComponent(logTicket);}
       runlogEs=new EventSource(runlogUrl);
       runlogEs.addEventListener("log",function(e){
-        runlogBuffer.push(e.data);
+        runlogBuffer.unshift(e.data);
         // Keep buffer size manageable (last 1000 lines)
         if(runlogBuffer.length>1000){
-          runlogBuffer=runlogBuffer.slice(-1000);
+          runlogBuffer=runlogBuffer.slice(0,1000);
         }
         renderRunlogLines();
       });
