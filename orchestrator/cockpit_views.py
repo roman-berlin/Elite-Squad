@@ -299,11 +299,22 @@ def _result_banner(state: dict) -> str:
     Mirrors the /memory banner: the outcome of a ship/promote/patrol is shown ONCE on the next load
     of /, then cleared — unlike the sticky shared ``last_msg`` rendered as a control-bar note, which
     would otherwise persist across unrelated later actions. Pops ``last_result`` so a subsequent
-    reload (with no new action) no longer shows it."""
+    reload (with no new action) no longer shows it.
+
+    EU-662: When ``last_result_record`` is present, tone is derived from
+    ``record["tone"]`` (explicit structured signal); only falls back to legacy
+    substring inference when no record was set (backward-compat with writers that pre-date
+    ``set_last_result``).
+    """
     msg = (state.pop("last_result", "") or "").strip()
     if not msg:
         return ""
-    bad = any(w in msg.lower() for w in ("fail", "error"))
+    # EU-662: explicit tone from record wins; legacy substring fallback for older writers.
+    rec = state.pop("last_result_record", None)
+    if rec and isinstance(rec, dict):
+        bad = rec.get("tone") == "error"
+    else:
+        bad = any(w in msg.lower() for w in ("fail", "error"))
     fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
                       else ("var(--ok)", "var(--okline)", "var(--okbg)"))
     return (f"<div style='background:{bg};border-bottom:1px solid {border};color:{fg};"

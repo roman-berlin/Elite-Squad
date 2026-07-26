@@ -66,6 +66,38 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
+# EU-653: structured last-result storage. Existing readers strip/pop ``last_result`` as a plain
+# string (one-shot banner in ``cockpit_views._result_banner``, control-bar text, /api/deploy-status).
+# The helper writes BOTH — the plain text into ``st['last_result']`` (byte-compatible with every
+# existing reader) AND the full structured record into a new sibling key ``st['last_result_record']``.
+# Reader-migration happens in follow-on tickets (EU-648b/c/d); this helper is additive only.
+
+LAST_RESULT_TONES: frozenset[str] = frozenset(("ok", "error", "warn"))
+
+
+def set_last_result(app: str | None, tone: str, text: str) -> None:
+    """Store a structured (tone, text, timestamp) result while keeping ``last_result`` plain.
+
+    Validates ``tone`` against :data:`LAST_RESULT_TONES`; raises ``ValueError`` *before* touching
+    any state so an invalid call leaves everything unchanged.
+
+    Writes::
+
+        st['last_result']         = text          # plain string — every existing reader still works
+        st['last_result_record']  = {tone, text, timestamp}  # structured — for future readers
+
+    Note on back-compat: the *_result_banner* reader (cockpit_views.py:303) pops ``last_result`` as
+    a one-shot string; that behaviour is unaffected because we keep writing the same plain string
+    there. Record-staleness / clearing semantics are deferred to the migration tickets.
+    """
+    if tone not in LAST_RESULT_TONES:
+        raise ValueError(
+            f"invalid last_result tone {tone!r}: must be one of {sorted(LAST_RESULT_TONES)}")
+    st = get_state(app)
+    st["last_result"] = text
+    st["last_result_record"] = {"tone": tone, "text": text, "timestamp": time.time()}
+
+
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -1902,8 +1934,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 try:
                     from . import council
                     asyncio.run(council.hold_standup(cfg, audit=audit))
+                    set_last_result(None, "ok", "✓ Standup complete.")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"standup failed: {exc}"
+                    set_last_result(None, "error", f"standup failed: {exc}")
                 finally:
                     _state["standuping"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -1916,8 +1949,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 try:
                     from . import council
                     asyncio.run(council.hold_council(cfg, audit=audit))
+                    set_last_result(None, "ok", "✓ Council held.")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"council failed: {exc}"
+                    set_last_result(None, "error", f"council failed: {exc}")
                 finally:
                     _state["councilling"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -1959,9 +1993,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             def _bg():
                 try:
                     msg = asyncio.run(memory.scribe(cfg))
-                    _state["last_msg"] = "✓ " + (str(msg).strip() or "Squad memory updated by the Technical Writer.")
+                    set_last_result(None, "ok", "✓ " + (str(msg).strip() or "Squad memory updated by the Technical Writer."))
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"scribe failed: {exc}"
+                    set_last_result(None, "error", f"scribe failed: {exc}")
                 finally:
                     _state["scribing"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -1981,11 +2015,26 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # log below — which the officers actually read.
         act = ("" if _state.get("scribing")
                else _actbar(_actbtn("/api/scribe", "&#128221; Update memory")))
-        # One-shot confirmation banner ("✓ Technical Writer folded … into Unit Memory") — shown once the Technical Writer
-        # finishes (not mid-fold), so the action visibly "took" instead of silently returning here.
-        _m = "" if _state.get("scribing") else (_state.pop("last_msg", "") or "")
-        banner = (f"<div style='background:#10371f;border:1px solid #1c5238;color:#7fe3a6;border-radius:9px;"
-                  f"padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
+        # One-shot confirmation banner — shown once the Technical Writer finishes (not mid-fold),
+        # so the action visibly "took". Reads from last_result+record with tone-based colour.
+        _rec = None
+        _m = ""
+        if not _state.get("scribing"):
+            _r = _state.pop("last_result", "") or ""
+            _rec = _state.pop("last_result_record", None)
+            _m = _r
+        if _m and _rec:
+            _tone = _rec.get("tone", "")
+            if _tone == "error":
+                _bg, _bd, _fg = "#4d1f1f", "#7a2e2e", "#f8a0a0"
+            else:
+                _bg, _bd, _fg = "#10371f", "#1c5238", "#7fe3a6"
+        elif _m:
+            _bg, _bd, _fg = "#10371f", "#1c5238", "#7fe3a6"
+        else:
+            _bg = _bd = _fg = ""
+        banner = (f"<div style='background:{_bg};border:1px solid {_bd};color:{_fg};"
+                  f"border-radius:9px;padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
                   f"{html.escape(str(_m))}</div>" if _m else "")
         # Doctrine (Commander-owned) + the FULL living lessons log. Officers only see the newest
         # PREAMBLE_LESSONS of the log in their prompt; the whole tail lives here for the Commander.
@@ -3794,6 +3843,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
             st["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            set_last_result(app_name or None, "error", st["last_msg"])
             return redirect("/")
         text = (request.form.get("text") or "").strip()
         import copy
@@ -3804,6 +3854,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if _berr:
             release_run(app_name or None)
             st["last_msg"] = _berr
+            set_last_result(app_name or None, "error", st["last_msg"])
             return redirect("/")
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
@@ -3813,6 +3864,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             release_run(app_name or None)
             st["dry_run"] = None
             st["last_msg"] = f"could not start: {exc}"
+            set_last_result(app_name or None, "error", st["last_msg"])
             return redirect("/")
 
         def _bg():
@@ -3833,6 +3885,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             except Exception as exc:  # noqa: BLE001
                 errored = True
                 st["last_msg"] = str(exc)
+                set_last_result(app_name or None, "error", st["last_msg"])
             finally:
                 # EU-361: run_end fires from the finally — same as its run_api twin — so a worker
                 # that dies on an exception still closes its own boundary.
@@ -3845,6 +3898,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 # ``errored`` so a real run error (set just above) stays visible — release_run no
                 # longer clears last_msg, so the operator still sees why a failed run failed.
                 if not errored:
+                    set_last_result(app_name or None, "ok", "report intake complete")
                     st["last_msg"] = ""
                 # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
                 # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
