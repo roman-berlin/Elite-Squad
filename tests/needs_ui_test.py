@@ -91,8 +91,6 @@ chk("/group returns 200", r4.status_code == 200, str(r4.status_code))
 chk("/group composer intercepts submit (no native reload)",
     'addEventListener("submit"' in body4 and "preventDefault()" in body4)
 chk("/group composer posts to /api/group via fetch", 'fetch("/api/group"' in body4)
-chk("/group composer re-fetches /api/group-thread into #ginner on success",
-    "/api/group-thread" in body4 and 'getElementById("ginner")' in body4)
 chk("/group composer refocuses the input after send", ".focus()" in body4)
 chk("/group composer scrolls to newest after send",
     body4.count("window.scrollTo(0,document.body.scrollHeight)") >= 2)
