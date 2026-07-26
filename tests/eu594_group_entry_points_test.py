@@ -9,7 +9,9 @@ Asserts the rendered HTML the cockpit serves:
   1. _chat_tabs renders exactly ONE tab — the CTO — for both 'general' and 'group' actives.
   2. The Talk-to-the-unit panel (_TALK_HTML) has exactly ONE card, pointing at /chat.
   3. GET /chat and GET /council serve no href into /group and no 'Group room' text.
-  4. The dormant routes still answer: GET /group 200, GET /api/group-thread 200, POST /api/group works.
+  4. The dormant routes still answer: GET /group and GET /group?officer=X 200 and (EU-597) are
+     titled as the focused consult — no 'Group room' anywhere in the served body — plus
+     GET /api/group-thread 200 and POST /api/group works.
 """
 import sys, tempfile, types
 from pathlib import Path
@@ -58,7 +60,18 @@ for path in ("/chat", "/council"):
     chk(f"GET {path} has no 'Group room' text", "Group room" not in body)
 
 # --- 4. the routes stay live for direct hits (dormant, not dead) -------------
-chk("GET /group still 200", client.get("/group").status_code == 200)
+g = client.get("/group")
+chk("GET /group still 200", g.status_code == 200)
+# EU-597: the page title must not advertise the retired Group room — /group is the
+# focused consult now ('Consult the unit', or 'Consulting <officer>' with ?officer=).
+gb = g.get_data(as_text=True)
+chk("GET /group has no 'Group room' text", "Group room" not in gb)
+chk("GET /group titled as the unit consult", "Consult the unit" in gb, gb[:200])
+go = client.get("/group?officer=QA%20Engineer")
+chk("GET /group?officer=X still 200", go.status_code == 200)
+gob = go.get_data(as_text=True)
+chk("GET /group?officer=X has no 'Group room' text", "Group room" not in gob)
+chk("GET /group?officer=X titled as the officer consult", "Consulting QA Engineer" in gob, gob[:200])
 chk("GET /api/group-thread still 200", client.get("/api/group-thread").status_code == 200)
 r = client.post("/api/group", data={"text": "eu594 route-alive smoke"})
 chk("POST /api/group still accepted", r.status_code in (200, 302), str(r.status_code))

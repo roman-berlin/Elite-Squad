@@ -330,7 +330,7 @@ def _honest_commander_section(cfg: Config, text: str) -> str:
 
 
 def latest_focus(cfg: Config) -> str:
-    """The FOCUS line of the most recent council/daily — grounds the group room in today's
+    """The FOCUS line of the most recent council/daily — grounds the consult thread in today's
     priority. '' when no transcript or no FOCUS line exists."""
     import re as _re
     try:
@@ -1057,7 +1057,7 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def _brief(text: str, max_sentences: int = 2) -> str:
-    """Length guard (EU-287): trims a reply to at most `max_sentences` sentences so the group room
+    """Length guard (EU-287): trims a reply to at most `max_sentences` sentences so the consult
     reads like a chat, not a memo — even if a stubbed/verbose officer returns a multi-paragraph reply."""
     text = " ".join((text or "").split()).strip()
     if not text:

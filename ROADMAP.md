@@ -202,7 +202,7 @@ Last updated: 2026-06-20.
   in sync; first run asks once for Automation permission.)
 
 - **Officers never stall remotely — bypassPermissions + own-token Jira** (2026-06-20) — every
-  read-only officer (the General's chat, the whole council, stand-up, ship-review, group room, plus the
+  read-only officer (the General's chat, the whole council, stand-up, ship-review, plus the
   adjutant / drillmaster / reviewer / squad propose+plan passes — **12 in all**) now runs
   `permission_mode="bypassPermissions"` instead of `default`. On the headless VPS a `default` officer
   **dead-stopped** waiting for a tool-approval prompt no human could answer (the "approve Atlassian in
@@ -341,7 +341,7 @@ Last updated: 2026-06-20.
   unit" additions: (1) a **Group room** in the chat (tab next to your 1:1 General chat) where you
   consult the whole unit / brainstorm — your message goes to every officer, the **relevant ones
   answer in character, others add a short comment, off-lane officers stay quiet (PASS)**, each
-  building on the last; the thread persists. (2) A **real officer stand-up** — `/standup` keeps the
+  building on the last; the thread persists. **(Removed — EU-594. Now: CTO-only 1:1 chat + focused per-engineer consult via roster click.)** (2) A **real officer stand-up** — `/standup` keeps the
   instant snapshot *and* adds a **Hold stand-up** button that has every officer report **Yesterday /
   Today / Blockers** from the actual record and flag **hand-offs** ('need <Officer>: why'), which
   are collected into a cross-officer section (this is *on top of* the council, where officers

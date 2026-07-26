@@ -1,4 +1,4 @@
-"""EU-287 — Group room: only the relevant officer(s) reply, briefly (stubbed SDK).
+"""EU-287 — consult triage: only the relevant officer(s) reply, briefly (stubbed SDK).
 
 Covers the testable acceptance criteria:
   1. A backend-only question + a stubbed triage classifier returning the engineering-lane officer

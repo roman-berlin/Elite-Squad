@@ -124,7 +124,7 @@ solo now.)
 
 ## 8. Chat with the General
 **8.1 Open** — toolbar **💬 Chat**.
-- Expect: the **General | Group room** tabs; the General thread; a composer.
+- Expect: the **General** chat (single CTO-only 1:1 thread); a composer.
 
 **8.2 Pending decision** — if a run escalated/halted, a card appears ("the unit needs your call").
 - Expect: an inline reply box per decision. Answering it resumes the parked ticket (same as a Telegram reply).
@@ -136,10 +136,10 @@ solo now.)
 
 ---
 
-## 9. Group room
-**9.1 Open** — Chat → **Group room** tab (or Unit → Group room).
-**9.2 Ask the unit** — type a question / brainstorm prompt, send.
-- Expect: a "the unit is weighing in…" note, then the **relevant officers reply** in character (others add a short comment, off-lane ones stay silent). The General is **not** here (that's your 1:1 chat). Thread persists and auto-scrolls.
+## 9. Focused consult
+**9.1 Open** — Click an engineer on the Roster to open a focused consult with them (`/group?officer=<name>`).
+**9.2 Ask one officer** — type a question or brainstorm prompt; the selected officer replies in character.
+- Expect: a single-engineer thread with their answer; the General is **not** in this consult (that's your 1:1 chat in §8). Thread persists and auto-scrolls.
 
 ---
 
@@ -224,7 +224,7 @@ upkeep is Commander-driven now.
 | Run (dry + live) + controls | ☐ | |
 | Autopilot | ☐ | |
 | Delegation | ☐ | |
-| Chat + group + standup | ☐ | |
+| Chat + consult + standup | ☐ | |
 | Council/meeting/ship-review | ☐ | |
 | Patrol + autonomy | ☐ | |
 | Memory/scribe | ☐ | |

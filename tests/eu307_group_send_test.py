@@ -1,6 +1,6 @@
 """EU-307 — Group composer: send-then-see-own-message (mirrors eu307_chat_send_test.py for /group).
 
-Covers the *real* send-then-see behaviour of the Group room composer (not just JS source presence):
+Covers the *real* send-then-see behaviour of the consult composer (not just JS source presence):
 - A POST to /api/group must make the Commander's message visible in the very next GET of
   /api/group-thread purely from the SYNCHRONOUS echo (council._append_group), so the client's
   post-send refreshGroup() can stick the view to it WITHOUT waiting on the background
@@ -63,10 +63,10 @@ _orig_group_chat = council.group_chat
 async def _noop_group_chat(cfg, message, officers=None, audit=None, echo=True):
     return []
 council.group_chat = _noop_group_chat
-client.post("/api/group", data={"text": "ping to the group room"})
+client.post("/api/group", data={"text": "ping to the consult thread"})
 html1 = thread_html()
 chk("POST /api/group makes the message visible in the very next /api/group-thread",
-    "ping to the group room" in html1, html1[-300:])
+    "ping to the consult thread" in html1, html1[-300:])
 chk("the echoed group message renders as the Commander's own (you) bubble",
     'class="msg you"' in html1)
 council.group_chat = _orig_group_chat

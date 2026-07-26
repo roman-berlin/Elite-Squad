@@ -3360,7 +3360,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'window.scrollTo(0,document.body.scrollHeight);'
                 '});'
                 '</script>')
-        return _wrap("Group room — the unit", body)
+        # EU-597: the Group room tab was removed (EU-594) — /group survives only as the focused
+        # per-engineer consult, so the page title must not advertise the retired feature.
+        return _wrap(f"Consulting {officer}" if officer else "Consult the unit", body)
 
     @app.get("/api/group-thread")
     def group_thread_api() -> Response:

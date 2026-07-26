@@ -1,4 +1,4 @@
-"""QA for chat: the group room never goes dead (all-PASS still replies); the General answers 1:1."""
+"""QA for chat: the consult thread never goes dead (all-PASS still replies); the General answers 1:1."""
 import asyncio, sys, tempfile, types
 from pathlib import Path
 
@@ -26,7 +26,7 @@ cfg = Config(apps=[AppConfig(name="automatixy", repo_path=str(d), base_branch="D
                              protected_branch="MAIN", backlog_backend="none")],
              audit_path=str(d / "audit.jsonl"), use_worktree=False)
 
-# --- group room: EVERY officer PASSes (a greeting) -> the host must still reply ---
+# --- consult thread: EVERY officer PASSes (a greeting) -> the host must still reply ---
 async def all_pass(prompt, opts, tag=""):
     if tag == "group-host":
         return R("Good to hear from you, Commander — all quiet here. Want us to pick up a ticket?")
@@ -36,7 +36,7 @@ replies = asyncio.run(council.group_chat(cfg, "how are you? how is it going?"))
 check("all-PASS greeting still gets a reply (room not dead)", len(replies) >= 1, str(replies))
 check("the fallback reply isn't a PASS", replies and "PASS" not in replies[0][1])
 
-# --- group room: an in-lane officer answers normally ---
+# --- consult thread: an in-lane officer answers normally ---
 # EU-287: group_chat now triages to the 1-2 relevant officers before polling anyone, so the stub
 # must answer the "group-triage" call with the officer it wants selected.
 async def scout_answers(prompt, opts, tag=""):

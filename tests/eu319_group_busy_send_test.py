@@ -8,7 +8,7 @@ Found 2026-07-14 reviewing EU-307's landed code. Two changes met badly:
   * EU-307 turned the composer into Enter-to-send via ``fetch``, and fetch FOLLOWS the 302 to a
     200, so ``r.ok`` was true. The handler then cleared the input and showed no error.
 
-Net effect: type into the group room while the unit is mid-reply and the Commander's message is
+Net effect: type into the consult while the unit is mid-reply and the Commander's message is
 gone, with a UI that reported success. This harness pins the contract that closes it — a refused
 send is a 409 that changed nothing, and the accepted path (EU-307) is untouched.
 

@@ -216,8 +216,7 @@ ring buffer (`server.py:46-64`) and pushed to the browser via Server-Sent Events
 - **Activity** — recent steps (collapsible).
 - **Needs-you** (`/needs`, `server.py:1074`) — questions from the CTO, officer recommendations to
   approve, and runs that need you; **badge** count from `needs.count` (`server.py:160-165`).
-- **Talk-to-the-unit** — `/chat` (1:1 with the CTO, `server.py:1626`) and `/group` (the whole unit,
-  `server.py:1648`).
+- **Talk-to-the-unit** — `/chat` (1:1 with the CTO, `server.py:1626`) and `/group?officer=<name>` (focused consult: click an engineer on the Roster, `server.py:3301`).
 
 **Action buttons** (`server._control_bar`, `server.py:142-367`):
 | Button | Endpoint | What it does |
@@ -342,7 +341,7 @@ cheap Haiku status line (`roster.py:165-198`).
   council round-table) and `reviewer_model` (Reviewer + the PM/QA/Security/Release/Engineering-Manager/
   Engineering-Coach recon). With the ladder **on**, Opus is the cap these roles may climb to, not their
   starting tier — see below.
-- **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, group chat, the CTO's
+- **Sonnet** (`claude-sonnet-4-6`, `discussion_model`) — councils, stand-up, engineer consults, the CTO's
   chair/1:1, the Technical Writer. Also the **floor for all code** (Builder / Reviewer / recon
   sub-inspectors never drop below Sonnet — a too-weak coder just fails review and burns more on retries).
 - **Haiku** (`claude-haiku-4-5-20251001`, `smalltalk_model`) — the cheap-model tier for the roster
@@ -460,7 +459,7 @@ All live beside `audit_path` (the repo root) and are **gitignored** unless noted
 | `commander_notes.md` | `council.add_commander_note` (`council.py:172-179`) | Q/A standing guidance from chat |
 | `council/*.md` + `council/index.jsonl` | `council._save_transcript` (`council.py:830-846`) | Council/meeting/standup transcripts |
 | `last-standup.md` | `council` (`council.py:764-766`) | Latest stand-up |
-| `group_chat.jsonl` | `council._append_group` (`council.py:686-689`) | Group-room thread |
+| `group_chat.jsonl` | `council._append_group` (`council.py:686-689`) | Focused consult thread |
 | `autonomy.json` | `events._save` (`events.py:33-37`) | Autonomy cooldown state |
 | `memory/UNIT.md` | Commander + Technical Writer-region (`memory.py`) | **Versioned** doctrine |
 | `memory/UNIT.live.md` | `memory.update_log` (`memory.py:143-152`) | Gitignored living lessons log |
