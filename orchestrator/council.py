@@ -1323,8 +1323,9 @@ async def group_chat(cfg: Config, message: str, officers=None, audit=None,
 # --------------------------------------------------------------------------- #
 # _consult_specialist: single-officer grounded lookup (EU-600)
 #
-# Consults ONE officer by key, returns a brief answer. NOT yet wired into
-# respond_to_commander (later sub-ticket). Wraps the entire flow in one
+# Consults ONE officer by key, returns a brief answer. Wired into
+# ``respond_to_commander`` (EU-602) — consult note appended via
+# ``_append_consult_note`` when the brief is non-empty. Wraps the entire flow in one
 # try/except so any failure yields None — never raises.
 # --------------------------------------------------------------------------- #
 async def _consult_specialist(cfg: Config, message: str, officer_key: str) -> str | None:
