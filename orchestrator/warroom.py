@@ -2064,7 +2064,9 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         except Exception:  # noqa: BLE001 — the board must render even if the probe fails
             log_stream_path = ""
 
-    return (
+    # EU-670: splice pending result strip above KPIs when a last_result_record is set.
+    _strip = CV._result_strip(state)
+    board = (
         f'<div class=kpis>{k}</div>'
         f'{_sync_html(cfg)}'
         '<div class=cols>'
@@ -2084,6 +2086,7 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'{CV._card("Talk to the unit", _TALK_HTML)}'
         '</div>'
         '</div>')
+    return _strip + board
 
 
 def project_selector(cfg, app: Optional[str]) -> str:

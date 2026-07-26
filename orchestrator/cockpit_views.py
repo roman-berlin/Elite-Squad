@@ -319,6 +319,46 @@ def _result_banner(state: dict) -> str:
             f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
 
 
+def _peek_last_result(state: dict) -> dict | None:
+    """Read (without popping) ``last_result_record`` from *state*.
+
+    EU-670: non-destructive peek so the board can render the result strip repeatedly
+    across SSE ticks / polls. Returns None when nothing is pending.
+    """
+    rec = state.get("last_result_record")
+    if isinstance(rec, dict):
+        return rec
+    return None
+
+
+def _result_strip(state: dict) -> str:
+    """Render the last-run result as a thin, tone-styled strip with a dismiss button.
+
+    Non-destructive — never pops state. Returns ``""`` when there is no pending result record.
+    Tone colours mirror ``_result_banner`` (only "error" → bad).
+
+    EU-670: rendered inside the live board (prepended by ``warroom.render_board``);
+    the JS hook ``data-dismiss-result`` is wired in EU-671.
+    """
+    rec = _peek_last_result(state)
+    if not rec:
+        return ""
+    msg = (rec.get("text", "") or "").strip()
+    if not msg:
+        return ""
+    bad = rec.get("tone") == "error"
+    fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
+                      else ("var(--ok)", "var(--okline)", "var(--okbg)"))
+    return (f"<div style='background:{bg};border-bottom:1px solid {border};"
+            f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
+            f"justify-content:space-between;align-items:center'>"
+            f"{html.escape(msg)}"
+            f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
+            f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
+            f"color:inherit;border-radius:4px'>Dismiss</button>"
+            f"</div>")
+
+
 def _plan_limit_banner(state: dict, cfg=None) -> str:
     """Plan-limit warning banner: shown when a Claude or GLM plan limit is hit.
 
