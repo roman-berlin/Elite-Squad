@@ -100,7 +100,27 @@ chk("Roster still a top-level class=\"btn\" element (EU-68/EU-94 contract)",
 # EU-289 retired the "+ New task" panel (intake is Jira-only), so EU-299's "preserve the Run
 # form verbatim" pins are superseded — tests/eu289_toolbar_cleanup_test.py now pins its ABSENCE.
 chk("Autopilot form preserved (/api/autopilot)", "action=/api/autopilot" in bar)
-chk("Open logs link preserved (is_mac=True)", "&#128194; Open logs" in bar and "open-logs" in bar)
+# EU-632: the primary Open-logs button is a REAL NAVIGATION to the in-cockpit day-list view
+# (href="/logs/days?app=<app>") and renders on EVERY OS — the EU-106 Mac gate is gone (the old
+# /api/open-logs fetch-and-forget primary path 403'd off-Mac). The macOS-only secondary
+# "Finder" reveal is pinned by tests/lean_cockpit_test.py.
+_open_logs_anchor = re.search(r"<a\b[^>]*>&#128194; Open logs</a>", bar)
+chk("Open logs primary href points at /logs/days?app= (EU-632)",
+    _open_logs_anchor is not None
+    and 'href="/logs/days?app=automatixy"' in _open_logs_anchor.group(0),
+    "the Open-logs anchor itself must navigate to the day-list view for the current app")
+chk("Open logs anchor is NOT the old /api/open-logs endpoint (EU-632)",
+    _open_logs_anchor is not None and "open-logs" not in _open_logs_anchor.group(0),
+    "the 403-off-Mac endpoint must not be the button's href")
+_bar_nomac = V._control_bar(_cfg, "automatixy", healthy=True, is_mac=False)
+_open_logs_nomac = re.search(r"<a\b[^>]*>&#128194; Open logs</a>", _bar_nomac)
+chk("Open logs button present off-Mac — no Mac gate (EU-632)",
+    _open_logs_nomac is not None
+    and 'href="/logs/days?app=automatixy"' in _open_logs_nomac.group(0),
+    "the day view works off-Mac; the button must render with is_mac=False too")
+chk("off-Mac bar carries no /api/open-logs affordance at all (EU-632)",
+    "open-logs" not in _bar_nomac,
+    "the Darwin-only Finder reveal must not render off-Mac")
 
 # EU-289 de-duped this menu: "Budget monitor" (/budget) merged into "Usage & budget" (/usage),
 # and the duplicate "Unit roster" item went (the top-level Roster btn above still covers
