@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-642 · Elite-Unit · • Production diff removes only the Roster nav anchor; Jira/Task log/Daily/Memory intact and in order.
 - 2026-07-26 · EU-633 · Elite-Unit · • Verify-and-close ticket; feature already landed via EU-629/630/631/632, so a test-only diff is correct scope.
 - 2026-07-26 · EU-639 · Elite-Unit · • Verify-and-close: e2e test genuinely drives the real seams (concurrent _worker → EU-635 per-ticket file routing → run_log_stream_api → _ticket_line_ok), not stubs. · 🔗 /warroom — verify the Live Run Log panels on any concurrent active-run cards
 - 2026-07-26 · EU-632 · Elite-Unit · • AC1: toolbar Open-logs → /logs/days?app=, Mac gate removed, verified on/off-Mac by eu299+lean_cockpit. · 🔗 /warroom — "📂 Open logs" in the toolbar navigates to `/logs/days?app=<app>` (verify off-Mac too, e.g. the VPS); a run card's "📂 open log" link lands on `/logs/day?...&ticket=<id>` showing only that ticket's entries with a "show all entries" link back.
