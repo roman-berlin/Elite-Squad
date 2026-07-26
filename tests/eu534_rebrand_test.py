@@ -3,10 +3,9 @@
 Scans orchestrator/warroom.py source and asserts:
   1. EU-594: Group room card was removed — old tooltip text no longer in source.
   2. Log-empty placeholder reads "an engineer's model call", not officer's.
-  3. The /group?officer= query-param key is UNCHANGED (server.py:3194 reads it).
+  3. The /group?officer= query-param key is REMOVED (EU-613 routes everything through /chat).
   4. Module-level identifiers (from .officers import, OFFICER_NAMES) are UNCHANGED.
-  5. Quoted-string regex hits on '[Oo]fficer' are ONLY the ?officer= param line — zero hits on
-     rendered copy, tooltips, docstrings, or prose comments.
+  5. Quoted-string regex hits on '[Oo]fficer' are zero across rendered copy, tooltips, docstrings, and prose comments.
 """
 from __future__ import annotations
 
@@ -33,10 +32,10 @@ def test_log_empty_uses_engineer():
     assert actual_bad not in src, f'Old pattern still present: {actual_bad!r}'
 
 
-def test_group_param_key_unchanged():
-    """The /group?officer= URL param key must remain byte-for-byte."""
+def test_group_param_key_removed():
+    """EU-613: /group?officer= is gone — all links route through /chat."""
     src = WARROOM.read_text()
-    assert '/group?officer=' in src, "/group?officer= param key was removed — server.py:3194 reads it"
+    assert '/group?officer=' not in src, "/group?officer= should have been removed by EU-613"
 
 
 def test_identifiers_unchanged():
@@ -77,12 +76,10 @@ def test_no_officer_in_display_strings():
     assert 'bullet-formatted officer' not in src, "Old 'bullet-formatted officer' still present"
 
     # --- roster() function comments ---
-    assert 'the engineer\'s council name' in src, \
-        "roster() comment should say 'the engineer's council name'"
-    assert 'that exact engineer' in src, \
-        "roster() comment should say 'that exact engineer'"
-    assert 'every other engineer' in src, \
-        "roster() comment should say 'every other engineer'"
+    assert 'matches board label via SOT' in src, \
+        "roster() comment should reference SOT alignment"
+    assert 'Every officer link routes through /chat' in src, \
+        "roster() comment should explain /chat routing"
 
     # --- feed() comment ---
     assert 'Engineer-report bullets' in src, \
@@ -96,8 +93,7 @@ def test_no_officer_in_display_strings():
     assert 'fires for every officer' not in src, \
         "Old 'fires for every officer' still in phase_name docstring"
 
-    # --- URL param key MUST remain ---
-    assert '/group?officer=' in src, "/group?officer= param key was removed — server.py:3194 reads it"
-
+    # --- URL param key REMOVED by EU-613 (all links go /chat now) ---
+    assert '/group?officer=' not in src, "/group?officer= should have been removed by EU-613"
     # --- Module import MUST remain ---
     assert 'from .officers import' in src, ".officers import was renamed — breaks imports"

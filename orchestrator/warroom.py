@@ -53,10 +53,6 @@ _OFFICER_ROLES = [
 # The roster: (key, display name, role line). Display name resolved from officers.OFFICER_NAMES (SOT).
 _OFFICERS = [(key, _display(_OFFICER_KEY[key]), role) for key, role in _OFFICER_ROLES]
 
-# cockpit key -> the engineer's display name (the council name a click consults). Derived from the SAME
-# source of truth, so it can never drift from the board labels above. (general opens /chat, not /group.)
-_GROUP_NAME = {key: _display(ik) for key, ik in _OFFICER_KEY.items() if key != "general"}
-
 
 def _parse(ts: str) -> Optional[datetime]:
     return D._parse_ts(ts or "")
@@ -455,9 +451,7 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
     # An active run means the Builder/Reviewer are on duty right now.
     on_duty = {"builder", "reviewer"} if active else set()
 
-    # roster key -> the engineer's council name (so a click consults that exact engineer). Read from the
-    # single source of truth (see _GROUP_NAME) so it never drifts from the board / roster labels.
-    group_name = _GROUP_NAME
+    # roster key -> officer display name (matches board label via SOT).
     out = []
     for key, name, role in _OFFICERS:
         dt = seen.get(key)
@@ -467,8 +461,8 @@ def roster(cfg, tasks: list[dict], active: bool) -> list[dict]:
             dot = "recent"
         else:
             dot = "idle"
-        # The CTO is your 1:1 chat; every other engineer opens a focused consult with just them.
-        href = "/chat" if key == "general" else "/group?officer=" + quote(group_name.get(key, name))
+        # Every officer link routes through /chat (the CTO consult now covers 1:1 engineer consults).
+        href = "/chat"
         out.append({"name": name, "role": role, "dot": dot, "last": _rel(dt), "href": href})
     return out
 
