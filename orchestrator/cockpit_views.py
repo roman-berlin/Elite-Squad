@@ -301,20 +301,18 @@ def _result_banner(state: dict) -> str:
     would otherwise persist across unrelated later actions. Pops ``last_result`` so a subsequent
     reload (with no new action) no longer shows it.
 
-    EU-662: When ``last_result_record`` is present, tone is derived from
-    ``record["tone"]`` (explicit structured signal); only falls back to legacy
-    substring inference when no record was set (backward-compat with writers that pre-date
-    ``set_last_result``).
+    EU-656: Tone is read FROM the stored ``last_result_record["tone"]`` field only — zero
+    substring/text-content checks. A missing record defaults to ok (neutral/success).
     """
     msg = (state.pop("last_result", "") or "").strip()
     if not msg:
         return ""
-    # EU-662: explicit tone from record wins; legacy substring fallback for older writers.
+    # EU-656: read tone exclusively from the structured record.
     rec = state.pop("last_result_record", None)
+    bad = False
     if rec and isinstance(rec, dict):
         bad = rec.get("tone") == "error"
-    else:
-        bad = any(w in msg.lower() for w in ("fail", "error"))
+    # No fallback: write sites must populate last_result_record via set_last_result().
     fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
                       else ("var(--ok)", "var(--okline)", "var(--okbg)"))
     return (f"<div style='background:{bg};border-bottom:1px solid {border};color:{fg};"
@@ -651,16 +649,16 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     if _state["active"]:
         status = '<span class="tbnote run">&#9679; run in progress…</span>'
     elif _state.get("last_msg"):
-        # 2026-07-19: tone by CONTENT — "connection OK" showed in error-red before (every
-        # last_msg carried class=bad). Red is for failures only; success reads green.
+        # EU-656: tone from stored record, NOT content. Zero substring checks remain here.
+        # A missing record (legacy writer) defaults to "dim" (neutral) — no guessing text.
         _m = _state["last_msg"]
-        _ml = _m.lower()
-        if any(w in _ml for w in ("fail", "error", "not configured", "missing", "refused", "⚠")):
-            _tone = "bad"
-        elif any(w in _ml for w in ("ok", "✓", "set to", "cleared", "connected", "saved")):
-            _tone = "ok"
+        rec = _state.get("last_msg_record")
+        if rec and isinstance(rec, dict):
+            rtone = rec.get("tone", "")
+            _tone_map = {"error": "bad", "warn": "dim", "ok": "ok"}
+            _tone = _tone_map.get(rtone, "dim")
         else:
-            _tone = "dim"
+            _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
         status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
     else:
         status = ""

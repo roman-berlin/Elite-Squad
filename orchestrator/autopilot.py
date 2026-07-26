@@ -1138,7 +1138,12 @@ def resume_armed_drains(cfg: Config, *, wait_s: float | None = None,
                     try:
                         asyncio.run(autopilot(ap_cfg, app_name, once=False, stop_event=ev))
                     except Exception as exc:  # noqa: BLE001 — mirror server.py's _bg
-                        st["last_msg"] = f"autopilot error: {exc}"
+                        # EU-656: explicit error tone — the control bar renders the note red from
+                        # the stored record, not by substring-checking the text. Lazy import: this
+                        # runs in a serve-process thread, where server is already loaded (server
+                        # imports autopilot, never the reverse, so there's no module-level cycle).
+                        from . import server as _srv
+                        _srv.set_last_msg(app_name, "error", f"autopilot error: {exc}")
                     finally:
                         st["autopilot_on"] = False
                         cockpit_state.release_run(app_name)

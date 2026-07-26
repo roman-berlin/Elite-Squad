@@ -249,12 +249,12 @@ chk("AC4e: tone='error' does NOT use green OK CSS",
     "--okbg" not in banner and "--okline" not in banner, f"banner incorrectly has green: {banner[:200]}")
 
 _reset()
-# NO record present (legacy writer) — text with 'error' should still render red (back-compat)
+# EU-656: zero substring fallback — legacy writer without record defaults to ok tone.
 srv._state["last_result"] = "An unexpected error occurred during processing."
 srv._state.pop("last_result_record", None)
 banner = _result_banner(srv._state)
-chk("AC4f: legacy (no record) 'error' in text → red (back-compat)",
-    "--badbg" in banner and "--badline" in banner, f"legacy fallback broken: {banner[:200]}")
+chk("AC4f: legacy (no record) defaults to ok/green — no substring fallback per EU-656",
+    "--okbg" in banner and "--okline" in banner, f"legacy fallback wrong: {banner[:200]}")
 chk("AC4g: legacy pop removes last_result",
     srv._state.get("last_result", "") == "", "last_result not popped")
 
