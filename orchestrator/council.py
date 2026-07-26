@@ -918,6 +918,24 @@ def _file_commander_ticket(cfg: Config, msg_refs: list[str], answer: str):
         return None
 
 
+def _append_consult_note(reply_text: str, officer_key: str | None) -> str:
+    """Append a single-line consult disclosure note if a consult happened.
+
+    Returns *reply_text* unchanged when there was no consult.  Idempotent: calling twice with
+    the same key is a no-op after the first append.
+    """
+    if not officer_key:
+        return reply_text
+    try:
+        name = display(officer_key)
+    except Exception:
+        name = officer_key
+    note = f"\n\n(asked the {name} to check this.)"
+    if reply_text.endswith(note):
+        return reply_text  # idempotency guard
+    return reply_text + note
+
+
 async def respond_to_commander(cfg: Config, message: str) -> str:
     """The CTO answers a message from the Commander (a reply to a council question, or
     any question) directly in Telegram, grounded on the latest council + record, logs the exchange
@@ -973,6 +991,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     thread_ctx = recent_thread_context(cfg, ticket_ref=_msg_refs[0] if _msg_refs else None)
     # Two-pass specialist consult (EU-602): classify → fetch brief → fold into CTO grounding.
     # Always runs _needs_specialist (the classifier is cheap); consult only fires when keyed.
+    consulted_key: str | None = None
     try:
         officer_key = await _needs_specialist(cfg, message)
         if officer_key:
@@ -982,6 +1001,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
                     f"Specialist grounding — {display(officer_key)} advises "
                     f"(use as context, don't quote verbatim):\n{answer}"
                 )
+                consulted_key = officer_key
             else:
                 consult_ctx = ""
         else:
@@ -1030,6 +1050,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     _proposals, clean_answer = filing.parse_tickets(answer)
     # A reply may be ONLY a ticket block (no prose) — never send a bare "🎖️ " or log an empty answer.
     reply_text = clean_answer or ("Opened a ticket for that." if _proposals else answer)
+    reply_text = _append_consult_note(reply_text, consulted_key)
     notify.send(f"🎖️ {await notify.report_brief(cfg, reply_text)}")
     res = _file_commander_ticket(cfg, _msg_refs, answer)   # crash-safe: returns None on any failure
     if res is not None and res.lines:
