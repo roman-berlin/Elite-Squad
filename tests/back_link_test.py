@@ -22,7 +22,7 @@ results = []
 def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
-BACK = 'cockpit</a>'
+BACK = "aria-label='Back to cockpit'"
 
 # --- the shared helper that wraps 17 sub-pages always carries the back link ---
 w = cockpit_views._wrap("Some Page", "<p>body</p>")

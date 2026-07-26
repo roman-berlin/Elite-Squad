@@ -126,14 +126,28 @@ def _validate_git_repo(app: AppConfig) -> bool:
     return True
 
 
+# Meta/tracker prefixes that are REPORTS, never buildable work. Each is matched on the label first
+# (set at filing time) and on the title prefix as a fallback for boards where labels were stripped.
+#   infra-signature — the forensics watchdog's recurring-failure pattern reports.
+#   postmortem      — EU-588: forensics files "[postmortem] <ticket> — <cause>" whose body is a
+#                     failure timeline plus operator guidance ("split the ticket, then /unblock"),
+#                     not code work. The drain used to pick these up and burn a whole build trying
+#                     to "implement" a timeline; EU-482 sat open as an empty "Uncategorized"
+#                     postmortem until it was hand-closed on 2026-07-26.
+_TRACKER_TOKENS = ("infra-signature", "postmortem")
+
+
 def is_tracker_ticket(ticket) -> bool:
-    """True for meta/tracker tickets that must never enter the build queue: the forensics
-    watchdog's [infra-signature] pattern reports (labelled at filing time; the title prefix is
-    the fallback for boards where labels were stripped)."""
+    """True for meta/tracker tickets that must never enter the build queue.
+
+    One choke point for every report-shaped ticket the unit files at itself — keeping them out of
+    the drain AND out of the daily's "Next up" (both read this), instead of burning a planner call
+    per tracker to learn CLOSE."""
     labels = [str(l).lower() for l in (getattr(ticket, "labels", None) or [])]
-    if "infra-signature" in labels:
+    if any(tok in labels for tok in _TRACKER_TOKENS):
         return True
-    return str(getattr(ticket, "summary", "") or "").lstrip().lower().startswith("[infra-signature]")
+    summary = str(getattr(ticket, "summary", "") or "").lstrip().lower()
+    return any(summary.startswith(f"[{tok}]") for tok in _TRACKER_TOKENS)
 
 
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:

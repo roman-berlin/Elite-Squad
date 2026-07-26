@@ -4,10 +4,12 @@ Acceptance criteria covered here:
   1. GET /standup returns HTML with the plural "Engineers' stand-up" heading (the guard's
      \bEngineer\b bare-persona pattern can't match the plural) and no 'Officer stand-up',
      'The officers are reporting', or 'No officer stand-up'.
-  2. GET /council and GET /group return HTML whose visible copy has no standalone
+  2. GET /council returns HTML whose visible copy has no standalone
      'officer'/'officers' (name=officer wire keys exempt — asserted via diff/grep below).
   3. council.py brief literals read 'engineers' not 'officers'.
-  4. server.py display strings have no 'officer'.
+  4. server.py display strings have no 'officer' (except plumbing references like
+     request.form.get("officer"), name=officer, /group?officer= which are now dead code
+     from EU-608's group-chat deletion).
 """
 from __future__ import annotations
 
@@ -81,14 +83,9 @@ officer_words = re.findall(r'\boffic[eé]rs?\b', cleaned, re.IGNORECASE)
 chk("/council has no display 'officer'/'officers'", len(officer_words) == 0,
     f"LEFTOVER DISPLAY: {officer_words}")
 
-# Also check /group
+# ---- AC2b: /group was deleted by EU-608, no longer serves HTML ----------
 r = client.get("/group")
-body = r.get_data(as_text=True)
-chk("/group status 200", r.status_code == 200, str(r.status_code))
-cleaned = re.sub(r'name\s*=\s*officer[^>]*>', '', body)
-officer_words = re.findall(r'\boffic[eé]rs?\b', cleaned, re.IGNORECASE)
-chk("/group has no display 'officer'/'officers'", len(officer_words) == 0,
-    f"LEFTOVER DISPLAY: {officer_words}")
+chk("/group returns 404 (deleted by EU-608)", r.status_code == 404, str(r.status_code))
 
 # ---- AC3: council.py brief literals say 'engineers' ----
 source_path = Path("orchestrator/council.py")
@@ -124,7 +121,7 @@ for i, ln in enumerate(srv_src.splitlines(), 1):
     # Skip pure code identifiers / plumbing
     if any(skip in ln for skip in [
             'request.form.getlist("officer")', 'request.args.get("officer")',
-            'request.form.get("officer")', 'name=officer', '/group?officer=',
+            'request.form.get("officer")', 'name=officer',
             '_officer_', 'officer = ', 'officers = ', '# ',
             'html.escape(officer)', 'officer if', 'officer ', 'officer}',
             'officer_label', 'officer_key', '_select_officer', '_match_officer',

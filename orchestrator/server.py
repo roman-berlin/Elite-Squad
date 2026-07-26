@@ -51,6 +51,7 @@ from .cockpit_views import (  # noqa: F401
     _CHAT_STYLE,
     _actbar,
     _actbtn,
+    _back_btn,
     _bug_desc,
     _bug_title,
     _charged,
@@ -59,7 +60,6 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _dual_provider_gauge,
-    _group_inner,
     _result_banner,
     _wrap,
     _working,
@@ -226,7 +226,7 @@ def _claim_flag(name: str, value=True) -> bool:
                 _state["standuping"] = True     # ...several thread-scheduler ticks later
 
     Under ``app.run(..., threaded=True)`` two clicks milliseconds apart both passed the ``if`` and
-    both spawned a worker: two concurrent standups / councils / scribes, or two ``group_chat``
+    both spawned a worker: two concurrent standups / councils / scribes, or two consultant
     rounds answering the same message. ``ship_review`` already set its flag before the thread (the
     in-repo precedent); this closes the window for the other seven with a real lock, so the check
     and the set can't be split at all.
@@ -610,6 +610,48 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # Shell out to `open` — non-blocking; Finder/default app opens in the background.
         subprocess.Popen(["open", str(requested)], close_fds=True)   # noqa: S603,S607
         return jsonify({"ok": True, "path": str(requested)})
+
+    @app.get("/api/day-log")
+    def day_log_api() -> Response:
+        """EU-618: aggregate every per-ticket run-log under one day into a single stream.
+
+        Query params:
+            app : project name (slugified, resolved against log_root)
+            date: ``YYYY-MM-DD`` — validated with ``datetime.date.fromisoformat``
+
+        Security:
+            Path traversal guard mirrors /api/open-logs: resolved path must stay under
+            ``log_root(cfg)``; anything outside returns 403.
+
+        Returns JSON ``{"date": <date>, "entries": [{ticket, stage, time, text}, ...]}``.
+        An empty/missing day folder returns ``{"date": <date>, "entries": []}`` with 200.
+        """
+        import datetime
+        from flask import jsonify
+        from . import run_logger as _rl
+
+        # Validate date format upfront (pure parse, no IO yet).
+        try:
+            datetime.date.fromisoformat(date_param := request.args.get("date", "").strip())
+        except (ValueError, TypeError):
+            return Response("Bad 'date' parameter.", status=400, mimetype="text/plain")
+
+        date_str = date_param
+        app_name = (request.args.get("app") or "").strip()
+
+        root = _rl.log_root(cfg)
+        app_slug = _rl._safe_slug(app_name or "default")
+        requested = (root / app_slug / date_str).resolve()
+
+        # Path traversal guard: resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+
+        data = _rl.read_day_log(cfg, app_name or None, date_str)
+        return jsonify(data)
 
     @app.get("/api/autopilot")
     def autopilot_status_api() -> Response:
@@ -1016,12 +1058,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             f"href='/tasks?app={html.escape(a.name)}'>{html.escape(a.name)}</a>"
             for a in cfg.apps)
         back = (
+            # Floating back button (EU-542) via the shared partial — the SAME fixed pill as the
+            # _wrap pages, so the log can be left from any scroll depth. The dashboard <header>
+            # gets extra left padding so the float parks in its left corner WITHOUT covering the
+            # page title (150px clears the ~110px desktop pill + its 16px offset; 60px clears the
+            # 38px mobile disc + its 10px offset — both plus the safe-area inset). The project
+            # chip row stays in normal flow below the header, untouched by the float.
+            _back_btn(_home) +
             "<style>"
-            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:10px 16px;"
-            "background:var(--panel);border:1px solid var(--line2);border-radius:9px;"
-            "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;margin:0}"
-            ".backbtn svg{width:18px;height:18px;flex:none}"
-            ".backbtn:hover{border-color:var(--accent);color:var(--accent)}"
+            "header{padding-left:calc(150px + env(safe-area-inset-left,0px))}"
             ".tasknav{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 30px 0}"
             ".pchips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}"
             ".pchips .plabel{color:var(--dim);font-size:12px}"
@@ -1029,12 +1074,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             "color:var(--dim);font-size:13px;font-weight:600;text-decoration:none}"
             ".pchip:hover{border-color:var(--accent);color:var(--ink)}"
             ".pchip.on{background:var(--accentbg);border-color:var(--accent);color:var(--ink)}"
+            "@media(max-width:560px){"
+            "header{padding-left:calc(60px + env(safe-area-inset-left,0px));padding-right:16px}"
+            ".tasknav{padding:12px 16px 0}}"
             "</style>"
             "<div class=tasknav>"
-            f"<a class='backbtn' href='{_home}' aria-label='Back to cockpit'>"
-            "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
-            "stroke-linecap='round' stroke-linejoin='round'>"
-            "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a>"
             f"<div class=pchips><span class=plabel>Project:</span>{chips}</div>"
             "</div>")
         return page.replace("</header>", "</header>" + back, 1)
@@ -1697,7 +1741,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             _actbtn("/api/council", "&#128172; Hold a council now"))
         intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
-                 "use the <a href='/group'>Group room</a>.</p>")
+                 "<a href=\"/chat\">chat with the CTO</a>.</p>")
         if not hist:
             return _wrap("Daily Council", acts + intro + top
                          + "<p style='color:#8a909c'>No councils yet.</p>")
@@ -1819,6 +1863,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             _state["qa_findings"] = []
             _state["qa_verdict"] = ""
             _state["qa_dismissed"] = True
+            _state["qa_app"] = app_name  # EU-582: remember which app ran QA (retry after failure)
 
             def _bg():
                 notes = []
@@ -1885,6 +1930,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             "error_phase": st.get("qa_error_phase"),
             "dismissed": bool(st.get("qa_dismissed")),
         })
+
+    @app.post("/api/qa-dismiss")
+    def qa_dismiss() -> Response:
+        """EU-581: dismiss the QA report card — sets qa_dismissed=True so the home page
+        no longer shows the report card until the next successful QA run."""
+        _state["qa_dismissed"] = True
+        return redirect("/")
 
     @app.get("/merge-stats")
     def merge_stats_page() -> str:
@@ -2456,31 +2508,33 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         style = (
             "<style>"
             ".ugrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:6px 0 20px}"
-            ".ucard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:15px 17px}"
-            ".ut{color:#8a929f;font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
-            ".ubig{color:#e9ecf1;font-size:30px;font-weight:750;margin:7px 0 2px}.ubig .us{font-size:13px;color:#6b7480;font-weight:500}"
-            ".umeta{color:#6b7480;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+            ".ucard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 17px}"
+            ".ut{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
+            ".ubig{color:var(--ink);font-size:30px;font-weight:750;margin:7px 0 2px}.ubig .us{font-size:13px;color:var(--dim);font-weight:500}"
+            ".umeta{color:var(--dim);font-size:12px;font-family:ui-monospace,Menlo,monospace}"
             ".umodels{width:100%;border-collapse:collapse;margin-top:11px;font-size:12px}"
-            ".umodels th{color:#6b7480;text-align:left;font-weight:600;padding:3px 6px;border-bottom:1px solid #232936}"
-            ".umodels td{color:#c3cad6;padding:3px 6px;border-bottom:1px solid #1a1f2a}"
+            ".umodels th{color:var(--dim);text-align:left;font-weight:600;padding:3px 6px;border-bottom:1px solid var(--line)}"
+            ".umodels td{color:var(--ink);padding:3px 6px;border-bottom:1px solid var(--line2)}"
             ".umodels .r{text-align:right;font-family:ui-monospace,Menlo,monospace}"
-            ".budget{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
-            ".budget .bl{color:#e9ecf1;font-size:13px;margin-bottom:9px}"
-            ".bar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+            ".budget{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
+            ".budget .bl{color:var(--ink);font-size:13px;margin-bottom:9px}"
+            ".bar{height:9px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
             ".bar .fill{display:block;height:100%}.bar .fill.ok{background:#3b6cff}.bar .fill.warn{background:#d99a2b}.bar .fill.over{background:#f0676b}"
-            ".bnote{color:#8a929f;font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:#8a929f}"
+            ".bnote{color:var(--dim);font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:var(--dim)}"
             # EU-77 — live Claude Max subscription-limits panel (the real ceiling), green→amber→red.
-            ".plan{background:#12161f;border:1px solid #232936;border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
-            ".plan .ph{color:#e9ecf1;font-size:13px;font-weight:650;display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
-            ".plan .ps{color:#6b7480;font-size:11px;font-weight:500}"
+            ".plan{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
+            ".plan .ph{color:var(--ink);font-size:13px;font-weight:650;display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
+            ".plan .ps{color:var(--dim);font-size:11px;font-weight:500}"
             ".plan .pl{margin-top:13px}"
-            ".plan .plh{display:flex;justify-content:space-between;align-items:baseline;color:#c3cad6;font-size:12px;margin-bottom:5px}"
-            ".plan .plh .pp{font-family:ui-monospace,Menlo,monospace;color:#e9ecf1;font-weight:650}"
-            ".plan .pm{color:#6b7480;font-size:11px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}"
-            ".pbar{height:9px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+            ".plan .plh{display:flex;justify-content:space-between;align-items:baseline;color:var(--ink);font-size:12px;margin-bottom:5px}"
+            ".plan .plh .pp{font-family:ui-monospace,Menlo,monospace;color:var(--ink);font-weight:650}"
+            ".plan .pm{color:var(--dim);font-size:11px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}"
+            ".pbar{height:9px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
             ".pbar .pf{display:block;height:100%}"
             ".pbar .pf.g{background:#3fb950}.pbar .pf.a{background:#d99a2b}.pbar .pf.r{background:#f0676b}"
-            ".plan .pnote{color:#8a929f;font-size:12px;margin-top:8px}"
+            ".plan .pnote{color:var(--dim);font-size:12px;margin-top:8px}"
+            # EU-540 — qwen quota line (compact, dim)
+            ".qwen-q{color:var(--dim);font-size:11.5px;margin:8px 0;font-family:ui-monospace,Menlo,monospace}"
             "</style>")
 
         # EU-77 — the REAL Claude Max ceiling (session / weekly · all models / per-model), read live.
@@ -2565,11 +2619,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # one shows the real plan cap, the other the unit's self-imposed budget. Best-effort probe.
         plan = plan_panel(_usage.plan_usage(cfg))
 
-        # EU-122: Dual-provider budget gauge — shows Claude + GLM side-by-side with low-watermark indicators
-        # GLM usage data is None for now (placeholder) until backend integration is added
-        dual_gauge = _dual_provider_gauge(cfg, _usage.plan_usage(cfg), glm_usage=None)
+        # EU-122 / EU-540: Dual-provider budget gauge — Claude + GLM side-by-side, live data.
+        # Pass real glm_budget_status() instead of placeholder None so the secondary gauge
+        # shows actual numbers from the ledger, not a dead 0%. glm_budget_status() carries the
+        # fraction as 'pct' (no 'utilization' key); _provider_card falls back to 'pct'. The GLM
+        # daily ceiling resets at midnight, so annotate resets_in for the card's meta line.
+        glm_usage = {**_usage.glm_budget_status(cfg), "resets_in": "midnight"}
+        dual_gauge = _dual_provider_gauge(cfg, _usage.plan_usage(cfg), glm_usage=glm_usage)
+        # EU-540: one compact Qwen Token-Plan quota line under the dual-gauge if available
+        qwen_line = ""
+        try:
+            qw = _usage.qwen_quota_status(cfg)
+            if qw:
+                qwen_line = f'<div class="qwen-q">Qwen Token-Plan: {html.escape(qw)}</div>'
+        except Exception:  # noqa: BLE001 — never break render on quota read failure
+            pass
 
-        body = (style + dual_gauge + plan + budget + mixbanner + "<div class=ugrid>"
+        body = (style + dual_gauge + qwen_line + plan + budget + mixbanner + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
@@ -2589,13 +2655,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         style = (
             "<style>"
             ".budgetpage{max-width:900px;margin:0 auto;padding:20px 0}"
-            ".bhead{color:#e9ecf1;font-size:22px;font-weight:700;margin-bottom:18px}"
-            ".bsubhead{color:#8a929f;font-size:14px;margin-bottom:24px}"
+            ".bhead{color:var(--ink);font-size:22px;font-weight:700;margin-bottom:18px}"
+            ".bsubhead{color:var(--dim);font-size:14px;margin-bottom:24px}"
             "</style>")
 
-        # Get current usage data for both providers
+        # EU-540: pass real GLM budget status instead of placeholder None. glm_budget_status()
+        # carries the fraction as 'pct'; _provider_card falls back to 'pct' for the gauge width.
         claude_usage = _usage.plan_usage(cfg)
-        glm_usage = None  # Placeholder until GLM backend integration is added
+        glm_usage = {**_usage.glm_budget_status(cfg), "resets_in": "midnight"}
 
         # Render the dual-provider gauge
         dual_gauge = _dual_provider_gauge(cfg, claude_usage, glm_usage)
@@ -3271,110 +3338,6 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'else{btn.remove();}}catch(e){btn.disabled=false;btn.textContent=prev;}}'
                 '</script>')
         return _wrap("Chat with the CTO", body)
-
-    @app.get("/group")
-    def group_page() -> str:
-        officer = (request.args.get("officer") or "").strip()
-        # EU-287: a lightweight typing indicator (not a banner) — the officer(s) triage picked are
-        # composing. `_state['grouping']` already tracks the in-flight window (set in group_api below).
-        busy = (f'<div class=typing>&middot; {html.escape(officer) if officer else "an engineer"} '
-                'is weighing in&hellip;</div>' if _state.get("grouping") else "")
-        aim = (f'<div class=aim>Consulting <b>{html.escape(officer)}</b> directly — only they answer. '
-               '<a href="/group">ask the whole unit instead</a></div>') if officer else ""
-        oin = f'<input type=hidden name=officer value="{html.escape(officer)}">' if officer else ""
-        ph = (f"Ask {html.escape(officer)} something…" if officer
-              else "Ask the unit / brainstorm with the engineers…")
-        body = (_CHAT_STYLE + _chat_tabs("group")
-                + '<div class=chat>' + aim + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
-                '<div class=composer><div id=grouperr class=chaterr role=alert aria-live=assertive></div>'
-                '<form id=groupform method=post action=/api/group>' + oin
-                + f'<input type=text id=groupinput name=text autocomplete=off autofocus '
-                f'placeholder="{ph}"><button>Send</button></form></div>'
-                '<script>window.scrollTo(0,document.body.scrollHeight);'
-                # EU-307 — same patch-in-place-friendly pattern as /chat's refreshChat(): pull the
-                # poll body into a function so Enter-to-send can await the identical refresh,
-                # instead of duplicating the #ginner reconciliation logic. Group has no windowing
-                # (EU-304/305 only landed for /chat), so this stays a plain innerHTML swap — that's
-                # the graceful-degradation path the ticket asks for regardless of EU-286a.
-                'async function refreshGroup(force){try{var r=await fetch("/api/group-thread",{cache:"no-store"});'
-                'if(!r.ok)return;'
-                'var near=force||((window.innerHeight+window.scrollY)>=document.body.scrollHeight-140);'
-                'document.getElementById("ginner").innerHTML=await r.text();'
-                'if(near)window.scrollTo(0,document.body.scrollHeight);'
-                '}catch(e){}}'
-                'setInterval(function(){refreshGroup(false);},4000);'
-                # EU-307 — Telegram-style Enter-to-send for the group composer, mirroring /chat's
-                # chatform handler: intercept submit, POST via fetch, and only on success clear the
-                # input, patch-refresh #ginner, refocus, and stick to the newest message. On failure
-                # keep the typed text and surface an inline error so Enter retries the same send.
-                'var groupform=document.getElementById("groupform"),groupinput=document.getElementById("groupinput"),'
-                'grouperr=document.getElementById("grouperr");'
-                'if(groupform)groupform.addEventListener("submit",async function(ev){'
-                'ev.preventDefault();'
-                'var text=groupinput.value;if(!text.trim())return;'
-                'var ok=false,busy=false;'
-                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});'
-                'ok=!!(r&&r.ok);busy=!!(r&&r.status===409);}'
-                'catch(e){ok=false;}'
-                # EU-319: a 409 means the officers are mid-reply and the send was REFUSED, not that
-                # it failed — the text stays in the composer either way (that is the data-loss fix),
-                # but backpressure gets its own copy and no red `cerr` ring, because retrying in a
-                # few seconds is the correct move and nothing is broken.
-                'if(!ok){'
-                'if(busy){if(grouperr){grouperr.textContent="The unit is still replying — your message was NOT sent. Press Enter to try again in a moment.";'
-                'grouperr.classList.add("on");}}'
-                'else{groupinput.classList.add("cerr");'
-                'if(grouperr){grouperr.textContent="Message not sent — check your connection and press Enter to retry.";'
-                'grouperr.classList.add("on");}}'
-                'groupinput.focus();return;}'
-                'groupinput.classList.remove("cerr");if(grouperr)grouperr.classList.remove("on");'
-                'groupinput.value="";'
-                'await refreshGroup(true);'
-                'groupinput.focus();'
-                'window.scrollTo(0,document.body.scrollHeight);'
-                '});'
-                '</script>')
-        return _wrap("Group room — the unit", body)
-
-    @app.get("/api/group-thread")
-    def group_thread_api() -> Response:
-        from flask import Response
-        return Response(_group_inner(cfg), mimetype="text/html")
-
-    @app.post("/api/group")
-    def group_api() -> Response | tuple[Response, int]:
-        from urllib.parse import quote
-
-        from flask import jsonify
-        text = (request.form.get("text") or "").strip()
-        officer = (request.form.get("officer") or "").strip() or None
-        _dest = "/group?officer=" + quote(officer) if officer else "/group"
-        if not text:
-            return redirect(_dest)
-        # EU-319 + EU-361: claim the room ATOMICALLY, in the request thread. Two problems used to
-        # live in one line (``if text and not _state.get("grouping")``):
-        #   * the flag was set inside _bg(), so two quick sends both passed the check (EU-361);
-        #   * a send that lost the check fell straight through to the 302 below, so the EU-307
-        #     Enter-to-send fetch followed the redirect, saw r.ok, cleared the composer — and the
-        #     Commander's typed message was GONE with the UI reporting success (EU-319: real data
-        #     loss on his own channel, found 2026-07-14 reviewing EU-307's landed code).
-        # A 409 is the honest answer: nothing was queued. The composer keeps the text and says so.
-        if not _claim_flag("grouping"):
-            return jsonify({"queued": False, "busy": True,
-                            "error": "the unit is still replying — nothing was sent"}), 409
-        from . import council
-        council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
-
-        def _bg():
-            try:
-                asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
-                                               audit=audit, echo=False))
-            except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = f"group chat failed: {exc}"
-            finally:
-                _state["grouping"] = False
-        threading.Thread(target=_bg, daemon=True).start()
-        return redirect(_dest)
 
     @app.get("/api/chat-thread")
     def chat_thread_api() -> Response:

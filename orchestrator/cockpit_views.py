@@ -1,7 +1,7 @@
 """Cockpit templates / view helpers — the inline-HTML builders.
 
 Split out of ``server.py`` (F16: decompose templates/routes/state) so the presentation
-layer (page chrome, the control bar, the chat/group renderers, action buttons) lives
+layer (page chrome, the control bar, the chat renderer, action buttons) lives
 apart from the Flask route handlers. These functions take plain data + ``Config`` and
 return HTML strings — they never touch ``request``/``redirect``. ``server`` re-exports
 them, so ``server._control_bar`` / ``server._wrap`` etc. stay valid for callers and tests.
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import os
+import time
 from pathlib import Path
 
 from . import dashboard as D
@@ -95,13 +96,75 @@ def _back_home() -> str:
     return f"/?app={html.escape(appq)}" if appq else "/"
 
 
+def _back_btn(home_url: str) -> str:
+    """Shared floating back-to-cockpit button (EU-542).
+
+    Renders a small ``position:fixed`` arrow-back link above all page content so it stays
+    visible at ANY scroll depth — exactly what the Commander asked for ("a back to cockpit
+    arrow button that will move with the chat"). Theme tokens only (no hex literals), so it
+    re-skins from the single :root block and is correct in dark AND light. Keyboard
+    accessible: a real ``<a>``, tab-focusable, Enter navigates, ``--ring`` on focus-visible.
+
+    The PM's EU-542 placement call is baked in:
+      * a subtle token-based translucent backdrop (color-mix over ``--panel2`` + blur, gated
+        behind @supports with a solid token fallback) so any mid-scroll overlap stays legible;
+      * below 560px width it collapses to an icon-only 38px disc so the message column is
+        never covered;
+      * offsets and the caller-side clearance both include ``env(safe-area-inset-*)`` so a
+        notched device never overlaps the button OR the content under it.
+    Callers clear the footprint below the button: ``_wrap`` pads the body's top, the /tasks
+    route indents the dashboard header.
+    """
+    return (
+        "<style>"
+        ".backbtn{position:fixed;z-index:100;"
+        "top:calc(16px + env(safe-area-inset-top,0px));"
+        "left:calc(16px + env(safe-area-inset-left,0px));"
+        "display:inline-flex;align-items:center;gap:9px;padding:11px 16px;"
+        "background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-pill);"
+        "color:var(--ink);font-size:13.5px;font-weight:650;text-decoration:none;"
+        "transition:all var(--t-fast);box-shadow:var(--shadow-2);animation:bbeu542 .22s ease-out}"
+        "@keyframes bbeu542{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}"
+        # Translucent token backdrop — the @supports gate keeps older browsers on the solid
+        # token background above instead of a fully transparent (unreadable) button.
+        "@supports(background:color-mix(in srgb,red 50%,blue)){"
+        ".backbtn{background:color-mix(in srgb,var(--panel2) 85%,transparent);"
+        "backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px)}}"
+        ".backbtn svg{width:17px;height:17px;transition:transform var(--t-fast);flex:none}"
+        ".backbtn:hover{background:var(--line);border-color:var(--accent);color:var(--accent);"
+        "transform:translateX(-3px);box-shadow:var(--shadow-3)}"
+        ".backbtn:hover svg{transform:translateX(-2px)}"
+        ".backbtn:active{transform:translateX(-1px)}"
+        ".backbtn:focus-visible{outline:none;box-shadow:var(--ring)}"
+        # Narrow screens: icon-only 38px disc tucked into the corner, hugging the safe area.
+        "@media(max-width:560px){"
+        ".backbtn{top:calc(10px + env(safe-area-inset-top,0px));"
+        "left:calc(10px + env(safe-area-inset-left,0px));width:38px;height:38px;padding:0;"
+        "justify-content:center}"
+        ".backbtn .bbl{display:none}"
+        ".backbtn svg{width:19px;height:19px}}"
+        "@media(prefers-reduced-motion:reduce){.backbtn{animation:none;transition:none}}"
+        "</style>"
+        f"<a class='backbtn' href='{home_url}' aria-label='Back to cockpit'>"
+        f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
+        f"stroke-linecap='round' stroke-linejoin='round' aria-hidden=true>"
+        f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg><span class=bbl>cockpit</span></a>"
+    )
+
+
 def _wrap(title: str, inner: str) -> str:
+    """Page chrome with a **floating** back-to-cockpit button (EU-542)."""
+    # body top-padding clears the fixed button's footprint (PM EU-542 call): 66px ≥ the
+    # desktop pill's bottom edge (16px offset + ~46px box), and still ≥ the 38px mobile disc
+    # (10px offset) — plus the safe-area inset on notched devices, so the first heading /
+    # chat bubble / timestamp always starts BELOW the button and is never obscured.
     return ("<!doctype html><meta charset=utf-8><title>" + html.escape(title) + "</title>"
             + _token_css() +
             "<style>*{box-sizing:border-box}"
             "body{background:radial-gradient(1100px 440px at 80% -10%,rgba(77,124,255,.08),transparent 60%),"
             "var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"
-            "\"Segoe UI\",Inter,sans-serif;margin:0;padding:22px 30px}a{color:var(--info)}"
+            "\"Segoe UI\",Inter,sans-serif;margin:0;"
+            "padding:calc(66px + env(safe-area-inset-top,0px)) 30px}a{color:var(--info)}"
             ".rep{white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);"
             "border-radius:var(--r-lg);padding:16px}"
             "textarea,select,input{background:var(--panel);border:1px solid var(--line2);color:var(--ink);"
@@ -109,21 +172,9 @@ def _wrap(title: str, inner: str) -> str:
             "button{background:var(--accent);border:0;color:#fff;border-radius:var(--r-md);padding:9px 16px;"
             "font-weight:650;cursor:pointer}"
             "a:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible,"
-            "input:focus-visible{outline:none;box-shadow:var(--ring)}"
-            ".backbtn{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;"
-            "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
-            "color:var(--ink);font-size:14px;font-weight:600;text-decoration:none;"
-            "transition:all var(--t-fast);margin-bottom:16px;box-shadow:var(--shadow-1)}"
-            ".backbtn svg{width:18px;height:18px;transition:transform var(--t-fast);flex:none}"
-            ".backbtn:hover{background:var(--line);border-color:var(--accent);color:var(--accent);"
-            "transform:translateX(-3px);box-shadow:var(--shadow-2)}"
-            ".backbtn:hover svg{transform:translateX(-2px)}"
-            ".backbtn:active{transform:translateX(-1px)}"
-            ".backbtn:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
-            f"<a class='backbtn' href='{_back_home()}' aria-label='Back to cockpit'>"
-            f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
-            f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>cockpit</a> "
-            f"<h2>{html.escape(title)}</h2>{inner}")
+            "input:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
+            + _back_btn(_back_home())
+            + f"<h2>{html.escape(title)}</h2>{inner}")
 
 
 def _working(msg: str, secs: int = 5) -> str:
@@ -612,6 +663,43 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # are still available, only the per-project button was removed from the control bar.
     ship_html = ""
 
+    # QA report card (EU-581): shown when _state["qa_dismissed"] is False AND there's actual data.
+    # Replaces transient last_msg with a persistent card that stays until dismissed.
+    qa_findings = list(_state.get("qa_findings") or [])
+    qa_verdict = (_state.get("qa_verdict") or "").strip()
+    _qrd = _state.get("qa_dismissed")
+    qa_report_html = ""
+    if not _qrd and (qa_findings or qa_verdict):
+        base_url = D._jira_base_for(cfg, app0)
+        findings_list = ""
+        if qa_findings:
+            n = len(qa_findings)
+            link_items = "".join(
+                f'<a href="{html.escape(base_url)}/browse/{html.escape(k)}" '
+                f'target=_blank rel=noopener>{html.escape(k)}</a>'
+                for k in qa_findings
+            )
+            findings_list = (f'{n} finding{"s" if n != 1 else ""} filed: ' + link_items)
+        else:
+            findings_list = "no new findings"
+        verdict_cls = ("ok" if "go" in (qa_verdict or "").lower() else "bad")
+        qa_report_html = (
+            '<div class="qa-report" role="status"'
+            ' style="background:var(--panel);border:1px solid var(--line);'
+            'border-radius:var(--r-lg);padding:var(--s-3) var(--s-4);margin:0 0 14px">'
+            '<div class="qa-report-title" style="font-size:var(--t-md);font-weight:700;'
+            'color:var(--ink);margin-bottom:var(--s-2)"'
+            '>&#128203; Findings Report</div>'
+            f'<div class="qa-report-findings" style="margin-bottom:var(--s-2)">{findings_list}</div>'
+            '<div class="qa-report-verdict" style="font-size:var(--t-md);font-weight:700;'
+            f'color:var(--{verdict_cls})">{html.escape(qa_verdict or "(no verdict)")}'
+            '</div>'
+            '<form method=post action=/api/qa-dismiss style="margin-top:var(--s-2);margin-bottom:0">'
+            '<button type=submit style="font-size:var(--t-xs);font-weight:600;padding:'
+            '4px 10px;border-radius:var(--r-sm);background:var(--panel2);border:1px solid var(--line)'
+            ';color:var(--dim);cursor:pointer">&#10003; Dismiss</button></form>'
+            '</div>')
+
     # Freshness — show "· 28m ago" next to each Reports item so staleness is visible at a glance.
     from . import warroom as _wr
     _base = Path(cfg.audit_path)
@@ -653,6 +741,82 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             ".then(function(r){return r.json()}).then(function(d){"
             "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
             ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
+
+    # QA progress strip: live two-phase indicator while a QA run is in flight.
+    # Reuses the same poll-and-reload pattern as deploy_strip; points at /api/qa-status.
+    # Server-side rendered so a mid-run refresh shows the correct current phase.
+    qa_strip = ""
+    if _state.get("qa"):
+        _qs = _state.get("qa_started") or 0
+        _qelapsed = int(time.time() - _qs) if isinstance(_qs, (int, float)) else 0
+        _mm, _ss = divmod(_qelapsed, 60)
+        # None+active = claim-time race window → show phase 1.
+        # qlabel carries a LITERAL '&': the single html.escape() below encodes it once
+        # (a pre-escaped '&amp;' here would double-escape to '&amp;amp;' in the browser).
+        if _state.get("qa_phase") == "ship_review":
+            qlabel = "Phase 2/2 — ship verdict"
+        else:
+            qlabel = "Phase 1/2 — inspecting dev & filing findings"
+        # NOTE: the inline script is ONE self-contained snippet — keep each JS string
+        # literal inside a single Python string (iter-1 split 'Phase 1/2…' across two
+        # Python literals, which produced unparseable JS), and end with exactly one
+        # IIFE close `})();`. The '&' inside the JS string literal stays literal too:
+        # <script> content is raw text, HTML entities are NOT decoded there.
+        qa_strip = (
+            f'<div class="qa-strip"><span id=qaphase>{html.escape(qlabel)}</span>'
+            f' <span id=qaelapsed>{_mm:02d}:{_ss:02d}</span></div>'
+            "<script>(function(){var el=document.getElementById('qaphase');"
+            "var ta=document.getElementById('qaelapsed');function p(){fetch('/api/qa-status')"
+            ".then(function(r){return r.json()}).then(function(d){"
+            "if(el){el.textContent=(d.phase==='ship_review')"
+            "?'Phase 2/2 — ship verdict':'Phase 1/2 — inspecting dev & filing findings'}"
+            "var m=Math.floor(d.elapsed_s/60);var s=d.elapsed_s%60;"
+            "if(ta){ta.textContent=String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')}"
+            "if(!d.active){location.reload()}else{setTimeout(p,1500)}})"
+            ".catch(function(){setTimeout(p,2500)})}setTimeout(p,1500)})();</script>")
+
+    # QA failure state (EU-582): shown when a QA run completed with an error phase,
+    # but NO active run is in flight (the progress strip covers it while qa is truthy).
+    # Displays plain-language failure description + any partial findings + one-click Retry.
+    qa_failure_html = ""
+    _ep = _state.get("qa_error_phase")
+    if _ep and not _state.get("qa"):   # error exists AND no active run running
+        # Map internal phase name → human label matching the progress strip wording.
+        if _ep == "ship_review":
+            _phase_label = "Phase 2 (ship verdict)"
+        else:
+            # Everything else (including bare "patrol" or whatever future phases get added)
+            # maps to Phase 1 with the same wording as the progress strip.
+            _phase_label = "Phase 1 (inspecting dev & filing findings)"
+        _error_msg = html.escape(_state.get("last_result", "") or "")
+        qa_failure_html = (
+            '<div role=status style="background:var(--badbg);border:1px solid var(--badline);'
+            'border-radius:var(--r-lg);padding:var(--s-3) var(--s-4);margin:0 0 14px">'
+            '<div style="font-weight:700;color:var(--bad);margin-bottom:var(--s-2)"'
+            f'>&#9888; QA failed during {_phase_label}: {_error_msg}</div>'
+        )
+        # Render partial findings (already filed by a surviving phase).
+        _partial_findings = list(_state.get("qa_findings") or [])
+        if _partial_findings:
+            _base_url = D._jira_base_for(cfg, app0)
+            _f_links = "".join(
+                f'<a href="{html.escape(_base_url)}/browse/{html.escape(k)}" '
+                f'target=_blank rel=noopener>{html.escape(k)}</a>'
+                for k in _partial_findings
+            )
+            _n = len(_partial_findings)
+            qa_failure_html += (
+                f'<div style="margin-bottom:var(--s-2);font-size:var(--t-sm)">'
+                f'{_n} finding{"s" if _n != 1 else ""} already filed: {_f_links}</div>')
+        # One-click retry form: POST /api/qa with hidden app field.
+        _retry_app = _state.get("qa_app") or app0
+        qa_failure_html += (
+            '<form method=post action=/api/qa style="margin-top:var(--s-2);margin-bottom:0">'
+            f'<input type=hidden name=app value="{html.escape(_retry_app)}">'
+            '<button type=submit style="font-size:var(--t-xs);font-weight:600;padding:'
+            '4px 10px;border-radius:var(--r-sm);background:var(--bad);color:var(--badtxt);'
+            'border:none;cursor:pointer">&#128260; Retry</button></form>'
+            '</div>')
 
     # EU-103: per-project autopilot controls — read from the per-app run-state.
     # State is resolved here (not in the template) so the HTML is a pure string.
@@ -838,6 +1002,8 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
 .tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
+.qa-strip{{display:flex;align-items:center;gap:10px;padding:9px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline);color:#cfe0ff;font-size:13px;font-weight:650}}
+.qa-strip #qaelapsed{{font-variant-numeric:tabular-nums;color:var(--dim);font-weight:400}}
 .deploybar .dspin{{width:18px;height:18px;border:3px solid var(--accentline);border-top-color:var(--accent);border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
 .deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
 .deploybar .dsub{{color:var(--dim);font-weight:400;font-size:12px}}
@@ -894,7 +1060,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
   <span class=grow></span>
   {status}
 </div>
-{deploy_strip}"""
+{deploy_strip}{qa_strip}{qa_report_html}{qa_failure_html}"""
 
 
 def _chat_bubbles(notes: str) -> list[tuple[str, str]]:
@@ -1024,24 +1190,7 @@ _CHAT_STYLE = ("<style>"
 def _chat_tabs(active: str, npend: int = 0) -> str:
     badge = f'<span class=cbadge>{npend}</span>' if npend else ""
     g = "on" if active == "general" else ""
-    gr = "on" if active == "group" else ""
-    return (f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a>'
-            f'<a class="ctab {gr}" href="/group">&#128101; Group room</a></div>')
-
-
-def _group_inner(cfg: Config) -> str:
-    from . import council
-    msgs = council.group_messages(cfg, limit=30)   # EU-287: window to the recent messages, not the whole log
-    if not msgs:
-        return ('<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant engineers '
-                'weigh in. (The CTO is your 1:1 chat.)</div>')
-    out = ""
-    for who, text in msgs:
-        side = "you" if who == "you" else "unit"
-        label = "You" if who == "you" else html.escape(who)
-        out += (f'<div class="msg {side}"><div class=who>{label}</div>'
-                f'<div class=bub>{html.escape(text)}</div></div>')
-    return f'<div class=thread>{out}</div>'
+    return f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a></div>'
 
 
 def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None = None) -> str:
@@ -1083,7 +1232,11 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
                 '</div>'
             )
 
-        util = float(data.get("utilization", 0.0))
+        # EU-540: plan-probe rows carry 'utilization' (fraction); glm_budget_status()/budget_status()
+        # carry 'pct' as a fraction (used/cap) with no 'utilization' key. Prefer 'utilization' when
+        # present (plan rows), else fall back to 'pct' so the GLM gauge reflects real ledger burn
+        # instead of a dead 0%. Both are 0.0–1.0 fractions here.
+        util = float(data.get("utilization", data.get("pct", 0.0)) or 0.0)
         pct = int(util * 100)
         wpct = min(100, max(0, pct))
         tone, aria_label = _gauge_tone(util)
@@ -1170,21 +1323,21 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
     return (
         "<style>"
         ".dualprov{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:6px 0 20px}"
-        ".provcard{background:#12161f;border:1px solid #232936;border-radius:12px;padding:16px 18px}"
+        ".provcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}"
         ".phead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}"
-        ".pname{color:#e9ecf1;font-size:15px;font-weight:700}"
-        ".pbrand{color:#6b7480;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
+        ".pname{color:var(--ink);font-size:15px;font-weight:700}"
+        ".pbrand{color:var(--dim);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
         ".pstatus{display:flex;align-items:center;gap:8px;margin-bottom:10px}"
         ".picon{font-size:14px}.picon.ok{color:#3fb950}.picon.warn{color:#d99a2b}.picon.bad{color:#f0676b}"
-        ".pstat{color:#8a929f;font-size:12px;font-weight:500;text-transform:uppercase}"
-        ".ppct{color:#e9ecf1;font-size:13px;font-weight:600;margin-left:auto}"
+        ".pstat{color:var(--dim);font-size:12px;font-weight:500;text-transform:uppercase}"
+        ".ppct{color:var(--ink);font-size:13px;font-weight:600;margin-left:auto}"
         ".pgauge{margin:12px 0}"
-        ".pgbar{height:10px;background:#0d1119;border-radius:6px;overflow:hidden;border:1px solid #222a38}"
+        ".pgbar{height:10px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
         ".pgfill{display:block;height:100%;transition:width .3s ease}"
         ".pgfill.g{background:#3fb950}.pgfill.a{background:#d99a2b}.pgfill.r{background:#f0676b}"
-        ".premain{color:#6b7480;font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
-        ".pmeta{color:#6b7480;font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
-        ".pnote{color:#8a929f;font-size:12px;margin-top:8px}"
+        ".premain{color:var(--dim);font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
+        ".pmeta{color:var(--dim);font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
+        ".pnote{color:var(--dim);font-size:12px;margin-top:8px}"
         "@media(max-width:680px){.dualprov{grid-template-columns:1fr}}"
         "</style>"
         '<div class=dualprov>'

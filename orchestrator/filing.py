@@ -74,12 +74,36 @@ def make_block(proposals: list[dict]) -> str:
 # EU-284: an officer's declared severity maps to a Jira-native priority so a CRITICAL finding
 # doesn't rot at the project's default (Medium) priority. Absent/unknown severity -> None, which
 # leaves the backend's own default untouched (see JiraAdapter.create_task).
+# EU-586: the map knew only the CRITICAL/HIGH/MEDIUM/LOW vocabulary of the block contract above,
+# but the Reviewer speaks a DIFFERENT scale — reviewer.py:49 declares
+# `"severity": "blocker|major|minor"` and reviewer.py:1204 lowercases it, so after filing's
+# `.upper()` the value arrives as BLOCKER / MAJOR / MINOR. None of those matched, the lookup
+# returned None, and every reviewer finding landed on the project default. Measured on the board:
+# BLOCKER -> Medium, MAJOR -> Medium — a blocker-level finding sat at the same priority as a test
+# nitpick, competing directly with the Commander's own work.
+#
+# Both vocabularies are mapped here so neither officer can file blind.
+#
+# CRITICAL stays "Highest" — that is EU-284's deliberate contract (a critical finding must not rot
+# at the project default) and it is rare AND pages the Commander, so it is not queue noise. The
+# REVIEWER scale is the high-volume one (every build can emit minors), so it is capped at High: the
+# unit's routine self-findings must never outrank a ticket the Commander himself marked Highest.
 _SEVERITY_TO_PRIORITY = {
+    # the findings-block contract (officers writing an explicit severity)
     "CRITICAL": "Highest",
     "HIGH": "High",
     "MEDIUM": "Medium",
     "LOW": "Low",
+    # the Reviewer's quality-issue scale (reviewer.py:49) — previously unmapped
+    "BLOCKER": "High",
+    "MAJOR": "Medium",
+    "MINOR": "Low",
 }
+
+# Severities that page the Commander when NEWLY filed (see FilingResult.filed_critical). EU-586:
+# BLOCKER joins CRITICAL — a blocker-level finding filed silently at the project default was the
+# exact failure this pair guards against.
+_PAGING_SEVERITIES = ("CRITICAL", "BLOCKER")
 
 
 def parse_tickets(report: str) -> tuple[list[dict], str]:
@@ -269,7 +293,7 @@ def file_findings(app: AppConfig, officer_label: str, report: str, audit=None) -
             if key:
                 res.filed.append(key)
                 res.lines.append(f"✓ {key} filed — {title}")
-                if severity == "CRITICAL":
+                if severity in _PAGING_SEVERITIES:
                     res.filed_critical.append((key, title))
             else:
                 res.failed.append((title, "filing not supported"))
