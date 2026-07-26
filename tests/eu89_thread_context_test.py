@@ -155,7 +155,8 @@ with tempfile.TemporaryDirectory() as _td:
 
     asyncio.run(council.respond_to_commander(cfg, "approve AUTO-5"))
 
-    injected_prompt = captured_prompts[0] if captured_prompts else ""
+    # EU-602: _needs_specialist also calls run_agent (triage), so use LAST captured prompt (main CTO call).
+    injected_prompt = captured_prompts[-1] if captured_prompts else ""
     check("thread context appears in the LLM prompt",
           "Thread context" in injected_prompt, repr(injected_prompt[:400]))
     check("recent chat turns are injected",

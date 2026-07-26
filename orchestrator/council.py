@@ -971,6 +971,23 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     # message, so 'create it' / 'approve' / 'yes go ahead' can resolve without re-asking.
     _msg_refs = _TICKET_KEY.findall(message or "")
     thread_ctx = recent_thread_context(cfg, ticket_ref=_msg_refs[0] if _msg_refs else None)
+    # Two-pass specialist consult (EU-602): classify → fetch brief → fold into CTO grounding.
+    # Always runs _needs_specialist (the classifier is cheap); consult only fires when keyed.
+    try:
+        officer_key = await _needs_specialist(cfg, message)
+        if officer_key:
+            answer = await _consult_specialist(cfg, message, officer_key)
+            if answer:
+                consult_ctx = (
+                    f"Specialist grounding — {display(officer_key)} advises "
+                    f"(use as context, don't quote verbatim):\n{answer}"
+                )
+            else:
+                consult_ctx = ""
+        else:
+            consult_ctx = ""
+    except Exception:  # noqa: BLE001 — crash-safe; never propagate consult errors
+        consult_ctx = ""
     apps_brief = "\n".join(
         f"- {a.name}: repo {getattr(a, 'repo_path', '?')} · branches "
         f"{getattr(a, 'base_branch', '?')}/{getattr(a, 'protected_branch', '?')}"
@@ -991,6 +1008,8 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
         *([f"Thread context (recent turns + pending proposals for this ticket — "
            f"use this to resolve 'it' / 'approve' / 'create it' without re-asking):\n{thread_ctx}\n"]
           if thread_ctx else []),
+        *([f"Specialist grounding (ground your answer in this context, don't quote verbatim):\n{consult_ctx}\n"]
+          if consult_ctx else []),
         *([f"What you've already discussed with him:\n{notes}\n"] if notes else []),
         f"The Commander says: {message}", "",
         "Reply like a colleague — short and natural.",
