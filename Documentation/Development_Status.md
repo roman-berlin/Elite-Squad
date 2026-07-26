@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-618 · Elite-Unit · • All five ACs met: multi-run chronological merge, empty/missing day → 200 {entries:[]}, traversal guard mirroring /api/open-logs, and unit tests for merge/ordering, missing-stage fallback, empty day, and traversal.
 - 2026-07-26 · EU-598 · Elite-Unit · • All 3 ACs verified end-to-end across the epic: card removal (EU-594), CTO-only entry + internal consult with 'asked the X' note (EU-600), and this ticket's doc sweep (AC3).
 - 2026-07-26 · EU-608 · Elite-Unit · • `group_chat` + all 9 dead helpers + `_group_inner` deleted; grep confirms zero references in orchestrator/. · 🔗 /chat — verify group room link no longer appears in chat tabs or Talk panel
 - 2026-07-26 · EU-604 · Elite-Unit · • Comment fix (council.py:1326-1328) is accurate — wiring it describes is real and already landed (EU-602). · 🔗 /chat — send "is there a secret leaked in the repo?" expecting one 🎖️ reply with "(asked the Security Engineer to check this.)" appended below the answer
