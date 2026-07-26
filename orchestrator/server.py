@@ -611,6 +611,48 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         subprocess.Popen(["open", str(requested)], close_fds=True)   # noqa: S603,S607
         return jsonify({"ok": True, "path": str(requested)})
 
+    @app.get("/api/day-log")
+    def day_log_api() -> Response:
+        """EU-618: aggregate every per-ticket run-log under one day into a single stream.
+
+        Query params:
+            app : project name (slugified, resolved against log_root)
+            date: ``YYYY-MM-DD`` — validated with ``datetime.date.fromisoformat``
+
+        Security:
+            Path traversal guard mirrors /api/open-logs: resolved path must stay under
+            ``log_root(cfg)``; anything outside returns 403.
+
+        Returns JSON ``{"date": <date>, "entries": [{ticket, stage, time, text}, ...]}``.
+        An empty/missing day folder returns ``{"date": <date>, "entries": []}`` with 200.
+        """
+        import datetime
+        from flask import jsonify
+        from . import run_logger as _rl
+
+        # Validate date format upfront (pure parse, no IO yet).
+        try:
+            datetime.date.fromisoformat(date_param := request.args.get("date", "").strip())
+        except (ValueError, TypeError):
+            return Response("Bad 'date' parameter.", status=400, mimetype="text/plain")
+
+        date_str = date_param
+        app_name = (request.args.get("app") or "").strip()
+
+        root = _rl.log_root(cfg)
+        app_slug = _rl._safe_slug(app_name or "default")
+        requested = (root / app_slug / date_str).resolve()
+
+        # Path traversal guard: resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+
+        data = _rl.read_day_log(cfg, app_name or None, date_str)
+        return jsonify(data)
+
     @app.get("/api/autopilot")
     def autopilot_status_api() -> Response:
         """Live autopilot state: PID-based daemon check + in-memory cockpit flags.

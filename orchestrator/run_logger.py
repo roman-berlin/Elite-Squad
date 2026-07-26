@@ -11,10 +11,17 @@ Config keys (set in config.yaml or the Config dataclass):
                          on every run start.  0 or absent = disabled.
 
 Typical log path:  logs/automatixy/2026-06-29/AUTO-42-153000.log
+
+Per-day aggregation (EU-618):
+    ``read_day_log(cfg, app_name, date_str)`` reads every run-log file under a day folder,
+    merges them into one chronological stream, and attributes each entry ``{ticket, stage,
+    time, text}``.  Stage comes from optional inline stage markers; lines without a known
+    marker are kept with ``stage: ""`` and never silently dropped.
 """
 from __future__ import annotations
 
 import datetime
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -257,3 +264,158 @@ def _purge_old_logs(app_dir: Path, retention_days: int, now: datetime.datetime) 
                 shutil.rmtree(entry)
             except Exception:  # noqa: BLE001
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Per-day log aggregation (EU-618)
+# ---------------------------------------------------------------------------
+# Conservative stage-marker vocabulary.  Matches common banner forms:
+#   [Build] / <Gate> / Stage: Review / [Land] — case-sensitive exact matches.
+# Each token becomes its capitalised form in the output entry.
+_STAGE_TOKENS = ("Build", "Gate", "Review", "Land", "Test", "Lint",
+                 "Analyse", "Deploy", "Merge")
+_STAGE_RE = re.compile(
+    r'\[(?P<st>' + '|'.join(_STAGE_TOKENS) + r')\]'
+    r'|<(?P<angle>' + '|'.join(_STAGE_TOKENS) + r')>'
+    r'|Stage:\s*(?P<colon>' + '|'.join(_STAGE_TOKENS) + r')\b',
+)
+
+
+def _format_time(hhmmss: str) -> str:
+    """Render an HHMMSS string as ``HH:MM:SS``."""
+    if len(hhmmss) == 6:
+        return f"{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:]}"
+    return hhmmss
+
+
+def _parse_ticket_time(name: str) -> tuple[str, str]:
+    """Extract ``(ticket_slug, time_str)`` from a filename stem.
+
+    Pattern: ``<ticket>-<HHMMSS>``, where ticket may itself contain dashes.
+    The HHMMSS part is exactly six digits immediately before ``.log``.
+    When the suffix isn't 6-digit, the entire stem is the ticket and
+    time defaults to empty-string (file ordered by mtime later).
+    """
+    m = re.match(r'^(.+)-(\d{6})\.log$', name)
+    if m:
+        return m.group(1), m.group(2)
+    stem = Path(name).stem  # drops .log
+    return stem, ""
+
+
+def _scan_file(filepath: Path) -> list[dict]:
+    """Read *filepath* line-by-line, attributing each with ticket, stage, time.
+
+    Best-effort but NEVER silent: an unreadable file or a mid-file read failure
+    yields one attributed ``[read error]`` marker entry (and keeps the lines
+    already read) so a broken file is visible in the stream instead of vanishing.
+    """
+    entries: list[dict] = []
+    ticket, hhmmss = _parse_ticket_time(filepath.name)
+    time_str = _format_time(hhmmss)
+    current_stage = ""
+    try:
+        fh = filepath.open("r", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [{
+            "ticket": ticket,
+            "stage": "",
+            "time": time_str,
+            "text": f"[read error] {filepath.name}: {exc.__class__.__name__}",
+        }]
+    with fh:
+        while True:
+            try:
+                raw = fh.readline()
+            except OSError as exc:
+                # Mid-file failure: keep the lines read so far; mark the gap.
+                entries.append({
+                    "ticket": ticket,
+                    "stage": current_stage,
+                    "time": time_str,
+                    "text": f"[read error] {filepath.name}: {exc.__class__.__name__}",
+                })
+                break
+            if not raw:
+                break
+            text = raw.rstrip("\n\r")
+            m = _STAGE_RE.search(text)
+            if m:
+                current_stage = m.group("st") or m.group("angle") or m.group("colon")
+            entries.append({
+                "ticket": ticket,
+                "stage": current_stage,
+                "time": time_str,
+                "text": text,
+            })
+    return entries
+
+
+def _file_sort_key(entry: Path, day_date: datetime.date | None) -> float:
+    """Chronological sort key for *entry* in seconds-since-midnight of its day.
+
+    HHMMSS-named files use the embedded time; other files fall back to their
+    mtime rebased onto the day's local midnight, so both kinds interleave on
+    one scale (a raw mtime is ~10⁹ while an HHMMSS int tops out at 235959,
+    which used to push every fallback file behind every named file).
+    """
+    _, hhmmss = _parse_ticket_time(entry.name)
+    if hhmmss:
+        key = float(int(hhmmss[:2]) * 3600 + int(hhmmss[2:4]) * 60 + int(hhmmss[4:]))
+    else:
+        try:
+            key = float(entry.stat().st_mtime)
+        except OSError:
+            key = 0.0
+        if day_date is not None:
+            midnight = datetime.datetime.combine(day_date, datetime.time.min).timestamp()
+            key -= midnight
+    return min(max(key, 0.0), 86399.0)
+
+
+def read_day_log(cfg: Config, app_name: str | None, date_str: str) -> dict:
+    """Read all run-log files under one day folder and return a merged chronological stream.
+
+    Parameters
+    ----------
+    cfg : Config
+        Configuration (provides ``log_root`` anchor).
+    app_name : str | None
+        Application name; slugified via ``_safe_slug`` then resolved against
+        ``log_root(cfg)/<app>/YYYY-MM-DD/``.
+    date_str : str
+        Date in ``YYYY-MM-DD`` format.
+
+    Returns
+    -------
+    dict
+        ``{"date": <date_str>, "entries": [{ticket, stage, time, text}, ...]}``
+        sorted chronologically (HHMMSS first, mtime fallback — both normalised
+        to seconds-since-midnight so the two interleave; filename breaks ties),
+        preserving in-file line order.
+    """
+    root = log_root(cfg)
+    app_slug = _safe_slug(app_name or "default")
+    day_dir = root / app_slug / date_str
+
+    if not day_dir.is_dir():
+        return {"date": date_str, "entries": []}
+
+    try:
+        day_date = datetime.date.fromisoformat(date_str)
+    except ValueError:
+        day_date = None
+
+    files: list[tuple[float, str, Path]] = []  # (sort_key, full_name, path)
+    for entry in day_dir.iterdir():
+        if not entry.is_file() or not entry.name.lower().endswith(".log"):
+            continue
+        files.append((_file_sort_key(entry, day_date), entry.name, entry))
+
+    files.sort(key=lambda t: (t[0], t[1]))
+
+    result: list[dict] = []
+    for _, _name, fpath in files:
+        result.extend(_scan_file(fpath))
+
+    return {"date": date_str, "entries": result}
