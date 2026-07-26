@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-632 · Elite-Unit · • AC1: toolbar Open-logs → /logs/days?app=, Mac gate removed, verified on/off-Mac by eu299+lean_cockpit. · 🔗 /warroom — "📂 Open logs" in the toolbar navigates to `/logs/days?app=<app>` (verify off-Mac too, e.g. the VPS); a run card's "📂 open log" link lands on `/logs/day?...&ticket=<id>` showing only that ticket's entries with a "show all entries" link back.
 - 2026-07-26 · EU-637 · Elite-Unit · • All 4 functional ACs verified directly against source: unshift/slice(0,1000)/scrollTop-removal all correct, CSS classing + escaping + placeholder guard + done/error handlers untouched. · 🔗 /warroom (the EU-200 Live Run Log panel — verify newest streamed line renders at top; older lines scroll down naturally without auto-scroll)
 - 2026-07-26 · EU-631 · Elite-Unit · • Format=txt inherits the HTML route's date/traversal validation (verified: branch runs after both checks). • Content-Disposition filename uses slugged app + validated date — no header-injection risk. · 🔗 /logs/day?app=alpha&date=YYYY-MM-DD (toggle format=txt to verify the download control)
 - 2026-07-26 · EU-635 · Elite-Unit · • Implements PM decision (b) exactly: tuple-keyed open_run_log + additive _RUN_LOG_KEY ContextVar routing write_line only, UI attribution unchanged.
