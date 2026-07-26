@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-629 · Elite-Unit · • Route mirrors day_log_api's exact traversal-guard pattern (log_root → _safe_slug → relative_to → 403) — verified against source, correct.
 - 2026-07-26 · EU-618 · Elite-Unit · • All five ACs met: multi-run chronological merge, empty/missing day → 200 {entries:[]}, traversal guard mirroring /api/open-logs, and unit tests for merge/ordering, missing-stage fallback, empty day, and traversal.
 - 2026-07-26 · EU-598 · Elite-Unit · • All 3 ACs verified end-to-end across the epic: card removal (EU-594), CTO-only entry + internal consult with 'asked the X' note (EU-600), and this ticket's doc sweep (AC3).
 - 2026-07-26 · EU-608 · Elite-Unit · • `group_chat` + all 9 dead helpers + `_group_inner` deleted; grep confirms zero references in orchestrator/. · 🔗 /chat — verify group room link no longer appears in chat tabs or Talk panel
