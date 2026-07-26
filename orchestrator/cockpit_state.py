@@ -30,8 +30,8 @@ from dataclasses import asdict, dataclass, field
 # ``get_state(app)`` / ``run_lock_for(app)`` / ``claim_run(app)``.
 # --------------------------------------------------------------------------------------------------
 
-_STATE_KEYS = ("active", "last_msg", "last_result", "last_result_record", "dry_run",
-               "last_activity", "run_started", "stop_event", "log_seq",
+_STATE_KEYS = ("active", "last_msg", "last_msg_record", "last_result", "last_result_record",
+               "dry_run", "last_activity", "run_started", "stop_event", "log_seq",
                "autopilot_mode", "autopilot_on", "log_path",
                "plan_limit_hit", "plan_limit_reset_at",
                # EU-579/582: QA run-state fields — set/reset/tracked by qa_api()._bg
@@ -42,9 +42,10 @@ _STATE_KEYS = ("active", "last_msg", "last_result", "last_result_record", "dry_r
 
 def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
-    return {"active": False, "last_msg": "", "last_result": "", "last_result_record": None,
-            "dry_run": None, "last_activity": None, "run_started": None, "stop_event": None,
-            "log_seq": 0, "autopilot_mode": None, "autopilot_on": False, "log_path": None,
+    return {"active": False, "last_msg": "", "last_msg_record": None, "last_result": "",
+            "last_result_record": None, "dry_run": None, "last_activity": None,
+            "run_started": None, "stop_event": None, "log_seq": 0,
+            "autopilot_mode": None, "autopilot_on": False, "log_path": None,
             "plan_limit_hit": False, "plan_limit_reset_at": None,
             # EU-579/582: QA run-state defaults
             "qa_started": None, "qa_phase": None, "qa_error_phase": None,

@@ -98,6 +98,38 @@ def set_last_result(app: str | None, tone: str, text: str) -> None:
     st["last_result_record"] = {"tone": tone, "text": text, "timestamp": time.time()}
 
 
+# EU-656: structured last-msg storage. The old control-bar note (cockpit_views._control_bar)
+# guessed tone by substring-checking ``last_msg``'s text against word lists — which painted
+# success text containing "error" red and a "0 failed" summary red. The fix: the WRITER states
+# the tone explicitly (it knows whether the outcome was a failure), and the control bar renders
+# FROM the stored record only — zero substring inference at the write site OR the read site.
+# Mirrors ``set_last_result`` (EU-653): same ``(app, tone, text)`` signature, same validated
+# tone vocabulary, and the same dual write — plain text into ``st['last_msg']`` (every existing
+# reader still works) AND the structured record into ``st['last_msg_record']``. Failure-emitting
+# write sites (exceptions, backend blocks, start refusals) pass tone="error" so the note still
+# renders red; success/confirmation sites pass "ok"; config warnings pass "warn".
+
+
+def set_last_msg(app: str | None, tone: str, text: str) -> None:
+    """Store a sticky control-bar note with an explicit structural tone.
+
+    Mirrors :func:`set_last_result`: validates ``tone`` against :data:`LAST_RESULT_TONES`
+    (the shared ok/error/warn vocabulary) and raises ``ValueError`` *before* touching any state
+    so an invalid call leaves everything unchanged.
+
+    Writes::
+
+        st['last_msg']         = text          # plain string — every existing reader still works
+        st['last_msg_record']  = {tone, text, timestamp}  # the control bar renders from this
+    """
+    if tone not in LAST_RESULT_TONES:
+        raise ValueError(
+            f"invalid last_msg tone {tone!r}: must be one of {sorted(LAST_RESULT_TONES)}")
+    st = get_state(app)
+    st["last_msg"] = text
+    st["last_msg_record"] = {"tone": tone, "text": text, "timestamp": time.time()}
+
+
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
@@ -551,17 +583,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         st = get_state(key)
         busy = "a run is already in progress for this project — wait for it to finish, then start the new one"
         if is_active(key):
-            st["last_msg"] = busy
+            set_last_msg(key, "warn", busy)   # EU-656: refusal = neutral/dim note, tone not text
             return None
         if key is not None and is_active(None):
             # A unit-wide run (autopilot / Telegram resume) holds the legacy global guard.
-            _state["last_msg"] = ("a run is already in progress — stop it and wait for it to finish, "
-                                  "then start the new one")
+            set_last_msg(None, "warn",
+                         "a run is already in progress — stop it and wait for it to finish, "
+                         "then start the new one")
             return None
         if not claim_run(key, stop_event=stop_event):
             # Lost the start race (TOCTOU) or hit the max-parallel-runs cap.
-            st["last_msg"] = busy if is_active(key) else (
-                "too many projects are running at once — wait for one to finish, then start this one")
+            set_last_msg(key, "warn", busy if is_active(key) else (
+                "too many projects are running at once — wait for one to finish, then start this one"))
             return None
         return st
 
@@ -947,7 +980,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         _mode_param = (request.form.get("mode") or "").strip() or None
         if _mode_param is not None:
             if _mode_param not in ("choose", "drain"):
-                st["last_msg"] = f"invalid autopilot mode {_mode_param!r} — expected 'choose' or 'drain'"
+                set_last_msg(key, "warn",   # EU-656
+                             f"invalid autopilot mode {_mode_param!r} — expected 'choose' or 'drain'")
                 return redirect(_redir)
             st["autopilot_mode"] = _mode_param
 
@@ -964,26 +998,28 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
             # ── Auto-drain: start the continuous per-app autopilot ────────────────────────────────
             if ap_on:
-                st["last_msg"] = "autopilot is already running for this project"
+                set_last_msg(key, "warn", "autopilot is already running for this project")   # EU-656
                 return redirect(_redir)
             if not health.summary(cfg)["healthy"]:
-                st["last_msg"] = "autopilot blocked — fix the health problems first"
+                set_last_msg(key, "warn", "autopilot blocked — fix the health problems first")   # EU-656
                 return redirect(_redir)
             # Detached-daemon guard (EU-73), now per-app aware (EU-103): refuse only for a FOREIGN
             # daemon process (a launchd keepalive / a terminal that owns the whole queue), NOT this
             # cockpit's own in-process autopilot threads — those are tracked per-app and run in
             # parallel, so starting Elite-Unit while automatixy already runs must NOT be refused here.
             if ap.daemon_is_external():
-                st["last_msg"] = ("autopilot is already running as a detached daemon — stop it first "
-                                  "(unload the launchd keepalive agent, or close the terminal it runs "
-                                  "in) before starting another")
+                set_last_msg(key, "warn",   # EU-656
+                             "autopilot is already running as a detached daemon — stop it first "
+                             "(unload the launchd keepalive agent, or close the terminal it runs "
+                             "in) before starting another")
                 return redirect(_redir)
             # Cross-guard: a unit-wide run (an all-apps autopilot / Telegram resume on the None key)
             # blocks a per-app autopilot start too — it may touch this project. A DIFFERENT project's
             # run does NOT block (that is the per-app parallelism this ticket is about).
             if key is not None and is_active(None):
-                st["last_msg"] = ("a run is already in progress — stop it and wait for it to finish, "
-                                  "then start autopilot")
+                set_last_msg(key, "warn",   # EU-656
+                             "a run is already in progress — stop it and wait for it to finish, "
+                             "then start autopilot")
                 return redirect(_redir)
 
             ev = threading.Event()
@@ -991,16 +1027,19 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ap_cfg.dry_run = False     # continuous autopilot must be live (else it re-picks forever)
             _berr = _resolve_run_backend(ap_cfg, key)  # EU-190/EU-223: THIS app's (or global, key=None)
             if _berr:                              # sticky Model pick (blocks an unconfigured GLM), so
-                st["last_msg"] = _berr             # two per-app drains (EU-103) each get their own.
+                # EU-656: explicit error tone — the note renders red from the record, not the text.
+                set_last_msg(key, "error", _berr)  # two per-app drains (EU-103) each get their own.
                 return redirect(_redir)
             # Claim THIS project's run slot atomically (per-app TOCTOU guard + the cross-project
             # parallel cap). Flask is threaded=True, so two near-simultaneous Starts for the same
             # project both pass the checks above; claim_run lets exactly one win. A manual run holding
             # this app's slot also makes the claim fail (the two can't run_loop the same app at once).
             if not claim_run(key, dry_run=False, stop_event=ev):
-                st["last_msg"] = ("a run is already in progress for this project — wait for it to "
-                                  "finish, then start autopilot") if is_active(key) else (
-                    "too many projects are running at once — wait for one to finish, then start this one")
+                set_last_msg(key, "warn",   # EU-656
+                             ("a run is already in progress for this project — wait for it to "
+                              "finish, then start autopilot") if is_active(key) else (
+                                 "too many projects are running at once — wait for one to finish, "
+                                 "then start this one"))
                 return redirect(_redir)
             # The dedicated autopilot signal (distinct from a manual run's bare ``active``). Set
             # synchronously so the first render after Start already shows Autopilot ON; the loop sets it
@@ -1011,7 +1050,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 try:
                     asyncio.run(ap.autopilot(ap_cfg, key, once=False, stop_event=ev))
                 except Exception as exc:  # noqa: BLE001
-                    st["last_msg"] = f"autopilot error: {exc}"
+                    set_last_msg(key, "error", f"autopilot error: {exc}")   # EU-656: red from tone
                 finally:
                     st["autopilot_on"] = False   # autopilot off for this app
                     release_run(key)             # clears active / run_started / stop_event for THIS app
@@ -1038,10 +1077,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout, so this is a
                 # verified outcome (not launchctl's optimistic exit code) — surface it to the operator.
                 if stopped:
-                    st["last_msg"] = "✓ external launchd daemon confirmed stopped — it will not respawn."
+                    set_last_msg(key, "ok",   # EU-656: verified success — green from tone
+                                 "✓ external launchd daemon confirmed stopped — it will not respawn.")
                 else:
-                    st["last_msg"] = ("⚠ couldn't confirm the external launchd daemon stopped — "
-                                      "KeepAlive may respawn it; check `launchctl list` manually.")
+                    # EU-656: an unconfirmed stop is a failure outcome — explicit error tone so
+                    # the note still renders red (previously the ⚠/error text forced it red).
+                    set_last_msg(key, "error",
+                                 "⚠ couldn't confirm the external launchd daemon stopped — "
+                                 "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         if action == "stop" and ap_on:
@@ -1061,10 +1104,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 stopped = ap._stop_launchd_daemon()
                 # EU-232: verified outcome (see the drain branch above) — surface it to the operator.
                 if stopped:
-                    st["last_msg"] = "✓ external launchd daemon confirmed stopped — it will not respawn."
+                    set_last_msg(key, "ok",   # EU-656: verified success — green from tone
+                                 "✓ external launchd daemon confirmed stopped — it will not respawn.")
                 else:
-                    st["last_msg"] = ("⚠ couldn't confirm the external launchd daemon stopped — "
-                                      "KeepAlive may respawn it; check `launchctl list` manually.")
+                    # EU-656: an unconfirmed stop is a failure outcome — explicit error tone so
+                    # the note still renders red (previously the ⚠/error text forced it red).
+                    set_last_msg(key, "error",
+                                 "⚠ couldn't confirm the external launchd daemon stopped — "
+                                 "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         # toggle / unknown action → no-op (the mode persist above already took effect).
@@ -1458,28 +1505,28 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         mode_raw = (request.form.get("mode") or "").strip().lower()
         if mode_raw in ("hybrid", "backup"):
             if not backend_pref.get_secondary(cfg):
-                get_state(None)["last_msg"] = "Set a Secondary model first, then pick Hybrid or Backup."
+                set_last_msg(None, "warn", "Set a Secondary model first, then pick Hybrid or Backup.")   # EU-656
             else:
                 backend_pref.set_mode(mode_raw, cfg)
-                get_state(None)["last_msg"] = (
-                    "Hybrid — both models work per task: plan/review on the Main, building on the "
-                    "Secondary." if mode_raw == "hybrid" else
-                    "Backup — everything runs on the Main; the Secondary only takes over if the "
-                    "Main hits its limit.")
+                set_last_msg(None, "ok",   # EU-656: confirmation of a persisted mode change
+                             "Hybrid — both models work per task: plan/review on the Main, building on the "
+                             "Secondary." if mode_raw == "hybrid" else
+                             "Backup — everything runs on the Main; the Secondary only takes over if the "
+                             "Main hits its limit.")
             return redirect("/")
         # 2026-07-19: the Secondary selector posts secondary=<id|none> instead of backend=.
         sec_raw = (request.form.get("secondary") or "").strip()
         if sec_raw:
             if sec_raw.lower() == "none":
                 backend_pref.set_secondary(None, cfg)
-                get_state(None)["last_msg"] = "Secondary model cleared — single-model mode."
+                set_last_msg(None, "ok", "Secondary model cleared — single-model mode.")   # EU-656
             else:
                 from .model_registry import ModelRegistry as _MR
                 _sbk = backends.resolve_selection(sec_raw, _MR(cfg))
                 backend_pref.set_secondary(_sbk, cfg)
-                get_state(None)["last_msg"] = (
-                    f"Secondary model set to {_sbk}. Pick how they work: Hybrid (both, per task) "
-                    "or Backup (Secondary only if the Main hits its limit).")
+                set_last_msg(None, "ok",   # EU-656
+                             f"Secondary model set to {_sbk}. Pick how they work: Hybrid (both, per task) "
+                             "or Backup (Secondary only if the Main hits its limit).")
             return redirect("/")
         raw = (request.form.get("backend") or "").strip()
         app_param = (request.form.get("app") or "").strip() or None
@@ -1487,7 +1534,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             # "Inherit global" — clear this app's override; it now resolves the global pick.
             backend_pref.set_active(None, cfg, app_name=app_param)
             _state.pop("model_alert", None)
-            get_state(None)["last_msg"] = f"{app_param}: Model now inherits the global pick."
+            set_last_msg(None, "ok", f"{app_param}: Model now inherits the global pick.")   # EU-656
             return redirect("/")
         # EU-236: resolve against the registry so a KNOWN custom-backend id is persisted VERBATIM,
         # not flattened to opus by normalize(); opus/glm aliases still canonicalize, unknown -> opus.
@@ -1512,9 +1559,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         else:
             _rec = ModelRegistry(cfg).get(bk)
             _label = f"{(_rec or {}).get('display_name') or bk} (custom backend)."
-        get_state(None)["last_msg"] = (
-            f"{app_param}: Model set to {_label} (this project only)." if app_param
-            else "Model backend set to " + _label)
+        set_last_msg(None, "ok",   # EU-656: persisted backend confirmation — green from tone
+                     f"{app_param}: Model set to {_label} (this project only)." if app_param
+                     else "Model backend set to " + _label)
         return redirect("/")
 
     @app.post("/api/continue-on-alternate")
@@ -1553,7 +1600,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         last = _state.get("last_run") or {}
         app_name = _scope(last.get("app"))
         keys = [k for k in (last.get("tickets") or []) if k]
-        msg = f"Model backend switched to {bk.upper()}."
+        msg, tone = f"Model backend switched to {bk.upper()}.", "warn"
         if app_name and keys:
             import copy
             rcfg = copy.copy(cfg)
@@ -1569,7 +1616,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                            f"{', '.join(keys)} was not re-started.")
             except Exception as exc:  # noqa: BLE001
                 msg = f"Switched to {bk.upper()}, but auto-resume failed: {exc}"
-        get_state(None)["last_msg"] = msg
+                tone = "error"   # the auto-resume failed → red note (previously the text forced it)
+        # EU-656: explicit tone — a neutral confirmation stays dim; only a FAILED auto-resume
+        # is red. The control bar renders from this record, never from the message's text.
+        set_last_msg(None, tone, msg)
         return redirect("/")
 
     # ── EU-235: /models — cockpit CRUD for user-defined model backends ──────────────────────────
@@ -1630,9 +1680,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if not str(fields.get("tier") or "").strip():
             fields["tier"] = backends.classify_model_tier(
                 fields.get("display_name", ""), fields.get("model_id", ""), cfg)
-            get_state(None)["last_msg"] = (
-                f"Model backend saved — auto-classified as {fields['tier']}-tier "
-                "(editable on the backend's Edit form).")
+            set_last_msg(None, "ok",   # EU-656
+                         f"Model backend saved — auto-classified as {fields['tier']}-tier "
+                         "(editable on the backend's Edit form).")
         registry = ModelRegistry(cfg)
         record = registry.add({**fields, "credential_ref": _PENDING_REF})
         # Stores the raw key in the Secrets store and rewrites credential_ref to the real
@@ -1719,7 +1769,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
-            st["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            set_last_msg(app_name or None, "warn",   # EU-656: refusal — neutral note, banner explains
+                         "blocked — fix the health problems first (see the banner)")
             return redirect("/")
         import copy
         rcfg = copy.copy(cfg)        # per-run config — never mutate the shared cfg
@@ -1732,14 +1783,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         _berr = _resolve_run_backend(rcfg, app_name)   # EU-190/EU-223: this app's (or global) backend
         if _berr:
             release_run(app_name or None)
-            st["last_msg"] = _berr
+            set_last_msg(app_name or None, "error", _berr)   # EU-656: red from tone, not text
             return redirect("/")
         try:
             worklist = intake.from_tickets(rcfg, app_name, keys)
         except Exception as exc:  # noqa: BLE001
             release_run(app_name or None)
             st["dry_run"] = None
-            st["last_msg"] = f"could not start: {exc}"
+            set_last_msg(app_name or None, "error", f"could not start: {exc}")   # EU-656
             return redirect("/")
 
         # EU-191: remember the last cockpit run so the plan-limit prompt can auto-resume it on an
@@ -1763,7 +1814,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
-                st["last_msg"] = str(exc)
+                set_last_msg(app_name or None, "error", str(exc))   # EU-656: red from tone
             finally:
                 if audit is not None:
                     audit.record("run_end", tickets=len(reports or []))
@@ -1807,7 +1858,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
-            st["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            set_last_msg(app_name or None, "warn",   # EU-656: refusal — neutral note, banner explains
+                         "blocked — fix the health problems first (see the banner)")
             return redirect("/")
         kind = request.form.get("kind", "task")
         text = (request.form.get("text") or "").strip()
@@ -1823,7 +1875,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         _berr = _resolve_run_backend(rcfg, app_name)   # EU-190/EU-223: this app's (or global) backend
         if _berr:
             release_run(app_name or None)
-            st["last_msg"] = _berr
+            set_last_msg(app_name or None, "error", _berr)   # EU-656: red from tone, not text
             return redirect("/")
         try:
             if kind == "task" and ttype == "bug":
@@ -1838,7 +1890,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception as exc:  # noqa: BLE001
             release_run(app_name or None)
             st["dry_run"] = None
-            st["last_msg"] = f"could not start: {exc}"
+            set_last_msg(app_name or None, "error", f"could not start: {exc}")   # EU-656
             return redirect("/")
 
         def _bg():
@@ -1858,7 +1910,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
-                st["last_msg"] = str(exc)
+                set_last_msg(app_name or None, "error", str(exc))   # EU-656: red from tone
             finally:
                 if audit is not None:
                     audit.record("run_end", tickets=len(reports or []))
@@ -1892,18 +1944,20 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # EU-64: stop THIS project's run (the Stop button lives on a per-tab board). Resolve the tab's
         # project read-only (don't steal the active tab), then signal that app's stop Event.
         appq = _board_project(request.form.get("app"))
-        st = get_state(appq or None)
+        key = appq or None
+        st = get_state(key)
         ev = st.get("stop_event")
         if ev is None and not (request.form.get("app") or "").strip():
             # The Stop form may not carry an ?app yet — fall back to the sole stoppable run, if there
             # is exactly one (keeps Stop working in the single-run case during the per-project rollout).
             stoppable = [k for k in active_runs() if get_state(k).get("stop_event") is not None]
             if len(stoppable) == 1:
-                st = get_state(stoppable[0])
+                key = stoppable[0]
+                st = get_state(key)
                 ev = st.get("stop_event")
         if ev is not None:
             ev.set()
-            st["last_msg"] = "stopping after the current step — DEV untouched, no merge"
+            set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
         return redirect("/")
 
     @app.get("/standup")
@@ -2083,7 +2137,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     from . import council
                     asyncio.run(council.hold_meeting(cfg, topic, officers=officers, audit=audit))
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"meeting failed: {exc}"
+                    set_last_msg(None, "error", f"meeting failed: {exc}")   # EU-656: red from tone
                 finally:
                     _state["meeting"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -2098,10 +2152,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         appq = _scope(request.form.get("app"))
         app_name = appq or _first_shippable(cfg)
         if not app_name:
-            _state["last_msg"] = ("No project to QA — configure a product repo first.")
+            set_last_msg(None, "warn", "No project to QA — configure a product repo first.")   # EU-656
             return redirect("/")
         if _claim_flag("qa"):   # EU-361 pattern: claimed here, not inside _bg
-            _state["last_msg"] = QA_STATUS_TEMPLATE.format(app=app_name)
+            set_last_msg(None, "warn", QA_STATUS_TEMPLATE.format(app=app_name))   # EU-656: status run → dim
             # EU-579: RESET run-state at claim time — a new run must never show stale values.
             _state["qa_started"] = time.time()
             _state["qa_phase"] = None
@@ -2392,16 +2446,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             try:
                 res = approvals.approve_proposals(cfg, batch, titles)
                 if res is None:
-                    _state["last_msg"] = "That proposal batch was already actioned."
+                    set_last_msg(None, "warn", "That proposal batch was already actioned.")   # EU-656
                 else:
                     parts = [f"Filed {res.filed_n} ticket(s)"]
                     if res.deduped_n:
                         parts.append(f"{res.deduped_n} already open")
                     if res.failed_n:
                         parts.append(f"{res.failed_n} failed")
-                    _state["last_msg"] = ", ".join(parts) + "."
+                    # EU-656: tone from the outcome, NOT the text — the old substring check
+                    # painted ANY "… failed" mention red; only a real failed_n does now.
+                    set_last_msg(None, "error" if res.failed_n else "ok", ", ".join(parts) + ".")
             except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = f"approve failed: {exc}"
+                set_last_msg(None, "error", f"approve failed: {exc}")   # EU-656: red from tone
         return redirect("/needs")
 
     @app.post("/api/deny-proposals")
@@ -2412,7 +2468,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if batch:
             from . import approvals
             if approvals.deny_proposals(cfg, batch, reason):
-                _state["last_msg"] = "Proposal batch denied — nothing filed."
+                set_last_msg(None, "ok", "Proposal batch denied — nothing filed.")   # EU-656
         return redirect("/needs")
 
     @app.post("/api/needs-sync")
@@ -2423,7 +2479,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         from . import needs_sync
         r = needs_sync.reconcile(cfg, audit, force=True)
         n = len(r.get("cleared", []))
-        get_state(None)["last_msg"] = (
+        _sync_msg = (
             f"✓ Synced with Jira — cleared {n} item(s): "
             + ", ".join(t for t, _ in r.get("cleared", [])[:8])
             + ("…" if n > 8 else "") if n else
@@ -2433,9 +2489,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # column parked behind these is KEPT, not guessed-and-cleared; surface it so it's visible.
         unk = r.get("unknown", [])
         if unk:
-            get_state(None)["last_msg"] += (
+            _sync_msg += (
                 f" ⚠ {len(unk)} in an unrecognized Jira status (kept, not guessed): "
                 + ", ".join(t for t, _ in unk[:6]) + ("…" if len(unk) > 6 else ""))
+        # EU-656: explicit tone — success confirmation; the unrecognized-status caveat is a
+        # warning, not a failure (the old ⚠ substring check used to paint the WHOLE note red).
+        set_last_msg(None, "warn" if unk else "ok", _sync_msg)
         return redirect("/needs")
 
     @app.get("/needs")
@@ -3619,7 +3678,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     from . import decisions
                     decisions.route_message(cfg, audit, msg)
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"chat failed: {exc}"
+                    set_last_msg(None, "error", f"chat failed: {exc}")   # EU-656: red from tone
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/chat")
 
@@ -3695,18 +3754,20 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     _notify.send(f"✓ Commander directive filed as {key} (from {tid})")
                 except Exception:  # noqa: BLE001
                     pass
-                _state["last_msg"] = (
-                    f"✓ Filed {key} from your directive (linked to {tid}) — cleared from Needs-you.")
+                # EU-656: the note's tone mirrors the paired set_last_result tone (reviewed in
+                # EU-666) — the control bar renders from the stored record, never the text.
+                set_last_msg(None, "ok",
+                             f"✓ Filed {key} from your directive (linked to {tid}) — cleared from Needs-you.")
                 set_last_result(app_name, 'ok', f"Filed {key} from directive on {tid}")
             elif not supports_backlog:
-                _state["last_msg"] = (
-                    f"⚠ Couldn't file a ticket for {tid}: no backlog is configured for "
-                    f"{app_name or 'this app'}. Left it in Needs-you.")
+                set_last_msg(None, "warn",
+                             f"⚠ Couldn't file a ticket for {tid}: no backlog is configured for "
+                             f"{app_name or 'this app'}. Left it in Needs-you.")
                 set_last_result(app_name, 'warn', f"No backlog configured for {tid}")
             else:
-                _state["last_msg"] = (
-                    f"⚠ Couldn't file a ticket from your directive — {tid} kept in Needs-you."
-                    + (f" ({err})" if err else " (the backlog rejected the request)."))
+                set_last_msg(None, "error",
+                             f"⚠ Couldn't file a ticket from your directive — {tid} kept in Needs-you."
+                             + (f" ({err})" if err else " (the backlog rejected the request)."))
                 set_last_result(app_name, 'error', f"Filing failed for {tid}: {err}" if err else f"Filing rejected for {tid}")
             return redirect("/needs")
 
@@ -3727,15 +3788,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     ok = False
             if ok:
                 _dismiss_row()
-                _state["last_msg"] = f"✓ Closed {tid} per your reply — cleared from Needs-you."
+                set_last_msg(None, "ok", f"✓ Closed {tid} per your reply — cleared from Needs-you.")   # EU-656
                 set_last_result(app_name, 'ok', f"Closed {tid}")
             elif not supports_backlog:
-                _state["last_msg"] = (
-                    f"⚠ Couldn't close {tid}: no backlog is configured for "
-                    f"{app_name or 'this app'}. Left it in Needs-you.")
+                set_last_msg(None, "warn",   # EU-656: mirrors the paired set_last_result tone
+                             f"⚠ Couldn't close {tid}: no backlog is configured for "
+                             f"{app_name or 'this app'}. Left it in Needs-you.")
                 set_last_result(app_name, 'warn', f"No backlog configured for closing {tid}")
             else:
-                _state["last_msg"] = f"⚠ Couldn't close {tid} (backlog error) — left it in Needs-you."
+                set_last_msg(None, "error", f"⚠ Couldn't close {tid} (backlog error) — left it in Needs-you.")   # EU-656
                 set_last_result(app_name, 'error', f"Close failed for {tid}")
             return redirect("/needs")
 
@@ -3744,7 +3805,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             # _route_out_of_scope. Dismissing the row just stops it nagging; it re-appears if the
             # ticket re-escalates later.
             _dismiss_row()
-            _state["last_msg"] = f"✓ Deferred {tid} — cleared from Needs-you (left parked)."
+            set_last_msg(None, "ok", f"✓ Deferred {tid} — cleared from Needs-you (left parked).")   # EU-656
             set_last_result(app_name, 'ok', f"Deferred {tid}")
             return redirect("/needs")
 
@@ -3777,9 +3838,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         # 2026-07-19 stabilization: this swallow let the banner claim "the unit
                         # is re-running it" while the ticket stayed parked — the answer was
                         # silently lost. Surface it so the Commander can act.
-                        _state["last_msg"] = (f"⚠ answer to {tid} was saved as a comment but the "
-                                              f"unblock FAILED ({exc}) — the ticket is still "
-                                              "parked; /unblock it by hand.")
+                        set_last_msg(None, "error",   # EU-656: mirrors the paired result tone
+                                     f"⚠ answer to {tid} was saved as a comment but the "
+                                     f"unblock FAILED ({exc}) — the ticket is still "
+                                     "parked; /unblock it by hand.")
                         set_last_result(app_name, 'error', f"Unblock failed for {tid}: {exc}")
                         try:
                             audit.record("clarify_unblock_failed", ticket_id=tid,
@@ -3798,12 +3860,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     except Exception:  # noqa: BLE001 - status transition must not block the re-run
                         pass
             except Exception as exc:  # noqa: BLE001 - the re-run must never break the cockpit
-                _state["last_msg"] = f"answer to {tid} failed: {exc}"
+                set_last_msg(None, "error", f"answer to {tid} failed: {exc}")   # EU-656
                 set_last_result(app_name, 'error', f"Clarification failed for {tid}: {exc}")
 
         threading.Thread(target=_bg_clarify, daemon=True).start()
-        _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; ticket moved to To Do "
-                              "and the squad is re-running it with your decision.")
+        set_last_msg(None, "ok",   # EU-656: mirrors the paired set_last_result tone
+                     f"✓ Answer sent to {tid} — cleared from Needs-you; ticket moved to To Do "
+                     "and the squad is re-running it with your decision.")
         set_last_result(app_name, 'ok', f"Answer sent to {tid}")
         return redirect("/needs")
 
@@ -3823,7 +3886,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 decisions.resolve(cfg, "dismissed by Commander", ticket_id=tid, comment=False)
             except Exception:  # noqa: BLE001 - never block the redirect
                 pass
-            _state["last_msg"] = f"✓ Decision for {tid} dismissed — removed from Needs you."
+            set_last_msg(None, "ok", f"✓ Decision for {tid} dismissed — removed from Needs you.")   # EU-656
         return redirect("/needs")
 
     @app.get("/report")
@@ -3852,8 +3915,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             return redirect("/")
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
-            st["last_msg"] = "blocked — fix the health problems first (see the banner)"
-            set_last_result(app_name or None, "error", st["last_msg"])
+            _blocked = "blocked — fix the health problems first (see the banner)"
+            set_last_msg(app_name or None, "error", _blocked)   # EU-656: red from tone, not text
+            set_last_result(app_name or None, "error", _blocked)
             return redirect("/")
         text = (request.form.get("text") or "").strip()
         import copy
@@ -3863,8 +3927,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         _berr = _resolve_run_backend(rcfg, app_name)   # EU-190/EU-223: this app's (or global) backend
         if _berr:
             release_run(app_name or None)
-            st["last_msg"] = _berr
-            set_last_result(app_name or None, "error", st["last_msg"])
+            set_last_msg(app_name or None, "error", _berr)   # EU-656: red from tone, not text
+            set_last_result(app_name or None, "error", _berr)
             return redirect("/")
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
@@ -3873,8 +3937,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception as exc:  # noqa: BLE001
             release_run(app_name or None)
             st["dry_run"] = None
-            st["last_msg"] = f"could not start: {exc}"
-            set_last_result(app_name or None, "error", st["last_msg"])
+            set_last_msg(app_name or None, "error", f"could not start: {exc}")   # EU-656
+            set_last_result(app_name or None, "error", f"could not start: {exc}")
             return redirect("/")
 
         def _bg():
@@ -3894,8 +3958,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 reports = asyncio.run(run_loop(rcfg, worklist, audit, stop_event=ev))
             except Exception as exc:  # noqa: BLE001
                 errored = True
-                st["last_msg"] = str(exc)
-                set_last_result(app_name or None, "error", st["last_msg"])
+                set_last_msg(app_name or None, "error", str(exc))   # EU-656: red from tone
+                set_last_result(app_name or None, "error", str(exc))
             finally:
                 # EU-361: run_end fires from the finally — same as its run_api twin — so a worker
                 # that dies on an exception still closes its own boundary.
