@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-602 · Elite-Unit · • Two-pass consult wiring is correct: classify → consult → fold non-empty answer into optional grounding segment; all failure paths collapse to consult_ctx='' so the CTO prompt is byte-identical when no consult fires. · 🔗 /chat — send "is there a secret leaked in the repo?" to Commander chat and verify the specialist grounding section appears in the CTO's response (check cockpit logs or ask the CTO what it found).
 - 2026-07-26 · EU-601 · Elite-Unit · • `_needs_specialist` exists, is importable, and is NOT called from `respond_to_commander` (grep-confirmed) — matches AC exactly. · 🔗 (no UI — importable function check: `python3 -c "from orchestrator.council import _needs_specialist; import inspect; print('coroutine:', inspect.iscoroutinefunction(_needs_specialist))"` + run_all.py full pass green)
 - 2026-07-26 · EU-606 · Elite-Unit · • 3 group-only harnesses deleted in full; chat_test.py stripped of all group-room stubs/asserts and docstring clause, keeping only the 1:1 CTO coverage. · 🔗 (no UI — `python3 tests/run_all.py` confirms green on the reduced suite)
 - 2026-07-26 · EU-600 · Elite-Unit · • Helper is correctly isolated: never called from respond_to_commander or anywhere else (verified via grep). • Reuses _group_options/_officer_key/COUNCIL exactly as instructed — no new officer-dispatch path.
