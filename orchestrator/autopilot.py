@@ -1757,7 +1757,12 @@ def unblock(cfg: Config, ticket_id: str | None = None) -> str:
     return f"unblocked all ({len(blocked)})"
 
 
-_RED_BASE_MARKERS = ("is RED before any build", "gate fails on the clean base", "red base")
+# EU-623: the bare "red base" catch-all matched any prose CONTAINING those two words — including a
+# PM escalation note that merely mentioned a red base — so a ticket parked for a completely different
+# reason was silently "resumed". EU-543 was cleared that way at 08:03 with its work 80% done. The two
+# remaining markers are the literal phrases the park itself writes (loop.py:1430 "Base branch '…' is
+# RED before any build …" and the clean-base wording), so real red-base parks still match exactly.
+_RED_BASE_MARKERS = ("is RED before any build", "gate fails on the clean base")
 
 
 def _auto_resume_red_base(cfg: Config, blocked: set[str], audit: "AuditLog") -> set[str]:
@@ -1825,6 +1830,17 @@ def _auto_resume_red_base(cfg: Config, blocked: set[str], audit: "AuditLog") -> 
         remaining = [p for p in pending if str(p.get("id")) not in set(resumed)]
         decisions._save(cfg, remaining)
         blocked = remove_blocked(cfg, set(resumed)) or (blocked - set(resumed))
+        # EU-623: clearing the card + the blocked set was only HALF a resume — the ticket stayed
+        # 'Blocked' on the board, and the drain draws only To Do / In Progress. So an auto-resumed
+        # ticket landed in no list and on no screen: not parked, not queued, unreachable (EU-543,
+        # 2026-07-26). `unblock` has always restored the tracker status via _reopen_on_tracker;
+        # this path simply never called it. Best-effort per ticket — a tracker hiccup must not
+        # strand the rest of the resume (the enclosing except keeps the cycle safe either way).
+        for _tid in sorted(set(resumed)):
+            try:
+                _reopen_on_tracker(cfg, _tid)
+            except Exception:  # noqa: BLE001 — one tracker miss must not abort the sweep
+                audit.record("red_base_reopen_failed", ticket_id=_tid)
         audit.record("red_base_auto_resumed", tickets=sorted(set(resumed)))
         print(f"  · base is GREEN again — auto-resumed {', '.join(sorted(set(resumed)))} "
               f"(no answer needed; the park was an infrastructure condition, not a decision)",

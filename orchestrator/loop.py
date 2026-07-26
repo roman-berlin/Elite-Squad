@@ -2198,8 +2198,21 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             )
             if build_comment and backlog and not ticket.ephemeral:
                 commenter.post_comment(backlog, ticket.key, build_comment)
+            # EU-625: `notes` was the hardcoded string "builder process errored", so the REAL provider
+            # error never reached the report the shields read. EU-476 was planned 3× (~$3.94) while the
+            # secondary answered HTTP 400 "The free quota has been exhausted" in ~2s with 0 tokens on
+            # every attempt: a pure provider outage looked like a bad ticket and parked it. Carry the
+            # provider's own message (bounded) so the cap/infra classification can see it, and audit
+            # the shape of the failure — a 0-token, sub-5s error is a backend problem, never the code's.
+            _err = (build.summary or build.raw or "").strip()
+            _dead_backend = (getattr(build, "input_tokens", 0) or 0) == 0 and \
+                            (getattr(build, "duration_s", 0) or 0) < 5
+            audit.record("builder_process_error", ticket_id=ticket.id, iteration=iteration,
+                         model=getattr(build, "model", "") or "", dead_backend=_dead_backend,
+                         error=_err[:400])
             return _resolve(TicketReport(ticket.id, Outcome.ERRORED, iteration, cost, app.name, branch,
-                                         notes="builder process errored"))
+                                         notes=("builder process errored — "
+                                                + (_err[:300] or "no error text"))))
         if not git.has_changes():
             report = (build.summary or build.raw or "(no report)").strip()
             deliberate = _is_deliberate_halt(build.summary or build.raw)
@@ -2820,8 +2833,21 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
     # the dishonest escalation this ticket was filed to fix (2026-07-09 forensics). Requeue
     # exactly ONCE: `_already_pm_triaged` (above) guarantees at most one triage per ticket, so
     # this cannot loop — a still-stuck ticket escalates for real on its next exhaustion.
+    # EU-624: the hatch tested ONE prefix ("Verification failed") but the verdict-mismatch site
+    # (~L2389) writes "Gate/Builder verdict mismatch: …" — so a PM RESOLVE on a mismatch fell
+    # through to the escalation below and parked on the Commander anyway. It fired 0 times against
+    # 8 mismatches; EU-543 was parked (and then orphaned) that way with the work 80% done and the
+    # gate 501/502 green on a single SUPERSEDED harness. A mismatch is the same class as gate
+    # exhaustion — a build/CI health question, not a spec disagreement — so it belongs here. The
+    # one-shot guarantee is unchanged: `_already_pm_triaged` allows at most one triage per ticket,
+    # so a still-stuck ticket escalates for real on its next exhaustion.
+    # All THREE shapes a `last_changes[0]` exhaustion can take — the tuple must stay in lock-step
+    # with the writer sites (pinned by tests/eu623_park_recovery_test.py check 1c, which caught
+    # "Deterministic checks failed" as a third silently-unrequeueable case).
+    _REQUEUEABLE = ("Verification failed", "Gate/Builder verdict mismatch",
+                    "Deterministic checks failed")
     if triage and triage["action"] == "RESOLVE":
-        if last_changes and last_changes[0].startswith("Verification failed"):
+        if last_changes and last_changes[0].startswith(_REQUEUEABLE):
             audit.record(Outcome.REQUEUED.audit_event, ticket_id=ticket.id, action="RESOLVE",
                          reason="gate-flake", instruction=(triage.get("text") or "")[:600])
             print(f"  🎖️ {ticket.id}: PM said RESOLVE on a gate-exhaustion — requeuing once.",
