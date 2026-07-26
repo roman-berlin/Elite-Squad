@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-635 · Elite-Unit · • Implements PM decision (b) exactly: tuple-keyed open_run_log + additive _RUN_LOG_KEY ContextVar routing write_line only, UI attribution unchanged.
 - 2026-07-26 · EU-630 · Elite-Unit · • Guard/validation logic in the new /logs/day route is a verbatim, correct mirror of the already-reviewed /api/day-log guard — traversal, date-validation, and empty-day behavior all match. · 🔗 /logs/day?app=eu&date=YYYY-MM-DD
 - 2026-07-26 · EU-629 · Elite-Unit · • Route mirrors day_log_api's exact traversal-guard pattern (log_root → _safe_slug → relative_to → 403) — verified against source, correct.
 - 2026-07-26 · EU-618 · Elite-Unit · • All five ACs met: multi-run chronological merge, empty/missing day → 200 {entries:[]}, traversal guard mirroring /api/open-logs, and unit tests for merge/ordering, missing-stage fallback, empty day, and traversal.
