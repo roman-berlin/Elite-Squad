@@ -2137,12 +2137,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         notes.append("ship verdict posted (see /council + Telegram)")
                     finally:
                         _state["shipreview"] = False
-                    _state["last_result"] = f"✓ QA finished for {app_name} — " + "; ".join(notes)
+                    set_last_result(None, 'ok', f"✓ QA finished for {app_name} — " + "; ".join(notes))
                     _state["qa_error_phase"] = None  # EU-579: clear prior error on success
                     _state["qa_dismissed"] = False  # EU-579: new report just landed
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_result"] = f"QA failed: {exc}" + (
-                        f" (completed: {'; '.join(notes)})" if notes else "")
+                    set_last_result(None, 'error', f"QA failed: {exc}" + (
+                        f" (completed: {'; '.join(notes)})" if notes else ""))
                     _state["qa_error_phase"] = _state.get("qa_phase")  # EU-579
                 finally:
                     _state["qa_phase"] = None
