@@ -1934,8 +1934,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 try:
                     from . import council
                     asyncio.run(council.hold_standup(cfg, audit=audit))
+                    set_last_result(None, "ok", "✓ Standup complete.")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"standup failed: {exc}"
+                    set_last_result(None, "error", f"standup failed: {exc}")
                 finally:
                     _state["standuping"] = False
             threading.Thread(target=_bg, daemon=True).start()
@@ -1948,8 +1949,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 try:
                     from . import council
                     asyncio.run(council.hold_council(cfg, audit=audit))
+                    set_last_result(None, "ok", "✓ Council held.")
                 except Exception as exc:  # noqa: BLE001
-                    _state["last_msg"] = f"council failed: {exc}"
+                    set_last_result(None, "error", f"council failed: {exc}")
                 finally:
                     _state["councilling"] = False
             threading.Thread(target=_bg, daemon=True).start()
