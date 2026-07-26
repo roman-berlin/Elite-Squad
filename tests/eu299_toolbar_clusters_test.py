@@ -5,8 +5,9 @@ Acceptance criteria under test:
      each rendered as a cluster label styled with the `--t-xs` token, instead of one flat
      button row inside `.tbar`.
   2. Every existing action is preserved: the merged Run QA form (action=/api/qa — Patrol and
-     Ship-review folded into one, 2026-07-19), Jira link (/jira?app=), Roster link (/roster-doc), New-task Run
+     Ship-review folded into one, 2026-07-19), Jira link (/jira?app=), New-task Run
      form (/api/run), Autopilot forms (/api/autopilot), and the Reports menu links.
+     (EU-642 removed the Roster link /roster-doc from the bar — pinned absent below.)
   3. Buttons inside the clusters render through the `cockpit_views._btn` partial (shared `.btn`
      base + `_btn`'s inline `--r-xl`/`--s-*`/`--t-md` tokens) — no new hand-rolled button CSS.
   4. Cluster spacing/separation uses `--s-*` spacing tokens, not new ad-hoc px literals.
@@ -94,9 +95,9 @@ chk("merged QA form action present (action=/api/qa)", "action=/api/qa" in bar)
 chk("Run QA label glyph preserved", "&#128269; Run QA" in bar)
 chk("Jira link preserved (/jira?app=)", "/jira?app=automatixy" in bar)
 chk("Jira label glyph preserved", "&#128268; Jira" in bar)
-chk("Roster link preserved (/roster-doc)", 'href="/roster-doc"' in bar)
-chk("Roster still a top-level class=\"btn\" element (EU-68/EU-94 contract)",
-    'class="btn" href="/roster-doc"' in bar)
+chk("EU-642: Roster link is gone from the nav cluster (/roster-doc)",
+    'href="/roster-doc"' not in bar,
+    "the retired Roster nav button is back in the toolbar")
 # EU-289 retired the "+ New task" panel (intake is Jira-only), so EU-299's "preserve the Run
 # form verbatim" pins are superseded — tests/eu289_toolbar_cleanup_test.py now pins its ABSENCE.
 chk("Autopilot form preserved (/api/autopilot)", "action=/api/autopilot" in bar)
@@ -123,12 +124,12 @@ chk("off-Mac bar carries no /api/open-logs affordance at all (EU-632)",
     "the Darwin-only Finder reveal must not render off-Mac")
 
 # EU-289 de-duped this menu: "Budget monitor" (/budget) merged into "Usage & budget" (/usage),
-# and the duplicate "Unit roster" item went (the top-level Roster btn above still covers
-# /roster-doc). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
+# and the duplicate "Unit roster" item went; EU-642 then removed the top-level Roster btn too
+# (pinned absent above). tests/eu289_toolbar_cleanup_test.py pins the de-duped set.
 # 2026-07-19 (Commander order): the Reports dropdown is FLATTENED — Task log / Daily / Memory
 # are top-level nav buttons; Usage left the bar (the Tokens KPI deep-links /usage) and Forensics
 # left too (its summary rides in the daily; the Security-blocks KPI deep-links /forensics).
-for _href in ("/tasks", "/council", "/memory", "/roster-doc"):
+for _href in ("/tasks", "/council", "/memory"):
     chk(f"nav link preserved as a top-level button: {_href}", f'href="{_href}"' in bar)
 for _gone in ("/usage", "/forensics"):
     chk(f"{_gone} left the nav bar (KPI deep-links remain the route)", f'href="{_gone}"' not in bar)

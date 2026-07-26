@@ -4,6 +4,10 @@ Acceptance criteria (from the ticket):
   • A cockpit nav entry opens a Roster view listing every officer and soldier with their duty.
   • A test asserts the page renders the roster.
 
+Historical: EU-642 (2026-07-26) removed the nav BUTTON — the /roster-doc route and the
+roster page it serves are the surviving EU-94 deliverables, and section 1 below now pins
+the button's ABSENCE. Mirrors the Mayor-row historical note in eu68_roster_nav_test.py.
+
 This file is the formal gate for EU-94. The broader roster round-trip / model-column
 tests live in roster_test.py; the nav-button specifics from EU-68 live in
 eu68_roster_nav_test.py. This file focuses only on the EU-94 acceptance criteria so the
@@ -56,16 +60,18 @@ cfg = Config(
 cfg.detected_auth = lambda: "test"  # skip auth middleware
 _sync.can_promote = lambda: False   # keep the bar off git / network
 
-# ── 1. Cockpit nav entry ──────────────────────────────────────────────────────
-# The Roster link must be a first-class button in the top control bar (one click,
-# not hidden behind a sub-menu).
+# ── 1. Cockpit nav entry — EU-642 removed the Roster button ──────────────────
+# The EU-94 deliverable that survives is the /roster-doc route + page (section 2);
+# the nav button was retired 2026-07-25 (Commander: "remove the button of roster -
+# no need anymore"). This block now guards the removal so the button cannot
+# silently reappear in the control bar.
 bar = cockpit_views._control_bar(cfg, "automatixy")
-chk("cockpit nav bar contains the Roster link (/roster-doc)",
-    'href="/roster-doc"' in bar)
-chk("Roster is a top-level btn (not only inside a dropdown)",
-    'class="btn" href="/roster-doc"' in bar)
-chk("Roster nav button title mentions engineers",
-    "Engineers" in bar)
+chk("EU-642: cockpit nav bar no longer links to /roster-doc",
+    'href="/roster-doc"' not in bar,
+    "the retired Roster nav button is back in the control bar")
+chk("EU-642: no Roster btn markup or 'Engineers' title left in the bar",
+    'class="btn" href="/roster-doc"' not in bar and "Engineers" not in bar,
+    "leftover Roster button markup in the control bar")
 
 # ── 2. /roster-doc page: every officer with their duty ───────────────────────
 client = server.create_app(cfg).test_client()

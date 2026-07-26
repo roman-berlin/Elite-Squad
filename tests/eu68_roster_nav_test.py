@@ -6,7 +6,9 @@ What this ticket added:
   2. (Historical) The liaison / Mayor officer wired into the roster. The Mayor's roster row was
      removed in the 2026-07-19 stabilization — liaison.py died in 40da120 and the row was the last
      phantom reference — so this harness now pins the label superset (officers.py) and the row's
-     ABSENCE, while the nav-button criterion stays as landed.
+     ABSENCE.
+  3. (Historical) EU-642 removed the nav button from the control bar — the link lives only on
+     its own page now, reachable at /roster-doc directly.
 
 Tests here cover the EU-68 acceptance criterion specifically:
   "a Roster button in the cockpit opens a page listing every officer (role · duty · model)
@@ -81,44 +83,26 @@ chk('/roster-doc page does NOT render the retired Mayor row',
     "the liaison phantom row is back on the served /roster-doc page")
 
 # ---------------------------------------------------------------------------
-# 4. Nav button: the "Roster" link is in the TOP-LEVEL control bar, NOT gated
-#    behind the Reports <details> sub-menu (requirement: reachable in ≤1 click)
+# 4. Nav button: EU-642 removed the "Roster" link — assert it stays gone
 # ---------------------------------------------------------------------------
 _sync.can_promote = lambda: False   # avoid git/network calls
 bar = cockpit_views._control_bar(scfg, "automatixy")
 
-# The link must be present in the bar at all
-chk('_control_bar has href="/roster-doc"',
-    'href="/roster-doc"' in bar, "Roster link absent from the control bar")
+# The Roster link must NOT appear anywhere in the control bar (EU-642 removal, regression guard)
+chk('EU-642: _control_bar does NOT contain href="/roster-doc"',
+    'href="/roster-doc"' not in bar,
+    "Roster link still present in the control bar")
 
-# The top-level button is rendered as class="btn" (same class as Choose-a-ticket, Jira, etc.).
-# The secondary link inside the Reports dropdown omits the class. So checking for the class="btn"
-# variant proves the link is a first-class nav element, not buried in a sub-menu.
-top_btn_markup = 'class="btn" href="/roster-doc"'
-chk('Roster is a top-level class="btn" element (not hidden inside the Reports dropdown)',
-    top_btn_markup in bar,
-    "top-level btn markup missing — link may be inside the Reports sub-menu only")
-
-# The Reports <details> sub-menu must NOT be the ONLY place the link appears:
-# verify the first occurrence has class="btn" (top-level), not a plain <a> (dropdown-only).
-#
-# EU-289 (2026-07-17) removed the duplicate "Unit roster" anchor from the Reports dropdown, which
-# exposed a bug in this check: it compared raw .find() results, and a MISSING dropdown anchor
-# returns -1, so `900 < -1` went False — i.e. it only passed while the duplicate it was meant to
-# tolerate still existed. No-dropdown is the strongest form of EU-68's "one click, not buried in a
-# sub-menu" AC, so treat absent as a pass and only fail when a dropdown anchor genuinely precedes
-# the top-level button.
-_top_at = bar.find(top_btn_markup)
-_drop_at = bar.find('<a href="/roster-doc"')
-first_occurrence_is_toplevel = _top_at != -1 and (_drop_at == -1 or _top_at < _drop_at)
-chk("First occurrence of roster-doc is the top-level btn, not the dropdown anchor",
-    first_occurrence_is_toplevel,
-    f"roster-doc first occurrence is inside the dropdown, not in the top bar "
-    f"(top={_top_at}, dropdown={_drop_at})")
-
-chk('Roster button carries the descriptive title attribute ("Engineers")',
-    "Engineers" in bar,
-    "title attr missing — tooltip won't appear")
+# Other nav-row buttons render unchanged, in the same order (regression guard)
+for label, url in [
+    ("Jira", "/jira"),
+    ("Task log", "/tasks"),
+    ("Daily", "/council"),
+    ("Memory", "/memory"),
+]:
+    chk(f'Nav button "{label}" still present at {url}',
+        url in bar,
+        f"{label} nav link missing from control bar")
 
 # ---------------------------------------------------------------------------
 # Report

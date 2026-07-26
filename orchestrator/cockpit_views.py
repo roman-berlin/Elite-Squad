@@ -1053,7 +1053,6 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <span class=tclabel>nav</span>
     <div class=tcrow>
       {_btn("&#128268; Jira", tag="a", attrs=f' href="/jira?app={html.escape(app0)}" title="Pick or connect the Jira this project uses"')}
-      <a class="btn" href="/roster-doc" title="Engineers &amp; duties — the full unit roster">&#128101; Roster</a>
       {open_logs_html}
       {_btn(f"&#128203; Task log{fr_tasks}", tag="a", attrs=' href="/tasks" title="Every run — Today / week / month scoping, transcripts, Jira links"')}
       {_btn(f"&#128172; Daily{fr_council}", tag="a", attrs=' href="/council" title="The daily muster — DONE / NEXT / NEEDS YOU + failure causes"')}
