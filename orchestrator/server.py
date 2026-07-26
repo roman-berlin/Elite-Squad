@@ -712,18 +712,21 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     @app.get("/logs/day")
     def day_view() -> Response:
         """EU-630: render one day's consolidated log as HTML.
+            EU-631: ``format=txt`` returns plain-text downloadable attachment.
 
         Query params:
             app : project name (slugified, resolved against log_root)
             date: ``YYYY-MM-DD`` — validated with ``datetime.date.fromisoformat``
+            format: ``txt`` — when set, returns a plain-text attachment instead of HTML
 
         Security:
             Path traversal guard mirrors ``/api/day-log`` and ``/logs/days``: resolved path
             must stay under ``log_root(cfg)``; anything outside returns 403.
 
-        Returns a minimal HTML page (``text/html``, 200).  Each entry is a line prefixed
+        Returns a minimal HTML page (``text/html``, 200) or plain-text attachment
+        (``text/plain``, 200). Each entry is a line prefixed
         ``[<ticket>] [<stage>] <text>``.  An empty or missing day returns a "no log entries"
-        message rather than raising 404/500.
+        message rather than raising 404/500 (HTML) or an empty attachment body (TXT).
 
         Cross-platform: no OS-specific gating. Works on macOS, Linux, and Windows.
         """
@@ -753,6 +756,26 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         data = _rl.read_day_log(cfg, app_name or None, date_str)
         safe_app = html.escape(app_name or "(none)")
         safe_date = html.escape(date_str)
+        app_slug_val = str(app_slug)
+
+        # EU-631: plain-text download when format=txt is requested.
+        fmt = (request.args.get("format") or "").strip().lower()
+        if fmt == "txt":
+            if not data["entries"]:
+                return Response(
+                    "", status=200, mimetype="text/plain",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="day-log-{app_slug_val}-{date_str}.txt"'})
+            txt_lines = []
+            for e in data["entries"]:
+                ticket = e.get("ticket") or "—"
+                stage = e.get("stage") or "—"
+                text = e.get("text") or ""
+                txt_lines.append("[{}] [{}] {}".format(ticket, stage, text))
+            return Response(
+                "\n".join(txt_lines), status=200, mimetype="text/plain",
+                headers={"Content-Disposition":
+                         f'attachment; filename="day-log-{app_slug_val}-{date_str}.txt"'})
 
         if not data["entries"]:
             empty = (
@@ -769,12 +792,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             text = html.escape(e.get("text") or "")
             lines.append("<li>[{}] [{}] {}</li>".format(ticket, stage, text))
         entry_html = "<ol>\n{}\n</ol>".format("\n".join(lines))
+        download_href = ("/logs/day?app={}&date={}&format=txt").format(
+            html.escape(app_name or ""), html.escape(date_str))
         detail = (
             "<html><head><title>Day Log — {}</title></head>"
             "<body><h1>Day Log — {}</h1>{}"
-            '<p><a href="/logs/days?app={}">Back to days</a></p>'
+            '<p><a href="/logs/days?app={}">Back to days</a> | '
+            '<a href="{}">⬇ download .txt</a></p>'
             "</body></html>").format(safe_app, safe_date, entry_html,
-                                     html.escape(app_name or ""))
+                                     html.escape(app_name or ""), download_href)
         return Response(detail, status=200, mimetype="text/html")
 
     @app.get("/api/autopilot")
