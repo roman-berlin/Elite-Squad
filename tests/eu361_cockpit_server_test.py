@@ -441,6 +441,148 @@ chk("days handler lacks 'Darwin' literal (EU-629/6)",
 
 srv.threading = _stub_threading(_real_thread)
 
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-630 — GET /logs/day : day-detail HTML view (chronological render of read_day_log entries)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+_reset()
+del srv.threading  # drop any module-level swap; fall back to real threading
+
+from orchestrator import run_logger as _rl  # noqa: E402
+
+_log_root = _rl.log_root(cfg)
+_app_dir = _log_root / "alpha"
+_app_dir.mkdir(parents=True, exist_ok=True)
+
+# Build a populated day: 3 log files sharing the same time-suffix so they sort by filename.
+_day = _app_dir / "2026-08-15"
+_day.mkdir(parents=True, exist_ok=True)
+
+# All three files share the same -120000 suffix → same sort-key → filename tiebreak.
+_t1 = _day / "EU-630-120000.log"
+_t2 = _day / "EU-631-120000.log"
+_t3 = _day / "EU-632-120000.log"
+
+_t1.write_text("[Build]\nRunning build steps for EU-630\n", encoding="utf-8")
+_t2.write_text("[Gate]\nGate passed for EU-631\n[Review]\nPR approved\n", encoding="utf-8")
+_t3.write_text('Script injection attempt: <script>alert("xss")</script>\n', encoding="utf-8")
+
+c = srv.create_app(cfg).test_client()
+
+
+# --- 1) 200 HTML showing every entry from read_day_log in order ---
+r_pop = c.get("/logs/day?app=alpha&date=2026-08-15")
+chk("GET /logs/day?app=alpha&date=YYYY-MM-DD returns 200 (EU-630/1)",
+    r_pop.status_code == 200, f"status={r_pop.status_code}")
+body_pop = r_pop.get_data(as_text=True)
+chk("Content-Type contains text/html (EU-630/1)",
+    "text/html" in r_pop.content_type, repr(r_pop.content_type))
+# Verify chronological order: each known entry must appear AFTER the previous one.
+_order_checks = [
+    ("Running build steps for EU-630",   "EU-631"),
+    ("Gate passed for EU-631",            "PR approved"),
+    ('Script injection attempt: &lt;script&gt;', None),
+]
+try:
+    _order_ok = True
+    _prev = ""
+    for _text, _next_hint in _order_checks:
+        _pos = body_pop.index(_text)
+        if _prev and _pos < body_pop.index(_prev):
+            _order_ok = False
+            break
+        _prev = _text
+except ValueError:
+    _order_ok = False
+chk("entries appear in chronological order (EU-630/1)", _order_ok,
+    f"one of the {len(_order_checks)} known entries not found or out-of-order")
+
+# --- 2) Lines are prefixed [<ticket>] [<stage>] ---
+chk("[EU-630] [Build] present (EU-630/2)",
+    "[EU-630] [Build]" in body_pop, "ticket+stage prefix missing")
+chk("[EU-631] [Gate] present (EU-630/2)",
+    "[EU-631] [Gate]" in body_pop, "ticket+stage prefix missing")
+chk("[EU-631] [Review] present (EU-630/2)",
+    "[EU-631] [Review]" in body_pop, "second stage for EU-631 missing")
+chk('[EU-632] [—] present (EU-630/2)',
+    '[EU-632] [—]' in body_pop, "missing-stage fallback not rendered")
+
+# An entry with a completely empty stage renders [—]
+_empty_stage_day = _app_dir / "2026-08-16"
+_empty_stage_day.mkdir(parents=True, exist_ok=True)
+_empty_file = _empty_stage_day / "EU-999-130000.log"
+_empty_file.write_text("", encoding="utf-8")
+
+c_empty = srv.create_app(cfg).test_client()
+r_es = c_empty.get("/logs/day?app=alpha&date=2026-08-16")
+chk("empty log file → 200 (EU-630/2-empty)", r_es.status_code == 200,
+    f"status={r_es.status_code}")
+
+
+# --- 3a) malformed date → 400 ---
+r_bad = c.get("/logs/day?app=alpha&date=2026-13-99")
+chk("malformed date → 400 (EU-630/3a)",
+    r_bad.status_code == 400, f"status={r_bad.status_code}")
+
+# --- 3b) missing date param → 400 ---
+r_nom = c.get("/logs/day?app=alpha")
+chk("missing date param → 400 (EU-630/3b)",
+    r_nom.status_code == 400, f"status={r_nom.status_code}")
+
+# --- 3c) path traversal → 403 ---
+r_trav = c.get("/logs/day?app=..&date=2026-08-15")
+chk("app=.. → 403 (EU-630/3c)",
+    r_trav.status_code == 403, f"status={r_trav.status_code}")
+
+# --- 3d) ../.. safe slug → 200 empty-state (NOT 403) ---
+r_safe = c.get("/logs/day?app=../..&date=2026-08-15")
+chk("app=../.. → safe slug '__..__', 200 empty-state (EU-630/3d)",
+    r_safe.status_code == 200, f"unexpected status={r_safe.status_code}")
+
+# --- 4) nonexistent day → 200 with 'no log entries' message ---
+r_miss = c.get("/logs/day?app=alpha&date=1999-01-01")
+chk("nonexistent day → 200 (EU-630/4)",
+    r_miss.status_code == 200, f"status={r_miss.status_code}")
+miss_body = r_miss.get_data(as_text=True)
+chk("nonexistent day shows 'no log entries' (EU-630/4)",
+    "no log entries" in miss_body.lower(),
+    repr(miss_body[:300]))
+
+# --- 5) HTML-escaped injection in log text ---
+chk("<script> NOT present raw in body (EU-630/5)",
+    "<script>" not in body_pop, "raw script tag leaked")
+chk("&lt;script&gt; present (escaped) (EU-630/5)",
+    "&lt;script&gt;" in body_pop, "HTML entities not escaped")
+
+# --- 6) handler source lacks platform/Darwin guard ---
+_fresh = srv.create_app(cfg)
+_dv_func = _fresh.view_functions.get("day_view")
+if _dv_func is not None:
+    _full_src = inspect.getsource(_dv_func)
+    _lstripped = _full_src.lstrip()
+    _dq = _lstripped.find('"""')
+    _sq = _lstripped.find("'''")
+    if _dq != -1 and (_sq == -1 or _dq < _sq):
+        _end = _lstripped.find('"""', _dq + 3)
+        _handler_src = _lstripped[_end + 3:] if _end != -1 else ""
+    elif _sq != -1:
+        _end = _lstripped.find("'''", _sq + 3)
+        _handler_src = _lstripped[_end + 3:] if _end != -1 else ""
+    else:
+        _handler_src = _lstripped
+else:
+    _handler_src = "<route not yet defined>"
+    chk("day_view route exists (EU-630/6)", False, "view_functions['day_view'] is None")
+
+chk("day_view handler lacks platform.system call (EU-630/6)",
+    "platform.system" not in _handler_src,
+    repr(_handler_src))
+chk("day_view handler lacks 'Darwin' literal (EU-630/6)",
+    "Darwin" not in _handler_src,
+    repr(_handler_src))
+
+srv.threading = _stub_threading(_real_thread)
+
 print("\n============ EU-361 COCKPIT SERVER CORRECTNESS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:

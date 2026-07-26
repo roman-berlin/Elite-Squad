@@ -709,6 +709,74 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             '<p><a href="/">Back</a></p></body></html>').format(safe_app, links_html)
         return Response(list_html, status=200, mimetype="text/html")
 
+    @app.get("/logs/day")
+    def day_view() -> Response:
+        """EU-630: render one day's consolidated log as HTML.
+
+        Query params:
+            app : project name (slugified, resolved against log_root)
+            date: ``YYYY-MM-DD`` — validated with ``datetime.date.fromisoformat``
+
+        Security:
+            Path traversal guard mirrors ``/api/day-log`` and ``/logs/days``: resolved path
+            must stay under ``log_root(cfg)``; anything outside returns 403.
+
+        Returns a minimal HTML page (``text/html``, 200).  Each entry is a line prefixed
+        ``[<ticket>] [<stage>] <text>``.  An empty or missing day returns a "no log entries"
+        message rather than raising 404/500.
+
+        Cross-platform: no OS-specific gating. Works on macOS, Linux, and Windows.
+        """
+        import datetime
+        from . import run_logger as _rl
+
+        # Validate date format upfront (pure parse, no IO yet).
+        try:
+            datetime.date.fromisoformat(date_param := request.args.get("date", "").strip())
+        except (ValueError, TypeError):
+            return Response("Bad 'date' parameter.", status=400, mimetype="text/plain")
+
+        date_str = date_param
+        app_name = (request.args.get("app") or "").strip()
+
+        root = _rl.log_root(cfg)
+        app_slug = _rl._safe_slug(app_name or "default")
+        requested = (root / app_slug / date_str).resolve()
+
+        # Path traversal guard: resolved path must sit under the log root.
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            return Response("Path is outside the configured log folder.", status=403,
+                            mimetype="text/plain")
+
+        data = _rl.read_day_log(cfg, app_name or None, date_str)
+        safe_app = html.escape(app_name or "(none)")
+        safe_date = html.escape(date_str)
+
+        if not data["entries"]:
+            empty = (
+                "<html><head><title>Day Log — {}</title></head>"
+                "<body><h1>Day Log</h1><p>No log entries found for <strong>{}</strong>.</p>"
+                '<p><a href="/logs/days?app={}" >Back to days</a></p>'
+                "</body></html>").format(safe_app, safe_date, html.escape(app_name or ""))
+            return Response(empty, status=200, mimetype="text/html")
+
+        lines = []
+        for e in data["entries"]:
+            ticket = html.escape(e.get("ticket") or "—")
+            stage = html.escape(e.get("stage") or "—")
+            text = html.escape(e.get("text") or "")
+            lines.append("<li>[{}] [{}] {}</li>".format(ticket, stage, text))
+        entry_html = "<ol>\n{}\n</ol>".format("\n".join(lines))
+        detail = (
+            "<html><head><title>Day Log — {}</title></head>"
+            "<body><h1>Day Log — {}</h1>{}"
+            '<p><a href="/logs/days?app={}">Back to days</a></p>'
+            "</body></html>").format(safe_app, safe_date, entry_html,
+                                     html.escape(app_name or ""))
+        return Response(detail, status=200, mimetype="text/html")
+
     @app.get("/api/autopilot")
     def autopilot_status_api() -> Response:
         """Live autopilot state: PID-based daemon check + in-memory cockpit flags.
