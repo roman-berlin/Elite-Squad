@@ -546,13 +546,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
         # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
         import platform as _platform
-        # EU-235: splice the '/models' nav link into the rendered bar. The link is owned by
-        # models_views (see add_models_nav_link's docstring for why it's injected here rather
-        # than edited into _control_bar) — the EU-293 nav-link finding, landed with the page.
+        # EU-643: the '/models' nav link renders DIRECTLY in the control bar (backend_control's
+        # "➕ Add model" button) — the EU-235 post-render splice (models_views.add_models_nav_link)
+        # was removed with its injection anchor (EU-642 took the anchor button out of the nav row,
+        # so the splice was a no-op carrying only a stale literal of the retired roster page URL).
         bar = (_result_banner(_state)
-               + models_views.add_models_nav_link(
-                   _control_bar(cfg, appq, h["healthy"],
-                                is_mac=_platform.system() == "Darwin")))
+               + _control_bar(cfg, appq, h["healthy"],
+                              is_mac=_platform.system() == "Darwin"))
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
         # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
         # unit-level actions, not per-project runs.)
@@ -1547,7 +1547,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     # Views live in models_views.py (string builders — no templates/ dir in this repo). Every POST
     # below is automatically covered by the EU-254 _csrf_origin_guard before_request hook (it
     # guards ALL state-changing methods), which is where the abandoned WIP branch's EU-292 CSRF
-    # finding lands; the EU-293 nav-link finding lands via add_models_nav_link in index(). That
+    # finding lands; the EU-293 nav-link finding renders via backend_control's "➕ Add model"
+    # button in the control bar (EU-643 removed the old index() post-render splice). That
     # WIP branch (7d448e5) predates the landed secrets layer and is deliberately not merged.
     from .model_registry import ModelRegistry
     from .model_registry import _validate as _mr_validate

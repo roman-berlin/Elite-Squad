@@ -223,23 +223,10 @@ def render_model_form(cfg, record: dict | None = None, values: dict | None = Non
     return _wrap(title, inner)
 
 
-# The Roster button in _control_bar's nav cluster — a stable, distinctive literal since the
-# EU-299 nav-cluster work. tests/cockpit_models_test.py pins the link's presence on GET /, so a
-# rename of this anchor fails the suite instead of silently dropping the link.
-_NAV_ANCHOR = '<a class="btn" href="/roster-doc"'
-
-
-def add_models_nav_link(bar_html: str) -> str:
-    """Splice the '/models' nav button into an already-rendered control bar (server.index).
-
-    Injection-by-anchor instead of editing ``cockpit_views._control_bar`` directly: EU-235's
-    files are clustered apart from the concurrent cockpit_views work, and server.py already
-    post-processes rendered pages this way (see tasks_page's ``page.replace("</header>", …)``).
-    Idempotent, and a missing anchor degrades to an unchanged bar — the link is lost but the
-    cockpit never breaks."""
-    link = ('<a class="btn" href="/models" '
-            'title="Model backends — view, add, edit or delete custom model endpoints">'
-            '&#129504; Models</a>')
-    if _NAV_ANCHOR not in bar_html or 'href="/models"' in bar_html:
-        return bar_html
-    return bar_html.replace(_NAV_ANCHOR, link + _NAV_ANCHOR, 1)
+# EU-643: the old injection-by-anchor splice (``add_models_nav_link``) is GONE. It inserted the
+# '/models' nav button in front of a neighbouring nav-row button's opening tag — but EU-642
+# removed that anchor button from the nav row, and the '/models' link is rendered DIRECTLY by the
+# control bar now (cockpit_views.backend_control's "➕ Add model" button), so the splice was dead
+# code whose only remaining purpose was carrying a stale literal of the retired page's URL.
+# tests/cockpit_models_test.py pins the link's presence on GET / (via backend_control); tests/
+# eu546_roster_button_removed_test.py guards that no cockpit surface re-links that dormant page.
