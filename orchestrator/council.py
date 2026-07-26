@@ -33,6 +33,7 @@ from .agent import run_agent
 from .config import Config
 from .signals import collect_signals, format_signals
 from .officers import OFFICER_NAMES, display
+from .roster import _OFFICER_ROWS
 from . import auth_probe, notify
 
 # Reverse map (display name -> stable internal key). Officer display names are renamed in
@@ -1056,6 +1057,30 @@ _TRIAGE_SYSTEM = (
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
+# --------------------------------------------------------------------------- #
+# Specialist triage — one cheap call to pick AT MOST ONE officer whose lane
+# owns a Commander message (EU-601).  The roster is the LIVE set from
+# roster._OFFICER_ROWS only; retired officers never appear in the prompt so
+# they can never be returned, but we also validate the key as a belt guard.
+# --------------------------------------------------------------------------- #
+_NEEDS_SPECIALIST_SYSTEM = (
+    "You are a fast triage classifier for an elite software unit's group chat. Given a message from "
+    "the Commander, pick EXACTLY ONE officer whose lane genuinely owns this message — or answer "
+    "'NONE' if it's a greeting, small talk, or no lane clearly owns it. Output ONLY the officer rank "
+    "name exactly as given below, nothing else — no explanation."
+)
+
+
+def _needs_specialist_prompt(message: str) -> str:
+    """Build the specialist-triage prompt using ONLY live-roster officers."""
+    roster = "\n".join(f"- {display(key)} ({lens_role})" for key, lens_role, *_ in _OFFICER_ROWS)
+    return "\n".join([
+        "Officers and their lanes:", roster, "",
+        f'The Commander says to the group: "{message}"', "",
+        "Which single officer should answer? Reply with their rank name only, or 'NONE'.",
+    ])
+
+
 def _brief(text: str, max_sentences: int = 2) -> str:
     """Length guard (EU-287): trims a reply to at most `max_sentences` sentences so the group room
     reads like a chat, not a memo — even if a stubbed/verbose officer returns a multi-paragraph reply."""
@@ -1093,6 +1118,33 @@ async def _triage_officers(cfg: Config, message: str, tail: str) -> list[str]:
     if not text or text.lower().rstrip(".!").strip() == "none":
         return []
     return [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()][:2]
+
+
+# Internal key set from the LIVE roster — retired keys are excluded by construction (the prompt
+# never lists them) but we validate here too as a belt guard (EU-601).
+_LIVE_KEYS = frozenset(key for key, *_ in _OFFICER_ROWS)
+
+
+async def _needs_specialist(cfg: Config, message: str) -> str | None:
+    """Cheap specialist triage (EU-601): returns ONE officer key whose lane owns ``message``, or
+    ``None`` when no lane clearly does.  Never raises on any error."""
+    try:
+        run = await run_agent(
+            _needs_specialist_prompt(message),
+            ClaudeAgentOptions(model=cfg.smalltalk_model, system_prompt=_NEEDS_SPECIALIST_SYSTEM,
+                               cwd=_general_root(), permission_mode="bypassPermissions",
+                               allowed_tools=[], disallowed_tools=["Write", "Edit", "NotebookEdit",
+                                                                    "Bash", "Task", "Agent"],
+                               setting_sources=["project"], max_turns=1, effort="low"),
+            tag="consult-triage")
+    except Exception:  # noqa: BLE001 — classifier failure → no consult; never propagate
+        return None
+    text = (run.final or run.text or "").strip()
+    if not text or text.lower().rstrip(".!").strip() == "none":
+        return None
+    rank = text.split("\n")[0].strip()
+    key = _officer_key(rank)
+    return key if key in _LIVE_KEYS else None
 
 
 def _match_officers(picks: list[str]) -> list[tuple[str, str, str]]:
