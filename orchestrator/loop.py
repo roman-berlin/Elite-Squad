@@ -1008,9 +1008,12 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
     - Split siblings never co-run (_split_lineage mutex), and a fragment chain injects at the FRONT
       of the queue to preserve EU-201's dependency order.
     - A base-level verdict halts ITS app's further picks (same contract as the serial drain).
-    - Per-ticket run logs: the concurrent path writes the EU-253 note file instead of claiming the
-      per-app log handle — two slots registering one key would clobber each other; stdout is still
-      attributed per-slot via the EU-272 ContextVar."""
+    - Per-ticket run logs (EU-635): each pick opens a real per-ticket log handle registered under the
+      (app.name, slot) tuple — distinct keys, so two same-app slots can't clobber each other — and the
+      EU-635 _RUN_LOG_KEY ContextVar (set per pick, reset in the finally) routes this slot's captured
+      stdout into THAT file, while the EU-272 ContextVar keeps UI attribution on the bare app name.
+      The handle is closed when the ticket returns or raises, so a slot never leaks a handle (or stale
+      routing) into its next ticket."""
     budget = Budget(cfg.max_cost_usd)
     reports: list[TicketReport] = []
     queue: deque[tuple[AppConfig, Ticket]] = deque(worklist)
@@ -1101,13 +1104,19 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
                                                 notes="deferred — worktree busy (another run active)"))
                     continue
                 backlog = None
+                _log_opened = False
                 try:
-                    run_logger.write_note_log(
-                        cfg, app.name, ticket.id,
-                        f"[EU-380] concurrent drain (slot {slot}, {n} builders) — per-ticket stdout "
-                        f"is attributed in the shared stream by app; consult the drain log.")
+                    run_logger.open_run_log(cfg, app.name, ticket.id, run_key=key)
+                    _log_opened = True
                 except Exception:  # noqa: BLE001 — log setup must never block a run
-                    pass
+                    _log_opened = False
+                # EU-635: route this slot's captured stdout into the per-ticket handle opened above.
+                # _Tee.write looks up _RUN_LOG_KEY — set here to the SAME (app.name, slot) tuple the
+                # handle is registered under; without it the lines attribute to the bare app name,
+                # a key no concurrent handle exists under, and the file stays empty. A ContextVar,
+                # not global state: each slot's asyncio Task carries its own context, so co-scheduled
+                # slots can't cross-route each other's lines (the EU-272 attribution hazard).
+                _log_key_token = cockpit_state.set_run_log_key(key)
                 try:
                     try:
                         if key not in gits:
@@ -1128,7 +1137,12 @@ async def _run_inner_concurrent(cfg: Config, worklist: list[tuple[AppConfig, Tic
                     except Exception as exc:  # noqa: BLE001 — one bad ticket must not kill the run
                         report = await _exception_report(cfg, ticket, app, exc, audit, backlog=backlog)
                 finally:
-                    pass
+                    cockpit_state.reset_run_log_key(_log_key_token)
+                    if _log_opened:
+                        try:
+                            run_logger.close_run_log(run_key=key)
+                        except Exception:  # noqa: BLE001 — log teardown must never block a run
+                            pass
                 reports.append(report)
                 if (report.notes or "").startswith(_BASE_LEVEL_PREFIXES):
                     base_halted.add(app.name)

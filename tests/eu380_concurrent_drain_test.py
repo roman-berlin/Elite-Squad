@@ -96,9 +96,13 @@ async def _fake_process(ticket, app, cfg, git, backlog, audit, budget, stop_even
 
 _orig_inner = loop._process_ticket_inner
 _orig_note = loop.run_logger.write_note_log
+_orig_open = getattr(loop.run_logger, "open_run_log", None)
+_orig_close = getattr(loop.run_logger, "close_run_log", None)
 _orig_mkgit = loop._make_git
 loop._process_ticket_inner = _fake_process
 loop.run_logger.write_note_log = lambda *a, **k: None
+loop.run_logger.open_run_log = lambda *a, **k: None  # EU-635: _worker now uses open_run_log
+loop.run_logger.close_run_log = lambda *a, **k: None  # EU-635: mirror close on finally
 loop._make_git = lambda cfg, app, slot=0: SimpleNamespace(ensure_clean=lambda: None)
 
 try:
@@ -180,6 +184,10 @@ try:
 finally:
     loop._process_ticket_inner = _orig_inner
     loop.run_logger.write_note_log = _orig_note
+    if _orig_open is not None:
+        loop.run_logger.open_run_log = _orig_open
+    if _orig_close is not None:
+        loop.run_logger.close_run_log = _orig_close
     loop._make_git = _orig_mkgit
 
 print(f"\n{checks}/{checks} passed")
