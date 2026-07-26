@@ -288,20 +288,26 @@ def _note_model_fallback(why: str) -> None:
 
 
 def _ticket_line_ok(line: str, ticket: str | None) -> bool:
-    """EU-487: does one shared-drain-log line belong to THIS card's ticket?
+    """EU-487 / EU-639: does one shared-drain-log line belong to THIS card's ticket?
 
     The concurrent drain interleaves every build's stdout into ONE file (per-ticket log
     files are EU-444 — deliberately NOT built here); the only per-ticket attribution a raw
     stdout line carries is the ticket key the officer printed with it (``EU-444: builder
-    started``). A line passes when the requested ticket key appears anywhere in it. With no
-    ticket filter (the single-run cockpit — no ``ticket`` query param) EVERY line passes,
-    so the stream stays byte-identical to pre-EU-487. While a filter IS active, a line
-    carrying no ticket key at all is dropped: under interleaving, guessing its owner would
-    leak the other card's noise onto this one. Pure function of its two inputs — no state.
+    started``). A line passes when the requested ticket key appears as a whole token in it.
+    With no ticket filter (the single-run cockpit — no ``ticket`` query param) EVERY line
+    passes, so the stream stays byte-identical to pre-EU-487. While a filter IS active, a
+    line carrying no ticket key at all is dropped: under interleaving, guessing its owner
+    would leak the other card's noise onto this one. Pure function of its two inputs — no
+    state.
+
+    EU-639: ticket matching uses a regex word-boundary (``\b``) so ``EU-49`` matches
+    ``EU-49: …`` and ``for EU-49 on …`` but NOT ``EU-492: …``.  This prevents a shorter
+    ticket prefix from leaking the sibling ticket's lines onto the wrong panel.
     """
     if not ticket:
         return True
-    return ticket in line
+    import re
+    return bool(re.search(r"\b" + re.escape(ticket) + r"\b", line))
 
 
 def create_app(cfg: Config, port: int = 8787) -> Flask:
