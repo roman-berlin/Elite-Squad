@@ -3843,6 +3843,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
             st["last_msg"] = "blocked — fix the health problems first (see the banner)"
+            set_last_result(app_name or None, "error", st["last_msg"])
             return redirect("/")
         text = (request.form.get("text") or "").strip()
         import copy
@@ -3853,6 +3854,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if _berr:
             release_run(app_name or None)
             st["last_msg"] = _berr
+            set_last_result(app_name or None, "error", st["last_msg"])
             return redirect("/")
         desc = _bug_desc(cfg, text, request.files.get("screenshot"))
         title = _bug_title(text)
@@ -3862,6 +3864,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             release_run(app_name or None)
             st["dry_run"] = None
             st["last_msg"] = f"could not start: {exc}"
+            set_last_result(app_name or None, "error", st["last_msg"])
             return redirect("/")
 
         def _bg():
@@ -3882,6 +3885,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             except Exception as exc:  # noqa: BLE001
                 errored = True
                 st["last_msg"] = str(exc)
+                set_last_result(app_name or None, "error", st["last_msg"])
             finally:
                 # EU-361: run_end fires from the finally — same as its run_api twin — so a worker
                 # that dies on an exception still closes its own boundary.
@@ -3894,6 +3898,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 # ``errored`` so a real run error (set just above) stays visible — release_run no
                 # longer clears last_msg, so the operator still sees why a failed run failed.
                 if not errored:
+                    set_last_result(app_name or None, "ok", "report intake complete")
                     st["last_msg"] = ""
                 # EU-191: AFTER the fast cleanup (so a slow usage probe never delays clearing the
                 # control-bar note — the race that broke eu104), raise the unit-wide (None-keyed)
