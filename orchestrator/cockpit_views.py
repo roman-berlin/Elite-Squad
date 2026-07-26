@@ -1193,20 +1193,6 @@ def _chat_tabs(active: str, npend: int = 0) -> str:
     return f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a></div>'
 
 
-def _group_inner(cfg: Config) -> str:
-    from . import council
-    msgs = council.group_messages(cfg, limit=30)   # EU-287: window to the recent messages, not the whole log
-    if not msgs:
-        return '<div class=cempty>No messages yet. Ask the unit anything — the 1–2 relevant engineers weigh in.</div>'
-    out = ""
-    for who, text in msgs:
-        side = "you" if who == "you" else "unit"
-        label = "You" if who == "you" else html.escape(who)
-        out += (f'<div class="msg {side}"><div class=who>{label}</div>'
-                f'<div class=bub>{html.escape(text)}</div></div>')
-    return f'<div class=thread>{out}</div>'
-
-
 def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None = None) -> str:
     """EU-122: Dual-provider budget gauge — shows Claude and GLM side-by-side with % remaining.
 

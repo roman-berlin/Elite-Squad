@@ -1,18 +1,13 @@
-"""EU-594 — the CTO chat is the ONLY visible entry point into the unit chat.
+"""EU-594/EU-608 — the CTO chat is the ONLY visible entry point into the unit chat.
 
-The Group room card (Talk panel), the Group room tab (chat tabs bar) and the
-/group link in the council-page nudge were removed (UI-only — the /group and
-/api/group routes stay live for direct hits; the nudge
-sentence lives in server.py, not warroom.py as the ticket's AC stated).
-EU-612 then deleted the /api/group-thread route (its only consumer, the
-/group polling client, went with it).
+The Group room card (Talk panel), the Group room tab (chat tabs bar), the
+/group and /api/group routes, and all group_chat infrastructure were removed
+by EU-608. Only the UI assertions remain relevant.
 
 Asserts the rendered HTML the cockpit serves:
   1. _chat_tabs renders exactly ONE tab — the CTO — for both 'general' and 'group' actives.
   2. The Talk-to-the-unit panel (_TALK_HTML) has exactly ONE card, pointing at /chat.
   3. GET /chat and GET /council serve no href into /group and no 'Group room' text.
-  4. The dormant routes still answer: GET /group 200, POST /api/group works;
-     GET /api/group-thread is 404 (route deleted, EU-612).
 """
 import sys, tempfile, types
 from pathlib import Path
@@ -59,13 +54,6 @@ for path in ("/chat", "/council"):
     chk(f"GET {path} serves no href into /group", 'href="/group"' not in body and "href='/group'" not in body,
         body[:200])
     chk(f"GET {path} has no 'Group room' text", "Group room" not in body)
-
-# --- 4. the routes stay live for direct hits (dormant, not dead) -------------
-chk("GET /group still 200", client.get("/group").status_code == 200)
-gt = client.get("/api/group-thread")
-chk("GET /api/group-thread now 404 (EU-612)", gt.status_code == 404, str(gt.status_code))
-r = client.post("/api/group", data={"text": "eu594 route-alive smoke"})
-chk("POST /api/group still accepted", r.status_code in (200, 302), str(r.status_code))
 
 print("\n============ EU-594 GROUP ENTRY POINTS ============")
 passed = sum(1 for _, ok, _ in results if ok)

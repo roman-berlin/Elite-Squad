@@ -60,7 +60,6 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _dual_provider_gauge,
-    _group_inner,
     _result_banner,
     _wrap,
     _working,
@@ -227,7 +226,7 @@ def _claim_flag(name: str, value=True) -> bool:
                 _state["standuping"] = True     # ...several thread-scheduler ticks later
 
     Under ``app.run(..., threaded=True)`` two clicks milliseconds apart both passed the ``if`` and
-    both spawned a worker: two concurrent standups / councils / scribes, or two ``group_chat``
+    both spawned a worker: two concurrent standups / councils / scribes, or two consultant
     rounds answering the same message. ``ship_review`` already set its flag before the thread (the
     in-repo precedent); this closes the window for the other seven with a real lock, so the check
     and the set can't be split at all.
@@ -3297,94 +3296,6 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'else{btn.remove();}}catch(e){btn.disabled=false;btn.textContent=prev;}}'
                 '</script>')
         return _wrap("Chat with the CTO", body)
-
-    @app.get("/group")
-    def group_page() -> str:
-        officer = (request.args.get("officer") or "").strip()
-        # EU-287: a lightweight typing indicator (not a banner) — the officer(s) triage picked are
-        # composing. `_state['grouping']` already tracks the in-flight window (set in group_api below).
-        busy = (f'<div class=typing>&middot; {html.escape(officer) if officer else "an engineer"} '
-                'is weighing in&hellip;</div>' if _state.get("grouping") else "")
-        aim = (f'<div class=aim>Consulting <b>{html.escape(officer)}</b> directly — only they answer. '
-               '<a href="/group">ask the whole unit instead</a></div>') if officer else ""
-        oin = f'<input type=hidden name=officer value="{html.escape(officer)}">' if officer else ""
-        ph = (f"Ask {html.escape(officer)} something…" if officer
-              else "Ask the unit / brainstorm with the engineers…")
-        body = (_CHAT_STYLE + _chat_tabs("group")
-                + '<div class=chat>' + aim + busy + '<div id=ginner>' + _group_inner(cfg) + '</div></div>'
-                '<div class=composer><div id=grouperr class=chaterr role=alert aria-live=assertive></div>'
-                '<form id=groupform method=post action=/api/group>' + oin
-                + f'<input type=text id=groupinput name=text autocomplete=off autofocus '
-                f'placeholder="{ph}"><button>Send</button></form></div>'
-                '<script>window.scrollTo(0,document.body.scrollHeight);'
-                # EU-307 — Telegram-style Enter-to-send for the group composer, mirroring /chat's
-                # chatform handler: intercept submit, POST via fetch, and only on success clear the
-                # input, refocus, and stick to the newest message. On failure keep the typed text
-                # and surface an inline error so Enter retries the same send. (EU-612: the post-send
-                # #ginner patch-refresh and the 4s poll died with /api/group-thread — the room is
-                # dormant; the thread re-renders server-side on the next page load.)
-                'var groupform=document.getElementById("groupform"),groupinput=document.getElementById("groupinput"),'
-                'grouperr=document.getElementById("grouperr");'
-                'if(groupform)groupform.addEventListener("submit",async function(ev){'
-                'ev.preventDefault();'
-                'var text=groupinput.value;if(!text.trim())return;'
-                'var ok=false,busy=false;'
-                'try{var r=await fetch("/api/group",{method:"POST",body:new FormData(groupform)});'
-                'ok=!!(r&&r.ok);busy=!!(r&&r.status===409);}'
-                'catch(e){ok=false;}'
-                # EU-319: a 409 means the officers are mid-reply and the send was REFUSED, not that
-                # it failed — the text stays in the composer either way (that is the data-loss fix),
-                # but backpressure gets its own copy and no red `cerr` ring, because retrying in a
-                # few seconds is the correct move and nothing is broken.
-                'if(!ok){'
-                'if(busy){if(grouperr){grouperr.textContent="The unit is still replying — your message was NOT sent. Press Enter to try again in a moment.";'
-                'grouperr.classList.add("on");}}'
-                'else{groupinput.classList.add("cerr");'
-                'if(grouperr){grouperr.textContent="Message not sent — check your connection and press Enter to retry.";'
-                'grouperr.classList.add("on");}}'
-                'groupinput.focus();return;}'
-                'groupinput.classList.remove("cerr");if(grouperr)grouperr.classList.remove("on");'
-                'groupinput.value="";'
-                'groupinput.focus();'
-                'window.scrollTo(0,document.body.scrollHeight);'
-                '});'
-                '</script>')
-        return _wrap("Group room — the unit", body)
-
-    @app.post("/api/group")
-    def group_api() -> Response | tuple[Response, int]:
-        from urllib.parse import quote
-
-        from flask import jsonify
-        text = (request.form.get("text") or "").strip()
-        officer = (request.form.get("officer") or "").strip() or None
-        _dest = "/group?officer=" + quote(officer) if officer else "/group"
-        if not text:
-            return redirect(_dest)
-        # EU-319 + EU-361: claim the room ATOMICALLY, in the request thread. Two problems used to
-        # live in one line (``if text and not _state.get("grouping")``):
-        #   * the flag was set inside _bg(), so two quick sends both passed the check (EU-361);
-        #   * a send that lost the check fell straight through to the 302 below, so the EU-307
-        #     Enter-to-send fetch followed the redirect, saw r.ok, cleared the composer — and the
-        #     Commander's typed message was GONE with the UI reporting success (EU-319: real data
-        #     loss on his own channel, found 2026-07-14 reviewing EU-307's landed code).
-        # A 409 is the honest answer: nothing was queued. The composer keeps the text and says so.
-        if not _claim_flag("grouping"):
-            return jsonify({"queued": False, "busy": True,
-                            "error": "the unit is still replying — nothing was sent"}), 409
-        from . import council
-        council._append_group(cfg, "you", text)   # echo instantly; the bg adds officer replies
-
-        def _bg():
-            try:
-                asyncio.run(council.group_chat(cfg, text, officers=[officer] if officer else None,
-                                               audit=audit, echo=False))
-            except Exception as exc:  # noqa: BLE001
-                _state["last_msg"] = f"group chat failed: {exc}"
-            finally:
-                _state["grouping"] = False
-        threading.Thread(target=_bg, daemon=True).start()
-        return redirect(_dest)
 
     @app.get("/api/chat-thread")
     def chat_thread_api() -> Response:
