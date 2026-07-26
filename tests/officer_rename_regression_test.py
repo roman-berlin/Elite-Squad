@@ -229,10 +229,7 @@ for uikey, name, _role in warroom._OFFICERS:
     ik = warroom._OFFICER_KEY.get(uikey, uikey)
     check(f"cockpit board label resolves to SOT: {uikey!r} -> {name!r}", name == display(ik),
           f"{name!r} != display({ik!r})={display(ik)!r}")
-for uikey, gname in warroom._GROUP_NAME.items():
-    ik = warroom._OFFICER_KEY.get(uikey, uikey)
-    check(f"group-room consult name resolves to SOT: {uikey!r} -> {gname!r}", gname == display(ik),
-          f"{gname!r} != display({ik!r})={display(ik)!r}")
+# EU-613: _GROUP_NAME removed — all roster links now route through /chat.
 
 # === 6. soldiers -> engineers applied to the human-facing PROMPTS (rename-map item) ===========
 # Internal identifiers/tags/keys (tag "soldier·…", _SOLDIER_SYSTEM, soldier_tools, audit "soldier_build")
