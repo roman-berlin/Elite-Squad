@@ -66,6 +66,38 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
+# EU-653: structured last-result storage. Existing readers strip/pop ``last_result`` as a plain
+# string (one-shot banner in ``cockpit_views._result_banner``, control-bar text, /api/deploy-status).
+# The helper writes BOTH — the plain text into ``st['last_result']`` (byte-compatible with every
+# existing reader) AND the full structured record into a new sibling key ``st['last_result_record']``.
+# Reader-migration happens in follow-on tickets (EU-648b/c/d); this helper is additive only.
+
+LAST_RESULT_TONES: frozenset[str] = frozenset(("ok", "error", "warn"))
+
+
+def set_last_result(app: str | None, tone: str, text: str) -> None:
+    """Store a structured (tone, text, timestamp) result while keeping ``last_result`` plain.
+
+    Validates ``tone`` against :data:`LAST_RESULT_TONES`; raises ``ValueError`` *before* touching
+    any state so an invalid call leaves everything unchanged.
+
+    Writes::
+
+        st['last_result']         = text          # plain string — every existing reader still works
+        st['last_result_record']  = {tone, text, timestamp}  # structured — for future readers
+
+    Note on back-compat: the *_result_banner* reader (cockpit_views.py:303) pops ``last_result`` as
+    a one-shot string; that behaviour is unaffected because we keep writing the same plain string
+    there. Record-staleness / clearing semantics are deferred to the migration tickets.
+    """
+    if tone not in LAST_RESULT_TONES:
+        raise ValueError(
+            f"invalid last_result tone {tone!r}: must be one of {sorted(LAST_RESULT_TONES)}")
+    st = get_state(app)
+    st["last_result"] = text
+    st["last_result_record"] = {"tone": tone, "text": text, "timestamp": time.time()}
+
+
 def _first_shippable(cfg) -> str:
     """The first app that is an actual PRODUCT — i.e. NOT the unit's own repo (that one promotes via
     'Update unit', not ship-review). Used when ship-review is invoked with no single project selected
