@@ -3317,22 +3317,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 + f'<input type=text id=groupinput name=text autocomplete=off autofocus '
                 f'placeholder="{ph}"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
-                # EU-307 — same patch-in-place-friendly pattern as /chat's refreshChat(): pull the
-                # poll body into a function so Enter-to-send can await the identical refresh,
-                # instead of duplicating the #ginner reconciliation logic. Group has no windowing
-                # (EU-304/305 only landed for /chat), so this stays a plain innerHTML swap — that's
-                # the graceful-degradation path the ticket asks for regardless of EU-286a.
-                'async function refreshGroup(force){try{var r=await fetch("/api/group-thread",{cache:"no-store"});'
-                'if(!r.ok)return;'
-                'var near=force||((window.innerHeight+window.scrollY)>=document.body.scrollHeight-140);'
-                'document.getElementById("ginner").innerHTML=await r.text();'
-                'if(near)window.scrollTo(0,document.body.scrollHeight);'
-                '}catch(e){}}'
-                'setInterval(function(){refreshGroup(false);},4000);'
                 # EU-307 — Telegram-style Enter-to-send for the group composer, mirroring /chat's
                 # chatform handler: intercept submit, POST via fetch, and only on success clear the
-                # input, patch-refresh #ginner, refocus, and stick to the newest message. On failure
-                # keep the typed text and surface an inline error so Enter retries the same send.
+                # input, refocus, and stick to the newest message. On failure keep the typed text
+                # and surface an inline error so Enter retries the same send. (EU-612: the post-send
+                # #ginner patch-refresh and the 4s poll died with /api/group-thread — the room is
+                # dormant; the thread re-renders server-side on the next page load.)
                 'var groupform=document.getElementById("groupform"),groupinput=document.getElementById("groupinput"),'
                 'grouperr=document.getElementById("grouperr");'
                 'if(groupform)groupform.addEventListener("submit",async function(ev){'
@@ -3355,17 +3345,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'groupinput.focus();return;}'
                 'groupinput.classList.remove("cerr");if(grouperr)grouperr.classList.remove("on");'
                 'groupinput.value="";'
-                'await refreshGroup(true);'
                 'groupinput.focus();'
                 'window.scrollTo(0,document.body.scrollHeight);'
                 '});'
                 '</script>')
         return _wrap("Group room — the unit", body)
-
-    @app.get("/api/group-thread")
-    def group_thread_api() -> Response:
-        from flask import Response
-        return Response(_group_inner(cfg), mimetype="text/html")
 
     @app.post("/api/group")
     def group_api() -> Response | tuple[Response, int]:
