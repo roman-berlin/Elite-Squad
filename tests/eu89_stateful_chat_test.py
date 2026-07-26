@@ -240,7 +240,9 @@ with tempfile.TemporaryDirectory() as _td:
 
     asyncio.run(council.respond_to_commander(cfg, "approve AUTO-5"))
 
-    injected = captured_prompts[0] if captured_prompts else ""
+    # EU-602: _needs_specialist also calls run_agent (triage), so use the LAST captured prompt
+    # (the main CTO call), not the first (which is now the triage call).
+    injected = captured_prompts[-1] if captured_prompts else ""
     check("context injection: LLM prompt contains Thread context section",
           "Thread context" in injected, repr(injected[:300]))
     check("context injection: stored proposal body appears in the LLM prompt",
