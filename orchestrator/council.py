@@ -1229,6 +1229,47 @@ async def group_chat(cfg: Config, message: str, officers=None, audit=None,
 
 
 # --------------------------------------------------------------------------- #
+# _consult_specialist: single-officer grounded lookup (EU-600)
+#
+# Consults ONE officer by key, returns a brief answer. NOT yet wired into
+# respond_to_commander (later sub-ticket). Wraps the entire flow in one
+# try/except so any failure yields None — never raises.
+# --------------------------------------------------------------------------- #
+async def _consult_specialist(cfg: Config, message: str, officer_key: str) -> str | None:
+    """Ask a single officer for a brief (1–2 sentence) answer scoped to their lane.
+
+    Returns None on any error (timeout, malformed response, unknown key).
+    Does NOT modify or depend on ``respond_to_commander``."""
+    try:
+        digest = format_signals(collect_signals(cfg))
+        notes = recent_commander_notes(cfg)
+        cwd = _general_root()
+        # Strict key lookup — iterate COUNCIL; no fallback-to-all like _select_officers.
+        officer = None
+        for rank, lens_role, voice in COUNCIL:
+            if _officer_key(rank) == officer_key:
+                officer = (rank, lens_role, voice)
+                break
+        if officer is None:
+            return None
+        rank, lens_role, voice = officer
+        prompt = "\n".join([
+            f"You are the {rank} ({lens_role}). The unit's recent record:", "", digest, "",
+            *([f"Standing guidance from the Commander:\n{notes}\n"] if notes else []),
+            f'The Commander asks: "{message}"', "",
+            "Answer in at most 2 short sentences, strictly from your lane. If this is not your "
+            "lane, reply with exactly 'PASS'.",
+        ])
+        run = await run_agent(prompt, _group_options(cfg, voice, cwd), tag="consult-" + officer_key)
+        s = (run.final or run.text or "").strip()
+        if not s or s.lower().rstrip(".!").strip() in _SKIP:
+            return None
+        return _brief(s, max_sentences=2)
+    except Exception:  # noqa: BLE001 — best-effort, never raise
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Daily stand-up — each officer reports Yesterday / Today / Blockers from the
 # real record and flags hand-offs ('need <Officer>'). Assembled deterministically
 # (no extra chair call) and saved for the cockpit.
