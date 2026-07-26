@@ -3697,14 +3697,17 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     pass
                 _state["last_msg"] = (
                     f"✓ Filed {key} from your directive (linked to {tid}) — cleared from Needs-you.")
+                set_last_result(app_name, 'ok', f"Filed {key} from directive on {tid}")
             elif not supports_backlog:
                 _state["last_msg"] = (
                     f"⚠ Couldn't file a ticket for {tid}: no backlog is configured for "
                     f"{app_name or 'this app'}. Left it in Needs-you.")
+                set_last_result(app_name, 'warn', f"No backlog configured for {tid}")
             else:
                 _state["last_msg"] = (
                     f"⚠ Couldn't file a ticket from your directive — {tid} kept in Needs-you."
                     + (f" ({err})" if err else " (the backlog rejected the request)."))
+                set_last_result(app_name, 'error', f"Filing failed for {tid}: {err}" if err else f"Filing rejected for {tid}")
             return redirect("/needs")
 
         if intent == "close":
@@ -3725,12 +3728,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             if ok:
                 _dismiss_row()
                 _state["last_msg"] = f"✓ Closed {tid} per your reply — cleared from Needs-you."
+                set_last_result(app_name, 'ok', f"Closed {tid}")
             elif not supports_backlog:
                 _state["last_msg"] = (
                     f"⚠ Couldn't close {tid}: no backlog is configured for "
                     f"{app_name or 'this app'}. Left it in Needs-you.")
+                set_last_result(app_name, 'warn', f"No backlog configured for closing {tid}")
             else:
                 _state["last_msg"] = f"⚠ Couldn't close {tid} (backlog error) — left it in Needs-you."
+                set_last_result(app_name, 'error', f"Close failed for {tid}")
             return redirect("/needs")
 
         if intent == "defer":
@@ -3739,6 +3745,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             # ticket re-escalates later.
             _dismiss_row()
             _state["last_msg"] = f"✓ Deferred {tid} — cleared from Needs-you (left parked)."
+            set_last_result(app_name, 'ok', f"Deferred {tid}")
             return redirect("/needs")
 
         # intent == 'clarification': resolve the pending decision and re-run the original ticket with
@@ -3773,6 +3780,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         _state["last_msg"] = (f"⚠ answer to {tid} was saved as a comment but the "
                                               f"unblock FAILED ({exc}) — the ticket is still "
                                               "parked; /unblock it by hand.")
+                        set_last_result(app_name, 'error', f"Unblock failed for {tid}: {exc}")
                         try:
                             audit.record("clarify_unblock_failed", ticket_id=tid,
                                          error=str(exc)[:200])
@@ -3791,10 +3799,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         pass
             except Exception as exc:  # noqa: BLE001 - the re-run must never break the cockpit
                 _state["last_msg"] = f"answer to {tid} failed: {exc}"
+                set_last_result(app_name, 'error', f"Clarification failed for {tid}: {exc}")
 
         threading.Thread(target=_bg_clarify, daemon=True).start()
         _state["last_msg"] = (f"✓ Answer sent to {tid} — cleared from Needs-you; ticket moved to To Do "
                               "and the squad is re-running it with your decision.")
+        set_last_result(app_name, 'ok', f"Answer sent to {tid}")
         return redirect("/needs")
 
     @app.post("/needs/resolve")
