@@ -91,5 +91,11 @@ including the transient guarantees. See `tests/eu212_fallback_audit_test.py` and
   the seam's full signature.
 - `tests/retired_subsystems_test.py` — a deleted subsystem cannot stay referenced live
   (registry-driven; extended by every deletion land).
+- `tests/drain_log_pointer_test.py` — the concurrent drain's per-ticket file must resolve to
+  a real path (the pointer note was the old fallback when no handle existed).
+- `tests/eu543_live_log_e2e_test.py` — sibling to eu639: asserts stub-signature removal
+  (AC4, `[EU-380]`/`[EU-253]` text never leaks into real content), set-based isolation
+  (AC3, zero shared lines between concurrent tickets), SSE fallback guard (AC2, no "shared
+  drain stream" frame when per-ticket files exist), and warroom.js newest-line-first posture.
 - `tests/run_all.py` — the union gate itself; its verdict exits non-zero and its wall-clock
   budget keeps the gate honest.
