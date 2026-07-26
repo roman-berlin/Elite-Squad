@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-600 · Elite-Unit · • Helper is correctly isolated: never called from respond_to_commander or anywhere else (verified via grep). • Reuses _group_options/_officer_key/COUNCIL exactly as instructed — no new officer-dispatch path.
 - 2026-07-26 · EU-594 · Elite-Unit · • Group room card (_TALK_HTML), tab (_chat_tabs), and council nudge link all removed — CTO is the only visible entry.
 - 2026-07-26 · EU-542 · Elite-Unit · • AC1/2/3 all met: single shared floating fixed button on /chat, /council, and /tasks; keyboard-accessible token-only styling; 560px icon-disc collapse + top-padding clearance per the PM call.
 - 2026-07-26 · EU-540 · Elite-Unit · • AC1: theme tokens (--panel/--ink/--dim/--well/--line2) all defined in both light+dark :root — legible in both modes.
