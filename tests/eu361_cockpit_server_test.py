@@ -574,14 +574,96 @@ else:
     _handler_src = "<route not yet defined>"
     chk("day_view route exists (EU-630/6)", False, "view_functions['day_view'] is None")
 
+_chk_src = inspect.getsource(srv.create_app(cfg).view_functions["day_view"])
+_lstripped_src = _chk_src.lstrip()
+_dq_s = _lstripped_src.find('"""')
+_sq_s = _lstripped_src.find("'''")
+if _dq_s != -1 and (_sq_s == -1 or _dq_s < _sq_s):
+    _end_s = _lstripped_src.find('"""', _dq_s + 3)
+    _handler_src_631 = _lstripped_src[_end_s + 3:] if _end_s != -1 else ""
+elif _sq_s != -1:
+    _end_s = _lstripped_src.find("'''", _sq_s + 3)
+    _handler_src_631 = _lstripped_src[_end_s + 3:] if _end_s != -1 else ""
+else:
+    _handler_src_631 = _lstripped_src
+del _lstripped_src, _dq_s, _sq_s, _end_s  # noqa: F841
+
 chk("day_view handler lacks platform.system call (EU-630/6)",
-    "platform.system" not in _handler_src,
-    repr(_handler_src))
+    "platform.system" not in _handler_src_631,
+    repr(_handler_src_631))
 chk("day_view handler lacks 'Darwin' literal (EU-630/6)",
-    "Darwin" not in _handler_src,
-    repr(_handler_src))
+    "Darwin" not in _handler_src_631,
+    repr(_handler_src_631))
 
 srv.threading = _stub_threading(_real_thread)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EU-631 — GET /logs/day?format=txt : plain-text download affordance
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# --- 1) format=txt returns 200 with text/plain + Content-Disposition attachment header ---
+r_txt = c.get("/logs/day?app=alpha&date=2026-08-15&format=txt")
+chk("GET /logs/day?...&format=txt → 200 (EU-631/1)",
+    r_txt.status_code == 200, f"status={r_txt.status_code}")
+chk("Content-Type contains text/plain (EU-631/1)",
+    "text/plain" in (r_txt.content_type or ""), repr(r_txt.content_type))
+cd_header = dict(r_txt.headers).get("Content-Disposition", "")
+chk("Content-Disposition present (EU-631/1)",
+    "attachment" in cd_header, repr(cd_header))
+chk("Content-Disposition filename ends .txt (EU-631/1)",
+    cd_header.endswith(".txt'") or cd_header.endswith('.txt"'), repr(cd_header))
+
+# --- 2) TXT body has same entries, same order, PLAIN TEXT (no html escaping) ---
+txt_body = r_txt.get_data(as_text=True)
+# Entries must appear in chronological order: build(EU-630) → Gate(EU-631) → Review(EU-631)
+_t1_pos = txt_body.index("Running build steps for EU-630")
+_t2_gate_pos = txt_body.index("Gate passed for EU-631")
+_t2_rvew_pos = txt_body.index("PR approved")
+_order_ok_631 = _t1_pos < _t2_gate_pos < _t2_rvew_pos
+chk("TXT entries in chronological order (EU-631/2)",
+    _order_ok_631, "entries out of order")
+# Script injection is raw, NOT html-escaped
+chk("Raw <script> in TXT body (not escaped) (EU-631/2)",
+    '<script>alert("xss")</script>' in txt_body,
+    repr(txt_body[txt_body.index('Script'):]))
+chk("&lt; NOT in TXT body (plain-text, no escaping) (EU-631/2)",
+    "&lt;script&gt;" not in txt_body, "unexpected HTML entities in plaintext")
+
+# --- 3a) malformed date → 400 (same as HTML) ---
+r_bad_txt = c.get("/logs/day?app=alpha&date=2026-13-99&format=txt")
+chk("malformed date+format=txt → 400 (EU-631/3a)",
+    r_bad_txt.status_code == 400, f"status={r_bad_txt.status_code}")
+
+# --- 3b) path traversal → 403 (same as HTML) ---
+r_trav_txt = c.get("/logs/day?app=..&date=2026-08-15&format=txt")
+chk("app=..+format=txt → 403 (EU-631/3b)",
+    r_trav_txt.status_code == 403, f"status={r_trav_txt.status_code}")
+
+# --- 4) nonexistent day → 200 with attachment headers, empty body ---
+r_miss_txt = c.get("/logs/day?app=alpha&date=1999-01-01&format=txt")
+chk("nonexistent day+format=txt → 200 (EU-631/4)",
+    r_miss_txt.status_code == 200, f"status={r_miss_txt.status_code}")
+chk("Content-Disposition on empty txt day (EU-631/4)",
+    "attachment" in dict(r_miss_txt.headers).get("Content-Disposition", ""),
+    "missing attachment header on empty day")
+miss_txt_body = r_miss_txt.get_data(as_text=True)
+chk("Empty body (no HTML markup) on missing day (EU-631/4)",
+    miss_txt_body == "", repr(miss_txt_body[:200]))
+chk("No '<html>' in empty txt response (EU-631/4)",
+    "<html>" not in miss_txt_body, "HTML leaked into txt response")
+
+# --- 5) HTML view has download .txt link; handler source still lacks platform guard ---
+chk("download .txt link in HTML body (EU-631/5)",
+    '/logs/day?app=alpha&date=2026-08-15&format=txt' in body_pop,
+    "download link href missing from HTML")
+chk("'download' visible in HTML (EU-631/5)",
+    "download" in body_pop.lower(), "download label missing from HTML")
+# Re-check: handler still lacks Darwin/platform gating after adding format=txt
+chk("day_view handler still lacks platform.system call (EU-631/5)",
+    "platform.system" not in _handler_src_631, repr(_handler_src_631))
+chk("day_view handler still lacks 'Darwin' literal (EU-631/5)",
+    "Darwin" not in _handler_src_631, repr(_handler_src_631))
 
 print("\n============ EU-361 COCKPIT SERVER CORRECTNESS QA ============")
 passed = sum(1 for _, ok, _ in results if ok)
