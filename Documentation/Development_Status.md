@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-26 · EU-637 · Elite-Unit · • All 4 functional ACs verified directly against source: unshift/slice(0,1000)/scrollTop-removal all correct, CSS classing + escaping + placeholder guard + done/error handlers untouched. · 🔗 /warroom (the EU-200 Live Run Log panel — verify newest streamed line renders at top; older lines scroll down naturally without auto-scroll)
 - 2026-07-26 · EU-631 · Elite-Unit · • Format=txt inherits the HTML route's date/traversal validation (verified: branch runs after both checks). • Content-Disposition filename uses slugged app + validated date — no header-injection risk. · 🔗 /logs/day?app=alpha&date=YYYY-MM-DD (toggle format=txt to verify the download control)
 - 2026-07-26 · EU-635 · Elite-Unit · • Implements PM decision (b) exactly: tuple-keyed open_run_log + additive _RUN_LOG_KEY ContextVar routing write_line only, UI attribution unchanged.
 - 2026-07-26 · EU-630 · Elite-Unit · • Guard/validation logic in the new /logs/day route is a verbatim, correct mirror of the already-reviewed /api/day-log guard — traversal, date-validation, and empty-day behavior all match. · 🔗 /logs/day?app=eu&date=YYYY-MM-DD
