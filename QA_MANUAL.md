@@ -124,7 +124,7 @@ solo now.)
 
 ## 8. Chat with the General
 **8.1 Open** — toolbar **💬 Chat**.
-- Expect: the **General | Group room** tabs; the General thread; a composer.
+- Expect: a single **💬 CTO** tab; the General thread; a composer.
 
 **8.2 Pending decision** — if a run escalated/halted, a card appears ("the unit needs your call").
 - Expect: an inline reply box per decision. Answering it resumes the parked ticket (same as a Telegram reply).
@@ -135,14 +135,9 @@ solo now.)
 **8.4 Unread badge** — when a decision is pending, the toolbar **💬 Chat** shows a red count.
 
 ---
-
-## 9. Group room
-**9.1 Open** — Chat → **Group room** tab (or Unit → Group room).
-**9.2 Ask the unit** — type a question / brainstorm prompt, send.
-- Expect: a "the unit is weighing in…" note, then the **relevant officers reply** in character (others add a short comment, off-lane ones stay silent). The General is **not** here (that's your 1:1 chat). Thread persists and auto-scrolls.
+_(§9 "Group room" was removed 2026-07-25 — the CTO chat above is the single entry point; numbering kept stable.)_
 
 ---
-
 ## 10. Daily standup
 **10.1 Snapshot** — **Views → Daily standup**.
 - Expect: instant snapshot (shipped today / needs-you / awaiting decision).

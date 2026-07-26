@@ -31,7 +31,7 @@ from .phases import BUILD, GATE, LAND, PHASES, REVIEW
 # Cockpit roster key -> internal officers.OFFICER_NAMES key. Most match 1:1; a few cockpit keys differ
 # from the engineer key (builder=field_engineer, reviewer=inspector). Display names are
 # NEVER hard-coded below — they're resolved from the single source of truth via display(), so renaming an
-# engineer is one edit in officers.OFFICER_NAMES and the board, roster and group-room labels all follow.
+# engineer is one edit in officers.OFFICER_NAMES and the board, roster labels all follow.
 _OFFICER_KEY = {
     "general": "general", "pm": "pm",
     "builder": "field_engineer", "reviewer": "inspector", "scout": "scout",
