@@ -240,25 +240,31 @@ def test_ac4_render_board_idle_byte_identity():
 # ===========================================================================
 
 def test_ac5_run_html_signature():
-    """_run_html(run, mode, elapsed, manual, log_path, log_ticket=None) contract.
+    """_run_html(run, mode, elapsed, manual, log_path, log_ticket=None, stopping=False) contract.
 
     The first five params are the original EU-485 contract — unchanged, same order, so
     every existing positional/keyword caller keeps working.  EU-487 appended ONE optional
     trailing kwarg (``log_ticket``, default None): the per-card shared-drain-log filter the
     multi-card path threads through; the single-run path omits it, keeping its output
-    byte-identical.  The guard pins both: no drift in the old params, and the new one
-    stays optional-with-default so the old call shape never breaks.
+    byte-identical.  EU-710 appended the next trailing kwarg (``stopping``, default False):
+    the confirmed-stop chip render_board computes from the slot's stop_event.  The guard
+    pins all three: no drift in the old params, and each appended one stays
+    optional-with-default so the old call shape never breaks.
     """
     import inspect
     sig = inspect.signature(warroom._run_html)
     params = list(sig.parameters.keys())
-    expected = ["run", "mode", "elapsed", "manual", "log_path", "log_ticket"]
+    expected = ["run", "mode", "elapsed", "manual", "log_path", "log_ticket", "stopping"]
     chk("AC5: _run_html params == expected", params == expected,
         f"got {params}, expected {expected}")
     lt = sig.parameters.get("log_ticket")
     chk("AC5b: log_ticket is optional with default None (old callers unaffected)",
         lt is not None and lt.default is None,
         f"log_ticket={lt!r}")
+    stp = sig.parameters.get("stopping")
+    chk("AC5c: stopping is optional with default False (old callers unaffected)",
+        stp is not None and stp.default is False,
+        f"stopping={stp!r}")
 
 
 # ===========================================================================
