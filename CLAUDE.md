@@ -95,6 +95,11 @@ Everything under `Documentation/` (these are the only files there — keep this 
   AC1–AC3 + the `max_concurrent_builders` cap, the full-gate integration pass (463/463 harnesses,
   8929 checks), the single-run byte-identity regression guard, the MANUAL TEST recipe, and the
   out-of-scope finding that the no-changes (EU-396) close path skips `_maybe_close_epic`.
+- `Documentation/PEEK_DISMISS_MIGRATION.md` — EU-648 epic (2026-07-27): how the one-shot action
+  result moved from the destructive pop-on-render `_result_banner` to the persistent dismissible
+  strip on the live board — the landed-piece map (EU-653…EU-677), the persistent-until-dismissed
+  semantics, the two writer scopes (per-project vs unit-wide) and EU-673's `_view_state` overlay
+  that closes the AC1 gap (unit-level results like the QA verdict never reached the live board).
 
 A regression guard (`tests/eu43_docs_reality_test.py`) greps this file for every repo-root
 `*.md`, `Documentation/*.md`, and `.claude/skills/*` path it names and fails if any of them

@@ -60,7 +60,7 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _dual_provider_gauge,
-    _result_strip,
+    _peek_last_result,
     _wrap,
     _working,
 )
@@ -531,12 +531,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         """The run-state to RENDER for one tab's board/header (EU-64: per-project).
 
         Returns ``app``'s own per-app run-state (so each tab's board/live-feed reflect ONLY that
-        project's run), with the still-unit-wide ``autopilot`` field overlaid so the header autopilot
-        switch + the autopilot 'live' chip keep working until autopilot itself goes per-project. The
-        per-app state is shallow-copied before the overlay, so that dict is never mutated; this path is
-        NOT fully read-only, though — it refreshes the unit-wide ``_state['autopilot']`` sub-dict in
-        place (the live ``daemon_running`` probe below) and, for a daemon this cockpit process never
-        started, CREATES that entry so the badge has something to read (EU-73).
+        project's run), with the still-unit-wide fields overlaid so unit-level UI keeps working
+        until those subsystems go per-project:
+          * ``autopilot`` — the header switch + 'live' chip (EU-73).
+          * ``last_result_record`` — the one-shot result strip (EU-673). Standup / council /
+            scribe / the QA verdict / start-refusals write their outcome with ``app=None`` onto
+            the unit-wide ``_state`` (unit-level actions, not one project's run); the live board
+            and its SSE stream render from THIS per-tab view, so the newest of the tab's own and
+            the unit-wide record is overlaid — otherwise a QA verdict would only ever appear on
+            a full GET /, never on the live board (the EU-648 AC1 gap this ticket closes). Both
+            scopes clear together via POST /api/dismiss-result, so the overlay can never
+            resurrect a dismissed result. Legacy plain-string ``last_result`` values (no record)
+            get the same unit-wide→per-tab fallback when the tab has none of its own.
+        The per-app state is always shallow-copied before overlaying, so that dict is never
+        mutated; this path is NOT fully read-only, though — it refreshes the unit-wide
+        ``_state['autopilot']`` sub-dict in place (the live ``daemon_running`` probe below) and,
+        for a daemon this cockpit process never started, CREATES that entry so the badge has
+        something to read (EU-73).
 
         EU-73: injects a live ``daemon_running`` field (PID-file check via ``autopilot.daemon_running()``)
         into the autopilot sub-dict so ``autopilot_switch()`` in warroom.py has a single source of
@@ -557,10 +568,24 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             # the badge shows ON — there is no stop_event so the cockpit can't stop it directly.
             ap = {"on": False, "daemon_running": True, "stopping": False, "app": "(external daemon)"}
             _state["autopilot"] = ap
-        if st is _state or not ap:
+        if st is _state:
             return st
         view = dict(st)
-        view["autopilot"] = ap
+        if ap:
+            view["autopilot"] = ap
+        # EU-673: newest-wins overlay of the unit-wide one-shot result (see docstring). A stamped
+        # record beats an undated one; on the (rare) equal-timestamp tie the tab's own record wins.
+        gl = _state.get("last_result_record")
+        if isinstance(gl, dict):
+            local = st.get("last_result_record")
+            if (not isinstance(local, dict)
+                    or float(gl.get("timestamp") or 0) > float(local.get("timestamp") or 0)):
+                view["last_result_record"] = gl
+        # Same fallback for legacy plain-string writers (pre-EU-653 code, or anything still
+        # assigning ``last_result`` directly): when the tab has no string of its own, surface the
+        # unit-wide one. _result_strip's own precedence keeps ANY record above a plain string.
+        if not (st.get("last_result") or "").strip() and (_state.get("last_result") or "").strip():
+            view["last_result"] = _state["last_result"]
         return view
 
     def _claim_cockpit_run(app_name: str, *, stop_event=None):
@@ -608,21 +633,22 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception:  # noqa: BLE001
             pass
         h = health.summary(cfg)
-        # EU-676: non-destructive peek via _result_strip (same helper the live board/SSE path uses).
-        # A pending un-dismissed result renders correctly on every fresh full-page reload
-        # instead of silently vanishing after the first load.
         # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
         import platform as _platform
         # EU-643: the '/models' nav link renders DIRECTLY in the control bar (backend_control's
         # "➕ Add model" button) — the EU-235 post-render splice (models_views.add_models_nav_link)
         # was removed with its injection anchor (EU-642 took the anchor button out of the nav row,
         # so the splice was a no-op carrying only a stale literal of the retired roster page URL).
-        bar = (_result_strip(_state)
-               + _control_bar(cfg, appq, h["healthy"],
-                              is_mac=_platform.system() == "Darwin"))
+        bar = _control_bar(cfg, appq, h["healthy"],
+                           is_mac=_platform.system() == "Darwin")
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.
-        # (The one-shot result banner stays on the unit-wide ``_state`` — ship/promote/patrol are
-        # unit-level actions, not per-project runs.)
+        # EU-673: the one-shot result strip renders INSIDE the board (warroom.render_board splices
+        # cockpit_views._result_strip from this view state) — NOT in the bar above. Unit-level
+        # outcomes (QA verdict, standup, council, scribe) are written onto the unit-wide ``_state``
+        # with app=None and reach the per-tab board via _view_state's newest-wins overlay, so the
+        # strip is byte-identical on the initial page render, the 5s poll and the SSE stream.
+        # EU-676 moved this bar off the destructive _result_banner; EU-673 removed the strip from
+        # the bar entirely — a bar copy would double-render the message the board already shows.
         return warroom.render_page(cfg, appq, _view_state(appq), bar, h)
 
     @app.get("/api/health")
@@ -2090,14 +2116,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # log below — which the officers actually read.
         act = ("" if _state.get("scribing")
                else _actbar(_actbtn("/api/scribe", "&#128221; Update memory")))
-        # One-shot confirmation banner — shown once the Technical Writer finishes (not mid-fold),
+        # Confirmation banner — shown once the Technical Writer finishes (not mid-fold),
         # so the action visibly "took". Reads from last_result+record with tone-based colour.
+        # EU-673: PEEK, not pop — this was the last destructive reader the EU-677 retirement
+        # missed. The pop silently consumed the stored result every time this page opened,
+        # erasing the live board's strip along with it (EU-648 AC2/AC3): a QA verdict survived
+        # right up until someone visited /memory. Per the peek+dismiss migration the result now
+        # persists on every surface until POST /api/dismiss-result clears both scopes.
         _rec = None
         _m = ""
         if not _state.get("scribing"):
-            _r = _state.pop("last_result", "") or ""
-            _rec = _state.pop("last_result_record", None)
-            _m = _r
+            _m = _state.get("last_result", "") or ""
+            _rec = _peek_last_result(_state)
         if _m and _rec:
             _tone = _rec.get("tone", "")
             if _tone == "error":

@@ -145,7 +145,9 @@ run_scribe_preserve_last_msg(client4, _scribe_ok)
 chk("AC4b: last_msg unchanged post-success", server._state.get("last_msg") == "PRE-EXISTING")
 
 # ══════════════════════════════════════════════════════════════════════════
-# AC5: GET /memory renders error banner (red), one-shot pop
+# AC5: GET /memory renders error banner (red), persistent until dismissed
+# (EU-673: the page peeks the stored result now — the old one-shot pop was the last
+# destructive reader and it erased the live board's strip on every visit)
 # ══════════════════════════════════════════════════════════════════════════
 print("--- AC5 ---")
 cfg5 = make_cfg()
@@ -158,7 +160,10 @@ chk("AC5a: failure text visible", "scribe failed: boom" in h_fail)
 chk("AC5b: green success absent (tone=error uses red)", "#10371f" not in h_fail)
 chk("AC5c: red error styling present", "#4d1f1f" in h_fail and "#f8a0a0" in h_fail)
 h_again = client5.get("/memory").get_data(as_text=True)
-chk("AC5c: second GET one-shot pop", "scribe failed: boom" not in h_again)
+chk("AC5c: banner persists on reload (EU-673 peek, not pop)", "scribe failed: boom" in h_again)
+chk("AC5d: dismiss-result clears the banner",
+    client5.post("/api/dismiss-result?app=automatixy").status_code == 200
+    and "scribe failed: boom" not in client5.get("/memory").get_data(as_text=True))
 
 # ══════════════════════════════════════════════════════════════════════════
 # REPORT
