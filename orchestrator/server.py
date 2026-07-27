@@ -2071,11 +2071,20 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ev.set()
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
         else:
-            # EU-695: visible on-page message when there is no live run to stop. Use the already-
-            # resolved `key` (not the raw posted_app) — mirroring the success branch just above — so
-            # an unrecognized/garbage `app` (which resolved to key=None at line ~2011) never makes
-            # get_state lazily create a permanent orphan entry in the state registry.
-            set_last_msg(key, "warn", "No live run to stop — that request may have arrived after the run already finished.")
+            # EU-695/EU-706: visible on-page message when there is no live run to stop, naming
+            # the target the click asked for — a stale card or a race with run completion must
+            # not vanish as a silent redirect, the user has to see the click had no effect. Use
+            # the already-resolved `key` (not the raw posted_app) as the state slot — mirroring
+            # the success branch just above — so an unrecognized/garbage `app` (which resolved
+            # to key=None above) never makes get_state lazily create a permanent orphan entry
+            # in the state registry.
+            if posted_app and posted_ticket:
+                target = f" for {posted_app}/{posted_ticket}"
+            elif posted_app:
+                target = f" for {posted_app}"
+            else:
+                target = ""   # legacy caller posted neither — nothing useful to name
+            set_last_msg(key, "warn", f"No active run found to stop{target}")
         return redirect("/")
 
     @app.get("/standup")
