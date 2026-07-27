@@ -1,4 +1,4 @@
-"""EU-656 — _result_banner and the control-bar note render from STORED TONE only.
+"""EU-656 — _result_strip and the control-bar note render from STORED TONE only.
 
 Both cockpit consumers used to guess tone by substring-checking the message text —
 which flagged success text containing "error" as a failure and painted "0 failed"
@@ -7,8 +7,11 @@ via set_last_result / set_last_msg(app, tone, text) — an EXPLICIT tone, mirror
 signatures, zero substring inference at the write site OR the read site — and the
 renderers read that record only.
 
+EU-677: _result_banner was retired; all callers now use _result_strip (non-destructive).
+Tests migrated accordingly.
+
 Coverage:
-  1. _result_banner reads last_result_record["tone"] exclusively (AC a/b).
+  1. _result_strip reads last_result_record["tone"] exclusively (AC a/b).
   2. set_last_msg(app, tone, text): explicit tone, validated like set_last_result,
      no auto-detection helper left anywhere.
   3. The control-bar note is rendered through _control_bar (the real render path,
@@ -27,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from orchestrator import autopilot as _ap_mod
 from orchestrator.cockpit_state import get_state, reset_workspaces
-from orchestrator.cockpit_views import _control_bar, _result_banner
+from orchestrator.cockpit_views import _control_bar, _result_strip
 from orchestrator.config import AppConfig, Config
 import orchestrator.server as server
 
@@ -61,36 +64,40 @@ def _reset():
     st["active"] = False
 
 
-# ── 1. _result_banner — tone from last_result_record ONLY ─────────────────────
+# ── 1. _result_strip — tone from last_result_record ONLY ──────────────────────
 _reset()
 server.set_last_result(None, "ok", "No build error detected on PR #42")
-b = _result_banner(server._state)
-chk("AC(a) banner: ok-tone text containing 'error' renders green",
+b = _result_strip(server._state)
+chk("AC(a) strip: ok-tone text containing 'error' renders green",
     "var(--ok)" in b and "var(--bad)" not in b, b[:180])
 
 _reset()
 server.set_last_result(None, "error", "Deploy failed: conflict")
-b = _result_banner(server._state)
-chk("AC(b) banner: real failure (tone error) renders red",
+b = _result_strip(server._state)
+chk("AC(b) strip: real failure (tone error) renders red",
     "var(--bad)" in b and "var(--ok)" not in b, b[:180])
 
 _reset()
 server.set_last_result(None, "warn", "Slow CI — rerun recommended")
-b = _result_banner(server._state)
-chk("banner: warn tone is not red", "var(--bad)" not in b, b[:180])
+b = _result_strip(server._state)
+chk("strip: warn tone is not red", "var(--bad)" not in b, b[:180])
 
 _reset()
 server._state["last_result"] = "plain legacy text mentioning error"
 server._state["last_result_record"] = None
-b = _result_banner(server._state)
-chk("banner: missing record defaults to ok — zero substring fallback",
-    "var(--ok)" in b and "var(--bad)" not in b, b[:180])
+b = _result_strip(server._state)
+# EU-676: plain-string fallback (no record) defaults to red/error styling in _result_strip.
+# Unlike _result_banner which defaulted to ok, this errs on the side of caution.
+chk("strip: legacy plain-string fallback defaults to red (cautionary default)",
+    "var(--bad)" in b, b[:180])
 
 _reset()
 server.set_last_result(None, "ok", "shipped")
-_result_banner(server._state)
-chk("banner: still one-shot (pops last_result)",
-    server._state.get("last_result", "") == "", repr(server._state.get("last_result")))
+_r = _result_strip(server._state)
+chk("strip: non-destructive (does not pop last_result)",
+    server._state.get("last_result", "") == "shipped", repr(server._state.get("last_result")))
+chk("strip: renders result without dismiss button (JS handles dismissal via SSE/poll)",
+    "shipped" in _r)
 
 
 # ── 2. set_last_msg(app, tone, text) — explicit tone, mirroring set_last_result ─

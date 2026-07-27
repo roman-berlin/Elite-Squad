@@ -66,11 +66,11 @@ from .cockpit_views import (  # noqa: F401
 )
 
 
-# EU-653: structured last-result storage. Existing readers strip/pop ``last_result`` as a plain
-# string (one-shot banner in ``cockpit_views._result_banner``, control-bar text, /api/deploy-status).
+# EU-653: structured last-result storage. Live readers (control-bar via _control_bar,
+# /api/deploy-status via .get, board/SSE via _result_strip) all use non-destructive reads.
+# _result_banner was retired EU-677 — no live callers need pop semantics.
 # The helper writes BOTH — the plain text into ``st['last_result']`` (byte-compatible with every
 # existing reader) AND the full structured record into a new sibling key ``st['last_result_record']``.
-# Reader-migration happens in follow-on tickets (EU-648b/c/d); this helper is additive only.
 
 LAST_RESULT_TONES: frozenset[str] = frozenset(("ok", "error", "warn"))
 
@@ -86,9 +86,10 @@ def set_last_result(app: str | None, tone: str, text: str) -> None:
         st['last_result']         = text          # plain string — every existing reader still works
         st['last_result_record']  = {tone, text, timestamp}  # structured — for future readers
 
-    Note on back-compat: the *_result_banner* reader (cockpit_views.py:303) pops ``last_result`` as
-    a one-shot string; that behaviour is unaffected because we keep writing the same plain string
-    there. Record-staleness / clearing semantics are deferred to the migration tickets.
+    Note on back-compat: existing live readers (_control_bar, /api/deploy-status, _result_strip) all
+    use non-destructive .get(). The old destructive-reader (_result_banner) was retired EU-677.
+    Record-staleness / clearing semantics are handled by _result_strip's persistent display with
+    client-side dismiss.
     """
     if tone not in LAST_RESULT_TONES:
         raise ValueError(
