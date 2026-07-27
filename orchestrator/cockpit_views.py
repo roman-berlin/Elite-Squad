@@ -314,7 +314,13 @@ def _result_strip(state: dict) -> str:
     """Render the last-run result as a thin, tone-styled strip with a dismiss button.
 
     Non-destructive — never pops state. Returns ``""`` when there is no pending result record.
-    Tone colours mirror ``_result_banner`` (only "error" → bad).
+    Tone colours map the stored ``ok/error/warn`` vocabulary onto good/bad/neutral:
+    ``error`` → ``var(--bad*)``, ``warn`` → ``var(--warn*)`` (neutral amber — the same
+    tokens the board's category badges use), everything else (``ok``) → ``var(--ok*)``.
+    EU-701: the warn branch joined when the five action pages (/council /standup /memory
+    /needs /report) adopted this renderer for their inline strips — the ACs require a
+    visually distinct neutral tone for ``warn`` outcomes (e.g. answer_api's "no backlog
+    configured"), which the old error/ok binary painted green.
 
     Fallback: if no ``last_result_record`` exists, reads the legacy ``last_result`` string
     directly (backward-compatible with EU-31 callers that write plain strings).
@@ -342,9 +348,13 @@ def _result_strip(state: dict) -> str:
     msg = (rec.get("text", "") or "").strip()
     if not msg:
         return ""
-    bad = rec.get("tone") == "error"
-    fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
-                      else ("var(--ok)", "var(--okline)", "var(--okbg)"))
+    tone = rec.get("tone")
+    if tone == "error":
+        fg, border, bg = ("var(--bad)", "var(--badline)", "var(--badbg)")
+    elif tone == "warn":
+        fg, border, bg = ("var(--warn)", "var(--warnline)", "var(--warnbg)")   # EU-701: neutral
+    else:
+        fg, border, bg = ("var(--ok)", "var(--okline)", "var(--okbg)")
     return (f"<div style='background:{bg};border-bottom:1px solid {border};"
             f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
             f"justify-content:space-between;align-items:center'>"
