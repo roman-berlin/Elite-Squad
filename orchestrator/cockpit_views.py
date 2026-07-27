@@ -355,6 +355,14 @@ def _result_strip(state: dict) -> str:
     the JS hook ``data-dismiss-result`` is wired in EU-675. The full-page GET / shows it via
     the board embedded in the page (EU-673 removed the duplicate bar strip from index()), so
     initial render, 5s poll and SSE stream all carry the exact same strip.
+
+    EU-714: this single renderer IS the banner/poll reconciliation — every surface reads the
+    ONE store through it and paints the SAME #board slot (GET / embeds the board; the 5s poll
+    and SSE stream replace it wholesale via applyBoard, never append), so a result can never
+    double-render as banner + strip. The store keeps the record until dismissed (peek), and
+    GET /api/last-result returns it with a stable ``timestamp`` identity — "already shown"
+    means the identical record, never a new one. Both dismiss endpoints clear both scopes.
+    Pinned end-to-end by tests/eu714_reconcile_strip_test.py.
     """
     rec = _peek_last_result(state)
     if not rec:
