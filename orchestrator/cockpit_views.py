@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from . import dashboard as D
-from .cockpit_state import _state, get_autopilot_status
+from .cockpit_state import _state, get_autopilot_status, get_state
 from .config import Config
 
 # ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
@@ -293,32 +293,66 @@ def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
     return desc
 
 
-def _result_banner(state: dict) -> str:
-    """One-shot read-and-clear result banner for the side-effectful / actions (ship/promote/patrol).
+# EU-677: removed — superseded by _result_strip (non-destructive peek+dismiss).
+# Both index() and the board/SSE path now use _result_strip; no live callers need pop semantics.
+# Legacy text references below (_plan_limit_banner docstring, _result_strip docstring) mention it
+# for historical context; see Documentation/PEEK_DISMISS_MIGRATION.md for the full migration story.
 
-    Mirrors the /memory banner: the outcome of a ship/promote/patrol is shown ONCE on the next load
-    of /, then cleared — unlike the sticky shared ``last_msg`` rendered as a control-bar note, which
-    would otherwise persist across unrelated later actions. Pops ``last_result`` so a subsequent
-    reload (with no new action) no longer shows it.
+def _peek_last_result(state: dict) -> dict | None:
+    """Read (without popping) ``last_result_record`` from *state*.
 
-    EU-662: When ``last_result_record`` is present, tone is derived from
-    ``record["tone"]`` (explicit structured signal); only falls back to legacy
-    substring inference when no record was set (backward-compat with writers that pre-date
-    ``set_last_result``).
+    EU-670: non-destructive peek so the board can render the result strip repeatedly
+    across SSE ticks / polls. Returns None when nothing is pending.
     """
-    msg = (state.pop("last_result", "") or "").strip()
+    rec = state.get("last_result_record")
+    if isinstance(rec, dict):
+        return rec
+    return None
+
+
+def _result_strip(state: dict) -> str:
+    """Render the last-run result as a thin, tone-styled strip with a dismiss button.
+
+    Non-destructive — never pops state. Returns ``""`` when there is no pending result record.
+    Tone colours mirror ``_result_banner`` (only "error" → bad).
+
+    Fallback: if no ``last_result_record`` exists, reads the legacy ``last_result`` string
+    directly (backward-compatible with EU-31 callers that write plain strings).
+
+    EU-670: rendered inside the live board (prepended by ``warroom.render_board``);
+    the JS hook ``data-dismiss-result`` is wired in EU-675. The full-page GET / shows it via
+    the board embedded in the page (EU-673 removed the duplicate bar strip from index()), so
+    initial render, 5s poll and SSE stream all carry the exact same strip.
+    """
+    rec = _peek_last_result(state)
+    if not rec:
+        # Legacy fallback: plain-string writers that don't set last_result_record.
+        msg = (state.get("last_result") or "").strip()
+        if not msg:
+            return ""
+        fg, border, bg = ("var(--bad)", "var(--badline)", "var(--badbg)")
+        return (f"<div style='background:{bg};border-bottom:1px solid {border};"
+                f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
+                f"justify-content:space-between;align-items:center'>"
+                f"{html.escape(msg)}"
+                f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
+                f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
+                f"color:inherit;border-radius:4px'>Dismiss</button>"
+                f"</div>")
+    msg = (rec.get("text", "") or "").strip()
     if not msg:
         return ""
-    # EU-662: explicit tone from record wins; legacy substring fallback for older writers.
-    rec = state.pop("last_result_record", None)
-    if rec and isinstance(rec, dict):
-        bad = rec.get("tone") == "error"
-    else:
-        bad = any(w in msg.lower() for w in ("fail", "error"))
+    bad = rec.get("tone") == "error"
     fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
                       else ("var(--ok)", "var(--okline)", "var(--okbg)"))
-    return (f"<div style='background:{bg};border-bottom:1px solid {border};color:{fg};"
-            f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
+    return (f"<div style='background:{bg};border-bottom:1px solid {border};"
+            f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
+            f"justify-content:space-between;align-items:center'>"
+            f"{html.escape(msg)}"
+            f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
+            f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
+            f"color:inherit;border-radius:4px'>Dismiss</button>"
+            f"</div>")
 
 
 def _plan_limit_banner(state: dict, cfg=None) -> str:
@@ -648,19 +682,44 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # EU-289: the app/effort <select> options and the run_dis gate lived only in the "+ New task"
     # panel, which is gone (intake is Jira-only) — so they went with it. The /api/run route itself
     # stays for scripted use; only the affordance was removed.
-    if _state["active"]:
-        status = '<span class="tbnote run">&#9679; run in progress…</span>'
-    elif _state.get("last_msg"):
-        # 2026-07-19: tone by CONTENT — "connection OK" showed in error-red before (every
-        # last_msg carried class=bad). Red is for failures only; success reads green.
-        _m = _state["last_msg"]
-        _ml = _m.lower()
-        if any(w in _ml for w in ("fail", "error", "not configured", "missing", "refused", "⚠")):
-            _tone = "bad"
-        elif any(w in _ml for w in ("ok", "✓", "set to", "cleared", "connected", "saved")):
-            _tone = "ok"
+    # EU-646: surface per-project start/stop messages. Read the active app's own ``last_msg``
+    # FIRST (set by ``_claim_cockpit_run``, ``run_selected_api``, ``autopilot_api``, etc.);
+    # render it once, then pop so it doesn't repeat across unrelated GET / requests. Fall back
+    # to the global ``_state["last_msg"]`` only when the per-app slot is empty.
+    app_st = get_state(app0) if app0 else _state
+    status = ""
+    app_msg = (app_st.get("last_msg") or "").strip() if app0 else None
+    global_msg = (_state.get("last_msg") or "").strip()
+    if app_msg:
+        # Per-app message has priority — render it, then clear so it shows exactly once.
+        # EU-646 iter-2: tone from the stored record (written by ``server.set_last_msg``), NOT
+        # from substring matches on the message text — the SAME contract as the global fallback
+        # branch below (EU-656): the writer states the tone, the view only maps it. A missing
+        # record (legacy raw ``st['last_msg'] = ...`` writer) defaults to "dim" (neutral).
+        _m = app_msg
+        rec = app_st.get("last_msg_record")
+        if rec and isinstance(rec, dict):
+            rtone = rec.get("tone", "")
+            _tone_map = {"error": "bad", "warn": "dim", "ok": "ok"}
+            _tone = _tone_map.get(rtone, "dim")
         else:
-            _tone = "dim"
+            _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
+        # Clear immediately after rendering — one-shot, no persistence. Both keys go back to
+        # their _new_state defaults so a stale record can never re-tone a later message.
+        app_st["last_msg"] = ""
+        app_st["last_msg_record"] = None
+    elif global_msg:
+        # Fallback to the global last_msg (unit-level actions like ship/promote/patrol).
+        # EU-656: tone from stored record, NOT content. Zero substring checks remain here.
+        _m = global_msg
+        rec = _state.get("last_msg_record")
+        if rec and isinstance(rec, dict):
+            rtone = rec.get("tone", "")
+            _tone_map = {"error": "bad", "warn": "dim", "ok": "ok"}
+            _tone = _tone_map.get(rtone, "dim")
+        else:
+            _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
         status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
     else:
         status = ""

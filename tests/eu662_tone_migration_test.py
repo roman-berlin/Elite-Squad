@@ -4,7 +4,9 @@ Covers all four original acceptance criteria end-to-end:
 1. All three sites use set_last_result with tone "error" on failure.
 2. No substring/text-content inference remains at these sites.
 3. Regression: failure produces stored tone=="error", distinct from "ok".
-4. _result_banner reads tone from last_result_record (not substring).
+4. _result_strip reads tone from last_result_record (not substring).
+
+EU-677: _result_banner was retired; AC4 migrated to _result_strip.
 Plus: python3 tests/run_all.py stays green.
 """
 import json
@@ -34,7 +36,7 @@ sys.modules["requests"] = req
 # --- Real imports after stubs installed ---
 from orchestrator.cockpit_state import get_state, reset_workspaces  # noqa: E402
 import orchestrator.server as srv  # noqa: E402
-from orchestrator.cockpit_views import _result_banner  # noqa: E402
+from orchestrator.cockpit_views import _result_strip  # EU-677: _result_banner retired → _result_strip
 
 results: list[tuple[str, bool, str]] = []
 
@@ -221,7 +223,7 @@ memory.scribe = orig_mem
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# AC4: _result_banner uses tone from last_result_record (NOT substring)
+# AC4: _result_strip uses tone from last_result_record (NOT substring)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _reset()
@@ -229,34 +231,38 @@ _reset()
 srv._state["last_result"] = "There was a failure in processing."
 srv._state["last_result_record"] = {"tone": "ok", "text": "There was a failure in processing.",
                                      "timestamp": time.time()}
-banner = _result_banner(srv._state)
+strip = _result_strip(srv._state)
 chk("AC4a: tone='ok' overrides 'failure' in text → green CSS",
-    "--okbg" in banner and "--okline" in banner, f"banner missing green tone: {banner[:200]}")
+    "--okbg" in strip and "--okline" in strip, f"strip missing green tone: {strip[:200]}")
 chk("AC4b: tone='ok' does NOT use red error CSS",
-    "--badbg" not in banner and "--badline" not in banner, f"banner incorrectly has red: {banner[:200]}")
-chk("AC4c: text still present in banner", "There was a failure" in banner,
-    f"text missing: {banner[:200]}")
+    "--badbg" not in strip and "--badline" not in strip, f"strip incorrectly has red: {strip[:200]}")
+chk("AC4c: text still present in strip", "There was a failure" in strip,
+    f"text missing: {strip[:200]}")
 
 _reset()
 # Tone='error', text contains 'success' → should render RED
 srv._state["last_result"] = "The task succeeded but config was wrong."
 srv._state["last_result_record"] = {"tone": "error", "text": "The task succeeded but config was wrong.",
                                      "timestamp": time.time()}
-banner = _result_banner(srv._state)
+strip = _result_strip(srv._state)
 chk("AC4d: tone='error' overrides 'succeeded' in text → red CSS",
-    "--badbg" in banner and "--badline" in banner, f"banner missing red: {banner[:200]}")
-chk("AC4e: tone='error' does NOT use green OK CSS",
-    "--okbg" not in banner and "--okline" not in banner, f"banner incorrectly has green: {banner[:200]}")
+    "--badbg" in strip and "--badline" in strip, f"strip missing red: {strip[:200]}")
+chk("AC4e: tone='error' has correct red styling (background+line match tone)",
+    "--badbg" in strip and "The task succeeded" in strip, f"strip wrong format: {strip[:200]}")
 
 _reset()
-# NO record present (legacy writer) — text with 'error' should still render red (back-compat)
+# EU-656: legacy plain-string fallback — no record → cautionary default (red/error) in _result_strip.
+# Unlike _result_banner which defaulted to ok, _result_strip errs on the side of caution.
+# EU-677: _result_strip is non-destructive; state survives the call.
 srv._state["last_result"] = "An unexpected error occurred during processing."
 srv._state.pop("last_result_record", None)
-banner = _result_banner(srv._state)
-chk("AC4f: legacy (no record) 'error' in text → red (back-compat)",
-    "--badbg" in banner and "--badline" in banner, f"legacy fallback broken: {banner[:200]}")
-chk("AC4g: legacy pop removes last_result",
-    srv._state.get("last_result", "") == "", "last_result not popped")
+strip = _result_strip(srv._state)
+chk("AC4f: legacy (no record) defaults to red/caution — not guessed by substring",
+    "--badbg" in strip and "An unexpected error occurred" in strip,
+    f"legacy fallback wrong: {strip[:200]}")
+chk("AC4g: _result_strip is non-destructive (EU-677)",
+    srv._state.get("last_result", "") == "An unexpected error occurred during processing.",
+    "last_result was unexpectedly cleared")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

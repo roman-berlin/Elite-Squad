@@ -1298,6 +1298,8 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     stop = ('<form method=post action=/api/stop-run class=stoprun '
             'onsubmit="return confirm(\'Stop this run? It halts at the next safe checkpoint — '
             'no merge, nothing left half-applied.\')">'
+            f'<input type="hidden" name="app" value="{_esc(run.get("app", "") or "")}">'
+            f'<input type="hidden" name="ticket" value="{_esc(run.get("ticket") or "—")}">'
             '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
             '</form>') if (run["live"] and manual) else ""
     # 2026-07-19 (Commander order): the verdict must tell the CURRENT story, not a stale fact —
@@ -2064,7 +2066,9 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         except Exception:  # noqa: BLE001 — the board must render even if the probe fails
             log_stream_path = ""
 
-    return (
+    # EU-670: splice pending result strip above KPIs when a last_result_record is set.
+    _strip = CV._result_strip(state)
+    board = (
         f'<div class=kpis>{k}</div>'
         f'{_sync_html(cfg)}'
         '<div class=cols>'
@@ -2084,6 +2088,7 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         f'{CV._card("Talk to the unit", _TALK_HTML)}'
         '</div>'
         '</div>')
+    return _strip + board
 
 
 def project_selector(cfg, app: Optional[str]) -> str:
@@ -2681,6 +2686,15 @@ function startStream(){
 applyUi();
 scrollLog();
 startStream();
+// EU-675: delegate dismiss-result button clicks — works for strips already present AND those added later via SSE/applyBoard.
+// Passes APP so the endpoint clears THIS tab's per-project state (the same state /api/board?app=APP renders from).
+document.addEventListener("click", function(e){
+  var btn=e.target.closest("[data-dismiss-result]");
+  if(!btn)return;
+  fetch("/api/dismiss-result?app="+encodeURIComponent(APP),{method:"POST"}).then(function(r){
+    return r.json().then(function(j){if(j.ok){var s=btn.closest("div");if(s)s.remove();}});
+  }).catch(function(){console.warn("[eu675] dismiss-result failed, strip left in place");});
+});
 // EU-200: Live run log streaming
 (function(){
   var _runlogDone=false;

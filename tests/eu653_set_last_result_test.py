@@ -17,7 +17,7 @@ except ImportError:
     sys.exit(0)
 
 from orchestrator.cockpit_state import get_state, reset_workspaces
-from orchestrator.cockpit_views import _result_banner
+from orchestrator.cockpit_views import _result_strip  # EU-677: _result_banner retired
 import orchestrator.server as server
 
 
@@ -136,25 +136,25 @@ class TestBackCompatReaders:
     def setup_method(self):
         reset_workspaces()
 
-    def test_result_banner_pops_plain_string(self):
-        """_result_banner strips/pops last_result as plain text — no crash."""
+    def test_result_strip_peeks_plain_string(self):
+        """_result_strip reads (does not pop) last_result as plain text — non-destructive."""
         server.set_last_result(None, "error", "boom")
-        state = server._state  # use same object as _result_banner reads
+        state = server._state
 
-        banner = _result_banner(state)
+        strip = _result_strip(state)
 
-        # Banner should contain the text and the key should be popped
-        assert "boom" in banner
-        assert state.get("last_result", "") == ""  # popped
+        # Strip should contain the text AND leave state intact
+        assert "boom" in strip
+        assert state.get("last_result", "") == "boom"  # NOT popped
 
-    def test_result_banner_with_ok_tone(self):
-        """A 'ok' tone's plain text renders in the banner and pops cleanly."""
+    def test_result_strip_with_ok_tone(self):
+        """An 'ok' tone's plain text renders in the strip without consuming state."""
         server.set_last_result(None, "ok", "all clear")
         state = server._state
 
-        banner = _result_banner(state)
-        assert "all clear" in banner
-        assert state.get("last_result", "") == ""
+        strip = _result_strip(state)
+        assert "all clear" in strip
+        assert state.get("last_result", "") == "all clear"  # survives
 
     def test_get_without_raise(self):
         """.get('last_result', '') returns the plain text (no .strip() needed because we store raw)."""
