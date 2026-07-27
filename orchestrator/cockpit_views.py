@@ -337,12 +337,29 @@ def _result_strip(state: dict) -> str:
     Non-destructive — never pops state. Returns ``""`` when there is no pending result record.
     Tone colours mirror ``_result_banner`` (only "error" → bad).
 
+    Fallback: if no ``last_result_record`` exists, reads the legacy ``last_result`` string
+    directly (backward-compatible with EU-31 callers that write plain strings).
+
     EU-670: rendered inside the live board (prepended by ``warroom.render_board``);
     the JS hook ``data-dismiss-result`` is wired in EU-671.
+    EU-676: the home-page index() path uses this non-destructive helper instead of
+    the destructive one-shot ``_result_banner``, so a pending result survives full-page reloads.
     """
     rec = _peek_last_result(state)
     if not rec:
-        return ""
+        # Legacy fallback: plain-string writers that don't set last_result_record.
+        msg = (state.get("last_result") or "").strip()
+        if not msg:
+            return ""
+        fg, border, bg = ("var(--bad)", "var(--badline)", "var(--badbg)")
+        return (f"<div style='background:{bg};border-bottom:1px solid {border};"
+                f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
+                f"justify-content:space-between;align-items:center'>"
+                f"{html.escape(msg)}"
+                f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
+                f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
+                f"color:inherit;border-radius:4px'>Dismiss</button>"
+                f"</div>")
     msg = (rec.get("text", "") or "").strip()
     if not msg:
         return ""

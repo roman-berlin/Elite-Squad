@@ -60,7 +60,7 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _dual_provider_gauge,
-    _result_banner,
+    _result_strip,
     _wrap,
     _working,
 )
@@ -607,15 +607,16 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception:  # noqa: BLE001
             pass
         h = health.summary(cfg)
-        # One-shot result banner for ship/promote/patrol — shown once, then cleared (read-and-clear),
-        # so a side-effectful action's outcome doesn't linger like the sticky last_msg note.
+        # EU-676: non-destructive peek via _result_strip (same helper the live board/SSE path uses).
+        # A pending un-dismissed result renders correctly on every fresh full-page reload
+        # instead of silently vanishing after the first load.
         # EU-106: pass is_mac so _control_bar can gate the '📂 Open logs' button (macOS only).
         import platform as _platform
         # EU-643: the '/models' nav link renders DIRECTLY in the control bar (backend_control's
         # "➕ Add model" button) — the EU-235 post-render splice (models_views.add_models_nav_link)
         # was removed with its injection anchor (EU-642 took the anchor button out of the nav row,
         # so the splice was a no-op carrying only a stale literal of the retired roster page URL).
-        bar = (_result_banner(_state)
+        bar = (_result_strip(_state)
                + _control_bar(cfg, appq, h["healthy"],
                               is_mac=_platform.system() == "Darwin"))
         # EU-64: render THIS tab's project state so each project's board/live-feed is independent.

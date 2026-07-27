@@ -102,9 +102,10 @@ _chk("_peek does NOT pop state", st.get("last_result_record") is not None)
 _chk("_result_strip returns '' when nothing pending",
      _result_strip({}) == "")
 
-# --- _result_strip: legacy-only text returns '' ---
-_chk("_result_strip ignores legacy-only last_result",
-     _result_strip({"last_result": "plain text"}) == "")
+# --- _result_strip: legacy-only last_result falls back (EU-676 compat) ---
+_legacy = _result_strip({"last_result": "plain text"})
+_chk("_result_strip renders legacy-only last_result (EU-676 fallback)",
+     "plain text" in _legacy and len(_legacy) > 0)
 
 # --- _result_strip: error tone → bad colours ---
 s = _result_strip({"last_result_record": {"tone": "error", "text": "Deploy failed"}})
