@@ -1366,6 +1366,25 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             D.dismiss(cfg.audit_path, tid)
         return redirect(back if back in ("/tasks", "/needs") else "/tasks")
 
+    @app.post("/api/dismiss-result")
+    def dismiss_result_api() -> Response:
+        """Clear the pending result strip from server state so the board re-render hides it.
+
+        EU-675: called by the inline JS delegated click handler on [data-dismiss-result] buttons.
+        The board renders the strip from the TAB's per-project state (_view_state → get_state(app)),
+        so the clear must hit that same dict — the handler passes its tab's APP exactly like the
+        /api/board poll does (resolved through _board_project, never trusting a raw name). Popping
+        the unit-wide _state too covers writers that store results globally (standup/council/QA)."""
+        from flask import jsonify
+
+        st = get_state(_board_project(request.args.get("app")) or None)
+        st.pop("last_result_record", None)
+        st.pop("last_result", "")  # legacy key — safe no-op when absent
+        if st is not _state:
+            _state.pop("last_result_record", None)
+            _state.pop("last_result", "")
+        return jsonify({"ok": True})
+
     @app.post("/api/unblock")
     def unblock_api() -> Response:
         """Remove a ticket from blocked_tickets.json (the parked set).
