@@ -2,7 +2,8 @@
 
 This test verifies that:
   (1) When daemon_is_external() returns True, get_autopilot_status() returns on=True with external=True
-  (2) The control bar renders 'Finish & stop' and 'Stop' buttons for external daemon runs
+  (2) The control bar renders 'Finish & stop' and 'Stop autopilot' buttons for external daemon runs
+      (EU-708 relabeled the bare 'Stop' to name its true effect — autopilot off only)
   (3) The drain action properly calls launchctl bootout for external daemons
 """
 from __future__ import annotations
@@ -100,7 +101,7 @@ _test_external_daemon_status()
 # =============================================================================
 
 def _test_control_bar_external_buttons() -> None:
-    """When autopilot is on and external=True, the control bar must render 'Finish & stop' and 'Stop' buttons."""
+    """When autopilot is on and external=True, the control bar must render 'Finish & stop' and 'Stop autopilot' buttons."""
     cockpit_state.reset_run_state()
     st = cockpit_state.get_state("automatixy")
     st["autopilot_on"] = True
@@ -112,9 +113,9 @@ def _test_control_bar_external_buttons() -> None:
         chk("control bar: contains 'Finish & stop' button",
             "Finish&nbsp;&amp;&nbsp;stop" in html,
             "HTML output missing 'Finish & stop' button")
-        chk("control bar: contains 'Stop' button",
-            "Stop</button>" in html,
-            "HTML output missing 'Stop' button")
+        chk("control bar: contains 'Stop autopilot' button",
+            "Stop&nbsp;autopilot</button>" in html,
+            "HTML output missing 'Stop autopilot' button")
         chk("control bar: marks external daemon with '(external)' label",
             "(external)" in html,
             "HTML output missing external daemon label")

@@ -982,7 +982,9 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             f'<input type=hidden name=app value="{ap_appq}">'
             '<button class="aptbtn stop" '
             'title="Mark autopilot off now — the in-flight build still finishes in the background">'
-            'Stop</button></form>'
+            'Stop&nbsp;autopilot</button></form>'
+            # EU-708: state the consequence as VISIBLE text next to the button, not tooltip-only.
+            '<span class="tbnote dim">In-flight builds continue running</span>'
             f'<form method=post action=/api/stop-run class=tbf>'
             f'<input type=hidden name=app value="{ap_appq}">'
             f'<input type=hidden name=ticket value="{_hs_ticket}">'
@@ -1011,7 +1013,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             f'<input type=hidden name=app value="{ap_appq}">'
             '<button class="aptbtn stop" '
             'title="Mark autopilot off now — the in-flight build still finishes in the background">'
-            'Stop</button></form>'
+            'Stop&nbsp;autopilot</button></form>'
+            # EU-708: the label names the real effect (autopilot off) and this tbnote states
+            # the consequence as VISIBLE on-page text next to the control — not tooltip-only.
+            '<span class="tbnote dim">In-flight builds continue running</span>'
             '</div>')
     else:
         # Autopilot off: offer two start modes that genuinely differ (EU-103 iter-2).
