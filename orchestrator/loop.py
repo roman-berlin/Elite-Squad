@@ -313,18 +313,40 @@ def _maybe_close_epic(backlog, ticket: Ticket, audit: AuditLog) -> None:
         # re-evaluating once is harmless, and it avoids an audit scan on every land.
         if epic_key in _EPIC_ROLLED_UP:
             return
-        kk = ", ".join((c.get("key") or "?") for c in children)
-        ok = close(epic_key,
-                   comment=(f"✅ Every child of this Epic has reached a terminal state ({kk}); the "
-                            f"last was {ticket.id}. Closing (EU-374 roll-up, re-evaluated on any "
-                            "child completing — EU-731)."),
-                   audit=audit)
+        # EU-734 (Commander 2026-07-28: "no zombies", epic to QA for sign-off): the Epic is the
+        # human's acceptance unit for the whole feature, so it goes to QA rather than closing
+        # itself — Jira must never assert an acceptance no human performed. The children already
+        # carry their own machine verdict, so the hand-off names each one and flags the EXCEPTIONS
+        # (anything still in QA rather than Done) — that is the whole point of reviewing the parent:
+        # one look tells him what is finished and what still wants his eyes.
+        _rows, _exceptions = [], []
+        for c in children:
+            _k = c.get("key") or "?"
+            _st = (c.get("status") or "").strip() or "?"
+            _rows.append(f"• {_k} [{_st}] {(c.get('summary') or '')[:60]}")
+            if _st.strip().lower() != "done":
+                _exceptions.append(f"{_k} ({_st})")
+        _body = ("✅ Every child of this Epic has finished — it is ready for your sign-off.\n\n"
+                 + "\n".join(_rows)
+                 + (f"\n\n⚠️ Still wanting your eyes: {', '.join(_exceptions)}"
+                    if _exceptions else "\n\nAll children closed clean — nothing flagged.")
+                 + f"\n\nCompleted by {ticket.id}. Close this Epic to accept the feature; reopen any "
+                   "child that is wrong.")
+        ok = False
+        try:
+            _epic_ticket = backlog.get_task(epic_key)
+            backlog.set_status(_epic_ticket, "QA")
+            backlog.add_comment(_epic_ticket, _body)
+            ok = True
+        except Exception as _exc:  # noqa: BLE001 — an Epic left open is the safe direction
+            print(f"  land · Epic {epic_key} hand-off failed ({_exc}) — left open", flush=True)
         if ok:
             _EPIC_ROLLED_UP.add(epic_key)
-            audit.record("epic_autoclosed", ticket_id=ticket.id, epic=epic_key,
-                         children=[(c.get("key") or "?") for c in children])
-            print(f"  land · Epic {epic_key} closed — all children Done/QA "
-                  f"(completed by {ticket.id}).", flush=True)
+            audit.record("epic_ready_for_signoff", ticket_id=ticket.id, epic=epic_key,
+                         children=[(c.get("key") or "?") for c in children],
+                         exceptions=_exceptions)
+            print(f"  land · Epic {epic_key} → QA for sign-off — all {len(children)} children "
+                  f"finished (completed by {ticket.id}).", flush=True)
     except Exception as exc:  # noqa: BLE001 — a board hiccup leaves the Epic open, never breaks a land
         print(f"  land · epic auto-close skipped ({exc})", flush=True)
 

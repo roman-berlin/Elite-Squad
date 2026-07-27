@@ -596,6 +596,29 @@ class JiraAdapter(BacklogAdapter):
         return True
 
     # -- Senior PM operations: close & transition -------------------------------- #
+    def open_epics(self) -> list[str]:
+        """Keys of every Epic in this project that is NOT done — the input to the EU-734 sweep.
+
+        The Epic roll-up normally fires when a child completes, but that only helps Epics whose
+        last child completes AFTER the roll-up exists. An Epic finished earlier (or one whose
+        hand-off failed on a board hiccup) would sit open forever with nothing left to trigger it —
+        16 were found in exactly that state on 2026-07-27. This lets an idle-boundary sweep
+        re-evaluate them, so "no zombies" holds without depending on a single event.
+
+        Raises BacklogSearchError on a failed/auth-blind search, like the other read paths: an
+        outage must read as "unknown", never as "no open Epics"."""
+        try:
+            r = self.session.post(self._url("search/jql"), json={
+                "jql": f'project = "{self.project}" AND issuetype = Epic AND statusCategory != Done '
+                       f'ORDER BY created ASC',
+                "maxResults": 100, "fields": ["summary"]})
+            r.raise_for_status()
+            self._raise_if_unauthenticated(r)
+            return [str(i.get("key")) for i in (r.json().get("issues") or []) if i.get("key")]
+        except requests.RequestException as exc:
+            raise BacklogSearchError(
+                f"open-Epic search failed for project '{self.project}': {exc}") from exc
+
     def close_ticket(self, ticket_id: str, comment: str = "", audit=None) -> bool:
         """Close a ticket with an optional comment. Returns True on success.
 
