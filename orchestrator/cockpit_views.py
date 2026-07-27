@@ -11,11 +11,37 @@ from __future__ import annotations
 import html
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dashboard as D
 from .cockpit_state import _state, get_autopilot_status, get_state
 from .config import Config
+
+
+# ── Relative-time formatting (EU-702) ────────────────────────────────────────────────
+def _rel(dt) -> str:
+    """Return a human-readable relative timestamp like '2m ago', '3h ago', or 'Dec 5' for
+    entries older than a day. Handles float or int epoch timestamps."""
+    if dt is None:
+        return ""
+    try:
+        delta = time.time() - float(dt)
+        if delta < 60:
+            return f"{int(delta)}s ago"
+        minutes = delta // 60
+        if minutes < 60:
+            label = "m" if minutes == 1 else "min"
+            return f"{int(minutes)}{label} ago"
+        hours = minutes // 60
+        if hours < 24:
+            label = "h" if hours == 1 else "h"
+            return f"{int(hours)}{label} ago"
+        # Older than a day — show calendar date
+        ts = datetime.fromtimestamp(float(dt), tz=timezone.utc)
+        return ts.strftime("%b %d")
+    except (ValueError, TypeError, OSError):
+        return ""
 
 # ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
 # Slice 1 made the War Room's ``:root{…}`` block the single source of truth for the
@@ -355,10 +381,17 @@ def _result_strip(state: dict) -> str:
         fg, border, bg = ("var(--warn)", "var(--warnline)", "var(--warnbg)")   # EU-701: neutral
     else:
         fg, border, bg = ("var(--ok)", "var(--okline)", "var(--okbg)")
+    ts_html = ""
+    raw_ts = rec.get("timestamp")
+    if raw_ts is not None:
+        ts_text = _rel(raw_ts)
+        if ts_text:
+            ts_html = (f'<span style="font-size:11px;color:var(--dim);margin-right:10px">'
+                       f'{html.escape(ts_text)}</span>')
     return (f"<div style='background:{bg};border-bottom:1px solid {border};"
             f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
             f"justify-content:space-between;align-items:center'>"
-            f"{html.escape(msg)}"
+            f"<span>{ts_html}{html.escape(msg)}</span>"
             f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
             f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
             f"color:inherit;border-radius:4px'>Dismiss</button>"
@@ -714,7 +747,14 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             _tone = _tone_map.get(rtone, "dim")
         else:
             _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
-        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
+        ts_html = ""
+        raw_ts = rec.get("timestamp") if rec else None
+        if raw_ts is not None:
+            _ts_text = _rel(raw_ts)
+            if _ts_text:
+                ts_html = (" <span style='font-size:11px;color:var(--dim);margin-left:6px'>"
+                           f"{html.escape(_ts_text)}</span>")
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}{ts_html}</span>'
         # Clear immediately after rendering — one-shot, no persistence. Both keys go back to
         # their _new_state defaults so a stale record can never re-tone a later message.
         app_st["last_msg"] = ""
@@ -730,7 +770,14 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             _tone = _tone_map.get(rtone, "dim")
         else:
             _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
-        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
+        ts_html = ""
+        raw_ts = rec.get("timestamp") if rec else None
+        if raw_ts is not None:
+            _ts_text = _rel(raw_ts)
+            if _ts_text:
+                ts_html = (" <span style='font-size:11px;color:var(--dim);margin-left:6px'>"
+                           f"{html.escape(_ts_text)}</span>")
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}{ts_html}</span>'
     else:
         status = ""
 
