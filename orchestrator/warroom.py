@@ -2660,6 +2660,7 @@ function applyBoard(html){
   if(ae&&(ae.tagName==="TEXTAREA"||ae.tagName==="INPUT")&&b.contains(ae))return;
   b.innerHTML=html;
   applyUi();
+  paintResultAges();  // EU-713: the innerHTML swap wipes the client-painted age string — repaint at once
   ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
     if(el&&k)el.scrollTop=k.bottom?el.scrollHeight:k.top;
     else if(el&&id==="logbox")el.scrollTop=el.scrollHeight;});
@@ -2695,6 +2696,30 @@ document.addEventListener("click", function(e){
     return r.json().then(function(j){if(j.ok){var s=btn.closest("div");if(s)s.remove();}});
   }).catch(function(){console.warn("[eu675] dismiss-result failed, strip left in place");});
 });
+// EU-713: relative-age ticker for the result strip. _result_strip emits the record's timestamp as
+// an empty .result-age span carrying data-ts (epoch seconds); this paints it ("just now", "2m ago")
+// and keeps it ageing — purely client-side, no endpoint calls. Re-queries every paint (EU-549: the
+// board's innerHTML swaps detach cached nodes), so strips rendered by later SSE frames are covered
+// too: paint on load, repaint inside applyBoard, then refresh every 30s while the page stays open.
+function _ageStr(ts){
+  var d=Math.floor(Date.now()/1000-ts);
+  if(d<45)return "just now";
+  if(d<90)return "1m ago";
+  if(d<3600)return Math.round(d/60)+"m ago";
+  if(d<7200)return "1h ago";
+  if(d<86400)return Math.round(d/3600)+"h ago";
+  return Math.round(d/86400)+"d ago";
+}
+function paintResultAges(){
+  document.querySelectorAll(".result-age[data-ts]").forEach(function(el){
+    var ts=parseFloat(el.getAttribute("data-ts"));
+    if(!isFinite(ts)||ts<=0)return;
+    var s=_ageStr(ts);
+    if(el.textContent!==s)el.textContent=s;
+  });
+}
+paintResultAges();
+setInterval(paintResultAges,30000);
 // EU-200: Live run log streaming
 (function(){
   var _runlogDone=false;

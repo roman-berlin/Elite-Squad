@@ -323,6 +323,10 @@ def _result_strip(state: dict) -> str:
     the JS hook ``data-dismiss-result`` is wired in EU-675. The full-page GET / shows it via
     the board embedded in the page (EU-673 removed the duplicate bar strip from index()), so
     initial render, 5s poll and SSE stream all carry the exact same strip.
+
+    EU-713: when the record carries a ``timestamp`` (epoch seconds), the strip also emits
+    an empty ``.result-age`` span with ``data-ts``; the board JS ticker in warroom paints
+    it as a relative string ("2m ago") and re-renders it every 30s — purely client-side.
     """
     rec = _peek_last_result(state)
     if not rec:
@@ -345,10 +349,22 @@ def _result_strip(state: dict) -> str:
     bad = rec.get("tone") == "error"
     fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
                       else ("var(--ok)", "var(--okline)", "var(--okbg)"))
+    # EU-713: emit the record's timestamp (epoch seconds) as data-ts on an empty
+    # .result-age span; the board JS ticker in warroom fills it with a relative string
+    # ("just now" → "2m ago") and keeps it ageing purely client-side — no endpoint
+    # calls. Records without a usable timestamp (legacy writers) render no span.
+    age = ""
+    try:
+        ts = float(rec.get("timestamp"))
+    except (TypeError, ValueError):
+        ts = 0.0
+    if ts > 0:
+        age = (f"<span class=result-age data-ts='{ts:.3f}' style='margin-left:10px;"
+               f"font-size:11px;color:var(--dim);white-space:nowrap'></span>")
     return (f"<div style='background:{bg};border-bottom:1px solid {border};"
             f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
             f"justify-content:space-between;align-items:center'>"
-            f"{html.escape(msg)}"
+            f"<span style='flex:1;min-width:0'>{html.escape(msg)}{age}</span>"
             f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
             f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
             f"color:inherit;border-radius:4px'>Dismiss</button>"
