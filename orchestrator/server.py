@@ -2037,6 +2037,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if ev is not None:
             ev.set()
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
+        else:
+            set_last_msg(key, "warn", "No active run found to stop.")   # EU-694: visible feedback
         return redirect("/")
 
     @app.get("/standup")
