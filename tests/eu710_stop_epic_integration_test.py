@@ -322,9 +322,9 @@ chk("D2: the hard-stop form survives the drain, naming the in-flight run",
     bool(frag) and d_app and html.unescape(d_app.group(1)) == "alpha"
     and d_tkt and html.unescape(d_tkt.group(1)) == "EU-710D",
     f"app={d_app.group(1) if d_app else None!r} ticket={d_tkt.group(1) if d_tkt else None!r}")
-chk("D3: the EU-689 autopilot Stop still sits alongside it",
+chk("D3: the EU-689 autopilot Stop still sits alongside it (relabeled 'Stop autopilot' by EU-708)",
     "action=/api/autopilot" in bar and "action value=stop" in bar
-    and "Stop</button>" in bar, "")
+    and "Stop&nbsp;autopilot</button>" in bar, "")
 
 r = client.post("/api/stop-run",
                 data={"app": html.unescape(d_app.group(1)),

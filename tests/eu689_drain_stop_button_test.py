@@ -45,8 +45,9 @@ def chk(name, cond):
         print(f"  FAIL {name}")
 
 # AC1: Stop button present in drain-state render
-chk("Stop button (action value=stop) in drain-state HTML",
-    "action value=stop" in bar and "Stop</button>" in bar)
+# (EU-708 relabeled it 'Stop autopilot' — its true effect; still action=stop)
+chk("Stop autopilot button (action value=stop) in drain-state HTML",
+    "action value=stop" in bar and "Stop&nbsp;autopilot</button>" in bar)
 
 # AC2: Posts to correct endpoint with app scope
 chk("Form action is /api/autopilot (same as running-state stop)",
