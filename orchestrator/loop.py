@@ -2044,6 +2044,25 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     if _entry:
                         audit.record("planner_verdict_park", ticket_id=ticket.id,
                                      verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
+                        # EU-730: land it in QA, not Blocked. EU-375's two safety properties are
+                        # untouched — nothing is auto-closed (QA still means the Commander confirms)
+                        # and no build is burned — but the COLUMN was wrong: nothing was built, so
+                        # there is no decision only he can make, just a recommendation to confirm.
+                        # Blocked is reserved for a genuine ask (measured: 1 of 128 park events in
+                        # the unit's history was an actual product decision). REFILE still parks —
+                        # rewriting a ticket IS the Commander's call.
+                        if _pres.verdict in ("CLOSE", "ANSWER"):
+                            try:
+                                backlog.set_status(ticket, "QA")
+                                backlog.add_comment(
+                                    ticket,
+                                    f"🔎 The Planner read this and judged **{_pres.verdict}** — not "
+                                    "work to build. Nothing was built and nothing was closed.\n\n"
+                                    f"Its reason: {(_pres.answer or _pres.approach or '')[:700]}\n\n"
+                                    "In QA for your check: close it if the Planner is right, or move "
+                                    "it back to To Do with a note to force a build.")
+                            except Exception:  # noqa: BLE001 — board hiccup must not break the park
+                                pass
                         _notify(cfg, f"⏸️ {ticket.id} — the Planner says {_pres.verdict}, not work to "
                                      f"build. Parked for your call (nothing closed).\n\n"
                                      + decisions.reply_hint(ticket.id))
@@ -2338,6 +2357,13 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
             # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
             # EU-153: Post no-changes comment
+            # EU-730 (Commander 2026-07-26, on EU-697: "if it implemented and satisfied — why he
+            # needs me? just PM can close it"). A no-changes build WROTE NOTHING: there is no diff,
+            # no merge, nothing that can break. The only question is "is it really already done?",
+            # and QA is exactly the column where the Commander answers that — Blocked is for a
+            # decision only he can make. Measured: of 128 park events in the unit's whole history,
+            # 92 were red-base, 29 max-passes, 4 turn-limit, 1 budget and ONE was a real product
+            # decision; the no-changes class had been landing in Blocked and reading as "stuck".
             note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
             if verify_findings_text:
                 # EU-396: attach the Reviewer's per-AC findings so the Commander's check is one
@@ -2354,11 +2380,22 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 commenter.post_comment(backlog, ticket.key, no_change_comment)
             if not cfg.dry_run and not ticket.ephemeral:
                 try:
-                    backlog.set_status(ticket, "Needs Human")
-                    backlog.add_comment(ticket, f"⛔ {note}\n\nVerify and close if already satisfied, or re-open with clarification if there's still work to do.")
+                    backlog.set_status(ticket, "QA")
+                    # EU-396 drew a real distinction — Reviewer-CONFIRMED vs merely claimed — and it
+                    # must not be lost now that both land in QA. The confident path (above) says
+                    # "Auto-verified"; this one says plainly that nobody verified it, so the
+                    # Commander knows which QA items need a real look and which are a formality.
+                    backlog.add_comment(
+                        ticket,
+                        f"🔎 {note}\n\n⚠️ NOT independently verified — the Reviewer could not confirm "
+                        "the claim, so check this one properly before closing.\n\n"
+                        "Nothing was built, so nothing can break — it is in QA for your check, not "
+                        "blocked. Close it if the work really is already done, or move it back to "
+                        "To Do with a note if something is still missing.")
                 except Exception:  # noqa: BLE001 - a comment failure must not break the run
                     pass
-            print(f"  🔵 {ticket.id}: no changes — moved to Needs Human for verification.", flush=True)
+            print(f"  🔵 {ticket.id}: no changes — moved to QA for verification (nothing was built).",
+                  flush=True)
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes="no changes — already satisfied"))
