@@ -13,6 +13,7 @@ Acceptance:
 """
 from __future__ import annotations
 
+import html
 import json
 import sys
 import tempfile
@@ -163,7 +164,23 @@ _test_per_app_msg_cleared_after_one_render()
 def _snippet(bar: str) -> str:
     """The rendered tbnote span (with context) for failure details."""
     i = bar.find("tbnote")
-    return bar[max(0, i - 30):i + 120] if i >= 0 else bar[:200]
+    return bar[max(0, i - 30):i + 150] if i >= 0 else bar[:200]
+
+
+def _tone_in_span(bar: str, tone: str, msg: str) -> bool:
+    """Check that *msg* appears inside a .tbnote.{tone} span — flexible about what
+    follows the text (timestamps, EU-702) before the closing </span>."""
+    open_tag = f'<span class="tbnote {tone}">'
+    idx = bar.find(open_tag)
+    if idx < 0:
+        return False
+    # Search from the opening tag for the message + any content + the closing tag
+    remainder = bar[idx:]
+    msg_idx = remainder.find(html.escape(msg))
+    if msg_idx < 0:
+        return False
+    # Make sure the close happens somewhere after the message
+    return '</span>' in remainder[msg_idx:]
 
 
 def _test_per_app_tone_from_record() -> None:
@@ -172,13 +189,14 @@ def _test_per_app_tone_from_record() -> None:
     Each case uses text the OLD substring logic would have mis-toned, so these checks fail if
     the per-app branch ever regresses to content-sniffing.
     """
+    import html as _html
     cockpit_state.reset_run_state()
     st = cockpit_state.get_state("automatixy")
     # tone='error' with text carrying NO failure keyword — old substring logic rendered 'dim'.
     server.set_last_msg("automatixy", "error", "run stopped by operator")
     bar = V._control_bar(_CFG, "automatixy", True)
     chk("per-app tone=error → span class 'bad'",
-        '<span class="tbnote bad">run stopped by operator</span>' in bar, _snippet(bar))
+        _tone_in_span(bar, "bad", "run stopped by operator"), _snippet(bar))
     chk("per-app msg AND record cleared after render",
         st.get("last_msg") == "" and st.get("last_msg_record") is None,
         f"last_msg={st.get('last_msg')!r} record={st.get('last_msg_record')!r}")
@@ -186,12 +204,12 @@ def _test_per_app_tone_from_record() -> None:
     server.set_last_msg("automatixy", "ok", "drain finished, 1 error recovered")
     bar = V._control_bar(_CFG, "automatixy", True)
     chk("per-app tone=ok → span class 'ok'",
-        '<span class="tbnote ok">drain finished, 1 error recovered</span>' in bar, _snippet(bar))
+        _tone_in_span(bar, "ok", "drain finished, 1 error recovered"), _snippet(bar))
     # tone='warn' maps to the neutral 'dim'.
     server.set_last_msg("automatixy", "warn", "a run is already in progress for this project")
     bar = V._control_bar(_CFG, "automatixy", True)
     chk("per-app tone=warn → span class 'dim'",
-        '<span class="tbnote dim">a run is already in progress for this project</span>' in bar,
+        _tone_in_span(bar, "dim", "a run is already in progress for this project"),
         _snippet(bar))
     # A legacy RAW write (no record) renders neutral 'dim' and still clears after one render.
     st["last_msg"] = "legacy note"
