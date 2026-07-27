@@ -32,8 +32,14 @@ chk("an ordinary ticket is NOT a tracker",
                                         summary="Out-of-process watchdog", description="d",
                                         labels=["autodev"])))
 src = Path("orchestrator/intake.py").read_text(encoding="utf-8")
+# EU-731 widened this line to `if is_tracker_ticket(ticket) or is_epic(ticket):` — an Epic is the
+# same shape of mistake (a container, never buildable work). Assert the CONTRACT (the tracker filter
+# runs at the from_drain choke point, so it covers the drain AND the daily's "Next up") rather than
+# the exact source line, which pinned a literal and broke on a purely additive change.
+_call = next((ln for ln in src.splitlines()
+              if "is_tracker_ticket(ticket)" in ln and ln.strip().startswith("if ")), "")
 chk("the filter sits at the from_drain choke point (drain + daily Next-up)",
-    "if is_tracker_ticket(ticket):" in src)
+    bool(_call) and "from_drain" in src and _call.strip().endswith(":"), _call.strip())
 
 print("\n========== TRACKER SKIP QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
