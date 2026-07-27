@@ -178,6 +178,39 @@ def _back_btn(home_url: str) -> str:
     )
 
 
+# EU-719 — shared fetch-submit helper for the cockpit's action forms, injected on every
+# ``_wrap`` page so the Needs-you answer buttons (server.py /needs) and the pinned
+# decision-card ``.preply`` forms (the /chat page) share ONE submit path instead of each
+# hand-rolling fetch + disable/enable logic. ``euPost(form, opts)`` disables every button in
+# the form and relabels the primary one '⏳ <busy>…' (default busy = 'Sending') for the
+# duration of the POST, then resolves with the response. The POST uses ``redirect:"manual"``
+# because the endpoints answer with a 302 (native-POST compatibility); the caller treats
+# ``opaqueredirect`` OR ``r.ok`` as success and decides the success UX itself (reload for
+# /needs, inline '✓ sent' for the chat cards). On ANY failure — network throw or non-ok /
+# non-redirect status — the buttons are re-enabled with their original labels restored and
+# the error re-thrown, so the caller can surface it inline instead of silently reloading.
+# Purely additive: pages that never call ``euPost`` are unaffected.
+_SUBMIT_HELPER = (
+    "<script>"
+    "window.euPost=function(form,opts){"
+    "opts=opts||{};"
+    "var btns=[].slice.call(form.querySelectorAll('button'));"
+    "var saved=btns.map(function(b){return[b,b.innerHTML];});"
+    "btns.forEach(function(b){b.disabled=true;});"
+    "var busyBtn=opts.button||form.querySelector('button[type=submit]')||btns[0]||null;"
+    "if(busyBtn){busyBtn.textContent='⏳ '+(opts.busy||'Sending')+'…';}"
+    "return fetch(form.getAttribute('action')||'',"
+    "{method:'POST',body:new FormData(form),redirect:'manual'})"
+    ".then(function(r){"
+    "if(r.type==='opaqueredirect'||r.ok){return r;}"
+    "throw new Error('HTTP '+r.status);"
+    "}).catch(function(e){"
+    "saved.forEach(function(p){p[0].innerHTML=p[1];p[0].disabled=false;});"
+    "throw e;"
+    "});};"
+    "</script>")
+
+
 def _wrap(title: str, inner: str) -> str:
     """Page chrome with a **floating** back-to-cockpit button (EU-542)."""
     # body top-padding clears the fixed button's footprint (PM EU-542 call): 66px ≥ the
@@ -200,6 +233,10 @@ def _wrap(title: str, inner: str) -> str:
             "a:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible,"
             "input:focus-visible{outline:none;box-shadow:var(--ring)}</style>"
             + _back_btn(_back_home())
+            # EU-719: the shared fetch-submit helper (see _SUBMIT_HELPER) — before the page
+            # content so ``window.euPost`` is already defined when the consumer pages' inline
+            # scripts parse (the /needs + /chat submit handlers call it on submit).
+            + _SUBMIT_HELPER
             + f"<h2>{html.escape(title)}</h2>{inner}")
 
 
@@ -1287,7 +1324,11 @@ def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
     for d in pend:
         tid = html.escape(str(d.get("id", "")))
         q = html.escape((d.get("question") or d.get("summary") or "").strip())[:1600]
-        cards += (f'<div class=pcard><div class=ph2>&#128681; {tid} · the unit needs your call</div>'
+        # EU-719: data-tid keys the card for the chat page's fetch-submit path — the reply
+        # handler records answered tids and the 5s poll uses the attribute to keep a slow
+        # background resolve from swapping an answered card's '✓ sent' state back to the
+        # stale pending form. No-JS fallback is unchanged: the form is still a native POST.
+        cards += (f'<div class=pcard data-tid="{tid}"><div class=ph2>&#128681; {tid} · the unit needs your call</div>'
                   f'<div class=pq>{q}</div>'
                   '<form class=preply method=post action=/api/chat>'
                   f'<input type=hidden name=ticket value="{tid}">'
@@ -1326,6 +1367,11 @@ _CHAT_STYLE = ("<style>"
                ".pcard .ph2{color:var(--warn);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
                ".pcard .pq{color:var(--ink);font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:var(--mono);line-height:1.5}"
                ".preply{display:flex;gap:8px;margin-top:11px}.preply input{flex:1}"
+               # EU-719: fetch-submit feedback states for the pinned decision cards — the '✓ sent'
+               # body that replaces the form on success (until the next poll removes the card) and
+               # the inline failure line shown when the submit didn't go through.
+               ".psent{color:var(--ok);font-weight:700;font-size:14px;padding:4px 0}"
+               ".perr{color:var(--bad);font-size:12.5px;font-weight:600;margin-top:8px}"
                ".load-earlier{display:block;margin:14px auto 0;background:var(--panel2);"
                "border:1px solid var(--line2);color:var(--dim);border-radius:var(--r-pill);"
                "padding:7px 15px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}"
