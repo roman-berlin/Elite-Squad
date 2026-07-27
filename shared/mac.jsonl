@@ -1894,3 +1894,5 @@
 {"ts": "2026-07-28T00:28:34+0300", "event": "ticket_start", "ticket_id": "EU-717", "app": "Elite-Unit", "branch": "autodev/EU-717-ship-shared-in-flight-submit-helper-and-", "dry_run": false, "ephemeral": false}
 {"ts": "2026-07-28T00:28:34+0300", "event": "prior_attempts_injected", "ticket_id": "EU-717", "chars": 113}
 {"ts": "2026-07-28T00:28:34+0300", "event": "ticket_transition", "ticket_id": "EU-717", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
+{"ts": "2026-07-28T00:47:57+0300", "event": "ticket_start", "ticket_id": "EU-553", "app": "Elite-Unit", "branch": "autodev/EU-553-navigation-truth-link-the-5-orphan-pages", "dry_run": false, "ephemeral": false}
+{"ts": "2026-07-28T00:47:59+0300", "event": "ticket_transition", "ticket_id": "EU-553", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
