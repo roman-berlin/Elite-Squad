@@ -1102,10 +1102,21 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                'title="Browse this project\'s run logs by day"'))
     if is_mac:
         open_logs_html += (
+            # EU-731: fire-and-forget fetch → check r.ok + catch network errors; show visible inline error
+            ' <span id=finder-ok-span style="display:none;font-size:11px;line-height:1"></span>'
+            ' <span id=finder-err-span style="display:none;margin-top:1px;font-size:11px;'
+            'color:#d32f2f;line-height:1.3" '
+            'aria-live="polite"></span>'
             ' <a style="font-size:11px;color:var(--info)" '
             'href="/api/open-logs" '
-            'onclick="fetch(this.href);return false" '
+            'onclick="try{fetch(this.href).then(function(r){if(!r.ok)throw Error(String(r.status));'
+            'document.getElementById(\'finder-ok-span\').textContent=\'Opened.\';}).catch(function(e)'
+            '{var s=document.getElementById(\'finder-err-span\');s.textContent=\'Failed to open log:\'+'
+            '(e.message||e);s.style.display=\'block\';})}catch(e){var s=document.getElementById('
+            '\'finder-err-span\');s.textContent=\'Failed to open log:\'+(e.message||e);s.style.display='
+            '\'block\'}finally{return false}" '
             'title="Reveal the logs folder in Finder (macOS only)">Finder</a>'
+            # Note: span appears before link so it shows immediately below on reflow
         )
 
     # Render plan-limit banner BEFORE the control bar (if active)
