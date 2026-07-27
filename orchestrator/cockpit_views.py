@@ -320,9 +320,9 @@ def _result_strip(state: dict) -> str:
     directly (backward-compatible with EU-31 callers that write plain strings).
 
     EU-670: rendered inside the live board (prepended by ``warroom.render_board``);
-    the JS hook ``data-dismiss-result`` is wired in EU-671.
-    EU-676: the home-page index() path uses this non-destructive helper instead of
-    the destructive one-shot ``_result_banner``, so a pending result survives full-page reloads.
+    the JS hook ``data-dismiss-result`` is wired in EU-675. The full-page GET / shows it via
+    the board embedded in the page (EU-673 removed the duplicate bar strip from index()), so
+    initial render, 5s poll and SSE stream all carry the exact same strip.
     """
     rec = _peek_last_result(state)
     if not rec:
