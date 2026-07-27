@@ -159,7 +159,7 @@ chk("AC3b: visible warning message present",
     msg != "",
     f"expected a warning message, got last_msg={msg!r}")
 chk("AC3c: message is meaningful to user",
-    "No live run to stop" in msg or "already finished" in msg,
+    "No active run found to stop" in msg,   # EU-706 wording (supersedes EU-695's)
     f"message content: {msg!r}")
 
 # Also test the stale-ticket path: start a run, let it finish, POST old ticket
@@ -177,7 +177,7 @@ cockpit_state.set_max_parallel_runs(0)
 client3.post("/api/stop-run", data={"app": "alpha", "ticket": "EU-old"})
 msg_stale = get_state("alpha").get("last_msg") or ""
 chk("AC3d: stale ticket also sets visible message",
-    "No live run to stop" in msg_stale or "already finished" in msg_stale,
+    "No active run found to stop" in msg_stale,   # EU-706 wording (supersedes EU-695's)
     f"message content: {msg_stale!r}")
 
 
@@ -262,7 +262,7 @@ chk("AC5e: lock registry did not grow at all",
 # lazily-created orphan tab. (Against the pre-fix code this message landed on the orphan instead.)
 msg_garbage = get_state(None).get("last_msg") or ""
 chk("AC5f: message still surfaced on the default board",
-    "No live run to stop" in msg_garbage or "already finished" in msg_garbage,
+    "No active run found to stop" in msg_garbage,   # EU-706 wording (supersedes EU-695's)
     f"global last_msg={msg_garbage!r}")
 
 
