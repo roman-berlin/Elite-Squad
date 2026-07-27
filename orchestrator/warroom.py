@@ -1298,6 +1298,8 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     stop = ('<form method=post action=/api/stop-run class=stoprun '
             'onsubmit="return confirm(\'Stop this run? It halts at the next safe checkpoint — '
             'no merge, nothing left half-applied.\')">'
+            f'<input type="hidden" name="app" value="{_esc(run.get("app", "") or "")}">'
+            f'<input type="hidden" name="ticket" value="{_esc(run.get("ticket") or "—")}">'
             '<button class=stopbtn title="Halt this run at the next checkpoint">&#9632; Stop</button>'
             '</form>') if (run["live"] and manual) else ""
     # 2026-07-19 (Commander order): the verdict must tell the CURRENT story, not a stale fact —
