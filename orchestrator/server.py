@@ -1171,6 +1171,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                          event_reachable=ev is not None)
             if ev is not None:
                 ev.set()
+                # EU-687: a drain is a confirmed stop — flip the card's persisted 'stopping'
+                # flag with the event so the run card shows the amber chip at once (cleared by
+                # the worker's finally → release_run when the drain completes).
+                st["stopping"] = True
             # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
             # the launchd service after signaling the stop_event so the current ticket finishes.
             # This must happen AFTER ev.set() so graceful shutdown happens first.
@@ -1198,6 +1202,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                          event_reachable=ev is not None)
             if ev is not None:
                 ev.set()
+                st["stopping"] = True   # EU-687: confirmed stop — chip flips at once (see drain)
             st["autopilot_on"] = False
             # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
             # the launchd service. Without launchctl bootout, clicking 'Stop' on an external daemon
@@ -2137,6 +2142,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     ev = st.get("stop_event")
         if ev is not None:
             ev.set()
+            # EU-687: the stop is CONFIRMED — flip the persisted flag in the same breath as the
+            # event so the run card renders the amber 'Stopping — finishing the current step'
+            # chip on the very next board render (the redirect below), not at the next checkpoint
+            # tick. release_run clears it when the run actually lets go. `st` here is always the
+            # live slot dict — the junk-app path resolved st={} above, whose ev is None and never
+            # reaches this branch.
+            st["stopping"] = True
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
         else:
             # EU-695/EU-706: visible on-page message when there is no live run to stop, naming
