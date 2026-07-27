@@ -1445,6 +1445,40 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         clear_last_result(_board_project(request.args.get("app")) or None)
         return jsonify({"ok": True})
 
+    @app.get("/api/last-result")
+    def last_result_api() -> Response:
+        """EU-712: return the current one-shot result record as JSON, or an empty payload
+        when none is stored. Read-only — does NOT clear/mutate the store.
+
+        Mirrors ``_view_state``'s two-scope lookup: tries the resolved app key first,
+        falls back to the unit-wide ``_state`` so global writers (standup/council/QA)
+        are always visible regardless of which tab is active.
+        """
+        from flask import jsonify
+
+        app_name = _board_project(request.args.get("app")) or None
+        rec = get_last_result(app_name)
+        if rec is None:
+            # Fallback to the unit-wide scope (global writers like QA/standup/council)
+            rec = get_last_result(None)
+        if rec is not None:
+            return jsonify(rec)
+        return jsonify({})
+
+    @app.post("/api/last-result/dismiss")
+    def last_result_dismiss_api() -> Response:
+        """EU-712: clear the pending one-shot result so GET /api/last-result returns empty
+        on the next call.
+
+        Delegates to ``clear_last_result`` which clears BOTH the per-app state AND the
+        unit-wide ``_state`` in one call (same contract as POST /api/dismiss-result).
+        Idempotent — safe to call when nothing is set, always returns 200/{ok:true}.
+        """
+        from flask import jsonify
+
+        clear_last_result(_board_project(request.args.get("app")) or None)
+        return jsonify({"ok": True})
+
     @app.post("/api/unblock")
     def unblock_api() -> Response:
         """Remove a ticket from blocked_tickets.json (the parked set).
