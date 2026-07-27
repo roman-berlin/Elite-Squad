@@ -3868,21 +3868,40 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 # refreshChat() the poller uses (so it degrades gracefully to the full-log render
                 # if EU-286a windowing isn't present), then re-focus the input and stick the view to
                 # the newest message (own message included).
+                # EU-726 — double-Enter dedupe: ONE shared setSending(on) helper toggles the
+                # `sending` re-entry flag AND the disabled state of the composer's input + Send
+                # button together, so a rapid or held Enter fires at most one POST and the box
+                # visibly locks while it is in flight. setSending(true) runs synchronously on the
+                # first Enter (before any await); setSending(false) runs on EVERY settle path —
+                # empty-text early-return, error, success — so the composer always re-enables.
+                # (The .preply cards below submit through window.euPost, which disables a form's
+                # BUTTONS for the POST; setSending is the composer's counterpart, extended to also
+                # disable the text input — euPost deliberately leaves inputs editable, and it
+                # POSTs with redirect:"manual" and never re-enables on success, both wrong for a
+                # composer that stays on page after a redirect-answering fetch.)
                 'var chatform=document.getElementById("chatform"),chatinput=document.getElementById("chatinput"),'
-                'chaterr=document.getElementById("chaterr");'
+                'chaterr=document.getElementById("chaterr"),sending=false,'
+                'sendbtn=chatform?chatform.querySelector("button"):null;'
+                'function setSending(on){sending=on;'
+                'if(chatinput)chatinput.disabled=on;'
+                'if(sendbtn)sendbtn.disabled=on;}'
                 'if(chatform)chatform.addEventListener("submit",async function(ev){'
                 'ev.preventDefault();'
-                'var text=chatinput.value;if(!text.trim())return;'
+                'if(sending)return;'
+                'setSending(true);'
+                'var text=chatinput.value;if(!text.trim()){setSending(false);return;}'
                 # POST the send; treat a network throw OR a non-ok HTTP status as failure. On
                 # failure DO NOT clear the input — keep the Commander's typed text so it can be
                 # retried — surface a visible inline error, and leave focus in the box so a
                 # re-press of Enter re-sends. Only on success do we clear + refresh + stick down.
+                # Both branches call setSending(false) so the box re-enables itself.
                 'var ok=false;'
                 'try{var r=await fetch("/api/chat",{method:"POST",body:new FormData(chatform)});ok=!!(r&&r.ok);}'
                 'catch(e){ok=false;}'
-                'if(!ok){chatinput.classList.add("cerr");'
+                'if(!ok){setSending(false);chatinput.classList.add("cerr");'
                 'if(chaterr){chaterr.textContent="Message not sent — check your connection and press Enter to retry.";'
                 'chaterr.classList.add("on");}chatinput.focus();return;}'
+                'setSending(false);'
                 'chatinput.classList.remove("cerr");if(chaterr)chaterr.classList.remove("on");'
                 'chatinput.value="";'
                 'await refreshChat(true);'
