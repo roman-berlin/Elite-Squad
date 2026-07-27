@@ -2684,6 +2684,15 @@ function startStream(){
 applyUi();
 scrollLog();
 startStream();
+// EU-675: delegate dismiss-result button clicks — works for strips already present AND those added later via SSE/applyBoard.
+// Passes APP so the endpoint clears THIS tab's per-project state (the same state /api/board?app=APP renders from).
+document.addEventListener("click", function(e){
+  var btn=e.target.closest("[data-dismiss-result]");
+  if(!btn)return;
+  fetch("/api/dismiss-result?app="+encodeURIComponent(APP),{method:"POST"}).then(function(r){
+    return r.json().then(function(j){if(j.ok){var s=btn.closest("div");if(s)s.remove();}});
+  }).catch(function(){console.warn("[eu675] dismiss-result failed, strip left in place");});
+});
 // EU-200: Live run log streaming
 (function(){
   var _runlogDone=false;
