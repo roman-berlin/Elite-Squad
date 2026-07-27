@@ -962,6 +962,17 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         # Drain in progress: show the "finishing…" label WITH a Stop button so a long run
         # can be cut short mid-drain — EU-689. The stop action reuses /api/autopilot which
         # already handles app-scoped stop_event.set() + autopilot_on=False for this app.
+        # EU-709: the drain ALSO keeps the HARD-STOP control — a /api/stop-run form carrying
+        # the in-flight run's own app + ticket (the per-card targeting channel, EU-692/EU-705),
+        # so a long ticket can be halted at its next checkpoint instead of running to completion.
+        # The ticket comes from the slot's ``run_tickets`` — published by the autopilot loop the
+        # moment it takes a cycle's worklist (mirrors run_selected_api's EU-693 claim record);
+        # "—" is the no-ticket sentinel /api/stop-run already understands (it then resolves the
+        # slot app-scoped). ap_stopping is gated on the per-app internal_on flag (EU-356), so
+        # this branch only ever renders for an in-process drain with a reachable stop_event —
+        # never for an external daemon.
+        _claimed = app_st.get("run_tickets") or []
+        _hs_ticket = html.escape(str(_claimed[0]) if _claimed else "—")
         ap_html = (
             '<div class="tbap stopping" title="Finishing current ticket, then standing down">'
             '<span class="apdot-sm stop"></span>'
@@ -972,6 +983,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             '<button class="aptbtn stop" '
             'title="Mark autopilot off now — the in-flight build still finishes in the background">'
             'Stop</button></form>'
+            f'<form method=post action=/api/stop-run class=tbf>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            f'<input type=hidden name=ticket value="{_hs_ticket}">'
+            '<button class="aptbtn stop" '
+            'title="Hard stop — halt the in-flight run at its next safe checkpoint '
+            '(no merge, nothing left half-applied)">'
+            '&#9632; Hard&nbsp;stop</button></form>'
             '</div>')
     elif ap_on:
         # Autopilot running: offer graceful drain or hard stop.
