@@ -125,9 +125,10 @@ def test_ac2_one_live_run_single_path_identity():
     _calls: list[dict] = []
     original = warroom._run_html
 
-    def _recorder(run, mode=None, elapsed=None, manual=False, log_path=None, log_ticket=None):
+    def _recorder(run, mode=None, elapsed=None, manual=False, log_path=None,
+                  log_ticket=None, stopping=False):
         result = original(run, mode=mode, elapsed=elapsed, manual=manual,
-                          log_path=log_path, log_ticket=log_ticket)
+                          log_path=log_path, log_ticket=log_ticket, stopping=stopping)
         _calls.append({
             "run": run,
             "mode": mode,
@@ -135,6 +136,7 @@ def test_ac2_one_live_run_single_path_identity():
             "manual": manual,
             "log_path": log_path,
             "log_ticket": log_ticket,
+            "stopping": stopping,
             "_html": result,
         })
         return result
