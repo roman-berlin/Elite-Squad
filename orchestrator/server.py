@@ -723,6 +723,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # strip is byte-identical on the initial page render, the 5s poll and the SSE stream.
         # EU-676 moved this bar off the destructive _result_banner; EU-673 removed the strip from
         # the bar entirely — a bar copy would double-render the message the board already shows.
+        # EU-714: that is also the banner/poll reconciliation — GET / and the live board's poll/SSE
+        # render the one store through the one renderer (_result_strip) into the one #board slot,
+        # so a result shows exactly once on every surface and a dismiss (either endpoint, both
+        # scopes) clears it for the next GET / AND the next poll. Pinned by
+        # tests/eu714_reconcile_strip_test.py.
         return warroom.render_page(cfg, appq, _view_state(appq), bar, h)
 
     @app.get("/api/health")
@@ -1171,6 +1176,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                          event_reachable=ev is not None)
             if ev is not None:
                 ev.set()
+                # EU-687: a drain is a confirmed stop — flip the card's persisted 'stopping'
+                # flag with the event so the run card shows the amber chip at once (cleared by
+                # the worker's finally → release_run when the drain completes).
+                st["stopping"] = True
             # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
             # the launchd service after signaling the stop_event so the current ticket finishes.
             # This must happen AFTER ev.set() so graceful shutdown happens first.
@@ -1198,6 +1207,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                          event_reachable=ev is not None)
             if ev is not None:
                 ev.set()
+                st["stopping"] = True   # EU-687: confirmed stop — chip flips at once (see drain)
             st["autopilot_on"] = False
             # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
             # the launchd service. Without launchctl bootout, clicking 'Stop' on an external daemon
@@ -1487,6 +1497,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         Mirrors ``_view_state``'s two-scope lookup: tries the resolved app key first,
         falls back to the unit-wide ``_state`` so global writers (standup/council/QA)
         are always visible regardless of which tab is active.
+
+        EU-714: this is the read side of the SAME single store the GET / banner and the
+        live-board strip render from — it legitimately still returns the record after GET /
+        showed it (peek, not pop); the record's ``timestamp`` is the stable identity key, so
+        a poll never re-surfaces a shown result as NEW.
         """
         from flask import jsonify
 
@@ -2137,6 +2152,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     ev = st.get("stop_event")
         if ev is not None:
             ev.set()
+            # EU-687: the stop is CONFIRMED — flip the persisted flag in the same breath as the
+            # event so the run card renders the amber 'Stopping — finishing the current step'
+            # chip on the very next board render (the redirect below), not at the next checkpoint
+            # tick. release_run clears it when the run actually lets go. `st` here is always the
+            # live slot dict — the junk-app path resolved st={} above, whose ev is None and never
+            # reaches this branch.
+            st["stopping"] = True
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
         else:
             # EU-695/EU-706: visible on-page message when there is no live run to stop, naming
@@ -2757,6 +2779,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ".nstrip{margin:0 0 12px;padding:8px 12px;border-radius:9px;"
             "border:1px dashed var(--line2);font-size:12.5px;color:var(--dim)}"
             ".nstrip label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-right:6px;font-weight:700}"
+            # EU-719: inline failure line shown under an answer form whose fetch-submit didn't
+            # go through (the button re-enables with its original label at the same time).
+            ".nerr{color:var(--bad);font-size:12.5px;font-weight:600;margin:7px 0 0}"
             "</style>")
         # EU-567: classify last_msg — status runs go to .nstrip, confirmations/errors keep .nbanner.
         _m = _state.pop("last_msg", "") or ""
@@ -3002,6 +3027,32 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     f"<input type=hidden name=batch value=\"{bid}\">"
                     "<button class='nbtn no'>Deny &mdash; discard</button></form></div>")
             out.append("</div>")
+
+        # EU-719 — fetch-submit for the option/answer forms: the clicked button disables and
+        # relabels to '⏳ …ing' via the shared window.euPost helper (cockpit_views._SUBMIT_HELPER)
+        # for the duration of the call — the file/close intents call Jira synchronously in
+        # /api/answer, so the native POST used to sit inert for seconds looking ignored. The
+        # endpoint still answers with a redirect(/needs); with redirect:'manual' that lands as
+        # an opaqueredirect the helper counts as success, so on success we reload to render the
+        # one-shot confirmation banner + the cleared row (last_msg is NOT popped by the unfollowed
+        # redirect). On failure the helper re-enables the button and we surface an inline .nerr
+        # instead of silently reloading. Forms stay native POSTs in the markup — the no-JS
+        # fallback behaviour is unchanged.
+        out.append(
+            "<script>(function(){"
+            "function clearErr(f){var e=f.parentNode.querySelector('.nerr');if(e){e.remove();}}"
+            "function showErr(f){clearErr(f);var e=document.createElement('div');e.className='nerr';"
+            "e.textContent='⚠ Not sent — check your connection and retry.';"
+            "f.parentNode.insertBefore(e,f.nextSibling);}"
+            "document.querySelectorAll('form[action=\"/api/answer\"]').forEach(function(f){"
+            "f.addEventListener('submit',function(ev){"
+            "ev.preventDefault();"
+            "var ti=f.querySelector('input[type=text][name=text]');"
+            "if(ti&&!ti.value.trim()){return;}"
+            "clearErr(f);"
+            "window.euPost(f).then(function(){location.reload();},function(){showErr(f);});"
+            "});});"
+            "})()</script>")
 
         return _wrap("Needs you", "".join(out))
 
@@ -3737,6 +3788,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 f'<input type=text id=chatinput name=text autocomplete=off autofocus value="{prefill}" '
                 'placeholder="Message the CTO…  (or reply  AUTO-1: your decision)"><button>Send</button></form></div>'
                 '<script>window.scrollTo(0,document.body.scrollHeight);'
+                # EU-719 — tids the Commander already answered from a pinned card THIS page
+                # lifetime. The .preply submit handler records into it on success; refreshChat
+                # reads it to keep a slow background resolve (the /api/chat reply path runs in
+                # a thread) from swapping the answered card's '✓ sent' state back to a stale
+                # pending form when the next 5s poll still lists the decision.
+                'var preplySent={};'
                 # EU-305 — append/patch only what's new instead of wholesale-replacing #cinner
                 # innerHTML every 5s (which jank-reset scroll position on every tick). The
                 # .pending 'needs-your-call' cards are cheap and sit above the thread, so they're
@@ -3754,12 +3811,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'var frag=document.createElement("div");frag.innerHTML=await r.text();'
                 'var cinner=document.getElementById("cinner");'
                 'var newPending=frag.querySelector(".pending"),oldPending=cinner.querySelector(".pending");'
+                # EU-719 — drop already-answered cards (preplySent) from the fetched fragment
+                # BEFORE the swap, so a background resolve slower than the 5s poll can't put a
+                # stale pending form back over the card's '✓ sent' state. serverHoldsSent records
+                # whether the server still lists an answered card — if the fetched fragment is
+                # empty ONLY because of this filter, the on-screen '✓ sent' card is kept (it's
+                # still the truth) instead of being removed ahead of the server.
+                'var serverHoldsSent=false;'
+                'if(newPending){newPending.querySelectorAll(".pcard[data-tid]").forEach(function(c){'
+                'if(preplySent[c.getAttribute("data-tid")]){serverHoldsSent=true;c.remove();}});}'
                 # EU-305 iter2 — only swap the .pending block when it actually changed, so text the
                 # Commander is mid-typing into a pending card's reply input isn't wiped every tick.
-                'if(newPending){if(oldPending){if(oldPending.outerHTML!==newPending.outerHTML)'
+                'if(newPending&&newPending.querySelector(".pcard")){'
+                'if(oldPending){if(oldPending.outerHTML!==newPending.outerHTML)'
                 'oldPending.outerHTML=newPending.outerHTML;}'
                 'else cinner.insertBefore(newPending,cinner.firstChild);}'
-                'else if(oldPending)oldPending.remove();'
+                'else if(oldPending){'
+                'if(!(serverHoldsSent&&oldPending.querySelector(".psent")))oldPending.remove();}'
                 'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
                 # EU-318 — capture the fetched window's max seq BEFORE the append loop below moves
                 # those nodes OUT of frag. The old code scanned frag for `total` AFTER the move, so on
@@ -3820,6 +3888,33 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'await refreshChat(true);'
                 'chatinput.focus();'
                 'window.scrollTo(0,document.body.scrollHeight);'
+                '});'
+                # EU-719 — pinned decision-card replies submit through the shared euPost helper
+                # instead of the native form POST, so the page no longer reloads into a card that
+                # still shows 'pending' (the /api/chat reply resolves in a background thread, so
+                # the reloaded page used to look like the reply was ignored). Delegated on
+                # document because the 5s poll swaps .pending card nodes in place — a listener
+                # bound to the form itself would die on the first swap. On success the card body
+                # is replaced inline with '✓ sent' and the tid is recorded in preplySent (read by
+                # refreshChat above); the next poll that no longer lists the decision removes the
+                # card. On failure euPost has already re-enabled the Send button — we surface an
+                # inline .perr line so the failure is visible instead of silently reloading.
+                'document.addEventListener("submit",function(ev){'
+                'var f=ev.target;'
+                'if(!f.classList||!f.classList.contains("preply")){return;}'
+                'ev.preventDefault();'
+                'var txt=f.querySelector("input[type=text][name=text]");'
+                'if(!txt||!txt.value.trim()){if(txt){txt.focus();}return;}'
+                'var card=f.closest(".pcard"),tin=f.querySelector("input[name=ticket]"),'
+                'tid=tin?tin.value:"";'
+                'if(card){var pe=card.querySelector(".perr");if(pe){pe.remove();}}'
+                'window.euPost(f).then(function(){'
+                'if(tid){preplySent[tid]=1;}'
+                'if(card){card.innerHTML="<div class=psent>✓ sent</div>";}'
+                '},function(){'
+                'if(card){var e=document.createElement("div");e.className="perr";'
+                'e.textContent="⚠ Not sent — check your connection and retry.";card.appendChild(e);}'
+                '});'
                 '});'
                 # EU-304 — 'load earlier': fetch the next-older batch (offset grows by its own
                 # data-limit each click) and prepend it into the live .thread, no reload. An empty

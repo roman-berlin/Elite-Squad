@@ -121,9 +121,9 @@ chk("AC1d: hard-stop form carries the in-flight ticket from run_tickets",
 chk("AC1e: hard-stop button rendered",
     "&#9632; Hard&nbsp;stop</button>" in bar, "")
 
-chk("AC1f: EU-689 autopilot Stop still rendered alongside (no regression)",
+chk("AC1f: EU-689 autopilot Stop still rendered alongside (no regression; relabeled 'Stop autopilot' by EU-708)",
     "action=/api/autopilot" in bar and "action value=stop" in bar
-    and "Stop</button>" in bar, "")
+    and "Stop&nbsp;autopilot</button>" in bar, "")
 
 # Slot with NO claimed tickets → the "—" sentinel /api/stop-run understands
 # (it then resolves the slot app-scoped) — never an empty value attribute.

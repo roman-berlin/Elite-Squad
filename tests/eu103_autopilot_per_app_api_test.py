@@ -379,8 +379,9 @@ def _test_control_bar_ap_stopping_shows_label() -> None:
     chk("_control_bar: no start buttons while stopping",
         "mode value=choose" not in bar and "mode value=drain" not in bar, "")
     # EU-689: hard-stop control remains visible during a drain (not collapsed to passive chip).
-    chk("_control_bar: Stop button present while stopping (EU-689)",
-        "action value=stop" in bar and "Stop</button>" in bar, bar)
+    # EU-708 relabeled the button 'Stop autopilot' (its true effect); wiring unchanged.
+    chk("_control_bar: Stop autopilot button present while stopping (EU-689; relabeled EU-708)",
+        "action value=stop" in bar and "Stop&nbsp;autopilot</button>" in bar, bar)
     chk("_control_bar: tbap stopping class present", 'class="tbap stopping"' in bar, bar[:300])
     cockpit_state.reset_run_state()
 

@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 # --------------------------------------------------------------------------------------------------
 
 _STATE_KEYS = ("active", "last_msg", "last_msg_record", "last_result", "last_result_record",
-               "dry_run", "last_activity", "run_started", "stop_event", "log_seq",
+               "dry_run", "last_activity", "run_started", "stop_event", "stopping", "log_seq",
                "autopilot_mode", "autopilot_on", "log_path",
                "plan_limit_hit", "plan_limit_reset_at",
                # EU-579/582: QA run-state fields — set/reset/tracked by qa_api()._bg
@@ -44,7 +44,12 @@ def _new_state() -> dict:
     """A fresh, fully-keyed run-state for one project (or the default ``None`` key)."""
     return {"active": False, "last_msg": "", "last_msg_record": None, "last_result": "",
             "last_result_record": None, "dry_run": None, "last_activity": None,
-            "run_started": None, "stop_event": None, "log_seq": 0,
+            "run_started": None, "stop_event": None,
+            # EU-687: set True the moment a stop is CONFIRMED for this app's run (the cockpit's
+            # stop paths set it alongside stop_event.set()); render_board reads it to flip the
+            # run card 'Working' → amber 'Stopping — finishing the current step' at once, and
+            # release_run clears it so the chip never survives into the idle 'last run' header.
+            "stopping": False, "log_seq": 0,
             "autopilot_mode": None, "autopilot_on": False, "log_path": None,
             "plan_limit_hit": False, "plan_limit_reset_at": None,
             # EU-579/582: QA run-state defaults
@@ -169,6 +174,10 @@ def claim_run(app: str | None = None, *, dry_run: bool | None = None,
             st["active"] = True
             st["run_started"] = time.time()
             st["last_activity"] = time.time()
+            # EU-687: a freshly-claimed run is working, never stopping — clear the flag here too
+            # (not only in release_run) so a stale True left by a run that died WITHOUT releasing
+            # can never make the NEXT run's card open on the amber 'Stopping' chip.
+            st["stopping"] = False
             if dry_run is not None:
                 st["dry_run"] = dry_run
             if stop_event is not None:
@@ -225,8 +234,14 @@ def release_run(app: str | None = None) -> None:
     postmortem / stopped).
 
     Clears the run-slot + liveness fields — ``active``, ``autopilot_on``, ``run_started``,
-    ``stop_event`` and ``last_activity`` — so a finished run never lingers as 'Working' on the
-    cockpit tab.  Mirror of ``claim_run`` (EU-104).
+    ``stop_event``, ``stopping`` and ``last_activity`` — so a finished run never lingers as
+    'Working' (or 'Stopping') on the cockpit tab.  Mirror of ``claim_run`` (EU-104).
+
+    EU-687: ``stopping`` is cleared HERE — the single place every terminal outcome funnels
+    through — so the amber 'Stopping — finishing the current step' chip dies with the run and
+    the card returns to its idle state. render_board ORs this flag with the stop_event's own
+    is_set(), so zeroing ``stop_event`` alone (below) also hides the chip; clearing the flag is
+    what keeps it from resurfacing on the next render that reads the persisted state.
 
     Deliberately does NOT touch ``last_msg``.  Every run's ``_bg`` writes the failure reason
     there (``st['last_msg'] = str(exc)``) and ``release_run`` runs in the SAME ``finally``
@@ -245,6 +260,7 @@ def release_run(app: str | None = None) -> None:
         st["autopilot_on"] = False     # zero the autopilot badge; set externally too, but defensive
         st["run_started"] = None
         st["stop_event"] = None
+        st["stopping"] = False         # EU-687: the confirmed-stop chip must not outlive the run
         st["last_activity"] = None     # clear heartbeat so stale timestamps never show after release
         # EU-200: Wake the SSE stream immediately so the board updates without delay.
         # Only bump the sequence counters, NOT last_activity (EU-104 requires it stay None).

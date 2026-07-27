@@ -1277,6 +1277,11 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     kept claiming 'Working' until the loop checkpointed out). ``render_board`` computes it from
     the slot's stop_event; ``release_run`` zeroes that event on every terminal outcome, which
     clears the chip.
+
+    EU-687: the confirmed-stop state is ALSO persisted as ``st['stopping']`` on the run's state
+    dict — the cockpit's stop paths set it alongside ``stop_event.set()`` and ``release_run``
+    clears it. ``render_board`` ORs the flag with the event, so the chip is driven by durable
+    state, not only by the (in-process, transient) Event object.
     """
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
@@ -2022,8 +2027,15 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     # autopilot_on-gated "stopping" would miss it) or via the control bar's drain/hard-stop.
     # _run_html consumes the flag on the live branch only, so a stale event on an idle slot
     # never surfaces; release_run clearing the event is what clears the chip.
+    # EU-687: the persisted ``stopping`` flag is the PRIMARY source — the cockpit's confirmed
+    # stop paths (/api/stop-run, the control bar's drain/hard-stop) set it in the SAME instant
+    # as stop_event.set(), so the chip does not depend on the event being readable here. The
+    # event-derived term is kept as a backstop for stops that set the event WITHOUT the flag
+    # (e.g. the loop's own SIGTERM handler). release_run clears BOTH, so the chip dies with
+    # the run either way; claim_run resets the flag so a stale True never opens a new card.
     _stop_ev = state.get("stop_event")
-    stopping = _stop_ev is not None and _stop_ev.is_set()
+    stopping = (bool(state.get("stopping"))
+                or (_stop_ev is not None and _stop_ev.is_set()))
 
     # EU-486: loop over live runs to produce one Active-run card per concurrent build.
     # 0 or 1 live → TODAY's code path byte-for-byte (identity guaranteed).
@@ -2518,7 +2530,9 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .runsub{font-size:12.5px;color:var(--dim)}.runsub b{color:var(--warn)}
 /* EU-710 (AC2): the run card's confirmed-stop chip — amber text + pulsing amber dot, shown in
    place of 'Working' from the moment the slot's stop_event fires until release_run clears it
-   (render_board computes _run_html's `stopping` flag from that same event). Reuses the `pulse`
+   (render_board computes _run_html's `stopping` flag from that same event). EU-687: the flag
+   is ALSO persisted as st['stopping'] — set by the confirmed-stop paths, cleared in
+   release_run — and render_board ORs it in as the chip's primary source. Reuses the `pulse`
    keyframes + --warn token so the chip matches the phasebar's amber 'now' treatment. */
 .runstopping{color:var(--warn);font-weight:600}
 .runstopping::before{content:"";display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--warn);margin-right:6px;animation:pulse 1.5s infinite;vertical-align:1px}
