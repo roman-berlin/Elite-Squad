@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from . import dashboard as D
-from .cockpit_state import _state, get_autopilot_status
+from .cockpit_state import _state, get_autopilot_status, get_state
 from .config import Config
 
 # ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
@@ -682,12 +682,37 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # EU-289: the app/effort <select> options and the run_dis gate lived only in the "+ New task"
     # panel, which is gone (intake is Jira-only) — so they went with it. The /api/run route itself
     # stays for scripted use; only the affordance was removed.
-    if _state["active"]:
-        status = '<span class="tbnote run">&#9679; run in progress…</span>'
-    elif _state.get("last_msg"):
+    # EU-646: surface per-project start/stop messages. Read the active app's own ``last_msg``
+    # FIRST (set by ``_claim_cockpit_run``, ``run_selected_api``, ``autopilot_api``, etc.);
+    # render it once, then pop so it doesn't repeat across unrelated GET / requests. Fall back
+    # to the global ``_state["last_msg"]`` only when the per-app slot is empty.
+    app_st = get_state(app0) if app0 else _state
+    status = ""
+    app_msg = (app_st.get("last_msg") or "").strip() if app0 else None
+    global_msg = (_state.get("last_msg") or "").strip()
+    if app_msg:
+        # Per-app message has priority — render it, then clear so it shows exactly once.
+        # EU-646 iter-2: tone from the stored record (written by ``server.set_last_msg``), NOT
+        # from substring matches on the message text — the SAME contract as the global fallback
+        # branch below (EU-656): the writer states the tone, the view only maps it. A missing
+        # record (legacy raw ``st['last_msg'] = ...`` writer) defaults to "dim" (neutral).
+        _m = app_msg
+        rec = app_st.get("last_msg_record")
+        if rec and isinstance(rec, dict):
+            rtone = rec.get("tone", "")
+            _tone_map = {"error": "bad", "warn": "dim", "ok": "ok"}
+            _tone = _tone_map.get(rtone, "dim")
+        else:
+            _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
+        # Clear immediately after rendering — one-shot, no persistence. Both keys go back to
+        # their _new_state defaults so a stale record can never re-tone a later message.
+        app_st["last_msg"] = ""
+        app_st["last_msg_record"] = None
+    elif global_msg:
+        # Fallback to the global last_msg (unit-level actions like ship/promote/patrol).
         # EU-656: tone from stored record, NOT content. Zero substring checks remain here.
-        # A missing record (legacy writer) defaults to "dim" (neutral) — no guessing text.
-        _m = _state["last_msg"]
+        _m = global_msg
         rec = _state.get("last_msg_record")
         if rec and isinstance(rec, dict):
             rtone = rec.get("tone", "")
