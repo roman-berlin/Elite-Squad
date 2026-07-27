@@ -2829,6 +2829,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             ids = ", ".join(t.id for _, t in worklist)
             print(f"  · taking {ids}", flush=True)
 
+            # EU-709: publish this cycle's tickets on the run slot — the cockpit's drain-state
+            # hard-stop control (cockpit_views._control_bar) reads them to target /api/stop-run
+            # at the EXACT run in flight (the per-card app+ticket channel, EU-692/EU-705), and
+            # the handler's stale-card guard (EU-693) validates the posted ticket against this
+            # list. Mirrors run_selected_api's claim-time record (server.py, EU-693); without it
+            # a drain slot carries no tickets and can only be stopped app-scoped.
+            run_state["run_tickets"] = [t.id for _, t in worklist]
+
             # Phase-2 §2 (2026-07-06): the EU-107 Senior PM pre-build triage gate is DELETED —
             # it was off by default since 2026-06-29 (it closed [Feature] tickets as "answered"),
             # and its ANSWER/CLOSE/REFILE verdicts move into the Planner's single per-ticket

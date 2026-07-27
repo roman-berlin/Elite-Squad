@@ -148,6 +148,9 @@ chk("AC4b: last_msg unchanged post-success", server._state.get("last_msg") == "P
 # AC5: GET /memory renders error banner (red), persistent until dismissed
 # (EU-673: the page peeks the stored result now — the old one-shot pop was the last
 # destructive reader and it erased the live board's strip on every visit)
+# (EU-701: the banner is now the shared cockpit_views._result_strip — the same
+# renderer the live board splices in — so the tone pins assert the THEME TOKENS
+# (var(--bad*)/var(--ok*)) instead of the retired hand-rolled banner's raw hex.)
 # ══════════════════════════════════════════════════════════════════════════
 print("--- AC5 ---")
 cfg5 = make_cfg()
@@ -157,8 +160,8 @@ client5 = make_client(cfg5)
 run_scribe(client5, _scribe_fail)
 h_fail = client5.get("/memory").get_data(as_text=True)
 chk("AC5a: failure text visible", "scribe failed: boom" in h_fail)
-chk("AC5b: green success absent (tone=error uses red)", "#10371f" not in h_fail)
-chk("AC5c: red error styling present", "#4d1f1f" in h_fail and "#f8a0a0" in h_fail)
+chk("AC5b: green success absent (tone=error uses red)", "var(--okbg)" not in h_fail)
+chk("AC5c: red error styling present", "var(--badbg)" in h_fail and "var(--bad)" in h_fail)
 h_again = client5.get("/memory").get_data(as_text=True)
 chk("AC5c: banner persists on reload (EU-673 peek, not pop)", "scribe failed: boom" in h_again)
 chk("AC5d: dismiss-result clears the banner",

@@ -60,7 +60,7 @@ from .cockpit_views import (  # noqa: F401
     _chat_tabs,
     _control_bar,
     _dual_provider_gauge,
-    _peek_last_result,
+    _result_strip,
     _wrap,
     _working,
 )
@@ -136,6 +136,40 @@ def clear_last_result(app: str | None) -> None:
         # Clear the unit-wide scope too so global writers (standup/council/QA) are fully cleaned.
         _state.pop("last_result_record", None)
         _state.pop("last_result", "")
+
+
+def page_result_strip(app: str | None) -> str:
+    """EU-701: the inline last-result strip for the action pages (/council, /standup, /memory,
+    /needs, /report) — so a failure from one of those pages' OWN actions renders on the page
+    that owns the action, not only on the home board.
+
+    Reads through the public :func:`get_last_result` accessor — a non-destructive PEEK, so the
+    home board, its SSE stream and every other surface keep rendering the SAME record until
+    POST /api/dismiss-result clears both scopes (EU-677 retired the last pop reader; a page
+    visit must never consume the strip — the EU-673 pop-regression this stays clear of).
+    Scope resolution mirrors GET /api/last-result: the page's own app scope first, then the
+    unit-wide ``_state`` fallback (standup/council/scribe write with app=None).
+
+    Renders through ``cockpit_views._result_strip`` — the SAME renderer the live board splices
+    in — so every surface shares one tone map (ok→good, error→bad, warn→neutral) and one
+    dismiss hook. The strip's ``data-dismiss-result`` button is wired by EU-675's handler on
+    the board only; on these static pages this helper appends a minimal same-origin handler
+    that posts the dismiss and reloads (the record is shared state — one dismiss clears the
+    strip everywhere). Returns ``""`` when nothing is pending, so pages concatenate it
+    unconditionally and render exactly one strip per page load.
+    """
+    rec = get_last_result(app)
+    if rec is None and app is not None:
+        rec = get_last_result(None)
+    if rec is None:
+        return ""
+    strip = _result_strip({"last_result_record": rec})
+    if not strip:
+        return ""
+    return (strip
+            + "<script>document.querySelectorAll('[data-dismiss-result]').forEach(function(b){"
+            "b.addEventListener('click',function(){fetch('/api/dismiss-result',{method:'POST'})"
+            ".then(function(){location.reload()},function(){location.reload()})})})</script>")
 
 
 # EU-656: structured last-msg storage. The old control-bar note (cockpit_views._control_bar)
@@ -1445,6 +1479,40 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         clear_last_result(_board_project(request.args.get("app")) or None)
         return jsonify({"ok": True})
 
+    @app.get("/api/last-result")
+    def last_result_api() -> Response:
+        """EU-712: return the current one-shot result record as JSON, or an empty payload
+        when none is stored. Read-only — does NOT clear/mutate the store.
+
+        Mirrors ``_view_state``'s two-scope lookup: tries the resolved app key first,
+        falls back to the unit-wide ``_state`` so global writers (standup/council/QA)
+        are always visible regardless of which tab is active.
+        """
+        from flask import jsonify
+
+        app_name = _board_project(request.args.get("app")) or None
+        rec = get_last_result(app_name)
+        if rec is None:
+            # Fallback to the unit-wide scope (global writers like QA/standup/council)
+            rec = get_last_result(None)
+        if rec is not None:
+            return jsonify(rec)
+        return jsonify({})
+
+    @app.post("/api/last-result/dismiss")
+    def last_result_dismiss_api() -> Response:
+        """EU-712: clear the pending one-shot result so GET /api/last-result returns empty
+        on the next call.
+
+        Delegates to ``clear_last_result`` which clears BOTH the per-app state AND the
+        unit-wide ``_state`` in one call (same contract as POST /api/dismiss-result).
+        Idempotent — safe to call when nothing is set, always returns 200/{ok:true}.
+        """
+        from flask import jsonify
+
+        clear_last_result(_board_project(request.args.get("app")) or None)
+        return jsonify({"ok": True})
+
     @app.post("/api/unblock")
     def unblock_api() -> Response:
         """Remove a ticket from blocked_tickets.json (the parked set).
@@ -2071,11 +2139,20 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ev.set()
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
         else:
-            # EU-695: visible on-page message when there is no live run to stop. Use the already-
-            # resolved `key` (not the raw posted_app) — mirroring the success branch just above — so
-            # an unrecognized/garbage `app` (which resolved to key=None at line ~2011) never makes
-            # get_state lazily create a permanent orphan entry in the state registry.
-            set_last_msg(key, "warn", "No live run to stop — that request may have arrived after the run already finished.")
+            # EU-695/EU-706: visible on-page message when there is no live run to stop, naming
+            # the target the click asked for — a stale card or a race with run completion must
+            # not vanish as a silent redirect, the user has to see the click had no effect. Use
+            # the already-resolved `key` (not the raw posted_app) as the state slot — mirroring
+            # the success branch just above — so an unrecognized/garbage `app` (which resolved
+            # to key=None above) never makes get_state lazily create a permanent orphan entry
+            # in the state registry.
+            if posted_app and posted_ticket:
+                target = f" for {posted_app}/{posted_ticket}"
+            elif posted_app:
+                target = f" for {posted_app}"
+            else:
+                target = ""   # legacy caller posted neither — nothing useful to name
+            set_last_msg(key, "warn", f"No active run found to stop{target}")
         return redirect("/")
 
     @app.get("/standup")
@@ -2096,8 +2173,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                    else "<p style='color:#8a909c'>No engineer stand-up recorded yet — the next one lands "
                         "automatically at the 10:00 muster. Each engineer reports Yesterday / Today / "
                         "Blockers and flags who they need.</p>")
+        # EU-701: /api/standup's outcome (standup_api writes it app=None) renders inline here,
+        # not only on the home board — suppressed mid-run so the _working panel owns the page.
+        strip = "" if _state.get("standuping") else page_result_strip(None)
         return _wrap("Daily standup",
-                     intro + "<h3>Snapshot</h3>" + snap + "<h3>Engineers' stand-up</h3>" + rep + btn)
+                     strip + intro + "<h3>Snapshot</h3>" + snap
+                     + "<h3>Engineers' stand-up</h3>" + rep + btn)
 
     @app.post("/api/standup")
     def standup_api() -> Response:
@@ -2142,18 +2223,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             top = ""
         acts = "" if (_state.get("councilling") or _state.get("shipreview")) else _actbar(
             _actbtn("/api/council", "&#128172; Hold a council now"))
+        # EU-701: /api/council's outcome (council_api writes it app=None) renders inline here,
+        # not only on the home board — suppressed mid-session so the _working panel owns the page.
+        strip = ("" if (_state.get("councilling") or _state.get("shipreview"))
+                 else page_result_strip(None))
         intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
                  "<a href=\"/chat\">chat with the CTO</a>.</p>")
         if not hist:
-            return _wrap("Daily Council", acts + intro + top
+            return _wrap("Daily Council", strip + acts + intro + top
                          + "<p style='color:#8a909c'>No councils yet.</p>")
         want = request.args.get("f") or hist[0]["file"]
         transcript = council.transcript_text(cfg, want) or "(transcript missing)"
         items = "".join(
             f"<li><a href='/council?f={html.escape(h['file'])}'>{html.escape(h['ts'][:16])} — "
             f"{html.escape(h['summary'])}</a></li>" for h in hist)
-        body = (acts + intro + top + "<div style='display:flex;gap:24px;align-items:flex-start'>"
+        body = (strip + acts + intro + top
+                + "<div style='display:flex;gap:24px;align-items:flex-start'>"
                 "<div style='flex:1;min-width:0'><h3>Transcript</h3><pre class=rep>"
                 + html.escape(transcript) + "</pre></div>"
                 "<div style='width:300px'><h3>Recent councils</h3><ul>" + items + "</ul></div></div>")
@@ -2187,31 +2273,16 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # log below — which the officers actually read.
         act = ("" if _state.get("scribing")
                else _actbar(_actbtn("/api/scribe", "&#128221; Update memory")))
-        # Confirmation banner — shown once the Technical Writer finishes (not mid-fold),
-        # so the action visibly "took". Reads from last_result+record with tone-based colour.
-        # EU-673: PEEK, not pop — this was the last destructive reader the EU-677 retirement
-        # missed. The pop silently consumed the stored result every time this page opened,
-        # erasing the live board's strip along with it (EU-648 AC2/AC3): a QA verdict survived
-        # right up until someone visited /memory. Per the peek+dismiss migration the result now
-        # persists on every surface until POST /api/dismiss-result clears both scopes.
-        _rec = None
-        _m = ""
-        if not _state.get("scribing"):
-            _m = _state.get("last_result", "") or ""
-            _rec = _peek_last_result(_state)
-        if _m and _rec:
-            _tone = _rec.get("tone", "")
-            if _tone == "error":
-                _bg, _bd, _fg = "#4d1f1f", "#7a2e2e", "#f8a0a0"
-            else:
-                _bg, _bd, _fg = "#10371f", "#1c5238", "#7fe3a6"
-        elif _m:
-            _bg, _bd, _fg = "#10371f", "#1c5238", "#7fe3a6"
-        else:
-            _bg = _bd = _fg = ""
-        banner = (f"<div style='background:{_bg};border:1px solid {_bd};color:{_fg};"
-                  f"border-radius:9px;padding:11px 14px;margin:0 0 14px;font-size:13.5px;font-weight:600'>"
-                  f"{html.escape(str(_m))}</div>" if _m else "")
+        # Confirmation / failure strip — shown once the Technical Writer finishes (not
+        # mid-fold), so the action visibly "took". EU-701: renders through the shared
+        # page_result_strip (same accessor, renderer and ok/error/warn tone map as the
+        # other four action pages and the live board) — replacing the hand-rolled banner
+        # that pre-dated the EU-699 store and carried its own hard-coded colours + a
+        # two-way (error/green) tone guess. Still a PEEK, as the EU-673 fix
+        # required: visiting /memory never consumes the record, so the board's strip
+        # survives a page visit and persists on every surface until POST
+        # /api/dismiss-result clears both scopes.
+        banner = "" if _state.get("scribing") else page_result_strip(None)
         # Doctrine (Commander-owned) + the FULL living lessons log. Officers only see the newest
         # PREAMBLE_LESSONS of the log in their prompt; the whole tail lives here for the Commander.
         live_full = memory._live_log()
@@ -2692,14 +2763,21 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         is_st = is_status_message(_m)
         banner = f"<div class=nbanner>{html.escape(str(_m))}</div>" if (_m and not is_st) else ""
         nstrip = f"<div class=nstrip><label>Status</label>{html.escape(str(_m))}</div>" if is_st else ""
+        # EU-701: the inbox's OWN action outcomes (answer_api's file/close/clarify results,
+        # EU-666 — app-scoped, hence appq-first with the unit-wide fallback) render inline
+        # here, not only on the home board. Distinct from the nbanner above, which is the
+        # last_msg note channel (EU-567): answer_api dual-writes both, so a failed answer
+        # briefly shows the note AND the result strip — the note is one-shot (popped just
+        # above), the strip persists until dismissed.
+        res_strip = page_result_strip(appq or None)
         sync_btn = ("<form method=post action=/api/needs-sync style='margin:0 0 14px'>"
                     "<button class='nbtn x' title='Check every item against live Jira NOW — items "
                     "whose ticket you already moved (Done/QA) or re-queued (To Do) in Jira are "
                     "cleared'>&#8635; Sync with Jira</button></form>")
         if not s.get("total"):
-            return _wrap("Needs you", style + banner + nstrip + sync_btn
+            return _wrap("Needs you", style + res_strip + banner + nstrip + sync_btn
                          + "<div class=nempty>&#10003; All clear — nothing needs you right now.</div>")
-        out = [style, banner, nstrip, sync_btn]
+        out = [style, res_strip, banner, nstrip, sync_btn]
 
         # ── Unified inbox rows — grouped by category (EU-102) ────────────────
         from urllib.parse import quote
@@ -4023,7 +4101,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             "<p>Screenshot (optional): <input type=file name=screenshot accept='image/*'></p>"
             "<p><label><input type=checkbox name=dryrun> dry run (build only — no merge)</label></p>"
             "<p><button>Send to the CTO</button></p></form>")
-        return _wrap("Report a problem", form)
+        # EU-701: report_api's failure outcomes (health block, backend error, intake failure —
+        # app-scoped, resolved like GET /api/last-result: active project first, unit-wide
+        # fallback) render inline on the form, so a blocked report is visible where it was
+        # filed, not only on the home board the failure redirects to.
+        strip = page_result_strip(_board_project(request.args.get("app")) or None)
+        return _wrap("Report a problem", strip + form)
 
     @app.post("/api/report")
     def report_api() -> Response:

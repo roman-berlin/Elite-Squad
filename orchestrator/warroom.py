@@ -1249,7 +1249,8 @@ def _kpi_sparkline_svg(
 
 def _run_html(run: Optional[dict], mode: Optional[str] = None,
               elapsed: Optional[str] = None, manual: bool = False,
-              log_path: Optional[str] = None, log_ticket: Optional[str] = None) -> str:
+              log_path: Optional[str] = None, log_ticket: Optional[str] = None,
+              stopping: bool = False) -> str:
     """Render the Active Run panel body.
 
     EU-76: this is the single authoritative slot for the in-flight (or most-recent) run.
@@ -1267,6 +1268,15 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
     ``data-log-ticket="<id>"`` (the runlog JS appends ``&ticket=`` to the stream URL from the
     first/newest card's attribute) and the open-log link carries ``&ticket=<id>`` as well.
     Default None → the single-run path emits neither, keeping that output unchanged.
+
+    EU-710 (AC2): ``stopping`` — True once a stop has been CONFIRMED for this app's run: its
+    slot's ``stop_event`` is set, either by a manual stop from this card's own Stop button or
+    by an autopilot drain / hard-stop from the control bar. The live header's 'Working · <phase>'
+    line flips to an amber 'Stopping — finishing the current step · <phase>' chip so the card
+    tells the current story immediately, not at the next checkpoint (the AC(2) gap: the card
+    kept claiming 'Working' until the loop checkpointed out). ``render_board`` computes it from
+    the slot's stop_event; ``release_run`` zeroes that event on every terminal outcome, which
+    clears the chip.
     """
     if not run:
         return ('<div class=runempty><div class=dot2></div>'
@@ -1356,6 +1366,21 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
         modechip = ('<span class="hgchip live">live → DEV</span>' if mode == "live"
                     else '<span class="hgchip dry">dry-run · no changes</span>' if mode == "dry"
                     else "")
+        # EU-710 (AC2): a CONFIRMED stop must flip the card's story at once — 'Working' →
+        # amber 'Stopping — finishing the current step · <phase>'. Before this, the card kept
+        # saying 'Working' until the loop noticed the event and checkpointed out, so an
+        # operator who had just clicked Stop watched a card that flatly contradicted the click.
+        # The chip's dot + text are amber (.runstopping); the current phase stays beside it so
+        # the operator sees WHERE the run is finishing. Only the live header flips — the idle
+        # 'last run' header below never carries a stop, so it is untouched.
+        if stopping:
+            runsub_inner = ('<span class=runstopping>&#9203;&nbsp;Stopping &mdash; '
+                            'finishing the current step</span>'
+                            f' &middot; <b>{_esc(phase_name)}</b>'
+                            f'{(" &nbsp;" + modechip) if modechip else ""}')
+        else:
+            runsub_inner = (f'Working &middot; <b>{_esc(phase_name)}</b>'
+                            f'{(" &nbsp;" + modechip) if modechip else ""}')
         runhead = (
             f'<div class="runhead runlive"{log_ticket_attr}>'
             '<div style="display:flex;align-items:center;gap:12px;min-width:0">'
@@ -1363,8 +1388,7 @@ def _run_html(run: Optional[dict], mode: Optional[str] = None,
             '<div style="min-width:0">'
             f'<div class=runtitle><span style="font-family:var(--mono)">{_esc(run["ticket"])}</span>'
             f'{app_span}</div>'
-            f'<div class=runsub>Working &middot; <b>{_esc(phase_name)}</b>'
-            f'{(" &nbsp;" + modechip) if modechip else ""}</div>'
+            f'<div class=runsub>{runsub_inner}</div>'
             '</div></div>'
             f'<div style="display:flex;gap:7px;align-items:center">{stop}</div>'
             '</div>'
@@ -1989,6 +2013,17 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
     ts = _scope(tasks, app)
     run = ts[0] if ts else None
     manual = bool(state.get("active")) and not ap_on
+    # EU-710 (AC2): compute the confirmed-stop state ONCE for this tab's slot and hand it to
+    # every _run_html call below, so a run card flips 'Working' → 'Stopping — finishing the
+    # current step' the moment the stop fires, not at the next checkpoint. The slot's
+    # stop_event is bound on claim (manual run OR autopilot loop) and zeroed by release_run,
+    # so "set" while this tab's card renders live == THIS run has been asked to stop — via its
+    # own card's Stop button (manual; autopilot_on stays False there, so get_autopilot_status'
+    # autopilot_on-gated "stopping" would miss it) or via the control bar's drain/hard-stop.
+    # _run_html consumes the flag on the live branch only, so a stale event on an idle slot
+    # never surfaces; release_run clearing the event is what clears the chip.
+    _stop_ev = state.get("stop_event")
+    stopping = _stop_ev is not None and _stop_ev.is_set()
 
     # EU-486: loop over live runs to produce one Active-run card per concurrent build.
     # 0 or 1 live → TODAY's code path byte-for-byte (identity guaranteed).
@@ -2004,7 +2039,8 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
         active = card["active"]
         k = _kpi_html(kpis(cfg, tasks, app))
         log_path = state.get("log_path")
-        run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path)
+        run = _run_html(run_obj, mode, elapsed, manual, log_path=log_path,
+                        stopping=stopping)
     else:
         # Multi-card path: one panel per live ticket, ordered newest-first.
         manual = bool(state.get("active")) and not ap_on  # stop button policy
@@ -2030,7 +2066,7 @@ def render_board(cfg, app: Optional[str], state: dict) -> str:
                               or lt.get("ticket_id") or "") or None
             cards_html.append(_run_html(c["run_obj"], c["mode"], c["elapsed"],
                                         c["manual"], log_path=state.get("log_path"),
-                                        log_ticket=card_ticket))
+                                        log_ticket=card_ticket, stopping=stopping))
         run = "\n".join(cards_html)
 
     # EU-76 dedup: the live run was rendered TWICE on the board — once as the top `_hero_html`
@@ -2480,6 +2516,12 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
    like "Elite-Unit" isn't upper-cased by the .ph rule) */
 .boardproj{text-transform:none;letter-spacing:0;font-size:11.5px;font-weight:600;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
 .runsub{font-size:12.5px;color:var(--dim)}.runsub b{color:var(--warn)}
+/* EU-710 (AC2): the run card's confirmed-stop chip — amber text + pulsing amber dot, shown in
+   place of 'Working' from the moment the slot's stop_event fires until release_run clears it
+   (render_board computes _run_html's `stopping` flag from that same event). Reuses the `pulse`
+   keyframes + --warn token so the chip matches the phasebar's amber 'now' treatment. */
+.runstopping{color:var(--warn);font-weight:600}
+.runstopping::before{content:"";display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--warn);margin-right:6px;animation:pulse 1.5s infinite;vertical-align:1px}
 .runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
 .dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}
 .stoprun{margin:0;display:inline}

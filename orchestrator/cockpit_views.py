@@ -11,11 +11,37 @@ from __future__ import annotations
 import html
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dashboard as D
 from .cockpit_state import _state, get_autopilot_status, get_state
 from .config import Config
+
+
+# ── Relative-time formatting (EU-702) ────────────────────────────────────────────────
+def _rel(dt) -> str:
+    """Return a human-readable relative timestamp like '2m ago', '3h ago', or 'Dec 5' for
+    entries older than a day. Handles float or int epoch timestamps."""
+    if dt is None:
+        return ""
+    try:
+        delta = time.time() - float(dt)
+        if delta < 60:
+            return f"{int(delta)}s ago"
+        minutes = delta // 60
+        if minutes < 60:
+            label = "m" if minutes == 1 else "min"
+            return f"{int(minutes)}{label} ago"
+        hours = minutes // 60
+        if hours < 24:
+            label = "h" if hours == 1 else "h"
+            return f"{int(hours)}{label} ago"
+        # Older than a day — show calendar date
+        ts = datetime.fromtimestamp(float(dt), tz=timezone.utc)
+        return ts.strftime("%b %d")
+    except (ValueError, TypeError, OSError):
+        return ""
 
 # ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
 # Slice 1 made the War Room's ``:root{…}`` block the single source of truth for the
@@ -314,7 +340,13 @@ def _result_strip(state: dict) -> str:
     """Render the last-run result as a thin, tone-styled strip with a dismiss button.
 
     Non-destructive — never pops state. Returns ``""`` when there is no pending result record.
-    Tone colours mirror ``_result_banner`` (only "error" → bad).
+    Tone colours map the stored ``ok/error/warn`` vocabulary onto good/bad/neutral:
+    ``error`` → ``var(--bad*)``, ``warn`` → ``var(--warn*)`` (neutral amber — the same
+    tokens the board's category badges use), everything else (``ok``) → ``var(--ok*)``.
+    EU-701: the warn branch joined when the five action pages (/council /standup /memory
+    /needs /report) adopted this renderer for their inline strips — the ACs require a
+    visually distinct neutral tone for ``warn`` outcomes (e.g. answer_api's "no backlog
+    configured"), which the old error/ok binary painted green.
 
     Fallback: if no ``last_result_record`` exists, reads the legacy ``last_result`` string
     directly (backward-compatible with EU-31 callers that write plain strings).
@@ -342,13 +374,24 @@ def _result_strip(state: dict) -> str:
     msg = (rec.get("text", "") or "").strip()
     if not msg:
         return ""
-    bad = rec.get("tone") == "error"
-    fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
-                      else ("var(--ok)", "var(--okline)", "var(--okbg)"))
+    tone = rec.get("tone")
+    if tone == "error":
+        fg, border, bg = ("var(--bad)", "var(--badline)", "var(--badbg)")
+    elif tone == "warn":
+        fg, border, bg = ("var(--warn)", "var(--warnline)", "var(--warnbg)")   # EU-701: neutral
+    else:
+        fg, border, bg = ("var(--ok)", "var(--okline)", "var(--okbg)")
+    ts_html = ""
+    raw_ts = rec.get("timestamp")
+    if raw_ts is not None:
+        ts_text = _rel(raw_ts)
+        if ts_text:
+            ts_html = (f'<span style="font-size:11px;color:var(--dim);margin-right:10px">'
+                       f'{html.escape(ts_text)}</span>')
     return (f"<div style='background:{bg};border-bottom:1px solid {border};"
             f"color:{fg};padding:8px 26px;font-size:13px;display:flex;"
             f"justify-content:space-between;align-items:center'>"
-            f"{html.escape(msg)}"
+            f"<span>{ts_html}{html.escape(msg)}</span>"
             f"<button data-dismiss-result style='margin-left:12px;padding:2px 10px;"
             f"cursor:pointer;border:1px solid var(--okline);background:transparent;"
             f"color:inherit;border-radius:4px'>Dismiss</button>"
@@ -704,7 +747,14 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             _tone = _tone_map.get(rtone, "dim")
         else:
             _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
-        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
+        ts_html = ""
+        raw_ts = rec.get("timestamp") if rec else None
+        if raw_ts is not None:
+            _ts_text = _rel(raw_ts)
+            if _ts_text:
+                ts_html = (" <span style='font-size:11px;color:var(--dim);margin-left:6px'>"
+                           f"{html.escape(_ts_text)}</span>")
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}{ts_html}</span>'
         # Clear immediately after rendering — one-shot, no persistence. Both keys go back to
         # their _new_state defaults so a stale record can never re-tone a later message.
         app_st["last_msg"] = ""
@@ -720,7 +770,14 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             _tone = _tone_map.get(rtone, "dim")
         else:
             _tone = "dim"  # legacy / raw assignment without set_last_msg → neutral
-        status = f'<span class="tbnote {_tone}">{html.escape(_m)}</span>'
+        ts_html = ""
+        raw_ts = rec.get("timestamp") if rec else None
+        if raw_ts is not None:
+            _ts_text = _rel(raw_ts)
+            if _ts_text:
+                ts_html = (" <span style='font-size:11px;color:var(--dim);margin-left:6px'>"
+                           f"{html.escape(_ts_text)}</span>")
+        status = f'<span class="tbnote {_tone}">{html.escape(_m)}{ts_html}</span>'
     else:
         status = ""
 
@@ -905,6 +962,17 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
         # Drain in progress: show the "finishing…" label WITH a Stop button so a long run
         # can be cut short mid-drain — EU-689. The stop action reuses /api/autopilot which
         # already handles app-scoped stop_event.set() + autopilot_on=False for this app.
+        # EU-709: the drain ALSO keeps the HARD-STOP control — a /api/stop-run form carrying
+        # the in-flight run's own app + ticket (the per-card targeting channel, EU-692/EU-705),
+        # so a long ticket can be halted at its next checkpoint instead of running to completion.
+        # The ticket comes from the slot's ``run_tickets`` — published by the autopilot loop the
+        # moment it takes a cycle's worklist (mirrors run_selected_api's EU-693 claim record);
+        # "—" is the no-ticket sentinel /api/stop-run already understands (it then resolves the
+        # slot app-scoped). ap_stopping is gated on the per-app internal_on flag (EU-356), so
+        # this branch only ever renders for an in-process drain with a reachable stop_event —
+        # never for an external daemon.
+        _claimed = app_st.get("run_tickets") or []
+        _hs_ticket = html.escape(str(_claimed[0]) if _claimed else "—")
         ap_html = (
             '<div class="tbap stopping" title="Finishing current ticket, then standing down">'
             '<span class="apdot-sm stop"></span>'
@@ -915,6 +983,13 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
             '<button class="aptbtn stop" '
             'title="Mark autopilot off now — the in-flight build still finishes in the background">'
             'Stop</button></form>'
+            f'<form method=post action=/api/stop-run class=tbf>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            f'<input type=hidden name=ticket value="{_hs_ticket}">'
+            '<button class="aptbtn stop" '
+            'title="Hard stop — halt the in-flight run at its next safe checkpoint '
+            '(no merge, nothing left half-applied)">'
+            '&#9632; Hard&nbsp;stop</button></form>'
             '</div>')
     elif ap_on:
         # Autopilot running: offer graceful drain or hard stop.
