@@ -12,6 +12,14 @@ Checks:
        (same app already running) returns a redirect instead of crashing (the iteration-1
        gate failure in eu646_per_app_message_test.py was a NoneType assignment before the
        claim's None check).
+  AC4  EU-694: a stop POST that matches NO live stop_event surfaces a VISIBLE page message
+       ("No active run found to stop.") on the redirect target — not a bare silent 302.
+       Covers the stale-card miss on a live run, a nonexistent app name, and the legacy
+       empty POST with no stoppable run anywhere.
+  AC5  EU-694 multi-run end-to-end in ONE concurrent window: stop card A → only A stops
+       and the success response carries NO no-match message (explicit negative assertion,
+       PM decision on AC2); stop a nonexistent third run → the visible no-match message;
+       run B stays active throughout.
 """
 import sys, types, tempfile, threading, time
 from pathlib import Path
@@ -149,12 +157,92 @@ chk("AC3a: refused duplicate run-selected claim returns a redirect (no crash)",
     r2.status_code == 302)
 chk("AC3b: the original run still owns the slot, unstopped",
     cockpit_state.is_active("alpha") and not _ev("alpha").is_set())
-client.post("/api/stop-run", data={"app": "alpha", "ticket": "EU-1"})
+# EU-694 PM decision: the success path also gets an explicit NEGATIVE assertion — follow
+# the redirect and prove the landing page carries no "No active run found to stop" note.
+r3 = client.post("/api/stop-run", data={"app": "alpha", "ticket": "EU-1"},
+                 follow_redirects=True)
 chk("AC3c: the original run is still stoppable by its exact app+ticket", _ev("alpha").is_set())
+chk("AC3d: success-path landing page carries no no-match message (EU-694)",
+    "No active run found to stop" not in r3.get_data(as_text=True))
 _drain_and_reset()
 
 
-print("\n================ EU-693 /api/stop-run LOOKUP QA ===================")
+# ═══════════════════════════════════════════════════════════════════════════════════
+# AC4: no-match → VISIBLE page message (EU-694). A stop POST that matches no live
+#      stop_event must not silently 302 — the page the user LANDS ON after the redirect
+#      shows "No active run found to stop." (the control bar's tbnote, rendered from the
+#      per-app last_msg the handler now writes; warroom already surfaces that mechanism).
+# ═══════════════════════════════════════════════════════════════════════════════════
+_start("alpha", ["EU-1"])
+_wait_started(1)
+chk("AC4a: alpha is active with a stop_event before the miss",
+    cockpit_state.is_active("alpha") and _ev("alpha") is not None)
+
+# Stale card: alpha's slot is claimed by EU-1, the form names a ticket it never claimed.
+r4 = client.post("/api/stop-run", data={"app": "alpha", "ticket": "EU-999"},
+                 follow_redirects=True)
+body4 = r4.get_data(as_text=True)
+chk("AC4b: unknown ticket stops nothing — event remains unset",
+    not _ev("alpha").is_set())
+chk("AC4c: the landing page shows the visible no-match message (not a bare 302)",
+    r4.status_code == 200 and "No active run found to stop" in body4,
+    "the redirect target must render the feedback — AC1")
+
+# Bad card: an app name that exists in no config keys the same feedback on the unit-wide slot.
+r4g = client.post("/api/stop-run", data={"app": "ghost", "ticket": "EU-1"})
+chk("AC4d: nonexistent app stops nothing and sets the unit-wide no-match message",
+    r4g.status_code == 302
+    and "No active run found to stop" in (cockpit_state.get_state(None).get("last_msg") or ""))
+_drain_and_reset()
+
+# Legacy fallback: an empty POST with NO stoppable run anywhere must also surface the
+# message on the landing page (pre-EU-694 it redirected with zero feedback).
+r4e = client.post("/api/stop-run", data={}, follow_redirects=True)
+chk("AC4e: legacy empty POST with no runs shows the message on the landing page",
+    r4e.status_code == 200 and "No active run found to stop" in r4e.get_data(as_text=True))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# AC5: multi-run end-to-end (EU-694) in ONE concurrent window — run B stays active
+#      throughout. Stop card A → only A stops + normal success response with NO
+#      no-match message (explicit negative assertion, PM decision on AC2); stop a
+#      nonexistent third run → the visible no-match message.
+# ═══════════════════════════════════════════════════════════════════════════════════
+_start("alpha", ["EU-1"])    # run A
+_start("beta", ["EU-7"])     # run B — started last, so it is the active tab
+_wait_started(2)
+chk("AC5a: both alpha (A) and beta (B) are active",
+    cockpit_state.is_active("alpha") and cockpit_state.is_active("beta"))
+chk("AC5b: the two runs hold distinct stop_events",
+    _ev("alpha") is not None and _ev("beta") is not None and _ev("alpha") is not _ev("beta"))
+
+# Stop card A by its exact app+ticket — the normal success path, unchanged by EU-694.
+rA = client.post("/api/stop-run", data={"app": "alpha", "ticket": "EU-1"},
+                 follow_redirects=True)
+bodyA = rA.get_data(as_text=True)
+chk("AC5c: stop(A) sets ONLY alpha's event — beta untouched",
+    _ev("alpha").is_set() and not _ev("beta").is_set(),
+    "multi-run isolation: stopping A must not affect B")
+chk("AC5d: success path keeps today's stopping message on A's slot",
+    "stopping after the current step" in (cockpit_state.get_state("alpha").get("last_msg") or ""))
+chk("AC5e: success response carries NO no-match message (PM decision)",
+    "No active run found to stop" not in bodyA,
+    "AC2: no new message may be inserted on the success path")
+
+# Stop a THIRD run that does not exist — a stale card naming beta's app with a ticket
+# beta's live run never claimed (the card's old run is gone).
+rC = client.post("/api/stop-run", data={"app": "beta", "ticket": "EU-999"},
+                 follow_redirects=True)
+bodyC = rC.get_data(as_text=True)
+chk("AC5f: the nonexistent third stop shows the visible no-match message",
+    "No active run found to stop" in bodyC,
+    "the page must show feedback, not silently redirect")
+chk("AC5g: run B remained active throughout — still live, never signaled",
+    cockpit_state.is_active("beta") and not _ev("beta").is_set())
+_drain_and_reset()
+
+
+print("\n================ EU-693 / EU-694 /api/stop-run QA ==================")
 passed = sum(1 for _, ok, _ in results if ok)
 for n, ok, det in results:
     print(f"  [{'PASS' if ok else 'FAIL'}] {n}" + (f"  ({det})" if det and not ok else ""))
