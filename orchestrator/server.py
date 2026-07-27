@@ -99,6 +99,45 @@ def set_last_result(app: str | None, tone: str, text: str) -> None:
     st["last_result_record"] = {"tone": tone, "text": text, "timestamp": time.time()}
 
 
+def get_last_result(app: str | None) -> dict | None:
+    """Return the structured last-result record for *app*, or ``None`` when none is set.
+
+    Reads through the same scope-resolution as ``set_last_result`` (per-app via
+    :func:`~orchestrator.cockpit_state.get_state`, falling back to the unit-wide
+    ``_state`` for ``app=None``), peeks ``last_result_record``, and returns it
+    verbatim — non-destructive so callers like the SSE stream and board poll can
+    re-read repeatedly without consuming state.
+
+    This is the primary read accessor for EU-699 infrastructure: code that needs
+    the stored result but should NOT go through the full GET / render path
+    (e.g. an API endpoint).  Returns ``{tone, text, timestamp}`` when present,
+    ``None`` otherwise.
+    """
+    st = get_state(app)
+    rec = st.get("last_result_record")
+    if isinstance(rec, dict):
+        return rec
+    return None
+
+
+def clear_last_result(app: str | None) -> None:
+    """Clear the pending result strip from server state so the board re-render hides it.
+
+    Clears BOTH the per-app state AND the unit-wide ``_state`` (covering writers that
+    store results globally like standup/council/QA).  Idempotent — safe to call when
+    nothing is set.
+
+    Used by :func:`dismiss_result_api` and any future explicit-dismiss surface.
+    """
+    st = get_state(app)
+    st.pop("last_result_record", None)
+    st.pop("last_result", "")  # legacy plain-string key — safe no-op when absent
+    if app is not None:
+        # Clear the unit-wide scope too so global writers (standup/council/QA) are fully cleaned.
+        _state.pop("last_result_record", None)
+        _state.pop("last_result", "")
+
+
 # EU-656: structured last-msg storage. The old control-bar note (cockpit_views._control_bar)
 # guessed tone by substring-checking ``last_msg``'s text against word lists — which painted
 # success text containing "error" red and a "0 failed" summary red. The fix: the WRITER states
@@ -573,17 +612,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         view = dict(st)
         if ap:
             view["autopilot"] = ap
-        # EU-673: newest-wins overlay of the unit-wide one-shot result (see docstring). A stamped
-        # record beats an undated one; on the (rare) equal-timestamp tie the tab's own record wins.
-        gl = _state.get("last_result_record")
-        if isinstance(gl, dict):
-            local = st.get("last_result_record")
-            if (not isinstance(local, dict)
+        # EU-673/EU-699: merge unit-wide last-result into the tab's view state via the
+        # public accessor so the board renders the result strip from the accessor's output.
+        # Newest-wins semantics: a stamped record beats an undated one; on a tie the tab's
+        # own record wins (EU-673). Fallback to legacy plain-string writers (EU-699).
+        gl = get_last_result(None)
+        if gl is not None:
+            local = get_last_result(app)
+            if (local is None
                     or float(gl.get("timestamp") or 0) > float(local.get("timestamp") or 0)):
                 view["last_result_record"] = gl
-        # Same fallback for legacy plain-string writers (pre-EU-653 code, or anything still
-        # assigning ``last_result`` directly): when the tab has no string of its own, surface the
-        # unit-wide one. _result_strip's own precedence keeps ANY record above a plain string.
+        # Legacy plain-string fallback: when the tab has no string of its own, surface the
+        # unit-wide one so _result_strip's own precedence keeps ANY record above a plain string.
         if not (st.get("last_result") or "").strip() and (_state.get("last_result") or "").strip():
             view["last_result"] = _state["last_result"]
         return view
@@ -1398,19 +1438,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     def dismiss_result_api() -> Response:
         """Clear the pending result strip from server state so the board re-render hides it.
 
-        EU-675: called by the inline JS delegated click handler on [data-dismiss-result] buttons.
-        The board renders the strip from the TAB's per-project state (_view_state → get_state(app)),
-        so the clear must hit that same dict — the handler passes its tab's APP exactly like the
-        /api/board poll does (resolved through _board_project, never trusting a raw name). Popping
-        the unit-wide _state too covers writers that store results globally (standup/council/QA)."""
+        EU-675/EU-699: delegated to ``clear_last_result`` (the public write accessor) which
+        clears BOTH the per-app state AND the unit-wide ``_state`` in one call."""
         from flask import jsonify
 
-        st = get_state(_board_project(request.args.get("app")) or None)
-        st.pop("last_result_record", None)
-        st.pop("last_result", "")  # legacy key — safe no-op when absent
-        if st is not _state:
-            _state.pop("last_result_record", None)
-            _state.pop("last_result", "")
+        clear_last_result(_board_project(request.args.get("app")) or None)
         return jsonify({"ok": True})
 
     @app.post("/api/unblock")
