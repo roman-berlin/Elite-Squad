@@ -211,6 +211,77 @@ _SUBMIT_HELPER = (
     "</script>")
 
 
+# EU-717: the shared in-flight <select> submit helper for the cockpit control bar. Mirrors
+# ``_SUBMIT_HELPER``'s disable+relabel+restore contract, but for the three model/secondary/mode
+# selects that used to fire ``onchange="this.form.submit()"`` — so arrow-key browsing the
+# options POSTed on every change and could switch the model before the user committed.
+#
+# The helper holds a change until Enter or blur (keyboard-safe: only those commit), then
+# disables the control and relabels its selected option '⏳ switching…' (or 'testing
+# connection…' for the GLM/model pick, which runs a live connection test server-side —
+# ``server.model_api`` → ``backends.glm_test_connection``). The form is still a native POST +
+# 302, so the page reloads on completion and the select reverts naturally; the restore
+# callback is a safety net for a blocked/prevented navigation so the control can never lock.
+#
+# EU-717 iter2 (review fix): a disabled ``<select>`` is EXCLUDED from the POST body, so the
+# iter1 helper — which set ``sel.disabled=true`` THEN called ``form.submit()`` — shipped the
+# picked backend/secondary/mode EMPTY and ``/api/model`` never saw the value (a Secondary or
+# Mode pick looked like a no-op; a GLM pick skipped the connection-test branch). The commit
+# now mirrors ``sel.value`` into a hidden ``<input name=sel.name value=sel.value>`` BEFORE
+# disabling, so the committed value still rides the POST while the visible control locks for
+# the busy state. The mirror is removed again on restore (a blocked navigation must not leave
+# a stale duplicate name behind). Pinned by ``tests/eu717_inflight_select_test.py``.
+#
+# Each select declares its intent (and thus its busy-label resolver) via
+# ``data-eu-inflight=<model|secondary|mode>``; the bootstrap reads that attribute, so the ONE
+# helper serves all three with no per-control JS duplicated.
+_INFLIGHT_SELECT_HELPER = """<script>
+window.euInflightSelect=function(sel,busyLabel){
+if(!sel||sel.__eu717)return sel;
+sel.__eu717=true;
+busyLabel=busyLabel||function(){return '⏳ …ing';};
+var initial=sel.value;
+var opt=null,prevText='',mirror=null;
+function restore(){
+sel.disabled=false;
+if(mirror){try{mirror.parentNode.removeChild(mirror);}catch(e){}mirror=null;}
+if(opt){try{opt.text=prevText;}catch(e){}opt=null;}
+}
+function commit(){
+if(sel.disabled)return;
+var form=sel.form;if(!form)return;
+opt=sel.options[sel.selectedIndex]||null;
+prevText=opt?opt.text:'';
+mirror=document.createElement('input');
+mirror.type='hidden';mirror.name=sel.name;mirror.value=sel.value;
+mirror.setAttribute('data-eu717-mirror','');
+form.appendChild(mirror);
+sel.disabled=true;
+if(opt)opt.text=busyLabel(sel.value);
+setTimeout(restore,10000);
+form.submit();
+}
+sel.addEventListener('focus',function(){initial=sel.value;});
+sel.addEventListener('keydown',function(e){if(e.key==='Enter'||e.keyCode===13){e.preventDefault();commit();}});
+sel.addEventListener('blur',function(){if(sel.value!==initial){commit();}});
+return sel;
+};
+(function(){
+var LABELS={
+model:function(v){return v==='glm'?'testing connection…':'⏳ switching…';},
+secondary:function(){return '⏳ switching…';},
+mode:function(){return '⏳ switching…';}
+};
+var nodes=document.querySelectorAll('select[data-eu-inflight]');
+for(var i=0;i<nodes.length;i++){
+var n=nodes[i];
+var fn=LABELS[n.getAttribute('data-eu-inflight')]||LABELS.mode;
+window.euInflightSelect(n,fn);
+}
+})();
+</script>"""
+
+
 def _wrap(title: str, inner: str) -> str:
     """Page chrome with a **floating** back-to-cockpit button (EU-542)."""
     # body top-padding clears the fixed button's footprint (PM EU-542 call): 66px ≥ the
@@ -713,13 +784,15 @@ def backend_control(cfg, app_name: str | None = None) -> str:
         '<form method=post action=/api/model class=tbf '
         'title="Main model — what the unit runs on (all projects)">'
         '<span class=tbsel-label>Main model</span>'
-        f'<select name=backend onchange="this.form.submit()" style="font-size:13px">{opts}</select>'
+        # EU-717: data-eu-inflight wires this select to the shared in-flight helper
+        # (_INFLIGHT_SELECT_HELPER) — keyboard-safe (Enter/blur commits, NOT every change).
+        f'<select name=backend data-eu-inflight="model" style="font-size:13px">{opts}</select>'
         f'</form>{note}'
         '<form method=post action=/api/model class=tbf '
         'title="Secondary model — the unit switches to it (loudly) when the main can&#39;t run: '
         'Claude plan limit hit, or GLM key missing. None = pause and wait instead.">'
         '<span class=tbsel-label>Secondary</span>'
-        f'<select name=secondary onchange="this.form.submit()" style="font-size:13px">{sec_opts}</select>'
+        f'<select name=secondary data-eu-inflight="secondary" style="font-size:13px">{sec_opts}</select>'
         f'</form>{fb_note}'
         # 2026-07-19 (Commander order): with TWO models, choose HOW they work — Hybrid (both,
         # per task: heavy thinking on Main, building on Secondary) or Backup (everything on the
@@ -731,7 +804,7 @@ def backend_control(cfg, app_name: str | None = None) -> str:
             'Backup — everything runs on the Main; the Secondary takes over only when the Main '
             'can&#39;t run (plan limit hit, key broken).">'
             '<span class=tbsel-label>Mode</span>'
-            '<select name=mode onchange="this.form.submit()" style="font-size:13px">'
+            '<select name=mode data-eu-inflight="mode" style="font-size:13px">'
             f"<option value='hybrid' {'selected' if mode == 'hybrid' else ''}>Hybrid — both, per task</option>"
             f"<option value='backup' {'selected' if mode == 'backup' else ''}>Backup — if main runs out</option>"
             '</select></form>'
@@ -744,6 +817,11 @@ def backend_control(cfg, app_name: str | None = None) -> str:
            if secondary else "")
         + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
         'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>'
+        # EU-717: the shared in-flight helper is emitted ONCE here (backend_control renders all
+        # three selects in one call), AFTER them so they're in the DOM when it runs. The
+        # bootstrap wires each select via its data-eu-inflight attribute; a missing Mode select
+        # (no Secondary set) is handled gracefully — it simply isn't found.
+        + _INFLIGHT_SELECT_HELPER
         )
 
 
