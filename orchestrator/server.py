@@ -2015,6 +2015,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             if ev is not None and claimed and posted_ticket not in [str(t) for t in claimed]:
                 # Stale Stop form: the run it was rendered for is gone and a DIFFERENT run now
                 # holds this app's slot — stopping it would kill the wrong run. Do nothing.
+                # EU-695: show a visible on-page message instead of a silent redirect.
                 ev = None
         elif posted_app:
             # App but no ticket — unchanged pre-EU-693 behavior: resolve read-only through
@@ -2037,6 +2038,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         if ev is not None:
             ev.set()
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
+        else:
+            # EU-695: visible on-page message when there is no live run to stop. Use the already-
+            # resolved `key` (not the raw posted_app) — mirroring the success branch just above — so
+            # an unrecognized/garbage `app` (which resolved to key=None at line ~2011) never makes
+            # get_state lazily create a permanent orphan entry in the state registry.
+            set_last_msg(key, "warn", "No live run to stop — that request may have arrived after the run already finished.")
         return redirect("/")
 
     @app.get("/standup")
