@@ -1814,6 +1814,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
+        # EU-693: remember this run's tickets so /api/stop-run can match the EXACT run that the
+        # warroom's Stop form targets (EU-692 posts the card's app + current ticket). A Stop click
+        # naming tickets this run never claimed is a stale card — the handler ignores it instead
+        # of killing the unrelated run that now holds the slot.
+        st["run_tickets"] = list(keys)   # e.g. ["EU-200", "EU-201"]
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
             set_last_msg(app_name or None, "warn",   # EU-656: refusal — neutral note, banner explains
@@ -1903,6 +1908,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
+        st["run_tickets"] = []   # EU-693: task/drain runs carry no tickets (see run_selected_api)
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
             set_last_msg(app_name or None, "warn",   # EU-656: refusal — neutral note, banner explains
@@ -1988,20 +1994,46 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
 
     @app.post("/api/stop-run")
     def stop_run_api() -> Response:
-        # EU-64: stop THIS project's run (the Stop button lives on a per-tab board). Resolve the tab's
-        # project read-only (don't steal the active tab), then signal that app's stop Event.
-        appq = _board_project(request.form.get("app"))
-        key = appq or None
-        st = get_state(key)
-        ev = st.get("stop_event")
-        if ev is None and not (request.form.get("app") or "").strip():
-            # The Stop form may not carry an ?app yet — fall back to the sole stoppable run, if there
-            # is exactly one (keeps Stop working in the single-run case during the per-project rollout).
-            stoppable = [k for k in active_runs() if get_state(k).get("stop_event") is not None]
-            if len(stoppable) == 1:
-                key = stoppable[0]
-                st = get_state(key)
-                ev = st.get("stop_event")
+        # EU-64 / EU-693: stop the EXACT run the caller names. The warroom's Stop form posts the
+        # run card's app + ticket (EU-692); the run's stop_event is looked up by that exact key
+        # instead of the old "resolve if exactly one stoppable run exists" heuristic, which
+        # silently stopped the wrong run (or none) once 2+ projects ran concurrently. The
+        # heuristic survives ONLY as a last-resort fallback for legacy callers that post neither.
+        posted_app = (request.form.get("app") or "").strip()
+        posted_ticket = (request.form.get("ticket") or "").strip()
+        if posted_ticket in ("", "—"):
+            posted_ticket = ""   # EU-692's form posts an em-dash when the run carries no ticket
+        if posted_app and posted_ticket:
+            # Canonical path — EU-693: one run slot per app, so the app names the slot and the
+            # ticket confirms the form belongs to the run that CURRENTLY holds it. Unknown app
+            # names are ignored outright (get_state lazily creates — a junk POST must not
+            # pollute the state registry with orphan entries).
+            key = posted_app if posted_app in _app_names else None
+            st = get_state(key) if key else {}
+            ev = st.get("stop_event")
+            claimed = st.get("run_tickets")
+            if ev is not None and claimed and posted_ticket not in [str(t) for t in claimed]:
+                # Stale Stop form: the run it was rendered for is gone and a DIFFERENT run now
+                # holds this app's slot — stopping it would kill the wrong run. Do nothing.
+                ev = None
+        elif posted_app:
+            # App but no ticket — unchanged pre-EU-693 behavior: resolve read-only through
+            # _board_project and stop that project's run.
+            key = (_board_project(posted_app) or None)
+            st = get_state(key)
+            ev = st.get("stop_event")
+        else:
+            # Neither app nor ticket — legacy caller. Unchanged pre-EU-693 behavior: try the
+            # active tab first; if it holds no stop_event, fall back to the sole stoppable run.
+            key = (_board_project(None) or None)
+            st = get_state(key)
+            ev = st.get("stop_event")
+            if ev is None:
+                stoppable = [k for k in active_runs() if get_state(k).get("stop_event") is not None]
+                if len(stoppable) == 1:
+                    key = stoppable[0]
+                    st = get_state(key)
+                    ev = st.get("stop_event")
         if ev is not None:
             ev.set()
             set_last_msg(key, "warn", "stopping after the current step — DEV untouched, no merge")   # EU-656
@@ -3964,6 +3996,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         st = _claim_cockpit_run(app_name, stop_event=ev)
         if st is None:
             return redirect("/")
+        st["run_tickets"] = []   # EU-693: report runs carry no tickets (see run_selected_api)
         if not health.summary(cfg)["healthy"]:
             release_run(app_name or None)
             _blocked = "blocked — fix the health problems first (see the banner)"
