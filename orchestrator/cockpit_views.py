@@ -902,11 +902,19 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     # Disable start buttons when the system is unhealthy OR no project is selected.
     ap_dis = "" if (healthy and app0) else "disabled"
     if ap_stopping:
-        # Drain in progress: show a neutral "finishing…" label, no buttons.
+        # Drain in progress: show the "finishing…" label WITH a Stop button so a long run
+        # can be cut short mid-drain — EU-689. The stop action reuses /api/autopilot which
+        # already handles app-scoped stop_event.set() + autopilot_on=False for this app.
         ap_html = (
             '<div class="tbap stopping" title="Finishing current ticket, then standing down">'
             '<span class="apdot-sm stop"></span>'
             '<span class=tbaplabel>&#9203;&nbsp;Stopping&hellip;</span>'
+            f'<form method=post action=/api/autopilot class=tbf>'
+            f'<input type=hidden name=action value=stop>'
+            f'<input type=hidden name=app value="{ap_appq}">'
+            '<button class="aptbtn stop" '
+            'title="Mark autopilot off now — the in-flight build still finishes in the background">'
+            'Stop</button></form>'
             '</div>')
     elif ap_on:
         # Autopilot running: offer graceful drain or hard stop.
