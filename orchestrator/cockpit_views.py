@@ -293,31 +293,10 @@ def _bug_desc(cfg: Config, text: str, screenshot=None) -> str:
     return desc
 
 
-def _result_banner(state: dict) -> str:
-    """One-shot read-and-clear result banner for the side-effectful / actions (ship/promote/patrol).
-
-    Mirrors the /memory banner: the outcome of a ship/promote/patrol is shown ONCE on the next load
-    of /, then cleared — unlike the sticky shared ``last_msg`` rendered as a control-bar note, which
-    would otherwise persist across unrelated later actions. Pops ``last_result`` so a subsequent
-    reload (with no new action) no longer shows it.
-
-    EU-656: Tone is read FROM the stored ``last_result_record["tone"]`` field only — zero
-    substring/text-content checks. A missing record defaults to ok (neutral/success).
-    """
-    msg = (state.pop("last_result", "") or "").strip()
-    if not msg:
-        return ""
-    # EU-656: read tone exclusively from the structured record.
-    rec = state.pop("last_result_record", None)
-    bad = False
-    if rec and isinstance(rec, dict):
-        bad = rec.get("tone") == "error"
-    # No fallback: write sites must populate last_result_record via set_last_result().
-    fg, border, bg = (("var(--bad)", "var(--badline)", "var(--badbg)") if bad
-                      else ("var(--ok)", "var(--okline)", "var(--okbg)"))
-    return (f"<div style='background:{bg};border-bottom:1px solid {border};color:{fg};"
-            f"padding:11px 26px;font-size:13.5px;font-weight:600'>{html.escape(msg)}</div>")
-
+# EU-677: removed — superseded by _result_strip (non-destructive peek+dismiss).
+# Both index() and the board/SSE path now use _result_strip; no live callers need pop semantics.
+# Legacy text references below (_plan_limit_banner docstring, _result_strip docstring) mention it
+# for historical context; see Documentation/PEEK_DISMISS_MIGRATION.md for the full migration story.
 
 def _peek_last_result(state: dict) -> dict | None:
     """Read (without popping) ``last_result_record`` from *state*.
