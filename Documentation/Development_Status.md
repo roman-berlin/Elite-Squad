@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-27 · EU-726 · Elite-Unit · • Shared setSending(on) helper correctly toggles `sending` + input.disabled + sendbtn.disabled together; guard `if(sending)return;` runs before a synchronous setSending(true) pre-fetch, so rapid/held Enter fires at most…
 - 2026-07-27 · EU-719 · Elite-Unit · • All 6 ACs met: shared euPost helper disables+relabels on both surfaces, .preply uses fetch, '✓ sent' inline swap + poll de-dup, error re-enable with .nerr/.perr.
 - 2026-07-26 · EU-642 · Elite-Unit · • Production diff removes only the Roster nav anchor; Jira/Task log/Daily/Memory intact and in order.
 - 2026-07-26 · EU-633 · Elite-Unit · • Verify-and-close ticket; feature already landed via EU-629/630/631/632, so a test-only diff is correct scope.
