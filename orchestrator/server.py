@@ -723,6 +723,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # strip is byte-identical on the initial page render, the 5s poll and the SSE stream.
         # EU-676 moved this bar off the destructive _result_banner; EU-673 removed the strip from
         # the bar entirely — a bar copy would double-render the message the board already shows.
+        # EU-714: that is also the banner/poll reconciliation — GET / and the live board's poll/SSE
+        # render the one store through the one renderer (_result_strip) into the one #board slot,
+        # so a result shows exactly once on every surface and a dismiss (either endpoint, both
+        # scopes) clears it for the next GET / AND the next poll. Pinned by
+        # tests/eu714_reconcile_strip_test.py.
         return warroom.render_page(cfg, appq, _view_state(appq), bar, h)
 
     @app.get("/api/health")
@@ -1492,6 +1497,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         Mirrors ``_view_state``'s two-scope lookup: tries the resolved app key first,
         falls back to the unit-wide ``_state`` so global writers (standup/council/QA)
         are always visible regardless of which tab is active.
+
+        EU-714: this is the read side of the SAME single store the GET / banner and the
+        live-board strip render from — it legitimately still returns the record after GET /
+        showed it (peek, not pop); the record's ``timestamp`` is the stable identity key, so
+        a poll never re-surfaces a shown result as NEW.
         """
         from flask import jsonify
 
