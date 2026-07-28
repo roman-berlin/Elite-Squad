@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-28 · EU-766 · Elite-Unit · • All 5 orphan pages now have visible entry points within 1 click: /report in the QA cluster, /meeting+/standup+/ship-preview on /council, /budget linked from /usage. • All 3 acceptance criteria met; no spec gaps. · 🔗 /council
 - 2026-07-28 · EU-759 · Elite-Unit · • Both /usage and /budget share `_dual_provider_gauge`, so one fix covers both routes. • Empty-limits and unavailable branches both call the identical `_unknown_state_card` helper — no divergent copy. · 🔗 /usage (also covers /budget — they share `_dual_provider_gauge`)
 - 2026-07-28 · EU-742 · Elite-Unit · • All 4 ACs verified present in source (EU-719/656): euPost in-flight helper, /needs fetch-submit, .preply inline '✓ sent'/.perr, and synchronous file/close Jira calls. · 🔗 /needs
 - 2026-07-28 · EU-741 · Elite-Unit · • All 5 ACs met: three value-less buttons opt into the shared window.euInflightBtn helper with the exact AC labels, disabled+relabelled on form submit, double-submit guarded. · 🔗 /tickets (Develop selected) — also /needs (Sync with Jira) and /models/add (Add backend)
