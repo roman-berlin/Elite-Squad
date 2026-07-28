@@ -433,6 +433,38 @@ def _is_turn_limit(text: str | None) -> bool:
     return any(m in t for m in _TURN_LIMIT_MARKERS)
 
 
+def _is_dead_backend(build, err: str) -> bool:
+    """EU-625/757: is this builder failure the PROVIDER's fault rather than the ticket's?
+
+    Two independent signals, either sufficient:
+
+    * the provider said so — ``infra_classify`` tags the text ``backend-dead`` (exhausted quota,
+      unknown model id, bad key). This leads: a provider that answers "quota exhausted" is dead
+      whatever the clock read.
+    * the SHAPE says so — zero tokens consumed in a *measured* sub-5-second call, i.e. the request
+      was refused before any work happened.
+
+    EU-757: "measured" is the whole point of the ``0 <`` bound. A builder killed by the 3600s
+    wall-clock timeout returns no SDK result message, so ``duration_s`` keeps its 0.0 default and
+    ``input_tokens`` its 0 — and a bare ``duration < 5`` then labelled the SLOWEST possible failure
+    a dead backend. Measured live on 2026-07-28: three consecutive GLM builds each burned a full
+    hour and each was audited ``dead_backend=True``, aiming the diagnosis at the provider's health
+    instead of at its speed. A duration of exactly 0 means UNMEASURED, never instant.
+
+    Never raises — a classification hiccup must not break the error path it is describing.
+    """
+    try:
+        # Deferred import: infra_classify imports _TURN_LIMIT_MARKERS from THIS module, so a
+        # module-level import here would be circular.
+        from . import infra_classify as _ic
+        if _ic.classify(err) == "backend-dead":
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    duration = getattr(build, "duration_s", 0) or 0
+    return (getattr(build, "input_tokens", 0) or 0) == 0 and 0 < duration < 5
+
+
 # EU-197: Helper to wrap officer execution with transcript context
 def _officer_transcript_context(app: AppConfig, ticket: Ticket, officer: str, cfg: Config):
     """Context manager for per-officer transcript writing.
@@ -1962,6 +1994,37 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                          tokens_burned=_burned, token_budget=cfg.per_ticket_token_budget,
                          elapsed_min=round(_elapsed_min, 1),
                          time_budget_min=cfg.per_ticket_time_budget_min, reason=why)
+            # EU-739 AUTOSUBMIT — preserve the partial work BEFORE deciding what to do with the
+            # ticket. At this instant the worktree still holds everything the builder produced, and
+            # both downstream paths discard it: a split gives fragments a fresh branch, and a park
+            # leaves the diff to be reaped with the worktree. EU-659 died exactly here — 283 lines
+            # and 10,019,245 tokens thrown away, then rebuilt from scratch days later by sibling
+            # tickets under a different design. SWE-agent's rule is the right one: on a cost limit
+            # it runs a final `git diff` and submits whatever exists, because partial credit beats
+            # an exception. Committing here costs one commit and makes the work RECOVERABLE — the
+            # fragments (or the Commander) can start from it instead of from zero.
+            # Best-effort by contract: a git hiccup must never change the ticket's outcome.
+            _saved = None
+            try:
+                if not ticket.ephemeral and git.has_changes():
+                    _files = git.changed_paths()
+                    _saved = git.commit_all(
+                        f"WIP [autodev]: {ticket.id} partial work at the per-ticket budget stop\n\n"
+                        f"{why}. Committed so the work is not lost — this branch is the starting "
+                        f"point for the split fragments or for a manual pickup, NOT a finished "
+                        f"change (it never reached the gate or the reviewer).")
+                    if _saved:
+                        try:
+                            git.push(branch)
+                        except Exception:  # noqa: BLE001 — local commit already preserves it
+                            pass
+                        audit.record("budget_autosubmit", ticket_id=ticket.id, branch=branch,
+                                     sha=_saved[:12], files=len(_files))
+                        print(f"  💾 {ticket.id}: partial work committed to {branch} "
+                              f"({len(_files)} file(s)) — not lost.", flush=True)
+            except Exception as _exc:  # noqa: BLE001 — never let bookkeeping change the outcome
+                print(f"  · budget autosubmit skipped ({_exc})", flush=True)
+
             # "Too big for the budget" IS "too big" — hand it to the Scrum Master to split into right-sized
             # fragments, exactly like the turn-limit path (loop._exception_report), instead of parking on the
             # Commander. AUTO-85 burned 11.9M on one 8-page pass and parked here; splitting decomposes it. Only
@@ -1973,9 +2036,16 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 split_reason="budget", iterations=iteration, cost=cost, branch=branch)
             if _split is not None:
                 return _resolve(_split)
+            # EU-739: name the saved branch in the ask. Without it the Commander has no idea the
+            # partial work survived, which is how EU-659's 283 lines sat unnoticed until siblings
+            # rebuilt the same feature from scratch.
+            _recover = (f"\n\nThe partial work is SAVED on `{branch}` ({_saved[:12]}) — it never "
+                        "reached the gate or the reviewer, but it is a real starting point rather "
+                        "than a blank page." if _saved else "")
             decisions.add(cfg, ticket, app.name,
                           f"Per-ticket budget exceeded ({why}) after {iteration - 1} pass(es). "
-                          "Raise the budget, narrow the ticket, or answer the open review items.")
+                          "Raise the budget, narrow the ticket, or answer the open review items."
+                          + _recover)
             # Review fix (2026-07-05): also record the CANONICAL terminal event — the cockpit,
             # forensics and _run_in_flight all key on Outcome audit events (needs_human), not on
             # ticket_budget_exceeded; without this the parked ticket showed "running…" forever.
@@ -2285,8 +2355,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # provider's own message (bounded) so the cap/infra classification can see it, and audit
             # the shape of the failure — a 0-token, sub-5s error is a backend problem, never the code's.
             _err = (build.summary or build.raw or "").strip()
-            _dead_backend = (getattr(build, "input_tokens", 0) or 0) == 0 and \
-                            (getattr(build, "duration_s", 0) or 0) < 5
+            _dead_backend = _is_dead_backend(build, _err)
             audit.record("builder_process_error", ticket_id=ticket.id, iteration=iteration,
                          model=getattr(build, "model", "") or "", dead_backend=_dead_backend,
                          error=_err[:400])
@@ -2562,6 +2631,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # is satisfied by the gate that literally ran the tests instead of force-FAILing every
         # pass on missing Builder prose. '' for a no-op gate (see _gate_execution_evidence).
         gate_evidence = _gate_execution_evidence(app, gate, git.changed_paths())
+        # 2026-07-28: is this the LAST pass? Hoisted here (it was computed inline at the verdict-
+        # reconciliation below, which still reads it) because the Reviewer now needs it too: on the
+        # final pass reviewer._enforce_bounce_once demotes a FRESH unverifiable finding as well as a
+        # repeat, since no builder pass remains to satisfy it and the only alternative is parking a
+        # finished change on the Commander.
+        _final_pass = iteration >= max_passes
         # EU-72: hand the Reviewer the Builder's BuildArtifact (primary context) + the pool it
         # publishes its ReviewVerdict into. EU-52: escalate the reviewer on re-review.
         # EU-197: Wrap reviewer with transcript context to capture full tool inputs + reasoning
@@ -2569,7 +2644,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
                                                store=store, build_artifact=store.build,
                                                already_bounced=bounced_unverifiable,
-                                               gate_evidence=gate_evidence)
+                                               gate_evidence=gate_evidence,
+                                               final_pass=_final_pass)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
@@ -2585,7 +2661,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
                                                    store=store, build_artifact=store.build,
                                                    already_bounced=bounced_unverifiable,
-                                                   gate_evidence=gate_evidence)
+                                                   gate_evidence=gate_evidence,
+                                                   final_pass=_final_pass)   # same pass, stronger model
             cost += review.cost_usd
             budget.add(review.cost_usd)
             _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry
@@ -2626,8 +2703,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         if (review.verdict.value == "FAIL" and review.spec_met and not blockers
                 and not review.needs_human and not review.spec_gaps
                 and not review.required_changes):
-            _final_pass = iteration >= max_passes
-            if not review.blocking_issues or _final_pass:
+            if not review.blocking_issues or _final_pass:   # _final_pass hoisted above the review call
                 _rec_reason = ("fail-with-minors-only" if not review.blocking_issues
                                else "final-pass-criteria-met-majors")
                 review.verdict = Verdict.PASS

@@ -778,6 +778,37 @@ def _commander_mid_git(cfg) -> str | None:
     return None
 
 
+def _run_can_use_claude(cfg, app_name: str | None = None) -> bool:
+    """EU-753: True when THIS drain can actually dispatch to Anthropic/Claude — i.e. the Claude
+    plan limit is a real constraint on it.
+
+    The plan limit is a property of the Commander's Claude subscription, not of the drain. When he
+    selects a non-Claude model (GLM, or a registry backend such as the Qwen endpoint) as BOTH the
+    main and the secondary, a Claude plan limit says nothing about whether work can proceed — yet
+    the cycle preamble probed it unconditionally and then PAUSED the whole drain on a "hit". A
+    qwen-only unit could sit idle behind a limit belonging to a model it never calls.
+
+    Hybrid stays protected. `backends._HYBRID_BUILD_TAGS` routes only the builder to the secondary,
+    so Claude carries the planner/reviewer whenever it is EITHER side of the pair — hence the check
+    is "is Claude on either side", not "is Claude the primary". Both sides non-Claude is the only
+    case that skips.
+
+    Never raises: an unreadable preference degrades to True (probe as before), because the cost of a
+    wrong False (blind to a real limit) is worse than the cost of a wrong True (one cached probe).
+    """
+    try:
+        from . import backend_pref, backends as _bks
+        vals = [backend_pref.active(cfg, app_name), backend_pref.get_secondary(cfg)]
+    except Exception:  # noqa: BLE001 — unknowable state must keep the old behaviour
+        return True
+    for v in vals:
+        if v is None:
+            continue
+        if str(v).strip().lower() in _bks._NATIVE_ALIASES:
+            return True
+    return False
+
+
 def _sleep(seconds: float, stop_event=None) -> None:
     """Sleep, but wake immediately if asked to stop (so the cockpit toggle is responsive)."""
     end = time.time() + seconds
@@ -1190,6 +1221,66 @@ _BOOT_PARK_COMMENT = (
 )
 
 
+# ── EU-738 (2026-07-28): the reconcile's SELF-DERIVED liveness signal is per-TICKET ───────────
+# The bug: ``active_ids`` was built by matching APP NAMES against ticket ids —
+#     active_ids = {t.id for app, t in in_progress if app.name in (active_apps or set())}
+# ``cockpit_state.active_runs()`` returns app NAMES, so ``app.name in active_apps`` was true for
+# EVERY In-Progress ticket of any app holding a run slot. ``resume_armed_drains`` claims that slot
+# SYNCHRONOUSLY (``claim_run``) before this reconcile runs at main.py's serve boot, so on a normal
+# boot the whole In-Progress column read as "genuinely running", nothing was ever dangling, and the
+# reconcile silently did nothing. Measured 2026-07-28: six EU tickets In Progress against
+# max_concurrent_builders=2, the newest boot_reconcile audit line days old.
+#
+# A boot has no per-ticket signal in memory — ``cockpit_state``'s run-state carries no ticket id
+# (_new_state()), and the per-ticket live subset (warroom.live_runs) is a render-path derivation of
+# log lines. The audit IS the per-ticket signal, and it is already read here for the dangling core.
+# So a ticket counts as genuinely running when it has ANY audit activity inside the window below.
+#
+# Window: a run writes an audit line when an agent call RETURNS, so the longest LEGITIMATE silence
+# is one agent call's wall-clock budget — ``cfg.builder_timeout_s`` (3600s default; the builder is
+# the longest-budgeted role, agent._timeout_for_tag). Two measurements from the live audit forced
+# this to be derived rather than guessed: a 15-minute window classified two genuinely-live tickets
+# as abandoned (their planner call had been silent 18 min) and would have posted "resumed after an
+# unclean stop" onto healthy builds; and EU-743's builder call on 2026-07-28 ran 42.9 minutes
+# silent between its `planner` and `build` lines. The margin covers a call that runs right up to
+# its timeout and only then records.
+_LIVE_SILENCE_MARGIN_S = 1800.0
+
+
+def _live_silence_window_s(cfg) -> float:
+    """How long an In-Progress ticket may be silent in the audit before this reconcile may call it
+    abandoned — the configured agent budget plus ``_LIVE_SILENCE_MARGIN_S``, never a bare literal,
+    so raising ``builder_timeout_s`` widens the window with it. ``getattr`` defaults mirror
+    ``Config`` so a test stand-in without the fields is fine."""
+    budget = max(float(getattr(cfg, "builder_timeout_s", 3600) or 3600),
+                 float(getattr(cfg, "officer_timeout_s", 900) or 900))
+    return budget + _LIVE_SILENCE_MARGIN_S
+
+
+def _recently_active_ids(in_progress_ids, audit_rows, *, window_s: float,
+                         now: float | None = None) -> set[str]:
+    """EU-738: which of ``in_progress_ids`` show audit activity within the last ``window_s`` seconds
+    — the per-TICKET "a run is genuinely working this one RIGHT NOW" answer the app-name check got
+    wrong. ANY event carrying the ticket id counts (ticket_start, agent_call, build, usage …): the
+    question is whether something is still writing about this ticket, not which phase it is in.
+
+    Pure + fail-safe: a row whose ts the audit's own ``%Y-%m-%dT%H:%M:%S%z`` stamp can't parse is
+    skipped rather than counted as "now", so an unreadable stamp can't mask an abandoned run."""
+    now = time.time() if now is None else float(now)
+    cutoff = now - float(window_s)
+    live: set[str] = set()
+    wanted = set(in_progress_ids)
+    for ev in audit_rows:
+        ev = ev or {}
+        tid = str(ev.get("ticket_id") or "")
+        if not tid or tid not in wanted or tid in live:
+            continue
+        ts = _parse_audit_ts(ev.get("ts"))
+        if ts is not None and ts >= cutoff:
+            live.add(tid)
+    return live
+
+
 def _dangling_in_progress(in_progress_ids, audit_rows, active_ids) -> list[str]:
     """EU-398 core: which In Progress tickets were left dangling by a killed/crashed run.
 
@@ -1428,10 +1519,15 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
     already resumed the same id and it is STILL dangling — is HONESTLY PARKED instead (Blocked +
     comment) so a recurring kill can't loop the board into phantom progress forever.
 
-    ``active_apps`` overrides the live run-state check (tests); the default derives from
-    ``cockpit_state.active_runs()`` so a ticket an in-flight drain is working right now is untouched.
-    Records one ``boot_reconcile`` audit event with the resumed / parked / skipped_active ids.
-    Returns ``{resumed, parked, skipped_active, dangling}``. Never raises — the boot proceeds."""
+    ``active_apps`` overrides the live run-state check (tests) and is honoured verbatim — every
+    In-Progress ticket of a named app is treated as running. EU-738: the SELF-DERIVED default no
+    longer asks ``cockpit_state.active_runs()`` (app NAMES, which exempted the whole column — see
+    ``_recently_active_ids``); it asks the audit per TICKET, so only a ticket something is still
+    writing about is left alone.
+
+    Records one ``boot_reconcile`` audit event on EVERY boot — a no-op boot included (EU-738), so a
+    reconcile that found nothing is distinguishable from one that never ran. Returns
+    ``{resumed, parked, struck, skipped_active, dangling}``. Never raises — the boot proceeds."""
     from .backlog.base import make_backlog
 
     summary = {"resumed": [], "parked": [], "skipped_active": [], "dangling": []}
@@ -1460,17 +1556,21 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
         ip_ids = {t.id for _, t in in_progress}
         by_id = {t.id: (app, t) for app, t in in_progress}
 
-        # 2) a live run's tickets are genuinely running — untouched
-        if active_apps is None:
-            try:
-                from . import cockpit_state
-                active_apps = {str(a) for a in cockpit_state.active_runs()}
-            except Exception:  # noqa: BLE001 — fall back to "nothing active" on any probe failure
-                active_apps = set()
-        active_ids = {t.id for app, t in in_progress if app.name in (active_apps or set())}
-
-        # 3) one audit read → dangling core + the recurrence set
+        # 2) one audit read → the liveness signal, the dangling core and the recurrence set
         rows = _read_audit_rows(cfg.audit_path)
+
+        # 3) which tickets a run is genuinely working right now — untouched.
+        # An EXPLICITLY passed ``active_apps`` keeps overriding verbatim: it is the documented test
+        # seam (tests/eu398_boot_reconcile_test.py §3 pins "genuinely-running ticket gets NO
+        # comment" through it), and a caller that names the apps is asserting the run state itself.
+        # Only the SELF-DERIVED path changed in EU-738 — see _recently_active_ids for why the old
+        # app-name derivation exempted the entire In-Progress column on every boot.
+        if active_apps is None:
+            active_ids = _recently_active_ids(ip_ids, rows,
+                                              window_s=_live_silence_window_s(cfg))
+        else:
+            active_ids = {t.id for app, t in in_progress if app.name in active_apps}
+
         dangling = _dangling_in_progress(ip_ids, rows, active_ids)
         prior_resumed = _prior_resumed_ids(rows)
 
@@ -1509,16 +1609,26 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
             except Exception:  # noqa: BLE001 — a board hiccup on one ticket must not abort the pass
                 continue
 
-        # 5) one audit event with the affected ids (only when something was touched)
+        # 5) one audit event per BOOT — including a no-op one.
+        # EU-738: this used to record only `if resumed or parked`, so four days of a reconcile that
+        # was structurally incapable of finding anything (the app-name defect above) looked
+        # byte-identical to four days of a healthy reconcile with nothing to do. Recording every
+        # boot makes the silence provable: an absent line now means the reconcile did not RUN, and
+        # a no-op line carries the counts that say what it looked at. `_prior_resumed_ids` reads
+        # only `resumed`, so a no-op row (resumed=[]) contributes nothing to the recurrence set.
         skipped_active = sorted(active_ids & ip_ids)
+        try:
+            audit.record("boot_reconcile", resumed=sorted(resumed), parked=sorted(parked),
+                         struck=sorted(struck), skipped_active=skipped_active,
+                         dangling=sorted(dangling), in_progress_count=len(ip_ids))
+        except Exception:  # noqa: BLE001
+            pass
         if resumed or parked:
-            try:
-                audit.record("boot_reconcile", resumed=sorted(resumed), parked=sorted(parked),
-                             struck=sorted(struck), skipped_active=skipped_active)
-            except Exception:  # noqa: BLE001
-                pass
             print(f"  · boot reconcile: resumed {sorted(resumed)}; parked {sorted(parked)}; "
                   f"struck {sorted(struck)}; untouched {skipped_active} (active)", flush=True)
+        else:
+            print(f"  · boot reconcile: nothing to do — {len(ip_ids)} In Progress, "
+                  f"{len(skipped_active)} running, {len(dangling)} dangling", flush=True)
         summary = {"resumed": sorted(resumed), "parked": sorted(parked),
                    "struck": sorted(struck), "skipped_active": skipped_active,
                    "dangling": sorted(dangling)}
@@ -2426,6 +2536,12 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             armed_intent = True
         budget_paused = False    # so the "paused" / "80%" notices each fire once, not every loop
         budget_alerted = False
+        # EU-753/754: `_plan_skip_logged` keeps the "not a Claude run — skipping the plan probe"
+        # note to once per drain instead of once per cycle; `_fallback_notice_pending` carries the
+        # operator-facing "back on the main model" message, now that restoring the backend itself
+        # happens at the TOP of the cycle rather than in the clear-block further down.
+        _plan_skip_logged = False
+        _fallback_notice_pending = False
         # EU-118: plan-limit pause flag
         plan_limit_paused = False
         # Last-announced idle REASON, as (bool(unreachable), frozenset(unreachable boards)) — or None
@@ -2592,9 +2708,48 @@ async def autopilot(cfg: Config, app_name: str | None = None,
             elif not bs["alert"]:
                 budget_alerted = False
 
+            # EU-754: RE-READ THE BACKEND PREFERENCE FIRST, before anything reads cfg.model_backend.
+            # This used to live ~70 lines below, gated on `not plan_check.get("hit")`, which caused
+            # two measured failures on 2026-07-28:
+            #   • the Commander switched to GLM at 09:11 to stop spending Claude limits, and the
+            #     drain kept calling Claude until 10:45 — 94 minutes — because this is the ONLY
+            #     place a running drain re-reads the sticky preference and one cycle covers the
+            #     whole worklist;
+            #   • worse, the old `not hit` gate meant the preference was NOT re-read at all while a
+            #     Claude plan limit was active — exactly when switching AWAY from Claude matters
+            #     most. Reading it here also makes the plan-limit logic below evaluate against the
+            #     CURRENT backend instead of a stale one.
+            # Best-effort: minimal test cfgs may lack the attrs — never break the drain loop.
+            try:
+                from . import backend_pref as _bp
+                _pref_bk = _bp.active(cfg, app_name)
+                if getattr(cfg, "model_backend", _pref_bk) != _pref_bk:
+                    _was = getattr(cfg, "model_backend", None)
+                    cfg.model_backend = _pref_bk
+                    audit.record("model_backend_refreshed", app=app_name or "",
+                                 was=str(_was or ""), now=str(_pref_bk))
+                    print(f"  ⇄ backend preference changed ({_was} → {_pref_bk}) — picked up for "
+                          "the next ticket.", flush=True)
+            except Exception:  # noqa: BLE001 — a pref hiccup must never stall the drain
+                pass
+
             # EU-118: Plan-limit governor — halt when Claude Max subscription limits (session/weekly/per-model)
             # are hit. This prevents silent churn where the autopilot spins on rate-limit errors.
-            plan_check = usage.plan_limit_hit(cfg)
+            # EU-753: the probe reads the CLAUDE plan (usage.plan_limit_hit → the Claude CLI), so it
+            # is only meaningful when this run can actually reach Claude. With a non-Claude primary
+            # and no Claude fallback, a tripped Claude limit would otherwise pause a drain that
+            # never touches Anthropic — silently killing an overnight run for a limit it does not
+            # use. That is the exact configuration the Commander ran on 2026-07-28 (backend=glm, no
+            # secondary) while low on Claude.
+            _uses_claude = _run_can_use_claude(cfg, app_name)
+            plan_check = usage.plan_limit_hit(cfg) if _uses_claude else {"hit": False, "blind": False}
+            if not _uses_claude and not _plan_skip_logged:
+                _plan_skip_logged = True
+                audit.record("plan_limit_check_skipped", app=app_name or "",
+                             backend=str(getattr(cfg, "model_backend", "")),
+                             reason="run does not use the Claude plan")
+            elif _uses_claude and _plan_skip_logged:
+                _plan_skip_logged = False   # switched back to Claude — re-arm the note
             # EU-407: FAIL CLOSED on a blind probe. plan_limit_hit surfaces blind=True when the usage
             # probe can't see (the 5h Max window exhausted → the throwaway probe itself is refused, so
             # over_limits is empty and hit=False — fails OPEN; the EU-357 blind flag had zero consumers).
@@ -2626,6 +2781,7 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                         notify.send(f"⇄ Plan limit hit — autopilot continues on the secondary "
                                     f"model ({_fb_bk}). It switches back when the limit resets.")
                         print(f"  ⇄ {_fb_why} — drain continues on {_fb_bk}", flush=True)
+                        _fallback_notice_pending = True   # EU-754: arm the "back on main" notice
                     plan_limit_paused = False
                     # fall through to normal work — the secondary carries the drain
                 else:
@@ -2668,14 +2824,15 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                         break
                     _sleep(max(30, interval), stop_event)
                     continue
-            # Clear plan-limit state when no longer hit; also switch back to the MAIN model if
-            # the fallback had engaged (the pref didn't change — only this drain's working copy).
-            # Best-effort: minimal test cfgs may lack the attrs — never break the drain loop.
+            # EU-754: the refresh that used to live here now runs at the TOP of the cycle (see the
+            # model_backend_refreshed block), so a preference change binds even while a plan limit
+            # is active. What remains here is only the OPERATOR-FACING notice that the fallback has
+            # ended — the state itself was already restored above.
             try:
                 from . import backend_pref as _bp
                 _main_bk = _bp.active(cfg, app_name)
-                if not plan_check.get("hit") and getattr(cfg, "model_backend", _main_bk) != _main_bk:
-                    cfg.model_backend = _main_bk
+                if not plan_check.get("hit") and _fallback_notice_pending:
+                    _fallback_notice_pending = False
                     audit.record("model_fallback_cleared", app=app_name or "", backend=_main_bk)
                     notify.send(f"⇄ Plan limit cleared — autopilot is back on the main model ({_main_bk}).")
             except Exception:  # noqa: BLE001

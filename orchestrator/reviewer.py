@@ -333,11 +333,11 @@ def _is_production_source(path: str) -> bool:
     return (path.endswith(".py") or path.endswith(".tsx")) and not bool(_TEST_FILE_RE.search(path))
 
 
-def _diff_changed_production_files(diff: str) -> list[str]:
-    """Return every production source file changed in the diff (non-test .py/.tsx), as the b/-prefixed
-    path. Mirrors the per-file detector in _classify_diff but uses the broader _TEST_FILE_RE. Empty
-    for docs/config/test-only diffs — the exact precision the EU-441 gate needs: the coarse
-    'production' CATEGORY also fires on ≥30-line config/docs diffs and would false-block."""
+def _diff_changed_paths(diff: str) -> list[str]:
+    """Return every file path named in the diff's headers (``+++ b/…`` / ``--- a/…``) as written
+    (side prefix included), de-duplicated in first-seen order, with ``/dev/null`` dropped. The single
+    header parser behind both `_diff_changed_production_files` and the self-referential enforcer skip
+    further down, so the two can never disagree about what a diff touched."""
     seen: list[str] = []
     for line in (diff or "").split("\n"):
         if not (line.startswith("+++ b/") or line.startswith("--- a/")):
@@ -346,9 +346,17 @@ def _diff_changed_production_files(diff: str) -> list[str]:
         raw = parts[1] if len(parts) > 1 else ""
         if not raw or raw == "/dev/null":
             continue
-        if _is_production_source(raw) and raw not in seen:
+        if raw not in seen:
             seen.append(raw)
     return seen
+
+
+def _diff_changed_production_files(diff: str) -> list[str]:
+    """Return every production source file changed in the diff (non-test .py/.tsx), as the b/-prefixed
+    path. Mirrors the per-file detector in _classify_diff but uses the broader _TEST_FILE_RE. Empty
+    for docs/config/test-only diffs — the exact precision the EU-441 gate needs: the coarse
+    'production' CATEGORY also fires on ≥30-line config/docs diffs and would false-block."""
+    return [p for p in _diff_changed_paths(diff) if _is_production_source(p)]
 
 
 def _diff_has_test_file(diff: str) -> bool:
@@ -701,6 +709,75 @@ def _enforce_tenant_query(result: ReviewResult, diff: str) -> ReviewResult:
     return result
 
 
+# 2026-07-28 (the EU-518/EU-520 false-fire class): a deterministic enforcer must not sit in judgment
+# over a diff that edits the enforcer itself. All four backstops above decide by pattern-matching
+# TEXT — the diff's added lines (missing-tests / missing-typing / tenant-query) or the Builder's
+# free-text handoff (admitted-red-tests) — so a ticket whose whole PURPOSE is one of those detectors
+# carries the trigger phrases in its own diff and its own handoff BY CONSTRUCTION, and the enforcer
+# false-fires on the very change that fixes it. Measured cost: EU-518 and EU-520 both burned every
+# pass and escalated exactly this way with the work ~80% done and the repo gate 501/502 green (the
+# one red being a SUPERSEDED guard); EU-543 — a feature the Commander wanted — was lost downstream
+# of that escalation.
+#
+# The relief is self-referential and nothing else: an enforcer is skipped ONLY when the diff modifies
+# the source file that IMPLEMENTS that enforcer. Matching is an EXACT repo-relative path compare (not
+# a suffix/substring), so no product-repo diff can reach it and every other ticket keeps byte-identical
+# behaviour. What still judges a skipped diff: the LLM reviewer's own findings (untouched), the
+# deterministic repo gate — which is already green, since loop.py runs it BEFORE review — and
+# `_enforce_execution_gate`, deliberately absent from this map because it keys off the TICKET's
+# acceptance criteria rather than the diff text, so a diff editing reviewer.py cannot fabricate its
+# trigger. Every skip is recorded on `result.unverifiable_gaps`, which loop.py posts onto the ticket
+# (EU-353), so the relaxation is visible rather than silent.
+#
+# Each entry lists the source that IMPLEMENTS that enforcer's detection, nothing adjacent. The
+# red-admission entry has two, because the parser genuinely lives in both: `gate._red_test_admission`
+# / `gate.gate_vs_builder_verdict` are the EU-442 verdict-mismatch half and import reviewer.py's
+# regexes so "the orchestrator has ONE red-admission parser" (gate.py's own docstring, which cites
+# EU-520 — the ticket this map exists for). The other three stay reviewer.py-only on purpose:
+# gate.py's test-collectability check is a NEIGHBOURING behaviour, not the one `_enforce_missing_tests`
+# enforces (see its docstring), and mapping it here would relax the tests-with-the-code gate for
+# gate.py tickets that have nothing to do with the false-fire.
+_ENFORCER_SOURCE_FILES: dict[str, tuple[str, ...]] = {
+    "admitted-red-tests": ("orchestrator/reviewer.py", "orchestrator/gate.py"),
+    "missing-tests": ("orchestrator/reviewer.py",),
+    "missing-typing": ("orchestrator/reviewer.py",),
+    "tenant-query": ("orchestrator/reviewer.py",),
+}
+
+
+def _strip_diff_path_prefix(path: str) -> str:
+    """Drop git's ``a/``/``b/`` side prefix from a diff-header path, so a header path can be compared
+    against a repo-relative source path."""
+    for prefix in ("a/", "b/"):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return path
+
+
+def _self_referential_enforcer_skips(diff: str) -> list[str]:
+    """Return the `_ENFORCER_SOURCE_FILES` keys of every deterministic enforcer whose OWN implementing
+    source file this diff modifies — the tickets where the enforcer would be grading the change that
+    fixes it. Pure and deterministic; an ordinary diff (anything that does not edit this orchestrator's
+    own reviewer source) yields an empty list, so the enforcers run exactly as before."""
+    changed = {_strip_diff_path_prefix(p) for p in _diff_changed_paths(diff)}
+    if not changed:
+        return []
+    return [key for key, sources in _ENFORCER_SOURCE_FILES.items()
+            if any(src in changed for src in sources)]
+
+
+def _enforcer_skip_note(key: str) -> str:
+    """The audit-visible reason line for one skipped enforcer, appended to `result.unverifiable_gaps`
+    (surfaced on the ticket by EU-353, never blocking) so a self-referential skip is recorded rather
+    than silent. Worded with NO UI/pixel/browser vocabulary on purpose, so
+    `_classify_unverifiable_finding` returns None for it and the note is never mistaken for a finding
+    by the EU-351/EU-352 bounce accumulator."""
+    return (f"Deterministic '{key}' enforcer skipped on this diff: the diff modifies "
+            f"{', '.join(_ENFORCER_SOURCE_FILES[key])}, the source that implements that enforcer, so "
+            "its own trigger text is present by construction (the EU-518/EU-520 false-fire class). "
+            "Judged by the reviewer's own findings and the deterministic repo gate instead.")
+
+
 # EU-268: a deterministic backstop for the AUTO-109 failure mode — the Reviewer is READ-ONLY
 # (allowed_tools=[Read, Grep, Glob], Bash disallowed — see the options built below) so it CANNOT run
 # Playwright, pytest, or any other test suite. Despite that, on AUTO-109 the GLM-4.6 reviewer set
@@ -932,7 +1009,8 @@ def _finding_fingerprint(lens: str, detail: str) -> str:
     return hashlib.sha256(f"{norm_lens}|{norm_detail}".encode("utf-8")).hexdigest()
 
 
-def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> ReviewResult:
+def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str], *,
+                         final_pass: bool = False) -> ReviewResult:
     """EU-351: escalate-once bounce gate — mirrors `_enforce_admitted_red_tests`/
     `_enforce_execution_gate` as a deterministic backstop, but this one RELAXES rather than forces
     a blocker. Walks the reviewer's own blocking findings (`quality_issues` blocker/major subset)
@@ -951,15 +1029,32 @@ def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> Rev
     After demotion, if nothing else keeps the ticket down (no blocking_issues, no spec_gaps left,
     and spec_met is True), the verdict is RECOMPUTED to PASS — an escalate-once demotion has to
     actually let a ticket reach ship-ready, not just relabel the same permanent FAIL.
+
+    FINAL PASS (2026-07-28) — `final_pass=True` (threaded from loop.py's `iteration >= max_passes`)
+    additionally demotes a NEW unverifiable finding, not only a repeat. The repeat-only condition was
+    measured to be effectively unreachable for this class: 135/135 round-≥2 reviewer objections were
+    textually NEW (2026-07-05 audit, recorded on `config.escalate_effort_on_retry`), so the
+    fingerprint never matches and 29 of 128 escalations were still "max passes — PM escalated". A
+    reviewer inventing a FRESH unverifiable objection every round is the same non-convergence wearing
+    a new string. At the final pass the alternative is parking the ticket on the human, the
+    deterministic gate is already green (it must be, to reach review at all), an
+    unverifiable-BY-CONSTRUCTION finding cannot be satisfied by another builder pass, and there are no
+    passes left — so surfacing it in `unverifiable_gaps` (visible on the ticket) beats escalating it.
+    Scoped tightly: ONLY findings `_classify_unverifiable_finding` tags (it returns None for ordinary
+    logic/data/test findings, which stay untouched and still FAIL), and NEVER an execution-gate spec
+    gap — that gate keeps its own escalate-once contract inside `_enforce_execution_gate` and is
+    excluded here by its `_EXEC_GATE_GAP_PREFIX`. `final_pass` defaults False, so every direct caller
+    and every non-final pass behaves byte-identically to before.
     """
-    if not already_bounced:
+    if not already_bounced and not final_pass:
         return result
 
     kept_issues: list[QualityIssue] = []
     for q in result.quality_issues:
         if q.severity in ("blocker", "major"):
             lens = _classify_unverifiable_finding(q.detail)
-            if lens is not None and _finding_fingerprint(lens, q.detail) in already_bounced:
+            if lens is not None and (final_pass
+                                     or _finding_fingerprint(lens, q.detail) in already_bounced):
                 result.unverifiable_gaps = list(result.unverifiable_gaps) + [q.detail]
                 continue
         kept_issues.append(q)
@@ -969,7 +1064,12 @@ def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> Rev
     removed_gaps: list[str] = []
     for gap in result.spec_gaps:
         lens = _classify_unverifiable_finding(gap)
-        if lens is not None and _finding_fingerprint(lens, gap) in already_bounced:
+        # The final-pass arm deliberately excludes an execution-gate gap: relieving THAT gate is
+        # _enforce_execution_gate's own escalate-once business (its docstring pins the contract), and
+        # an exec-gate gap quoting a browser/responsive AC can classify as unverifiable, so without
+        # this guard the final pass would silently wave it through.
+        if lens is not None and (_finding_fingerprint(lens, gap) in already_bounced
+                                 or (final_pass and not gap.startswith(_EXEC_GATE_GAP_PREFIX))):
             result.unverifiable_gaps = list(result.unverifiable_gaps) + [gap]
             removed_gaps.append(gap)
             continue
@@ -977,13 +1077,15 @@ def _enforce_bounce_once(result: ReviewResult, already_bounced: set[str]) -> Rev
     result.spec_gaps = kept_gaps
 
     # EU-351 iteration-2: recompute the SPEC channel so a ticket whose only spec blocker was a
-    # previously-bounced unverifiable finding can actually reach ship-ready, not just get relabelled.
-    # By construction every gap in `removed_gaps` was a bounced-unverifiable repeat (that is the sole
-    # removal condition), so "all removed gaps were demoted-unverifiable" always holds here — the only
-    # extra requirement is that NONE survive (`not result.spec_gaps`). A real surviving gap (an
-    # ordinary spec gap, or an execution-gate gap from `_enforce_execution_gate` — neither classifies
-    # as unverifiable, so neither is ever removed) keeps `spec_gaps` non-empty and leaves `spec_met`
-    # False, so a genuine execution-gate FAIL is never flipped.
+    # previously-bounced — or, since 2026-07-28, a final-pass — unverifiable finding can actually
+    # reach ship-ready, not just get relabelled. By construction every gap in `removed_gaps`
+    # classified as unverifiable (that is the sole removal condition), so "all removed gaps were
+    # demoted-unverifiable" always holds here; the only extra requirement is that NONE survive
+    # (`not result.spec_gaps`). A real surviving gap keeps `spec_gaps` non-empty and leaves
+    # `spec_met` False: an ordinary spec gap never classifies as unverifiable, and an execution-gate
+    # gap — which CAN classify, when the AC it quotes names a browser/responsive surface — is held
+    # back by the `_EXEC_GATE_GAP_PREFIX` guard above, so a genuine execution-gate FAIL is never
+    # flipped.
     if removed_gaps and not result.spec_gaps:
         result.spec_met = True
 
@@ -1082,7 +1184,8 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
                  *, store: PerTicketArtifactStore | None = None,
                  build_artifact: BuildArtifact | None = None,
                  already_bounced: set[str] | None = None,
-                 gate_evidence: str = "") -> ReviewResult:
+                 gate_evidence: str = "",
+                 final_pass: bool = False) -> ReviewResult:
     from . import models, provider as _provider
     # EU-72: read the Builder's BuildArtifact (passed by the loop, or from the shared pool) as the
     # primary handoff; the full diff is still under review below. After parsing, publish a typed
@@ -1150,19 +1253,37 @@ async def review(diff: str, ticket: Ticket, app: AppConfig, cfg: Config, iterati
                                         routing_tier=routing_tier)
 
     result = _parse(run.final or run.text)
-    result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
+    # 2026-07-28: a deterministic enforcer whose OWN implementing source this diff edits is skipped
+    # for this diff — it would be grading the change that fixes it (see _ENFORCER_SOURCE_FILES).
+    # Empty for every ordinary diff, so nothing else changes.
+    skipped_enforcers = _self_referential_enforcer_skips(diff)
+    if "admitted-red-tests" not in skipped_enforcers:
+        result = _enforce_admitted_red_tests(result, build_artifact)   # EU-249 deterministic backstop
     # EU-441/EU-446 deterministic backstops: production code without an accompanying test, Python
     # code missing/eroding typing, and an unscoped Supabase query on a user-scoped table. Run before
     # the execution gate so these FAILs are recorded alongside (not suppressed by) any execution-AC
     # gap. Per-area guards keep each independent.
-    result = _enforce_missing_tests(result, diff)
-    result = _enforce_missing_typing(result, diff)
-    result = _enforce_tenant_query(result, diff)   # EU-446: unscoped user-scoped Supabase query
+    if "missing-tests" not in skipped_enforcers:
+        result = _enforce_missing_tests(result, diff)
+    if "missing-typing" not in skipped_enforcers:
+        result = _enforce_missing_typing(result, diff)
+    if "tenant-query" not in skipped_enforcers:
+        result = _enforce_tenant_query(result, diff)   # EU-446: unscoped user-scoped Supabase query
     # EU-268 deterministic backstop; EU-265 threads the loop's real green-gate proof into it.
     result = _enforce_execution_gate(result, ticket, build_artifact, diff,
                                      gate_evidence=gate_evidence,
                                      already_bounced=already_bounced or set())
-    result = _enforce_bounce_once(result, already_bounced or set())   # EU-351 deterministic backstop
+    # EU-351 deterministic backstop; `final_pass` (2026-07-28) widens the demotion to a FRESH
+    # unverifiable finding on the last pass, where the only other option is escalating to the human.
+    result = _enforce_bounce_once(result, already_bounced or set(), final_pass=final_pass)
+    # Record every self-referential skip where the ticket can see it (loop.py posts unverifiable_gaps
+    # per EU-353), so the relaxation is never silent.
+    for _key in skipped_enforcers:
+        _note = _enforcer_skip_note(_key)
+        if _note not in result.unverifiable_gaps:
+            result.unverifiable_gaps = list(result.unverifiable_gaps) + [_note]
+        print(f"  · reviewer: '{_key}' enforcer skipped — this diff edits the enforcer's own source",
+              flush=True)
     result.cost_usd = run.cost_usd
     result.raw = run.final
     result.input_tokens = getattr(run, "input_tokens", 0)   # EU-96: expose for per-officer burn tracking

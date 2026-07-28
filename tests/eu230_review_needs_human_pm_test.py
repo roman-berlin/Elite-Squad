@@ -173,7 +173,7 @@ async def pm_decide(cfg, tkt, app, audit, halt_report):
 
 
 async def _stub_review_needs_human(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                                   already_bounced=None, gate_evidence=""):   # EU-265: real signature
+                                   already_bounced=None, gate_evidence="", final_pass=False):   # EU-265: real signature
     return need_human_review
 
 
@@ -285,7 +285,7 @@ fail_no_issues = ReviewResult(
 
 
 async def _stub_review_findings(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                                already_bounced=None, gate_evidence=""):   # EU-265: real signature
+                                already_bounced=None, gate_evidence="", final_pass=False):   # EU-265: real signature
     return fail_with_decision_finding if iteration == 1 else fail_no_issues
 
 

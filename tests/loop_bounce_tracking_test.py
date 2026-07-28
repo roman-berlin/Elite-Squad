@@ -150,7 +150,7 @@ calls_a: list[dict] = []
 
 
 async def fake_review_a(diff, ticket, app, cfg, iteration=1, *, store=None, build_artifact=None,
-                        already_bounced=None, gate_evidence=""):   # EU-265: real signature
+                        already_bounced=None, gate_evidence="", final_pass=False):   # real signature
     calls_a.append({"iteration": iteration, "already_bounced": set(already_bounced or set())})
     if len(calls_a) == 1:
         return ReviewResult(
@@ -184,7 +184,7 @@ calls_b: list[dict] = []
 
 
 async def fake_review_b(diff, ticket, app, cfg, iteration=1, *, store=None, build_artifact=None,
-                        already_bounced=None, gate_evidence=""):   # EU-265: real signature
+                        already_bounced=None, gate_evidence="", final_pass=False):   # real signature
     calls_b.append({"iteration": iteration, "already_bounced": set(already_bounced or set())})
     if len(calls_b) == 1:
         # pass 1: unverifiable blocking finding -> bounced_unverifiable accumulates its fingerprint
@@ -228,7 +228,7 @@ calls_c: list[dict] = []
 
 
 async def fake_review_c(diff, ticket, app, cfg, iteration=1, *, store=None, build_artifact=None,
-                        already_bounced=None, gate_evidence=""):   # EU-265: real signature
+                        already_bounced=None, gate_evidence="", final_pass=False):   # real signature
     calls_c.append({"iteration": iteration, "already_bounced": set(already_bounced or set())})
     if len(calls_c) == 1:
         return ReviewResult(
