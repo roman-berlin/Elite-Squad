@@ -1648,6 +1648,18 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
             '</div>'
         )
 
+    def _unknown_state_card(provider_name: str, brand: str) -> str:
+        """EU-759: Unknown / unreadable live limits — grey card, never fake ok."""
+        return (
+            '<div class=provcard style="opacity:.65">'
+            '<div class=phead>'
+            f'<span class=pname>{html.escape(provider_name)}</span>'
+            f'<span class=pbrand style=color:var(--warn)>limits unknown</span>'
+            '</div>'
+            '<div class=pnote>&#8505;&nbsp;can\'t read live limits right now</div>'
+            '</div>'
+        )
+
     # Build Claude card from plan_usage data
     claude_card = ""
     if claude_usage.get("available"):
@@ -1662,14 +1674,12 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
                 worst_limit,
                 is_placeholder=False
             )
+        else:
+            # EU-759: available=True but no limits returned → unknown state (not blank)
+            claude_card = _unknown_state_card("Claude", "Max subscription")
     else:
-        # Claude data unavailable - show fallback
-        claude_card = _provider_card(
-            "Claude",
-            "Max subscription",
-            {"utilization": 0.0, "resets_in": ""},
-            is_placeholder=False
-        )
+        # EU-759: Claude data unavailable → unknown state (never fabricate ok/100%)
+        claude_card = _unknown_state_card("Claude", "Max subscription")
 
     # Build GLM card (placeholder if not configured)
     glm_card = _provider_card(
