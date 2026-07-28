@@ -2367,7 +2367,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 :root{color-scheme:dark;
 /* palette */
 --bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;
---ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;
+--ink:#e7ebf2;--dim:#7e8795;--faint:#a0aab8;
 --ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;
 --warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;
 --bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;
@@ -2411,7 +2411,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
    cockpit_views._token_css() so the whole cockpit follows one switch. ── */
 :root[data-theme=light]{color-scheme:light;
 --bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;
---ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;
+--ink:#1c2536;--dim:#5a6578;--faint:#626978;
 --ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;
 --warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;
 --bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;
