@@ -129,17 +129,17 @@ def html_view(cfg: Config, status: str = "") -> str:
     esc = _h.escape
     css = (
         "<style>"
-        ".rdoc{max-width:1000px}.rstatus{color:#c3cad6;font-size:14px;background:#12161f;border:1px solid "
-        "#232936;border-radius:10px;padding:12px 15px;margin:4px 0 18px}"
-        ".rtree{margin:6px 0 22px;font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.7;color:#c3cad6}"
-        ".rtree .cmd{color:#e9ecf1;font-weight:700}.rtree .gen{color:#7aa2ff;font-weight:700}"
-        ".rtree .off{color:#e9ecf1}.rtree .sol{color:#8a929f}"
-        ".rsec{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:#8a929f;font-weight:700;margin:18px 0 9px}"
+        ".rdoc{max-width:1000px}.rstatus{color:var(--text);font-size:14px;background:var(--panel);border:1px solid "
+        "var(--line);border-radius:10px;padding:12px 15px;margin:4px 0 18px}"
+        ".rtree{margin:6px 0 22px;font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.7;color:var(--text)}"
+        ".rtree .cmd{color:var(--text);font-weight:700}.rtree .gen{color:var(--accent);font-weight:700}"
+        ".rtree .off{color:var(--text)}.rtree .sol{color:var(--dim)}"
+        ".rsec{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);font-weight:700;margin:18px 0 9px}"
         "table.rtbl{width:100%;border-collapse:collapse;font-size:13px}"
-        "table.rtbl th{color:#6b7480;text-align:left;font-weight:600;padding:6px 9px;border-bottom:1px solid #232936}"
-        "table.rtbl td{padding:6px 9px;border-bottom:1px solid #1a1f2a;color:#c3cad6;vertical-align:top}"
-        "table.rtbl td.nm{color:#e9ecf1;font-weight:650;white-space:nowrap}table.rtbl td.rl{color:#8a929f;white-space:nowrap}"
-        "table.rtbl td.md{font-family:ui-monospace,Menlo,monospace;color:#7aa2ff}</style>")
+        "table.rtbl th{color:var(--dim);text-align:left;font-weight:600;padding:6px 9px;border-bottom:1px solid var(--line)}"
+        "table.rtbl td{padding:6px 9px;border-bottom:1px solid var(--panel2);color:var(--text);vertical-align:top}"
+        "table.rtbl td.nm{color:var(--text);font-weight:650;white-space:nowrap}table.rtbl td.rl{color:var(--dim);white-space:nowrap}"
+        "table.rtbl td.md{font-family:ui-monospace,Menlo,monospace;color:var(--accent)}</style>")
     # chain-of-command tree (no JS)
     tree = ['<div class=rtree>', '<span class=cmd>Commander · Roman</span>',
             f'<br>└─ <span class=gen>{esc(display("general"))}</span> · orchestrator']
