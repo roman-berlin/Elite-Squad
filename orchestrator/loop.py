@@ -1423,6 +1423,9 @@ async def _process_ticket_inner(ticket, app, cfg, git, backlog, audit, budget,
     branch = ticket.branch_name(app.branch_prefix)
     audit.record("ticket_start", ticket_id=ticket.id, app=app.name, branch=branch,
                  dry_run=cfg.dry_run, ephemeral=ticket.ephemeral)
+    # EU-574 / AC5: reset run-start clock for a NEW ticket or resumed ticket so elapsed is
+    # always honest; stale daemon-restart timestamps no longer poison the log-panel timer.
+    cockpit_state.mark_ticket_start(app.name)
 
     # EU-153: Initialize ticket commenter for gate events
     commenter = jira_commenter.TicketCommenter(
@@ -1970,6 +1973,11 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                   else min(cfg.max_iterations, HARD_MAX_PASSES))
     attempt_t0 = time.monotonic()
     for iteration in range(1, max_passes + 1):
+        # EU-574 / AC5: retry pass restart → reset the run-start clock so elapsed measures
+        # from this pass's beginning, not from ticket_start or a stale daemon-restart timestamp.
+        # Idempotent: safe to call on every pass; first-call overhead on iteration 1 is tiny
+        # because _process_ticket_inner already called it just before entering _attempt.
+        cockpit_state.mark_ticket_start(app.name)
         if stop_event is not None and stop_event.is_set():
             audit.record("run_stopped", ticket_id=ticket.id, iteration=iteration, phase="pre-build")
             print(f"  ■ {ticket.id}: stopped by Commander — no merge.", flush=True)
