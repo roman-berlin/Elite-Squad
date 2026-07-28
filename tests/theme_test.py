@@ -49,8 +49,16 @@ css = cockpit_views._token_css()
 chk("(2) _token_css carries the light override", "data-theme=light" in css)
 chk("(2b) _token_css reaches the sentinel (whole region, not just the first block)",
     "END THEME TOKENS" in css)
-chk("(3) boot script applies the persisted theme (default dark)",
-    "localStorage.getItem('ui.theme')||'dark'" in css.replace('"', "'"))
+_norm = css.replace('"', "'")
+chk("(3) boot script applies the persisted theme (dark only as last resort)",
+    "localStorage.getItem('ui.theme')" in _norm and "dataset.theme=t||'dark'" in _norm)
+# EU-780: a first-time visitor boots from the OS preference, never an unconditional dark default.
+chk("(3b) boot checks prefers-color-scheme before falling back to dark",
+    "matchMedia('(prefers-color-scheme:light)')" in _norm
+    and "localStorage.getItem('ui.theme')||'dark'" not in _norm)
+chk("(3c) the War Room main page boot is matchMedia-aware too",
+    "matchMedia" in warroom._PAGE
+    and 'localStorage.getItem("ui.theme")||"dark"' not in warroom._PAGE)
 
 # (4) the header toggle
 chk("(4a) the War Room header renders the theme toggle", 'id=themetoggle' in warroom._PAGE)

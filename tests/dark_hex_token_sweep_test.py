@@ -8,13 +8,18 @@ Swept surfaces:
   - dashboard.render_html()   — _TEMPLATE's hardcoded `:root{color-scheme:dark}` (broke light mode)
   - warroom health banner     — .healthbar.bad gradient + border hexes, and the DEAD .ok rule
     (the banner only ever renders class="healthbar bad" — a healthy unit renders no banner at all)
+  - server.py page routes (EU-780) — /usage /budget /onboard /forensics /memory /standup
+    /council /ship-preview (~33 inline dark hexes → tokens; every page already injects the
+    shared token block, so the substitution is what makes light mode render)
 
 We assert the *skin contract* — swept outputs reference the single-source-of-truth tokens via
 ``var(--…)`` and carry zero bare hex literals — and that every token the sweep uses is actually
 DEFINED in the token source of truth (an undefined var() silently falls back to inherit, so a
 typo'd token would pass a pure "contains var(--" check while rendering wrong).
 """
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -97,10 +102,67 @@ chk("warroom: health-banner CSS carries zero bare hex", not HEX.search(hb_css), 
 chk("warroom: .healthbar.bad skinned via the danger tokens",
     "var(--badbg)" in hb_css and "var(--badline)" in hb_css)
 
+# ── server.py surfaces (EU-780): every standalone page route rides the tokens ──
+# /usage, /budget, /onboard, /forensics, /memory, /standup, /council, /ship-preview
+# used to inline ~30 dark hexes (dark cards + unreadable grey text in light mode).
+src_server = (Path(__file__).parent.parent / "orchestrator" / "server.py").read_text(encoding="utf-8")
+RETIRED_SERVER_HEX = (
+    "#8a909c", "#8a929f", "#c4c9d2", "#e9ecf1", "#5c6573", "#6b7480", "#c3cad6", "#aab2c0",
+    "#b9a6e6", "#7aa2ff", "#12161f", "#1b2230", "#0d1119", "#1a1f2a", "#101620", "#171226",
+    "#2c2148", "#232936", "#222a38", "#1f6f43", "#3b6cff", "#d99a2b", "#f0676b", "#3fb950",
+    "#3fb961", "#f0a93f", "#2b5cff", "#2350e6", "#7c3aed", "#6d28d9", "#161b25", "#16203a",
+    "#2a3343",
+)
+chk("server.py: zero retired dark hex literals left in the source",
+    not any(h in src_server for h in RETIRED_SERVER_HEX),
+    str([h for h in RETIRED_SERVER_HEX if h in src_server]))
+
+from orchestrator import server  # noqa: E402 — imported late: only this section needs the app
+
+tmp2 = Path(tempfile.mkdtemp())
+
+
+def G2(*a):
+    subprocess.run(["git", *a], cwd=tmp2, check=True, capture_output=True, text=True)
+
+
+subprocess.run(["git", "init", str(tmp2)], check=True, capture_output=True)
+G2("config", "user.email", "t@t"); G2("config", "user.name", "t")
+G2("checkout", "-b", "DEV")
+(tmp2 / "a.txt").write_text("x\n"); G2("add", "-A"); G2("commit", "-m", "base")
+G2("branch", "MAIN", "DEV")
+(tmp2 / "b.txt").write_text("y\n"); G2("add", "-A"); G2("commit", "-m", "AUTO-9: a change")
+
+app2 = AppConfig(name="automatixy", repo_path=str(tmp2), base_branch="DEV", protected_branch="MAIN",
+                 backlog_backend="jira", backlog={"base_url": "https://acme.atlassian.net"})
+cfg2 = Config(apps=[app2], use_worktree=False)
+cfg2.detected_auth = lambda: "test"
+os.environ["GENERAL_COCKPIT_PROMOTE"] = "1"
+client = server.create_app(cfg2).test_client()
+
+# #fff is allowed: white on a token accent fill (primary buttons) is correct in BOTH themes.
+# The injected token block is EXCLUDED — the palette hexes legitimately live THERE (that's
+# the single source every page-side style below must read via var()).
+def _bare(page: str) -> list[str]:
+    page = page.split("/* END THEME TOKENS */</style>", 1)[-1]
+    css = "".join(re.findall(r"<style>(.*?)</style>", page, re.S))
+    return [h for h in HEX.findall(css) if h.lower() != "#fff"]
+
+
+for route in ("/usage", "/budget", "/onboard", "/forensics", "/memory", "/standup", "/council",
+              "/ship-preview"):
+    body = client.get(f"{route}?app=automatixy").get_data(as_text=True)
+    chk(f"{route}: renders with the shared token block (dark + light override)",
+        ":root{color-scheme:dark" in body and "data-theme=light" in body)
+    chk(f"{route}: <style> blocks carry zero bare hex (except #fff fills)",
+        not _bare(body), str(_bare(body)[:6]))
+    chk(f"{route}: page consumes var() tokens", "var(--ink)" in body)
+
 # ── every token the sweep consumes is actually defined ────────────────────────
 # (var(--undefined) falls back to inherit — looks tokenised, renders wrong)
 used = ("--line", "--accent", "--panel2", "--info", "--dim", "--text",
-        "--panel", "--badbg", "--badline", "--bad")
+        "--panel", "--badbg", "--badline", "--bad", "--faint", "--ink", "--well",
+        "--accentbg", "--accentline", "--brand", "--ok", "--warn", "--okline")
 defined_in = V._TOKENS_FALLBACK + warroom._PAGE
 missing = [t for t in used if f"{t}:" not in defined_in]
 chk("every token the sweep uses is defined in the token source of truth",

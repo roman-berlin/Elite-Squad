@@ -50,44 +50,74 @@ def _rel(dt) -> str:
 # documents and never see that block, so they must inject it too. ``_token_css``
 # pulls it LIVE out of ``warroom._PAGE`` — re-skin there and every page follows — and
 # falls back to a bundled copy when that block can't be read (tests / offline preview).
-_TOKENS_FALLBACK = (
-    ":root{color-scheme:dark;"
-    "--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;"
-    "--ink:#e7ebf2;--dim:#7e8795;--faint:#a0aab8;"
-    "--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;"
-    "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
-    "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
-    "--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;"
-    "--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;"
-    "--mono:ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;"
-    "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
-    "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
-    "--shadow-3:0 16px 40px rgba(0,0,0,.55);"
-    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease;"
-    # 8pt spacing scale (EU-296) — mirrors _PAGE's :root block, kept byte-identical.
-    "--s-1:4px;--s-2:8px;--s-3:16px;--s-4:24px;--s-5:32px;--s-6:48px;"
-    # modular type scale (EU-296) — px-equivalents/usage documented on the _PAGE mirror.
-    "--t-xs:11px;--t-sm:12.5px;--t-md:14px;--t-lg:18px;--t-xl:24px;--t-2xl:32px;"
-    # semantic color-role aliases (EU-296) — map onto the existing palette above.
-    "--surface:var(--panel);--border:var(--line);--text:var(--ink);"
-    "--positive:var(--ok);--critical:var(--bad)}"
-    # 2026-07-19 theme pass — mirrors _PAGE's extra tokens + light override (kept in sync by
-    # the live extraction below; this fallback only serves tests / offline previews).
-    ":root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}"
-    ":root[data-theme=light]{color-scheme:light;"
-    "--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;"
-    "--ink:#1c2536;--dim:#5a6578;--faint:#626978;"
-    "--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;"
-    "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
-    "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
-    "--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;"
-    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;"
-    "--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}")
+_TOKENS_FALLBACK = """\
+:root{color-scheme:dark;
+/* palette */
+--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;
+--ink:#e7ebf2;--dim:#7e8795;--faint:#a0aab8;
+--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;
+--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;
+--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;
+--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;--brand:#ff7a59;
+--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+/* corner radii */
+--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;
+/* elevation (board-surface depth hierarchy) */
+--shadow-1:0 1px 2px rgba(0,0,0,.35);
+--shadow-2:0 8px 24px rgba(0,0,0,.45);
+--shadow-3:0 16px 40px rgba(0,0,0,.55);
+/* keyboard-focus ring + motion — shared so focus & transitions are uniform (a11y) */
+--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);
+--t-fast:.15s ease;
+/* 8pt spacing scale (EU-296) — additive foundation; nothing is rewired to consume these yet */
+--s-1:4px; /* micro gap: icon-to-label spacing, tight inline gaps */
+--s-2:8px; /* small gap: control padding, chip/tag spacing */
+--s-3:16px; /* base gap: card padding, row gaps, standard margins */
+--s-4:24px; /* medium gap: section padding, panel gutters */
+--s-5:32px; /* large gap: section margin, major block spacing */
+--s-6:48px; /* xl gap: page-level section margin, hero spacing */
+/* modular type scale (EU-296) — will replace raw inline font-size numerals (e.g. the
+   30/40px KPI numerals) in a later slice; additive only for now */
+--t-xs:11px; /* micro labels, meta text, tags, timestamps */
+--t-sm:12.5px; /* secondary body text, chips, list meta */
+--t-md:14px; /* base body copy (matches body font-size) */
+--t-lg:18px; /* section/run titles */
+--t-xl:24px; /* group headers */
+--t-2xl:32px; /* hero KPI numerals (e.g. the 30-40px inline KPI stat figures) */
+/* semantic color-role aliases (EU-296) — map onto the existing palette so consumers
+   read intent, not raw color; --warn already exists above and is reused as-is */
+--surface:var(--panel); /* default elevated surface background */
+--border:var(--line); /* default hairline border */
+--text:var(--ink); /* default body text color */
+--positive:var(--ok); /* success / good-state accent */
+--critical:var(--bad)} /* error / bad-state accent */
+/* deep-inset backgrounds that were hardcoded hexes before the 2026-07-19 theme pass */
+:root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}
+/* ── LIGHT THEME (2026-07-19) — toggled via <html data-theme=light>; persisted in
+   localStorage('ui.theme') by the header toggle; every page consumes these through
+   cockpit_views._token_css() so the whole cockpit follows one switch. ── */
+:root[data-theme=light]{color-scheme:light;
+--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;
+--ink:#1c2536;--dim:#5a6578;--faint:#626978;
+--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;
+--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;
+--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;
+--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;
+--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;--brand:#e8590c;
+--shadow-1:0 1px 2px rgba(23,32,54,.08);
+--shadow-2:0 8px 24px rgba(23,32,54,.12);
+--shadow-3:0 16px 40px rgba(23,32,54,.16);
+--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(59,98,217,.5);
+--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}
+/* END THEME TOKENS */"""
 
 # Applies the saved theme BEFORE first paint on every page that injects the tokens, so
-# sub-pages follow the War Room header's toggle with no flash.
-_THEME_BOOT = ("<script>try{document.documentElement.dataset.theme="
-               "localStorage.getItem('ui.theme')||'dark'}catch(e){}</script>")
+# sub-pages follow the War Room header's toggle with no flash. A first-time visitor with no
+# saved preference boots from the OS setting (prefers-color-scheme) instead of always dark —
+# the 'dark' literal is only the last-resort fallback when matchMedia is unavailable.
+_THEME_BOOT = ("<script>try{var t=localStorage.getItem('ui.theme');"
+               "if(!t&&window.matchMedia('(prefers-color-scheme:light)').matches)t='light';"
+               "document.documentElement.dataset.theme=t||'dark'}catch(e){}</script>")
 
 
 def _token_css() -> str:
@@ -95,17 +125,16 @@ def _token_css() -> str:
     cockpit page shares ONE palette source with the War Room (EU-39). Read live from
     ``warroom._PAGE``; falls back to ``_TOKENS_FALLBACK`` when unavailable."""
     try:
-        import re
-
         from . import warroom
-        # 2026-07-19: grab the WHOLE token region — the dark :root, the extra-token :root, and
-        # the [data-theme=light] override — up to the END THEME TOKENS sentinel, so light mode
-        # flows to every standalone page from the one source in _PAGE.
-        m = re.search(r":root\{.*?/\* END THEME TOKENS \*/", warroom._PAGE, re.S)
-        if not m:
-            m = re.search(r":root\{[^}]*\}", warroom._PAGE)
-        if m:
-            return "<style>" + m.group(0) + "</style>" + _THEME_BOOT
+        # EU-780: slice the token region by its stable anchors instead of regex-scraping it —
+        # the dark :root, the extra-token :root and the [data-theme=light] override, through
+        # the END THEME TOKENS sentinel. ``_TOKENS_FALLBACK`` below is byte-for-byte this same
+        # slice (a test pins the identity), so the live path and the fallback path emit
+        # identical CSS and the two copies can never silently drift.
+        page = warroom._PAGE
+        start = page.index(":root{color-scheme:dark;")
+        end = page.index("/* END THEME TOKENS */") + len("/* END THEME TOKENS */")
+        return "<style>" + page[start:end] + "</style>" + _THEME_BOOT
     except Exception:  # noqa: BLE001 - tests / preview render without the War Room module loaded
         pass
     return "<style>" + _TOKENS_FALLBACK + "</style>" + _THEME_BOOT
@@ -658,20 +687,20 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
                 + (f"<input type=hidden name=app value='{html.escape(_affected_app)}'>"
                    if _affected_app else "")
                 + "<button style='font-size:13px;font-weight:650;padding:6px 14px;border-radius:7px;"
-                "background:#1f6feb;color:#fff;border:none;cursor:pointer'>"
+                "background:var(--accent);color:#fff;border:none;cursor:pointer'>"
                 f"Continue on {_label}{_resume}</button>"
-                "<span style='font-size:12px;color:#e7ebf2;font-weight:400;margin-left:10px'>"
+                "<span style='font-size:12px;color:var(--ink);font-weight:400;margin-left:10px'>"
                 "&#8212; keep the drain moving without waiting for the reset</span></form>")
     except Exception:  # noqa: BLE001 — the offer must never break the banner
         continue_offer = ""
 
     return (
-        "<div style='background:#2a1417;border-bottom:2px solid #5a1f22;color:#f0676b;"
+        "<div style='background:var(--badbg);border-bottom:2px solid var(--badline);color:var(--bad);"
         "padding:16px 26px;font-size:14px;font-weight:650;display:flex;align-items:flex-start;gap:11px'>"
         "<span style='font-size:20px'>&#9888;</span>"
         "<div>"
-        f"<div style='font-size:15px;margin-bottom:4px'>&#9888; {html.escape(backend_label)} plan limit reached &#8212; implementation paused</div>"
-        f"<div style='font-size:13px;color:#e7ebf2;font-weight:400'>Resets at {html.escape(reset_text)}. "
+        f"<div style='font-size:15px;margin-bottom:4px'>{html.escape(backend_label)} plan limit reached &#8212; implementation paused</div>"
+        f"<div style='font-size:13px;color:var(--ink);font-weight:400'>Resets at {html.escape(reset_text)}. "
         "New builds will wait until the limit renews.</div>"
         f"{continue_offer}"
         "</div></div>"
@@ -1354,10 +1383,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
 .tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
-.qa-strip{{display:flex;align-items:center;gap:10px;padding:9px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline);color:#cfe0ff;font-size:13px;font-weight:650}}
+.qa-strip{{display:flex;align-items:center;gap:10px;padding:9px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline);color:var(--info);font-size:13px;font-weight:650}}
 .qa-strip #qaelapsed{{font-variant-numeric:tabular-nums;color:var(--dim);font-weight:400}}
 .deploybar .dspin{{width:18px;height:18px;border:3px solid var(--accentline);border-top-color:var(--accent);border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
-.deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
+.deploybar .dmsg{{color:var(--info);font-size:13px;font-weight:650}}
 .deploybar .dsub{{color:var(--dim);font-weight:400;font-size:12px}}
 .deploybar .dprog{{flex:1;max-width:300px;height:6px;background:var(--bg);border-radius:var(--r-pill);overflow:hidden;border:1px solid var(--accentline)}}
 .deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,var(--accent),var(--info));border-radius:var(--r-pill);animation:dsl 1.4s ease-in-out infinite}}
@@ -1699,13 +1728,13 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
         ".pname{color:var(--ink);font-size:15px;font-weight:700}"
         ".pbrand{color:var(--dim);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
         ".pstatus{display:flex;align-items:center;gap:8px;margin-bottom:10px}"
-        ".picon{font-size:14px}.picon.ok{color:#3fb950}.picon.warn{color:#d99a2b}.picon.bad{color:#f0676b}"
+        ".picon{font-size:14px}.picon.ok{color:var(--ok)}.picon.warn{color:var(--warn)}.picon.bad{color:var(--bad)}"
         ".pstat{color:var(--dim);font-size:12px;font-weight:500;text-transform:uppercase}"
         ".ppct{color:var(--ink);font-size:13px;font-weight:600;margin-left:auto}"
         ".pgauge{margin:12px 0}"
         ".pgbar{height:10px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
         ".pgfill{display:block;height:100%;transition:width .3s ease}"
-        ".pgfill.g{background:#3fb950}.pgfill.a{background:#d99a2b}.pgfill.r{background:#f0676b}"
+        ".pgfill.g{background:var(--ok)}.pgfill.a{background:var(--warn)}.pgfill.r{background:var(--bad)}"
         ".premain{color:var(--dim);font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
         ".pmeta{color:var(--dim);font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
         ".pnote{color:var(--dim);font-size:12px;margin-top:8px}"

@@ -2535,7 +2535,7 @@ details.kpi{padding:0}
 .secreply textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
 .secbtn{background:var(--accent);color:#fff;border:0;border-radius:var(--r-sm);padding:6px 12px;
   font-size:11px;font-weight:600;cursor:pointer;transition:background var(--t-fast)}
-.secbtn:hover{background:#3b5ecc}
+.secbtn:hover{background:var(--accent-hover)}
 .secempty{padding:12px 17px;color:var(--faint);font-size:12px;font-style:italic}
 .secmore{padding:8px 17px;font-size:11px;color:var(--dim);border-top:1px solid var(--line2)}
 .secmore a{color:var(--info);text-decoration:none}
@@ -2599,7 +2599,7 @@ letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);positio
 .stoprun{margin:0;display:inline}
 .stopbtn{background:var(--badbg);color:var(--bad);border:1px solid var(--badline);border-radius:var(--r-sm);
 padding:4px 11px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:background var(--t-fast)}
-.stopbtn:hover{background:#3a181b}
+.stopbtn:hover{background:var(--badline)}
 /* EU-130: triage state bar */
 .triage-bar{margin-top:12px}
 .triage-bar .ph.triage-done{color:var(--ok)}
@@ -2672,7 +2672,7 @@ margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pul
 .lv.quiet{color:var(--warn);background:var(--warnbg)}
 .lv.stuck{color:var(--bad);background:var(--badbg)}
 /* synced badge — which machines' audits are merged into this view */
-.synced{margin:6px 24px 0;font-size:11px;color:#5b6b86;letter-spacing:.02em}
+.synced{margin:6px 24px 0;font-size:11px;color:var(--dim);letter-spacing:.02em}
 /* EU-298: a sync older than STALE_SYNC_CUTOFF_S reads as a warning, not as neutral chrome —
    reuses the EU-285a --warn token rather than a new colour literal */
 .synced.stale{color:var(--warn)}
@@ -2730,7 +2730,9 @@ font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);bor
 {{BAR}}
 <div id=board>{{BOARD}}</div>
 <script>
-try{document.documentElement.dataset.theme=localStorage.getItem("ui.theme")||"dark"}catch(e){}
+try{var t=localStorage.getItem("ui.theme");
+if(!t&&window.matchMedia("(prefers-color-scheme:light)").matches)t="light";
+document.documentElement.dataset.theme=t||"dark"}catch(e){}
 function uiTheme(){try{var r=document.documentElement;
   r.dataset.theme=r.dataset.theme==="light"?"dark":"light";
   localStorage.setItem("ui.theme",r.dataset.theme);}catch(e){}}

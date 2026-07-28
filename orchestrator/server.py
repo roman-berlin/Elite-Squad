@@ -2187,7 +2187,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     def standup_page() -> str:
         from . import council
         snap = "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>"
-        intro = ("<p style='color:#8a909c;margin:-4px 0 14px'>The stand-up now runs inside the daily "
+        intro = ("<p style='color:var(--dim);margin:-4px 0 14px'>The stand-up now runs inside the daily "
                  "muster — see <a href='/council'>Daily muster &amp; meetings</a>. You don't initiate "
                  "it; engineers post anything actionable to <a href='/needs'>Needs you</a> and ping you "
                  "on Telegram if blocked. The button below is only for an on-demand extra.</p>")
@@ -2198,7 +2198,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         else:
             last = council.last_standup(cfg)
             rep = ("<pre class=rep>" + html.escape(last) + "</pre>" if last
-                   else "<p style='color:#8a909c'>No engineer stand-up recorded yet — the next one lands "
+                   else "<p style='color:var(--dim)'>No engineer stand-up recorded yet — the next one lands "
                         "automatically at the 10:00 muster. Each engineer reports Yesterday / Today / "
                         "Blockers and flags who they need.</p>")
         # EU-701: /api/standup's outcome (standup_api writes it app=None) renders inline here,
@@ -2255,7 +2255,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # not only on the home board — suppressed mid-session so the _working panel owns the page.
         strip = ("" if (_state.get("councilling") or _state.get("shipreview"))
                  else page_result_strip(None))
-        intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
+        intro = ("<p style='color:var(--dim);margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
                  "<a href=\"/chat\">chat with the CTO</a>.</p>"
                  '<p style="display:flex;gap:14px;margin:4px 0">'
@@ -2268,7 +2268,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                  '</p>')
         if not hist:
             return _wrap("Daily Council", strip + acts + intro + top
-                         + "<p style='color:#8a909c'>No councils yet.</p>")
+                         + "<p style='color:var(--dim)'>No councils yet.</p>")
         want = request.args.get("f") or hist[0]["file"]
         transcript = council.transcript_text(cfg, want) or "(transcript missing)"
         items = "".join(
@@ -2323,12 +2323,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # PREAMBLE_LESSONS of the log in their prompt; the whole tail lives here for the Commander.
         live_full = memory._live_log()
         live_html = (
-            "<h3 style='margin:18px 0 8px;font-size:14px;color:#c4c9d2'>Living lessons log "
-            f"<span style='color:#8a929f;font-weight:400;font-size:12px'>· engineers see the newest "
+            "<h3 style='margin:18px 0 8px;font-size:14px;color:var(--ink)'>Living lessons log "
+            f"<span style='color:var(--dim);font-weight:400;font-size:12px'>· engineers see the newest "
             f"{memory.PREAMBLE_LESSONS} in every prompt; the full log lives here</span></h3>"
             "<pre class=rep>" + html.escape(live_full or "(no lessons logged yet)") + "</pre>")
         body = (banner + act + top
-                + "<h3 style='margin:14px 0 8px;font-size:14px;color:#c4c9d2'>Doctrine</h3>"
+                + "<h3 style='margin:14px 0 8px;font-size:14px;color:var(--ink)'>Doctrine</h3>"
                 + "<pre class=rep>" + html.escape(memory.load() or "(no Squad memory yet)") + "</pre>"
                 + live_html)
         return _wrap("Unit Memory", body)
@@ -2342,7 +2342,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             for n in names)
         body = (
             "<style>.mrow{display:flex;gap:9px;align-items:center;padding:6px 0;font-size:14px}"
-            "input[type=text]{width:480px;max-width:90%}.hint{color:#8a909c;font-size:13px}</style>"
+            "input[type=text]{width:480px;max-width:90%}.hint{color:var(--dim);font-size:13px}</style>"
             "<form method=post action=/api/meeting>"
             "<p>What's the meeting about?<br>"
             "<input type=text name=topic placeholder='e.g. how to close the superadmin authz gap'></p>"
@@ -2950,7 +2950,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     "<div class=ncard><details><summary>"
                     f"<span class='nbadge err'>Errored run</span>"
                     f"<span class=meta>{tid}</span>"
-                    + (f" &nbsp;<span style='color:#6b7480'>&mdash; {note}</span>" if note else "")
+                    + (f" &nbsp;<span style='color:var(--dim)'>&mdash; {note}</span>" if note else "")
                     + f"</summary>"
                     f"<div class=ndetail><div class=ndt>{why}</div>{detail}</div></details>"
                     # Primary: provide a directive — re-runs the ticket with the answer baked in.
@@ -3093,7 +3093,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ".budget{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
             ".budget .bl{color:var(--ink);font-size:13px;margin-bottom:9px}"
             ".bar{height:9px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
-            ".bar .fill{display:block;height:100%}.bar .fill.ok{background:#3b6cff}.bar .fill.warn{background:#d99a2b}.bar .fill.over{background:#f0676b}"
+            ".bar .fill{display:block;height:100%}.bar .fill.ok{background:var(--accent)}.bar .fill.warn{background:var(--warn)}.bar .fill.over{background:var(--bad)}"
             ".bnote{color:var(--dim);font-size:12px;margin-top:8px}.mono{font-family:ui-monospace,Menlo,monospace;color:var(--dim)}"
             # EU-77 — live Claude Max subscription-limits panel (the real ceiling), green→amber→red.
             ".plan{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 17px;margin:6px 0 18px}"
@@ -3105,7 +3105,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ".plan .pm{color:var(--dim);font-size:11px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}"
             ".pbar{height:9px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
             ".pbar .pf{display:block;height:100%}"
-            ".pbar .pf.g{background:#3fb950}.pbar .pf.a{background:#d99a2b}.pbar .pf.r{background:#f0676b}"
+            ".pbar .pf.g{background:var(--ok)}.pbar .pf.a{background:var(--warn)}.pbar .pf.r{background:var(--bad)}"
             ".plan .pnote{color:var(--dim);font-size:12px;margin-top:8px}"
             # EU-540 — qwen quota line (compact, dim)
             ".qwen-q{color:var(--dim);font-size:11.5px;margin:8px 0;font-family:ui-monospace,Menlo,monospace}"
@@ -3209,7 +3209,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception:  # noqa: BLE001 — never break render on quota read failure
             pass
 
-        budget_link = ('<p style="color:#8a909c;margin:2px 0"><a href="/budget" style="color:var(--ink);text-decoration:none">'
+        budget_link = ('<p style="color:var(--dim);margin:2px 0"><a href="/budget" style="color:var(--ink);text-decoration:none">'
                        '&#128203; View full budget page &rarr;</a></p>')
         body = (style + dual_gauge + qwen_line + plan + budget + mixbanner + budget_link + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
@@ -3472,23 +3472,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         current = ", ".join(esc(a.name) for a in cfg.apps) or "—"
         style = (
             "<style>"
-            ".cur{color:#8a929f;margin:2px 0 18px}.cur b{color:#e9ecf1}"
-            ".ob{background:#12161f;border:1px solid #232936;border-radius:12px;padding:17px 19px}"
+            ".cur{color:var(--dim);margin:2px 0 18px}.cur b{color:var(--ink)}"
+            ".ob{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:17px 19px}"
             ".obgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:13px}"
-            ".ob label{display:block;color:#c4c9d2;font-size:12.5px;font-weight:600}"
+            ".ob label{display:block;color:var(--ink);font-size:12.5px;font-weight:600}"
             ".ob input,.ob select{width:100%;margin-top:5px;box-sizing:border-box}"
-            ".ob .opt{color:#5c6573;font-weight:400}"
+            ".ob .opt{color:var(--faint);font-weight:400}"
             ".obrow{display:flex;gap:12px;align-items:center;margin-top:15px;flex-wrap:wrap}"
-            ".jbtn{background:#1b2230;border:1px solid #2a3343;color:#e9ecf1;border-radius:8px;padding:9px 15px;"
+            ".jbtn{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:9px 15px;"
             "font:inherit;font-size:13px;font-weight:650;cursor:pointer}"
-            ".jbtn.primary{background:#2b5cff;border-color:#2b5cff;color:#fff}.jbtn.primary:hover{background:#2350e6}"
-            ".hint{color:#6b7480;font-size:12px}.hint2{color:#8a929f;font-size:12.5px;margin-top:16px}"
+            ".jbtn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.jbtn.primary:hover{background:var(--accent)}"
+            ".hint{color:var(--dim);font-size:12px}.hint2{color:var(--dim);font-size:12.5px;margin-top:16px}"
             ".nearby{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}"
-            ".chip{display:inline-flex;flex-direction:column;gap:1px;background:#12161f;border:1px solid #2a3343;"
-            "border-radius:10px;padding:8px 12px;text-decoration:none;color:#e9ecf1;font-size:13px}"
-            ".chip:hover{border-color:#3b6cff;background:#161b25}.chip.on{border-color:#3b6cff;background:#16203a}"
-            ".chip small{color:#6b7480;font-size:11px;font-family:ui-monospace,Menlo,monospace}"
-            "h3{margin:18px 0 9px;font-size:14px;color:#c4c9d2}"
+            ".chip{display:inline-flex;flex-direction:column;gap:1px;background:var(--panel2);border:1px solid var(--line2);"
+            "border-radius:10px;padding:8px 12px;text-decoration:none;color:var(--ink);font-size:13px}"
+            ".chip:hover{border-color:var(--accent);background:var(--accentbg)}.chip.on{border-color:var(--accent);background:var(--accentbg)}"
+            ".chip small{color:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}"
+            "h3{margin:18px 0 9px;font-size:14px;color:var(--ink)}"
             "</style>")
         # Found-nearby repos (git repos beside your configured ones, not yet in config) → click to pre-fill.
         try:
@@ -3501,7 +3501,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 f"<a class='chip{' on' if r['path'] == pre_repo else ''}' "
                 f"href='/onboard?name={quote(_ob.slug(r['name']))}&repo={quote(r['path'])}'>"
                 f"{esc(r['name'])}<small>{esc(r['path'])}</small></a>" for r in disc)
-            nearby = ("<h3>Found nearby <span class=opt style='color:#5c6573;font-weight:400'>"
+            nearby = ("<h3>Found nearby <span class=opt style='color:var(--faint);font-weight:400'>"
                       "(click to fill the form)</span></h3><div class=nearby>" + chips + "</div>")
 
         def val(v) -> str:
@@ -3537,7 +3537,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                                 backlog=("jira" if jira else "none"), connection_id=jira, write=True)
         if not r["ok"]:
             return _wrap("Onboard a product",
-                         f"<p style='color:#f0676b'>&#10007; {esc(r['error'])}</p>"
+                         f"<p style='color:var(--bad)'>&#10007; {esc(r['error'])}</p>"
                          "<style>.backlnk{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
                          "font-size:13px;font-weight:600;text-decoration:none;padding:8px 14px;"
                          "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
@@ -3551,9 +3551,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                          "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
                          "<path d='M19 12H5M12 19l-7-7 7-7'/></svg>back</a>")
         warn = "".join(f"<li>&#9888; {esc(w)}</li>" for w in r["warnings"])
-        warnhtml = f"<ul style='color:#d99a2b'>{warn}</ul>" if warn else ""
+        warnhtml = f"<ul style='color:var(--warn)'>{warn}</ul>" if warn else ""
         return _wrap("Onboard a product",
-                     f"<p style='color:#3fb961'>&#10003; Added <b>{esc(r['name'])}</b> — base "
+                     f"<p style='color:var(--ok)'>&#10003; Added <b>{esc(r['name'])}</b> — base "
                      f"{esc(r['base'])} &rarr; protected {esc(r['protected'])}. Backed up config.yaml; "
                      f"<b>restart the cockpit / autopilot</b> to load it.</p>{warnhtml}"
                      f"<pre class=rep>{esc(r['block'])}</pre>"
@@ -3599,10 +3599,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'>"
                     f"<path d='M19 12H5M12 19l-7-7 7-7'/></svg>forensics</a></p>"
                     f"<h2 style='font-size:16px;margin:4px 0 2px'>{esc(label)}</h2>"
-                    f"<p style='color:#8a929f'>{len(runs)} matching run(s)."
+                    f"<p style='color:var(--dim)'>{len(runs)} matching run(s)."
                     + (f" &#8594; {esc(action)}" if action else "") + "</p>")
             if not runs:
-                inner = head + ("<p style='color:#8a929f'>None on record — nothing flagged in this "
+                inner = head + ("<p style='color:var(--dim)'>None on record — nothing flagged in this "
                                 "category.</p>")
                 return _wrap(f"Forensics — {label}", inner)
             trs = []
@@ -3615,8 +3615,8 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             table = ("<table class=fxtbl><tr><th>ticket</th><th>app</th><th>when</th>"
                      "<th>outcome</th><th>note</th></tr>" + "".join(trs) + "</table>")
             style = ("<style>.fxtbl{width:100%;border-collapse:collapse;margin:8px 0;font-size:13px}"
-                     ".fxtbl th{color:#6b7480;text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid #232936}"
-                     ".fxtbl td{color:#c3cad6;padding:6px 8px;border-bottom:1px solid #1a1f2a}</style>")
+                     ".fxtbl th{color:var(--dim);text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line2)}"
+                     ".fxtbl td{color:var(--ink);padding:6px 8px;border-bottom:1px solid var(--line)}</style>")
             return _wrap(f"Forensics — {label}", style + head + table)
         pm = (request.args.get("pm") or "").strip()
         if pm:  # view one post-mortem
@@ -3646,18 +3646,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         style = (
             "<style>"
             ".fxtax{display:flex;flex-direction:column;gap:9px;margin:6px 0 22px}"
-            ".fxrow{background:#12161f;border:1px solid #232936;border-radius:10px;padding:11px 14px}"
+            ".fxrow{background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:11px 14px}"
             ".fxhead{display:flex;justify-content:space-between;align-items:baseline;gap:10px}"
-            ".fxlabel{color:#e9ecf1;font-weight:650;font-size:13.5px}.fxn{color:#8a929f;font-size:12px;font-family:ui-monospace,Menlo,monospace}"
-            ".fxbar{height:7px;background:#0d1119;border-radius:5px;overflow:hidden;border:1px solid #222a38;margin:8px 0 7px}"
-            ".fxbar .fill{display:block;height:100%;background:#3b6cff}"
-            ".fxact{color:#8a929f;font-size:12.5px}"
+            ".fxlabel{color:var(--ink);font-weight:650;font-size:13.5px}.fxn{color:var(--dim);font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+            ".fxbar{height:7px;background:var(--well);border-radius:5px;overflow:hidden;border:1px solid var(--line2);margin:8px 0 7px}"
+            ".fxbar .fill{display:block;height:100%;background:var(--accent)}"
+            ".fxact{color:var(--dim);font-size:12.5px}"
             ".fxtbl{width:100%;border-collapse:collapse;margin:4px 0 20px;font-size:13px}"
-            ".fxtbl th{color:#6b7480;text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid #232936}"
-            ".fxtbl td{color:#c3cad6;padding:6px 8px;border-bottom:1px solid #1a1f2a}"
-            ".fxtbl .c{color:#f0a93f;font-weight:700;font-family:ui-monospace,Menlo,monospace}"
-            ".fxempty{background:#101620;border:1px solid #1f6f43;border-radius:12px;padding:16px 18px;color:#aab2c0}"
-            "h3{margin:20px 0 8px;font-size:14px;color:#c4c9d2}"
+            ".fxtbl th{color:var(--dim);text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line2)}"
+            ".fxtbl td{color:var(--ink);padding:6px 8px;border-bottom:1px solid var(--line)}"
+            ".fxtbl .c{color:var(--warn);font-weight:700;font-family:ui-monospace,Menlo,monospace}"
+            ".fxempty{background:var(--panel);border:1px solid var(--okline);border-radius:12px;padding:16px 18px;color:var(--ink)}"
+            "h3{margin:20px 0 8px;font-size:14px;color:var(--ink)}"
             "</style>")
         if not tax:
             return _wrap("Failure forensics", style + "<div class=fxempty>&#10003; No failed runs on "
@@ -3674,13 +3674,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             for o in offenders:
                 exists = _fx.postmortem_path(cfg, o["ticket_id"]).exists()
                 link = (f"<a href='/forensics?pm={quote(o['ticket_id'])}'>post-mortem &rarr;</a>"
-                        if exists else "<span style='color:#5c6573'>—</span>")
+                        if exists else "<span style='color:var(--faint)'>—</span>")
                 trs.append(f"<tr><td><b>{esc(o['ticket_id'])}</b></td><td>{esc(o['app'] or '—')}</td>"
                            f"<td class=c>×{o['count']}</td><td>{esc(o['label'])}</td><td>{link}</td></tr>")
             off_html = ("<h3>Repeat offenders</h3><table class=fxtbl><tr><th>ticket</th><th>app</th>"
                         "<th>fails</th><th>dominant cause</th><th>post-mortem</th></tr>"
                         + "".join(trs) + "</table>")
-        body = (style + f"<p style='color:#8a929f'>{total} failed run(s), grouped by cause.</p>"
+        body = (style + f"<p style='color:var(--dim)'>{total} failed run(s), grouped by cause.</p>"
                 + "<div class=fxtax>" + rows + "</div>" + off_html)
         return _wrap("Failure forensics", body)
 
@@ -3693,23 +3693,23 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     def ship_preview_page() -> str:
         from . import sync as _sync
         appq = (request.args.get("app") or "").strip() or (cfg.apps[0].name if cfg.apps else "")
-        # Skinned with the EU-39 design tokens injected by _wrap; the purple "ship" accent
-        # stays a distinct brand colour (matches the control-bar Ship button) on purpose.
+        # Skinned with the EU-39 design tokens injected by _wrap (EU-555c sweep); the go button
+        # rides the --brand accent so it re-skins from the single :root source like everything else.
         style = (
             "<style>"
-            ".shp{max-width:940px}.shhead{background:#171226;border:1px solid #2c2148;border-radius:var(--r-lg);"
+            ".shp{max-width:940px}.shhead{background:var(--panel2);border:1px solid var(--accentline);border-radius:var(--r-lg);"
             "padding:16px 18px;margin:4px 0 18px}.shhead h2{margin:0 0 6px;color:var(--ink);font-size:20px}"
-            ".shhead .meta{color:#b9a6e6;font-size:13px;font-family:var(--mono)}"
+            ".shhead .meta{color:var(--info);font-size:13px;font-family:var(--mono)}"
             ".shtix{margin:14px 0 6px;color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:700}"
             ".shcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:12px 15px;margin:9px 0}"
-            ".shcard .tk{color:var(--ink);font-weight:700;font-size:14px}.shcard .tk a{color:#7aa2ff;text-decoration:none}"
+            ".shcard .tk{color:var(--ink);font-weight:700;font-size:14px}.shcard .tk a{color:var(--info);text-decoration:none}"
             ".shcard .n{color:var(--dim);font-size:12px;margin-left:6px}"
             ".shcard ul{margin:8px 0 0;padding-left:0;list-style:none}"
-            ".shcard li{color:#c3cad6;font-size:13px;padding:3px 0;display:flex;gap:9px}"
-            ".shcard li .sha{color:#7aa2ff;font-family:var(--mono);white-space:nowrap}"
+            ".shcard li{color:var(--ink);font-size:13px;padding:3px 0;display:flex;gap:9px}"
+            ".shcard li .sha{color:var(--info);font-family:var(--mono);white-space:nowrap}"
             ".shbar{display:flex;gap:10px;align-items:center;margin:20px 0 8px}"
-            ".shgo{background:#7c3aed;border:0;color:#fff;border-radius:var(--r-md);padding:11px 18px;font-weight:700;cursor:pointer;font:inherit}"
-            ".shgo:hover{background:#6d28d9}.shgo:focus-visible{outline:none;box-shadow:var(--ring)}}"
+            ".shgo{background:var(--brand);border:0;color:#fff;border-radius:var(--r-md);padding:11px 18px;font-weight:700;cursor:pointer;font:inherit}"
+            ".shgo:hover{background:var(--brand)}.shgo:focus-visible{outline:none;box-shadow:var(--ring)}}"
             ".shcancel{{display:inline-flex;align-items:center;gap:8px;color:var(--ink);"
             "font-size:13px;font-weight:600;text-decoration:none;padding:10px 16px;"
             "background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);"
