@@ -29,6 +29,7 @@ class Ticket:
     labels: list[str] = field(default_factory=list)   # Jira labels (complexity + effort override)
     issue_type: Optional[str] = None                  # "Bug" | "Story" | "Epic" | ...
     status: Optional[str] = None                      # Jira status name at fetch time (e.g. "In Progress", "To Do")
+    priority: Optional[str] = None                    # Jira priority name at fetch time (e.g. "Highest", "High")
 
     def slug(self) -> str:
         import re
