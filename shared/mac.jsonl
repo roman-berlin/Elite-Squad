@@ -1809,3 +1809,6 @@
 {"ts": "2026-07-28T13:00:50+0300", "event": "planner", "ticket_id": "EU-554", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 4, "cost_usd": 0.808456, "provider": "GLM", "model": "glm-5.2"}
 {"ts": "2026-07-28T13:03:20+0300", "event": "agent_call", "tag": "planner", "model": "glm-5.2", "provider": "GLM", "model_version": "glm-5.2", "input_tokens": 592748, "output_tokens": 13879, "cost_usd": 0.912039, "duration_s": 410.53, "turns": 30, "ticket_id": "EU-553"}
 {"ts": "2026-07-28T13:03:20+0300", "event": "planner", "ticket_id": "EU-553", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 4, "cost_usd": 0.912039, "provider": "GLM", "model": "glm-5.2"}
+{"ts": "2026-07-28T13:49:41+0300", "event": "ticket_exception", "ticket_id": "EU-554", "app": "Elite-Unit", "error": "Command failed with exit code 143 (exit code: 143)\nError output: Check stderr output for details"}
+{"ts": "2026-07-28T13:49:42+0300", "event": "ticket_start", "ticket_id": "EU-555", "app": "Elite-Unit", "branch": "autodev/EU-555-light-theme-sweep-replace-all-hardcoded-", "dry_run": false, "ephemeral": false}
+{"ts": "2026-07-28T13:49:43+0300", "event": "ticket_transition", "ticket_id": "EU-555", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
