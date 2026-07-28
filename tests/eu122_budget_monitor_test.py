@@ -673,7 +673,7 @@ def test_dual_provider_gauge_resets_now():
 
 
 def test_dual_provider_gauge_empty_limits():
-    """Regression: _dual_provider_gauge handles empty limits list gracefully."""
+    """EU-759: empty limits → unknown-state card, never blank or green 'ok'."""
     class MockConfig:
         budget_alert_pct = 0.80
         budget_bad_threshold = 0.95
@@ -689,15 +689,25 @@ def test_dual_provider_gauge_empty_limits():
 
     result = _dual_provider_gauge(cfg, claude_usage, glm_usage=None)
 
-    # Should not crash, should render something
     assert result is not None, "Should return a result even with empty limits"
     assert isinstance(result, str), "Should return a string"
+    # Unknown-state card must appear — never a blank gap
+    assert "can't read live limits right now" in result, (
+        "Empty limits should render the unknown-state card"
+    )
+    # Must NOT fabricate healthy numbers
+    assert "100% remaining" not in result, (
+        "Empty limits must not show 100% remaining"
+    )
+    assert "&#10003;" not in result, (
+        "Empty limits must not show a green checkmark"
+    )
 
-    print("  ✓ _dual_provider_gauge handles empty limits list (regression)")
+    print("  ✓ _dual_provider_gauge handles empty limits → unknown-state card (EU-759)")
 
 
 def test_dual_provider_gauge_claude_unavailable():
-    """Regression: _dual_provider_gauge handles Claude unavailable gracefully."""
+    """EU-759: unreadable fetch → unknown-state card, never green 'ok/100%'."""
     class MockConfig:
         budget_alert_pct = 0.80
         budget_bad_threshold = 0.95
@@ -713,11 +723,24 @@ def test_dual_provider_gauge_claude_unavailable():
 
     result = _dual_provider_gauge(cfg, claude_usage, glm_usage=None)
 
-    # Should not crash, should render something
     assert result is not None, "Should return a result even when Claude unavailable"
     assert isinstance(result, str), "Should return a string"
+    # Unknown-state card must appear
+    assert "can't read live limits right now" in result, (
+        "Claude unavailable should render the unknown-state card"
+    )
+    # Must NOT fabricate healthy numbers — the old bug was ✓ ok / 100% remaining
+    assert "100% remaining" not in result, (
+        "Unreadable Claude must not show 100% remaining"
+    )
+    assert "&#10003;" not in result, (
+        "Unreadable Claude must not show a green checkmark"
+    )
+    assert "<span class=pstat>ok</span>" not in result, (
+        "Unreadable Claude must not report 'ok' status"
+    )
 
-    print("  ✓ _dual_provider_gauge handles Claude unavailable (regression)")
+    print("  ✓ _dual_provider_gauge handles Claude unavailable → unknown-state card (EU-759)")
 
 
 def test_dual_provider_gauge_zero_utilization():
