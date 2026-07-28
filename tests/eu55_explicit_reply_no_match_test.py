@@ -47,6 +47,11 @@ async def _respond(cfg, text):
     freetext.append(text)
 council.respond_to_commander = _respond
 council.add_commander_note = lambda cfg, text: freetext.append(text)
+# EU-743: route_message's free-text reply thread now claims/clears a 'CTO is typing…' flag via
+# council.set_typing(); the real module always has it, so the stub must too or _answer() dies with
+# AttributeError before it ever reaches respond_to_commander (the id-miss-routes-to-CTO check).
+council.set_typing = lambda *a, **k: None
+council.is_typing = lambda: False
 sys.modules["orchestrator.council"] = council
 
 resumed = []

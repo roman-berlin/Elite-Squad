@@ -1489,6 +1489,13 @@ def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
                   '<button>Send</button></form></div>')
     pending_html = f'<div class=pending>{cards}</div>' if cards else ""
 
+    # EU-743: 'CTO is typing…' indicator, driven by the claim/clear flag decisions.route_message's
+    # background reply thread sets (council.set_typing) — reuses the existing .typing style.
+    try:
+        typing_html = '<div class=typing>CTO is typing…</div>' if council.is_typing() else ""
+    except Exception:  # noqa: BLE001 — never break chat render on the flag read
+        typing_html = ""
+
     if not bubbles and not cards:
         bubbles = ('<div class=cempty>No messages yet. When an engineer needs a decision it shows '
                    'up here — or send the CTO a message below.</div>')
@@ -1497,7 +1504,7 @@ def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
         load_earlier = (f'<button type=button class=load-earlier data-offset="{window_limit}" '
                          f'data-limit="{window_limit}" onclick="loadEarlierChat(this)">'
                          '&#8593; Load earlier messages</button>')
-    return pending_html + load_earlier + f'<div class=thread>{bubbles}</div>'
+    return pending_html + typing_html + load_earlier + f'<div class=thread>{bubbles}</div>'
 
 
 def _safe_chat_transcript(cfg: Config) -> str:

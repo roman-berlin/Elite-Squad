@@ -3838,6 +3838,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'else cinner.insertBefore(newPending,cinner.firstChild);}'
                 'else if(oldPending){'
                 'if(!(serverHoldsSent&&oldPending.querySelector(".psent")))oldPending.remove();}'
+                # EU-743 — 'CTO is typing…' indicator: insert/remove to match the fetched fragment
+                # each poll (no content to diff, so just presence/absence), anchored right before
+                # the .thread wrapper so it never disturbs pending cards or scroll position.
+                'var newTyping=frag.querySelector(".typing"),oldTyping=cinner.querySelector(".typing");'
+                'if(newTyping){if(!oldTyping)cinner.insertBefore(newTyping,cinner.querySelector(".thread")||null);}'
+                'else if(oldTyping)oldTyping.remove();'
                 'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
                 # EU-318 — capture the fetched window's max seq BEFORE the append loop below moves
                 # those nodes OUT of frag. The old code scanned frag for `total` AFTER the move, so on

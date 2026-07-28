@@ -999,11 +999,14 @@ def route_message(cfg, audit, text: str) -> bool:
         pass
 
     def _answer():
+        council.set_typing(True)   # EU-743: claim — cockpit shows 'CTO is typing…' while this runs
         try:
             asyncio.run(council.respond_to_commander(cfg, text))
         except Exception as exc:  # noqa: BLE001
             council.add_commander_note(cfg, text)   # at least capture it
             notify.send(f"⚠️ the CTO couldn't reply ({exc}); logged your note.")
+        finally:
+            council.set_typing(False)   # EU-743: clear on success AND error — never sticks on
     threading.Thread(target=_answer, daemon=True).start()
     return True
 

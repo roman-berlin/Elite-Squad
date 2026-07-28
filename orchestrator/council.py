@@ -295,6 +295,25 @@ def _last_chat_line(cfg: Config) -> str:
     return lines[-1].strip() if lines else ""
 
 
+# EU-743 — 'CTO is typing…' claim/clear flag. The reply thread (decisions.route_message's
+# background _answer()) claims it just before generating a reply and clears it in a `finally`
+# (so an error path clears it too, never sticking on); /api/chat-thread reads it each poll to
+# render the indicator. In-memory only: the cockpit runs single-process/threaded (server.py
+# app.run(..., threaded=True)), so a plain dict is visible to every request thread without a
+# file/DB round-trip, and it correctly resets on process restart (no stale "typing" surviving).
+_typing_state: dict = {"on": False}
+
+
+def set_typing(on: bool) -> None:
+    """Claim (``True``) or clear (``False``) the CTO-is-typing flag for the cockpit chat."""
+    _typing_state["on"] = bool(on)
+
+
+def is_typing() -> bool:
+    """Whether the CTO's reply is currently being generated (cockpit chat typing indicator)."""
+    return bool(_typing_state.get("on"))
+
+
 def chat_transcript(cfg: Config, lines: int = 400) -> str:
     """Recent cockpit chat turns (full Q/A), newest kept. Falls back to the (truncated) commander notes
     if no chat file exists yet, so existing history still shows."""
