@@ -1356,6 +1356,66 @@ def _prior_resumed_ids(audit_rows) -> set[str]:
     return out
 
 
+def sweep_ready_epics(cfg: Config, backlogs: dict, audit) -> list[str]:
+    """EU-734: route any Epic whose children have ALL finished to QA for the Commander's sign-off.
+
+    The roll-up in ``loop._maybe_close_epic`` is event-driven — it fires when a child completes.
+    That cannot help an Epic that finished BEFORE the roll-up existed, nor one whose hand-off lost
+    a race with a board hiccup: nothing will ever trigger it again. This sweep is the standing
+    guarantee behind "no zombies" — it re-derives readiness from the children themselves, so an
+    Epic reaches the Commander even when no event does.
+
+    Deliberately conservative, mirroring ``reap_closed_branches``: an Epic with NO children is left
+    alone (it is hand-made, not an auto-split container); a child whose status cannot be read leaves
+    the Epic open; any error skips that Epic rather than the sweep. Idle-boundary only — never runs
+    mid-drain. Returns the Epic keys handed off."""
+    moved: list[str] = []
+    for app_name, bl in (backlogs or {}).items():
+        get_open = getattr(bl, "open_epics", None)
+        get_children = getattr(bl, "epic_children", None)
+        if not (get_open and get_children):
+            continue                      # backend without Epic support → nothing to do
+        try:
+            epics = get_open() or []
+        except Exception:  # noqa: BLE001 — an unreachable board must not abort the sweep
+            continue
+        for ekey in epics:
+            try:
+                children = get_children(ekey) or []
+                if not children:
+                    continue              # hand-made Epic (no children) — never touched
+                unfinished = [c.get("key") for c in children
+                              if (c.get("status") or "").strip().lower() not in ("done", "closed", "qa")
+                              and (c.get("status_category") or "").strip().lower() != "done"]
+                if unfinished:
+                    continue
+                rows = [f"• {c.get('key')} [{(c.get('status') or '?').strip()}] "
+                        f"{(c.get('summary') or '')[:60]}" for c in children]
+                exceptions = [f"{c.get('key')} ({(c.get('status') or '?').strip()})"
+                              for c in children
+                              if (c.get("status") or "").strip().lower() != "done"]
+                t = bl.get_task(ekey)
+                bl.set_status(t, "QA")
+                bl.add_comment(t, "✅ Every child of this Epic has finished — ready for your "
+                                  "sign-off.\n\n" + "\n".join(rows)
+                               + (f"\n\n⚠️ Still wanting your eyes: {', '.join(exceptions)}"
+                                  if exceptions else "\n\nAll children closed clean — nothing flagged.")
+                               + "\n\nFound by the idle Epic sweep (EU-734) rather than a child "
+                                 "landing, so no finished Epic can sit unnoticed. Close it to accept "
+                                 "the feature; reopen any child that is wrong.")
+                moved.append(ekey)
+                if audit is not None:
+                    audit.record("epic_ready_for_signoff", epic=ekey, app=app_name,
+                                 children=[c.get("key") for c in children],
+                                 exceptions=exceptions, via="sweep")
+            except Exception:  # noqa: BLE001 — one bad Epic must not sink the sweep
+                continue
+    if moved:
+        print(f"  · epic sweep: {len(moved)} Epic(s) ready for sign-off → QA: "
+              + ", ".join(moved), flush=True)
+    return moved
+
+
 def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
                    active_apps: set[str] | None = None) -> dict:
     """EU-398: at serve boot, reconcile In Progress tickets left dangling by a killed/crashed run.
@@ -2313,6 +2373,14 @@ async def autopilot(cfg: Config, app_name: str | None = None,
                     if _bl is not None:
                         _retire_backlogs[_a.name] = _bl
                 _reap_closed_branches(cfg, _retire_backlogs, audit)
+                # EU-734 "no zombies": the Epic roll-up fires when a CHILD completes, so it can
+                # only ever help an Epic whose last child finishes after the roll-up exists. One
+                # that finished earlier — or whose hand-off failed on a board hiccup — has nothing
+                # left to trigger it and sits open forever (16 found in that state on 2026-07-27).
+                # This idle-boundary sweep re-evaluates every open Epic so the guarantee does not
+                # depend on a single event. Same seam as the branch retirement above: idle only,
+                # best-effort, and it never blocks a start.
+                sweep_ready_epics(cfg, _retire_backlogs, audit)
             except Exception as _exc:  # noqa: BLE001 — housekeeping; never block an autopilot start
                 print(f"  · branch-retirement sweep skipped ({_exc})", flush=True)
 

@@ -166,8 +166,24 @@ class _EpicBacklog:
         self.children = children if children is not None else []
         self.fail_close = fail_close
         self.closed: list[tuple[str, str]] = []
-    def set_status(self, *a, **k): pass
-    def add_comment(self, *a, **k): pass
+        self.handed: list[tuple[str, str]] = []      # EU-734: (epic_key, status) hand-offs
+        self.comments: list[tuple[str, str]] = []    # EU-734: (epic_key, body)
+    # EU-734: the roll-up now hands the finished Epic to the Commander for sign-off (QA) instead of
+    # closing it, so the stub records the TRANSITION the way it used to record the close. Both are
+    # kept: `handed` is the new contract, `closed` proves nothing auto-closes any more.
+    def set_status(self, t, status=None, *a, **k):
+        key = getattr(t, "key", t)
+        if key == self.epic_key:
+            if self.fail_close:
+                raise RuntimeError("board down")
+            self.handed.append((key, status))
+    def add_comment(self, t, body="", *a, **k):
+        key = getattr(t, "key", t)
+        if key == self.epic_key:
+            self.comments.append((key, body))
+    def get_task(self, key):
+        import types as _t
+        return _t.SimpleNamespace(key=key, id=key)
     def parent_epic_key(self, key): return self.epic_key
     def epic_children(self, epic_key): return list(self.children)
     def close_ticket(self, ticket_id, comment="", audit=None):
@@ -228,13 +244,19 @@ try:
     bl = _EpicBacklog(children=_kids())
     au = _Audit()
     rep = land(VERIFY_TKT, bl, au)
-    chk("verify child + siblings Done/QA -> Epic closed", bl.closed
-        and bl.closed[0][0] == "EU-500", str(bl.closed))
-    chk("the close comment names the children",
-        bl.closed and "EU-501" in bl.closed[0][1] and "EU-502" in bl.closed[0][1],
-        str(bl.closed))
-    chk("epic_autoclosed audit event recorded (epic + children)",
-        any(e["event"] == "epic_autoclosed" and e.get("epic") == "EU-500" for e in au.events),
+    # EU-734 (Commander 2026-07-28, "ok do it - no zombies"): the Epic is his acceptance unit for
+    # the whole feature, so a finished Epic is now ROUTED TO QA for sign-off instead of closing
+    # itself — Jira must never assert an acceptance no human performed. The rest of EU-374's
+    # contract is unchanged and still asserted below: an open sibling keeps the Epic open, a board
+    # failure leaves it open, and a non-Epic parent is a no-op.
+    chk("all children finished -> Epic handed to QA for sign-off (EU-734)",
+        bl.handed and bl.handed[0] == ("EU-500", "QA"), str(bl.handed))
+    chk("…and NOTHING is auto-closed any more", not bl.closed, str(bl.closed))
+    chk("the hand-off comment names the children",
+        bl.comments and "EU-501" in bl.comments[0][1] and "EU-502" in bl.comments[0][1],
+        str(bl.comments)[:200])
+    chk("epic_ready_for_signoff audit event recorded (epic + children)",
+        any(e["event"] == "epic_ready_for_signoff" and e.get("epic") == "EU-500" for e in au.events),
         str([e["event"] for e in au.events]))
     chk("land still reports MERGED", rep.outcome == Outcome.MERGED, str(rep.outcome))
 

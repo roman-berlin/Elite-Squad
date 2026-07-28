@@ -256,6 +256,10 @@ def _gate_execution_evidence(app: AppConfig, gate, changed_paths: list[str] | No
                      + [f"$ {c}" for c in cmds])
 
 
+# EU-731: Epics whose roll-up already fired this process. See _maybe_close_epic.
+_EPIC_ROLLED_UP: set[str] = set()
+
+
 def _maybe_close_epic(backlog, ticket: Ticket, audit: AuditLog) -> None:
     """EU-374 (EU-301 step 5): close the parent Epic when its final VERIFY child lands.
 
@@ -275,9 +279,15 @@ def _maybe_close_epic(backlog, ticket: Ticket, audit: AuditLog) -> None:
     try:
         if getattr(ticket, "ephemeral", False):
             return
-        from . import scrum as _scrum
-        if not _scrum.is_verify_child(ticket.summary, ticket.description):
-            return
+        # EU-731: the `is_verify_child` gate that stood here was the ROOT CAUSE of 22 zombie Epics.
+        # Combined with this function's single call site (the land path), it meant the rollup got
+        # exactly ONE chance per Epic: if any sibling was still open when the verify child landed —
+        # which is common, since nothing orders the verify child last at PICK time — the check
+        # returned early and the Epic stayed open forever. Atlassian's own first-party rule
+        # re-evaluates the rollup on ANY child reaching a terminal state, and that is what this now
+        # does: every terminal path calls it, and any child can be the one that completes the set.
+        # The anti-vacuity guards below (snapshot must contain this child; every sibling terminal)
+        # do all the real safety work and are untouched.
         get_parent = getattr(backlog, "parent_epic_key", None)
         get_children = getattr(backlog, "epic_children", None)
         close = getattr(backlog, "close_ticket", None)
@@ -298,16 +308,45 @@ def _maybe_close_epic(backlog, ticket: Ticket, audit: AuditLog) -> None:
             print(f"  land · Epic {epic_key} stays open — sibling(s) not Done/QA yet: "
                   + ", ".join(str(k) for k in open_sibs), flush=True)
             return
-        kk = ", ".join((c.get("key") or "?") for c in children)
-        ok = close(epic_key,
-                   comment=(f"✅ All children landed ({kk}) and the verify child {ticket.id} just "
-                            "merged — closing this Epic (EU-374, auto-close on verify-child land)."),
-                   audit=audit)
+        # EU-731 idempotency: a child the Commander re-opens from QA and re-lands must not re-post
+        # the roll-up on an Epic he has already reviewed. In-process is the right scope — a restart
+        # re-evaluating once is harmless, and it avoids an audit scan on every land.
+        if epic_key in _EPIC_ROLLED_UP:
+            return
+        # EU-734 (Commander 2026-07-28: "no zombies", epic to QA for sign-off): the Epic is the
+        # human's acceptance unit for the whole feature, so it goes to QA rather than closing
+        # itself — Jira must never assert an acceptance no human performed. The children already
+        # carry their own machine verdict, so the hand-off names each one and flags the EXCEPTIONS
+        # (anything still in QA rather than Done) — that is the whole point of reviewing the parent:
+        # one look tells him what is finished and what still wants his eyes.
+        _rows, _exceptions = [], []
+        for c in children:
+            _k = c.get("key") or "?"
+            _st = (c.get("status") or "").strip() or "?"
+            _rows.append(f"• {_k} [{_st}] {(c.get('summary') or '')[:60]}")
+            if _st.strip().lower() != "done":
+                _exceptions.append(f"{_k} ({_st})")
+        _body = ("✅ Every child of this Epic has finished — it is ready for your sign-off.\n\n"
+                 + "\n".join(_rows)
+                 + (f"\n\n⚠️ Still wanting your eyes: {', '.join(_exceptions)}"
+                    if _exceptions else "\n\nAll children closed clean — nothing flagged.")
+                 + f"\n\nCompleted by {ticket.id}. Close this Epic to accept the feature; reopen any "
+                   "child that is wrong.")
+        ok = False
+        try:
+            _epic_ticket = backlog.get_task(epic_key)
+            backlog.set_status(_epic_ticket, "QA")
+            backlog.add_comment(_epic_ticket, _body)
+            ok = True
+        except Exception as _exc:  # noqa: BLE001 — an Epic left open is the safe direction
+            print(f"  land · Epic {epic_key} hand-off failed ({_exc}) — left open", flush=True)
         if ok:
-            audit.record("epic_autoclosed", ticket_id=ticket.id, epic=epic_key,
-                         children=[(c.get("key") or "?") for c in children])
-            print(f"  land · Epic {epic_key} closed — all children Done/QA "
-                  f"(verify child {ticket.id} landed).", flush=True)
+            _EPIC_ROLLED_UP.add(epic_key)
+            audit.record("epic_ready_for_signoff", ticket_id=ticket.id, epic=epic_key,
+                         children=[(c.get("key") or "?") for c in children],
+                         exceptions=_exceptions)
+            print(f"  land · Epic {epic_key} → QA for sign-off — all {len(children)} children "
+                  f"finished (completed by {ticket.id}).", flush=True)
     except Exception as exc:  # noqa: BLE001 — a board hiccup leaves the Epic open, never breaks a land
         print(f"  land · epic auto-close skipped ({exc})", flush=True)
 
@@ -2008,6 +2047,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 if _ev:
                     try:
                         backlog.set_status(ticket, "QA")
+                        # EU-731: re-evaluate the Epic roll-up here too. This used to fire ONLY from the land path,
+                        # so a child ending any other way never completed its Epic — 22 zombie Epics. Best-effort
+                        # and idempotent; a non-child ticket returns immediately (no parent).
+                        _maybe_close_epic(backlog, ticket, audit)
                         backlog.add_comment(
                             ticket, f"✅ Auto-closed to QA — {_ev}. The Planner verdicted "
                                     f"{_pres.verdict} and the work is already on origin/{app.base_branch}; "
@@ -2044,6 +2087,29 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     if _entry:
                         audit.record("planner_verdict_park", ticket_id=ticket.id,
                                      verdict=_pres.verdict, answer=(_pres.answer or "")[:600])
+                        # EU-730: land it in QA, not Blocked. EU-375's two safety properties are
+                        # untouched — nothing is auto-closed (QA still means the Commander confirms)
+                        # and no build is burned — but the COLUMN was wrong: nothing was built, so
+                        # there is no decision only he can make, just a recommendation to confirm.
+                        # Blocked is reserved for a genuine ask (measured: 1 of 128 park events in
+                        # the unit's history was an actual product decision). REFILE still parks —
+                        # rewriting a ticket IS the Commander's call.
+                        if _pres.verdict in ("CLOSE", "ANSWER"):
+                            try:
+                                backlog.set_status(ticket, "QA")
+                                # EU-731: re-evaluate the Epic roll-up here too. This used to fire ONLY from the land path,
+                                # so a child ending any other way never completed its Epic — 22 zombie Epics. Best-effort
+                                # and idempotent; a non-child ticket returns immediately (no parent).
+                                _maybe_close_epic(backlog, ticket, audit)
+                                backlog.add_comment(
+                                    ticket,
+                                    f"🔎 The Planner read this and judged **{_pres.verdict}** — not "
+                                    "work to build. Nothing was built and nothing was closed.\n\n"
+                                    f"Its reason: {(_pres.answer or _pres.approach or '')[:700]}\n\n"
+                                    "In QA for your check: close it if the Planner is right, or move "
+                                    "it back to To Do with a note to force a build.")
+                            except Exception:  # noqa: BLE001 — board hiccup must not break the park
+                                pass
                         _notify(cfg, f"⏸️ {ticket.id} — the Planner says {_pres.verdict}, not work to "
                                      f"build. Parked for your call (nothing closed).\n\n"
                                      + decisions.reply_hint(ticket.id))
@@ -2316,6 +2382,10 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     if not cfg.dry_run and not ticket.ephemeral:
                         try:
                             backlog.set_status(ticket, "QA")
+                            # EU-731: re-evaluate the Epic roll-up here too. This used to fire ONLY from the land path,
+                            # so a child ending any other way never completed its Epic — 22 zombie Epics. Best-effort
+                            # and idempotent; a non-child ticket returns immediately (no parent).
+                            _maybe_close_epic(backlog, ticket, audit)
                             backlog.add_comment(
                                 ticket, "✅ Auto-verified to QA (EU-396) — the Builder made no changes "
                                         "and the Reviewer independently audited the UNCHANGED tree and "
@@ -2338,6 +2408,13 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # Move the ticket off In Progress to Needs Human so the Commander can verify/close it.
             # The drain guard in intake.from_drain will skip tickets with recent no_changes outcomes.
             # EU-153: Post no-changes comment
+            # EU-730 (Commander 2026-07-26, on EU-697: "if it implemented and satisfied — why he
+            # needs me? just PM can close it"). A no-changes build WROTE NOTHING: there is no diff,
+            # no merge, nothing that can break. The only question is "is it really already done?",
+            # and QA is exactly the column where the Commander answers that — Blocked is for a
+            # decision only he can make. Measured: of 128 park events in the unit's whole history,
+            # 92 were red-base, 29 max-passes, 4 turn-limit, 1 budget and ONE was a real product
+            # decision; the no-changes class had been landing in Blocked and reading as "stuck".
             note = "Builder produced no changes — the acceptance criteria are already satisfied or this work was already completed by another ticket."
             if verify_findings_text:
                 # EU-396: attach the Reviewer's per-AC findings so the Commander's check is one
@@ -2354,11 +2431,26 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 commenter.post_comment(backlog, ticket.key, no_change_comment)
             if not cfg.dry_run and not ticket.ephemeral:
                 try:
-                    backlog.set_status(ticket, "Needs Human")
-                    backlog.add_comment(ticket, f"⛔ {note}\n\nVerify and close if already satisfied, or re-open with clarification if there's still work to do.")
+                    backlog.set_status(ticket, "QA")
+                    # EU-731: re-evaluate the Epic roll-up here too. This used to fire ONLY from the land path,
+                    # so a child ending any other way never completed its Epic — 22 zombie Epics. Best-effort
+                    # and idempotent; a non-child ticket returns immediately (no parent).
+                    _maybe_close_epic(backlog, ticket, audit)
+                    # EU-396 drew a real distinction — Reviewer-CONFIRMED vs merely claimed — and it
+                    # must not be lost now that both land in QA. The confident path (above) says
+                    # "Auto-verified"; this one says plainly that nobody verified it, so the
+                    # Commander knows which QA items need a real look and which are a formality.
+                    backlog.add_comment(
+                        ticket,
+                        f"🔎 {note}\n\n⚠️ NOT independently verified — the Reviewer could not confirm "
+                        "the claim, so check this one properly before closing.\n\n"
+                        "Nothing was built, so nothing can break — it is in QA for your check, not "
+                        "blocked. Close it if the work really is already done, or move it back to "
+                        "To Do with a note if something is still missing.")
                 except Exception:  # noqa: BLE001 - a comment failure must not break the run
                     pass
-            print(f"  🔵 {ticket.id}: no changes — moved to Needs Human for verification.", flush=True)
+            print(f"  🔵 {ticket.id}: no changes — moved to QA for verification (nothing was built).",
+                  flush=True)
             audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes="no changes — already satisfied"))
@@ -3219,8 +3311,10 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
             # "Manual steps to run" IS QA work; Blocked means "cannot proceed", and parking merged
             # code there buried it among genuine blockers. Blocked stays reserved for real parks.
             manual = None if cfg.mark_done_on_merge else _manual_test_block(build, review)
+            # EU-732: no manual steps => closed (machine-verified); manual steps => QA for a human.
             head = ("marked Done" if cfg.mark_done_on_merge
-                    else "moved to QA — manual test steps on the ticket" if manual else "moved to QA")
+                    else "moved to QA — manual test steps on the ticket" if manual
+                    else "closed — agent-QA verified, nothing needed your time")
             # Best-effort: the code IS merged at this point — a Jira hiccup here must degrade to a
             # log line, not propagate to _exception_report and mislabel a successful land as a
             # ticket_exception (which would strand the already-merged ticket In Progress).
@@ -3235,10 +3329,30 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                     audit.record("manual_test_required", ticket_id=ticket.id,
                                  gaps=list(getattr(review, "unverifiable_gaps", None) or [])[:8])
                 else:
-                    backlog.set_status(ticket, "Done" if cfg.mark_done_on_merge else "QA")
+                    # EU-732 (Commander 2026-07-26): a merged ticket with NO manual-test steps has
+                    # already passed every check a machine can make — the deterministic gate AND the
+                    # Reviewer's per-AC verification — and the Builder explicitly did not ask for a
+                    # human check. Sending it to QA anyway was a hardcoded default, not a decision:
+                    # measured on the live board, 56 of 79 QA items were exactly this shape, drowning
+                    # the 10 that genuinely needed his hands on the product. Those close here, with
+                    # the machine's QA evidence stated on the ticket so the close is auditable and
+                    # spot-checkable rather than silent. Anything needing a human still goes to QA
+                    # (the `manual` branch above), as does anything the Reviewer could not verify.
+                    _verdict = str(getattr(review, "verdict", "") or "PASS").upper()
+                    _acs = list(getattr(review, "verified_criteria", None)
+                                or getattr(review, "criteria", None) or [])
+                    _ac_line = (f"\n• Acceptance criteria verified: {len(_acs)}"
+                                if _acs else "\n• Acceptance criteria: checked against the diff")
+                    backlog.set_status(ticket, "Done")
                     backlog.add_comment(
                         ticket,
-                        f"✅ Merged to {app.base_branch} → {head}.\nWhat was done:\n{whatdone}{test_line}")
+                        f"✅ Merged to {app.base_branch} → closed.\n\n"
+                        f"AGENT QA — verified before closing:\n"
+                        f"• Gate: the full test suite passed on the merged tree\n"
+                        f"• Reviewer: {_verdict}{_ac_line}\n"
+                        f"• The Builder reported no steps needing a human\n\n"
+                        f"What was done:\n{whatdone}{test_line}\n\n"
+                        f"Reopen to To Do if this is wrong — nothing here needed your time.")
             except Exception as exc:  # noqa: BLE001 — tracker trouble never un-lands a merge
                 # EU-310: a lost post-merge transition strands the ticket In Progress, so the drain
                 # re-picks and rebuilds already-merged code (EU-307, 2026-07-14). Record it as an
@@ -3360,6 +3474,20 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                         f"🚨 Post-merge smoke FAILED on {app.base_branch}.\n"
                         f"• DEV is live with a failing smoke.\n"
                         f"• {smnote[:900]}")
+                    # EU-732 correctness: the smoke runs AFTER the post-merge transition, so a
+                    # ticket auto-closed as "agent-QA verified" may already be Done when the smoke
+                    # comes back red. That verdict is now false — the machine checks did NOT all
+                    # pass — so pull it back to QA for a human. Without this, the one signal that
+                    # says "DEV is live with a failing smoke" would be filed away as closed.
+                    # (The merge itself still stands; a red smoke never reverts — EU-60.)
+                    try:
+                        backlog.set_status(ticket, "QA")
+                        backlog.add_comment(
+                            ticket,
+                            "↩️ Moved back to QA — this had been auto-closed as agent-QA verified, "
+                            "but the post-merge smoke then failed, so it needs your eyes after all.")
+                    except Exception:  # noqa: BLE001 — tracker trouble never un-lands a merge
+                        pass
 
         # CI-conclusion (EU-251): for CI-relevant tickets, poll the REAL GitHub Actions conclusion
         # for the merge commit instead of certifying the Builder's self-report ("CI will go green")

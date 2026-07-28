@@ -150,6 +150,20 @@ def is_tracker_ticket(ticket) -> bool:
     return any(summary.startswith(f"[{tok}]") for tok in _TRACKER_TOKENS)
 
 
+def is_epic(ticket) -> bool:
+    """True for an Epic — a CONTAINER for child tickets, never buildable work itself.
+
+    EU-731: scrum.split decomposes an oversized ticket into an Epic + Task children, but nothing
+    stopped the drain from later picking the Epic itself off the board. EU-476 (the container for
+    the EU-458 split) was planned THREE times at ~$1.31 each — ~$3.94 — before parking, and the
+    effort sizer had even tagged it "sized XL … complexity: epic" while handing it to a builder
+    anyway. An Epic's acceptance criteria are its children's; building it directly is always waste.
+
+    Read from the ticket's own issue type, which the adapter already populates (jira.py:754) from
+    the `issuetype` field it already requests (jira.py:229) — so this costs nothing extra."""
+    return (str(getattr(ticket, "issue_type", "") or "").strip().lower() == "epic")
+
+
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
     """Pull ready tickets. With ``app_name=None`` this spans EVERY app that has a backlog — i.e. all
     connected Jiras — so Autopilot works across several Jira accounts at once. One connection failing
@@ -167,11 +181,14 @@ def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
         try:
             backlog = make_backlog(app)
             for ticket in backlog.get_ready_tasks(limit):
-                if is_tracker_ticket(ticket):
+                if is_tracker_ticket(ticket) or is_epic(ticket):
                     # 2026-07-21 (Commander: "401 invalid?"): [infra-signature] tickets are
                     # PATTERN TRACKERS the watchdog files — never buildable work. Skipping them
                     # here keeps them out of the drain AND the daily's "Next up" (same choke
                     # point), instead of burning a planner call per tracker to learn CLOSE.
+                    # EU-731: an EPIC is the same shape of mistake — a container whose acceptance
+                    # criteria belong to its children. EU-476 was planned 3x (~$3.94) before it
+                    # parked, having never built a line.
                     continue
                 items.append((app, ticket))
             LAST_DRAIN_ERRORS.pop(app.name, None)   # a clean fetch clears any prior error

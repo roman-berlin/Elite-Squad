@@ -161,11 +161,21 @@ cfg2 = mkcfg()
 app2 = cfg2.app("automatixy")
 rep2 = asyncio.run(loop._attempt(mkticket(), app2, cfg2, Git(), bl2, au2, loop.Budget(0), "autodev/AUTO-396"))
 chk("not confident -> Outcome.ESCALATED (today's behaviour preserved)", rep2.outcome == Outcome.ESCALATED, str(rep2.outcome))
-chk("not confident -> ticket parked to Needs Human", bl2.statuses == ["Needs Human"], str(bl2.statuses))
+# EU-730 (Commander 2026-07-26): the DESTINATION changed, the distinction did not. A no-changes
+# build wrote nothing, so it cannot break anything and belongs in QA — the column he sweeps — not
+# in Blocked, which is reserved for a decision only he can make (measured: 1 of 128 park events in
+# the unit's history was a real product decision). EU-396's substance is intact and re-asserted
+# below: the Reviewer is still consulted, the per-AC findings still travel with the ticket, and the
+# unverified case is still clearly marked so he knows which QA items need a real look.
+chk("not confident -> ticket lands in QA, not Blocked (EU-730)", bl2.statuses == ["QA"], str(bl2.statuses))
 chk("not confident -> no_changes_verify audited with confident=False", any(e["event"] == "no_changes_verify" and not e.get("confident") for e in au2.ev))
 chk("not confident -> plain no_changes escalate still audited", any(e["event"] == "no_changes" for e in au2.ev))
 chk("not confident -> Reviewer's per-AC findings attached to the parked comment", any("no offline-detection code" in c for c in bl2.comments), str(bl2.comments))
-chk("not confident -> NOT auto-closed to QA", "QA" not in bl2.statuses)
+chk("not confident -> NOT auto-closed (QA still means the Commander confirms; never Done)",
+    "Done" not in bl2.statuses and "Closed" not in bl2.statuses, str(bl2.statuses))
+chk("not confident -> the comment WARNS it was not independently verified (EU-730)",
+    any("NOT independently verified" in str(c) for c in getattr(bl2, "comments", [])),
+    str(getattr(bl2, "comments", []))[:200])
 
 
 # ---- C: verify_no_changes_enabled=False -> the Reviewer is never consulted (old behaviour) ----
@@ -184,7 +194,8 @@ cfg3 = mkcfg(verify_no_changes_enabled=False)
 app3 = cfg3.app("automatixy")
 rep3 = asyncio.run(loop._attempt(mkticket(), app3, cfg3, Git(), bl3, au3, loop.Budget(0), "autodev/AUTO-396"))
 chk("verify_no_changes_enabled=False -> Reviewer never consulted", len(calls) == 0, f"calls={len(calls)}")
-chk("verify_no_changes_enabled=False -> falls back to plain Needs-Human escalate", rep3.outcome == Outcome.ESCALATED and bl3.statuses == ["Needs Human"])
+chk("verify_no_changes_enabled=False -> Reviewer never consulted; still ESCALATED, now to QA (EU-730)",
+    rep3.outcome == Outcome.ESCALATED and bl3.statuses == ["QA"], str(bl3.statuses))
 
 
 print("\n================ EU-396 NO-CHANGES VERIFY QA ================")
