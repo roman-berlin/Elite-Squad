@@ -74,6 +74,10 @@ sync_base_after_merge: true # after a green live merge, bring <base> in your mai
 red_base_check: true        # Phase-2 §3.1 (the EU-174 killer): before the FIRST build pass, gate the CLEAN base
                             # tree; a red base BLOCKS the ticket (Telegram + Needs-you) instead of billing builds
                             # for a failure that predates the diff. Cached per base sha (state/red_base_cache.json)
+# autofiled_quota_per_n: 0   # EU-784: limits how often self-filed tickets enter the build queue during drain.
+                            # Value N = at most 1 autofiled pick per N consecutive picks (greedy, order-preserving).
+                            # Commander tickets always bump past quota; if only autofiled remain, head emits anyway.
+                            # 0 / absent = unlimited (backward-compatible). Set to e.g. 3 for 1-in-3 ratio.
 
 # --- post-merge safety net (Sentinel) ---
 sentinel_enabled: true      # ARMED: after a feature lands on <base>, Sentinel runs that app's `postmerge_commands`

@@ -415,6 +415,11 @@ class Config:
     #     builder->ERRORED+retry) — see orchestrator/agent.py `_timeout_for_tag`. ---
     officer_timeout_s: int = 900        # planner/reviewer/pm/adjutant/council/etc. (low-effort roles)
     builder_timeout_s: int = 3600       # builder — real code changes legitimately run long
+    # EU-784: limits how often autofiled tickets enter the build queue during drain selection.
+    # Value N = at most 1 autofiled per N consecutive picks (greedy, order-preserving).
+    # A Commander ticket bumps past the quota; if ONLY autofiled remain, head emits anyway.
+    # 0 (default) / absent = unlimited (backward-compatible).
+    autofiled_quota_per_n: int = 0
 
     # --- merge behaviour (auto-merge to dev if green) ---
     merge_to_dev: bool = True           # merge feature -> dev when review passes & dev stays green
