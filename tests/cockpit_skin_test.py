@@ -38,15 +38,19 @@ def chk(n, c, d=""):
 
 # ── tokens are pulled LIVE from the War Room's :root block (single source of truth) ──
 css = V._token_css()
-chk("token css is a :root{} style block + theme boot (2026-07-19)",
-    css.startswith("<style>:root{") and css.endswith("</script>") and "</style>" in css)
+chk("token css is a style block with :root{}, light override, and boot",
+    "<style>" in css and ":root{" in css and "</script>" in css and "</style>" in css)
 chk("token css carries the light override", "data-theme=light" in css)
 chk("token css carries the palette", "--accent" in css and "--bg" in css and "--ink" in css)
 chk("token css read live from warroom (not just fallback)", "--okline" in css)
 
-# fallback is self-consistent for offline/preview renders
-chk("fallback defines the same core tokens",
-    all(t in V._TOKENS_FALLBACK for t in ("--bg", "--ink", "--accent", "--ring", "--r-md")))
+# token css wraps warroom.THEME_TOKENS_CSS in <style> + _THEME_BOOT (EU-791)
+chk("token css is a valid style block with :root, light override, and boot",
+    "<style>" in css and ":root{" in css and "</script>" in css and "</style>" in css)
+# THEME_TOKENS_CSS defines the same core tokens (no fallback drift possible)
+from orchestrator.warroom import THEME_TOKENS_CSS
+chk("THEME_TOKENS_CSS defines the same core tokens",
+    all(t in THEME_TOKENS_CSS for t in ("--bg", "--ink", "--accent", "--ring", "--r-md")))
 
 # ── _wrap injects the tokens and skins via var() (so every standalone page inherits them) ──
 w = V._wrap("Forensics", "<p>x</p>")

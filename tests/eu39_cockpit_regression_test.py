@@ -1,10 +1,9 @@
 """EU-39 regression guards — the *behavioural* edges of the cockpit visual-refresh that
 the skin tests don't exercise:
 
-  1. ``_token_css`` FALLBACK path. The live path (regex out of ``warroom._PAGE``) is covered
-     by cockpit_skin_test; here we force the failure branch (no ``:root{}`` to match) and
-     prove the standalone pages still get a valid, self-contained token block instead of an
-     empty/broken ``<style>`` — so offline / preview / SDK-less renders never lose their skin.
+  1. ``_token_css`` emits ``THEME_TOKENS_CSS`` verbatim regardless of what's in
+     ``warroom._PAGE`` — EU-791 deleted the regex + fallback path. We prove that even if
+     ``_PAGE`` contains no ``:root{}``, ``_token_css()`` still returns a complete token block.
 
   2. ship-preview Jira deep-link HARDENING (EU-55/F12 dead-link fix). cockpit_skin_test proves
      a clean link renders; this pins the *fix itself*: the emitted anchor carries
@@ -43,27 +42,27 @@ def chk(n, c, d=""):
     results.append((n, bool(c), d))
 
 
-# ── 1) _token_css FALLBACK branch ────────────────────────────────────────────────
-# Live path first (sanity): a real :root block is present, so we read it, not the fallback.
+# ── 1) _token_css ALWAYS emits themes (EU-791: no fallback, no regex) ────────────
 live = V._token_css()
 chk("live path returns a :root token block (+ theme boot, 2026-07-19)",
-    live.startswith("<style>:root{") and "</style>" in live and "data-theme=light" in live)
+    "<style>" in live and ":root{" in live and "</style>" in live
+    and "data-theme=light" in live)
+chk("_token_css() wraps THEEME_TOKENS_CSS byte-identically",
+    live == "<style>" + warroom.THEME_TOKENS_CSS + "</style>" + V._THEME_BOOT)
 
-# Force the failure branch: blow away the :root{} the regex looks for.
-_saved = warroom._PAGE
-try:
-    warroom._PAGE = "<!doctype html><style>body{color:#fff}</style>"  # no :root{} to match
-    fb = V._token_css()
-finally:
-    warroom._PAGE = _saved
+# Prove independence from _PAGE content: change _PAGE, confirm _token_css()
+# stays the same (EU-791: it reads THEME_TOKENS_CSS, never scrapes _PAGE).
+_saved_page = warroom._PAGE
+warroom._PAGE = "<!doctype html><style>body{color:#fff}</style>"  # no :root{} at all
+fb = V._token_css()
+warroom._PAGE = _saved_page
 
-chk("fallback still yields a valid :root style block (+ theme boot, 2026-07-19)",
-    fb == "<style>" + V._TOKENS_FALLBACK + "</style>" + V._THEME_BOOT)
-chk("fallback is never an empty/broken <style>", fb.startswith("<style>:root{") and "</style>" in fb)
-chk("fallback carries the core palette + system tokens",
-    all(t in fb for t in ("--bg", "--ink", "--accent", "--ring", "--r-md", "--okline")))
-# and the live path is restored after the swap (no global leakage)
-chk("warroom._PAGE restored after fallback test", V._token_css() == live)
+chk("_token_css() ignores _PAGE content (reads THEME_TOKENS_CSS instead)",
+    fb == live)
+chk("even with broken _PAGE, token block is still complete (:root{} present)",
+    ":root{" in fb and "</style>" in fb and "data-theme=light" in fb)
+# and the live path is unaffected by the swap (no global leakage)
+chk("live path restored after _PAGE modification", V._token_css() == live)
 
 # ── shared git fixture for the ship-preview page ─────────────────────────────────
 tmp = Path(tempfile.mkdtemp())

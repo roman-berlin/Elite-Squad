@@ -8,7 +8,7 @@ Guards:
      raw 40px/30px font-size literal.
   3. ``_card``'s own output carries ``var(--r-xl)``, ``var(--surface)`` and an ``--s-*`` spacing
      token; the EU-296 foundation tokens stay mirrored between ``warroom._PAGE``'s ``:root``
-     block and ``cockpit_views._TOKENS_FALLBACK``.
+     block and ``warroom.THEME_TOKENS_CSS`` (the single source).
   4. ``_btn``'s own output carries ``var(--r-xl)`` and ``--s-*`` padding tokens, and the
      toolbar-button live call site (``_actbtn``/``_actbar``) renders through it.
   5. ``warroom._kpi_html`` routes numerals through ``cockpit_views._kpi_metric`` rather than
@@ -68,11 +68,13 @@ chk("_card output contains an --s-* spacing token", bool(re.search(r"var\(--s-\d
 chk("_card keeps the title", "Talk to the unit" in card, card)
 chk("_card keeps the trusted body HTML", "<p>body</p>" in card, card)
 
-# the EU-296 foundation tokens stay mirrored between _PAGE's :root block and _TOKENS_FALLBACK
+from orchestrator.warroom import THEME_TOKENS_CSS
+
+# the EU-296 foundation tokens are defined in the single-source THEME_TOKENS_CSS (EU-791)
 m_page = re.search(r":root\{[^}]*\}", warroom._PAGE)
 for tok in ("--t-xl", "--t-2xl", "--s-1", "--s-4", "--surface"):
     chk(f"{tok} defined in warroom._PAGE :root", bool(m_page) and f"{tok}:" in m_page.group(0), tok)
-    chk(f"{tok} defined in cockpit_views._TOKENS_FALLBACK", f"{tok}:" in V._TOKENS_FALLBACK, tok)
+    chk(f"{tok} defined in warroom.THEME_TOKENS_CSS", f"{tok}:" in THEME_TOKENS_CSS, tok)
 
 # ── 4) _btn: consumes --r-xl / --s-* padding, and the toolbar call site renders through it ──
 btn = V._btn("Run drill", cls="actbtn")

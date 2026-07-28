@@ -2,14 +2,11 @@
 color-role aliases, added ADDITIVELY to the single-source ``:root`` block.
 
 Guards:
-  1. every new token name appears in BOTH ``warroom._PAGE``'s ``:root`` block and
-     ``cockpit_views._TOKENS_FALLBACK`` (the mirror ``_token_css()`` falls back to);
-  2. the VALUE assigned to each new token is byte-identical between the two blocks
-     (mirror stays in sync);
-  3. ``_token_css()`` still extracts a single, valid ``:root{…}`` block via the
-     ``:root\\{[^}]*\\}`` regex — i.e. no nested ``{}`` was introduced;
-  4. the semantic-role tokens resolve to EXISTING palette vars (no new raw hex);
-  5. no pre-existing selector/declaration was touched — this file only asserts on
+  1. every new token name appears in ``warroom._PAGE``'s ``:root`` block (now via
+     ``THEME_TOKENS_CSS``, the single source of truth wired into ``_token_css()``);
+  2. ``_token_css()`` emits ``THEME_TOKENS_CSS`` verbatim inside ``<style>…</style>``;
+  3. the semantic-role tokens resolve to EXISTING palette vars (no new raw hex);
+  4. no pre-existing selector/declaration was touched — this file only asserts on
      additions, and a separate check confirms the pre-EU-296 token set is untouched.
 """
 import re
@@ -44,15 +41,14 @@ SEMANTIC = ["--surface", "--border", "--text", "--positive", "--critical"]
 NEW_TOKENS = SPACING + TYPE + SEMANTIC
 
 page = warroom._PAGE
-fallback = V._TOKENS_FALLBACK
+tokens = warroom.THEME_TOKENS_CSS   # EU-791: single source replaces fallback
 
 m_page = re.search(r":root\{[^}]*\}", page)
-m_fb = re.search(r":root\{[^}]*\}", fallback if fallback.startswith(":root{") else fallback)
+m_tok = re.search(r":root\{[^}]*\}", tokens)
 
-# ── 1) every new token name is present in BOTH blocks ────────────────────────────
+# ── 1) every new token name is present in warroom's :root block ─────────────────
 for tok in NEW_TOKENS:
-    chk(f"{tok} present in warroom._PAGE :root", m_page and f"{tok}:" in m_page.group(0), tok)
-    chk(f"{tok} present in cockpit_views._TOKENS_FALLBACK", f"{tok}:" in fallback, tok)
+    chk(f"{tok} present in warroom.THEME_TOKENS_CSS", m_tok and f"{tok}:" in m_tok.group(0), tok)
 
 
 def _value_of(block, tok):
@@ -60,21 +56,14 @@ def _value_of(block, tok):
     return mm.group(1) if mm else None
 
 
-# ── 2) values are byte-identical between the two blocks ─────────────────────────
-for tok in NEW_TOKENS:
-    v_page = _value_of(m_page.group(0), tok) if m_page else None
-    v_fb = _value_of(fallback, tok)
-    chk(f"{tok} value matches between _PAGE and fallback", v_page is not None and v_page == v_fb,
-        f"page={v_page!r} fallback={v_fb!r}")
-
-# ── 3) the :root{…} regex still extracts ONE valid, non-nested block ────────────
-chk("warroom._PAGE :root block still scrapes cleanly (no nested braces)",
-    m_page is not None and "{" not in m_page.group(0)[len(":root{"):-1])
-chk("_token_css() returns the token style block (+ light override + boot, 2026-07-19)",
-    V._token_css().startswith("<style>:root{") and "data-theme=light" in V._token_css()
+# ── 2) theme token css wraps THEEME_TOKENS_CSS verbatim ─────────────────────────
+expected_css = "<style>" + tokens + "</style>" + V._THEME_BOOT
+chk("_token_css() wraps THEME_TOKENS_CSS identically", V._token_css() == expected_css)
+chk("_token_css() returns valid style block + light override + boot",
+    V._token_css().startswith("<style>") and "data-theme=light" in V._token_css()
     and "</style>" in V._token_css())
 
-# ── 4) semantic-role tokens resolve to EXISTING palette vars, not new raw hex ────
+# ── 3) semantic-role tokens resolve to EXISTING palette vars, not new raw hex ────
 SEMANTIC_TARGETS = {
     "--surface": "--panel",
     "--border": "--line",
@@ -83,11 +72,11 @@ SEMANTIC_TARGETS = {
     "--critical": "--bad",
 }
 for tok, target in SEMANTIC_TARGETS.items():
-    v = _value_of(m_page.group(0), tok) if m_page else None
+    v = _value_of(tokens, tok)
     chk(f"{tok} resolves to existing palette var var({target})", v == f"var({target})", v)
     chk(f"{tok} introduces no raw hex", v is not None and "#" not in v, v)
 
-# ── 5) the pre-existing (EU-39) token set is untouched — additive only ──────────
+# ── 4) the pre-existing (EU-39) token set is untouched — additive only ──────────
 PRE_EXISTING = ("--bg:", "--panel:", "--panel2:", "--line:", "--line2:", "--ink:", "--dim:",
                  "--faint:", "--ok:", "--okbg:", "--okline:", "--warn:", "--warnbg:", "--warnline:",
                  "--bad:", "--badbg:", "--badline:", "--info:", "--infobg:", "--infoline:",
@@ -95,8 +84,8 @@ PRE_EXISTING = ("--bg:", "--panel:", "--panel2:", "--line:", "--line2:", "--ink:
                  "--r-sm:", "--r-md:", "--r-lg:", "--r-xl:", "--r-pill:",
                  "--shadow-1:", "--shadow-2:", "--shadow-3:", "--ring:", "--t-fast:")
 for tok in PRE_EXISTING:
-    chk(f"pre-existing token {tok.rstrip(':')} still declared in _PAGE", tok in (m_page.group(0) if m_page else ""))
-    chk(f"pre-existing token {tok.rstrip(':')} still declared in fallback", tok in fallback)
+    chk(f"pre-existing token {tok.rstrip(':')} still declared in THEME_TOKENS_CSS",
+        tok in tokens)
 
 print("\n=============== EU-296 DESIGN-TOKEN FOUNDATION QA ===============")
 passed = sum(1 for _, ok, _ in results if ok)

@@ -43,47 +43,6 @@ def _rel(dt) -> str:
     except (ValueError, TypeError, OSError):
         return ""
 
-# ── DESIGN TOKENS (EU-39) ─────────────────────────────────────────────────────
-# Slice 1 made the War Room's ``:root{…}`` block the single source of truth for the
-# cockpit's palette / radius / elevation / focus-ring. The standalone pages built
-# here (``_wrap`` chrome → forensics, chat, ship-preview, …) live in their OWN HTML
-# documents and never see that block, so they must inject it too. ``_token_css``
-# pulls it LIVE out of ``warroom._PAGE`` — re-skin there and every page follows — and
-# falls back to a bundled copy when that block can't be read (tests / offline preview).
-_TOKENS_FALLBACK = (
-    ":root{color-scheme:dark;"
-    "--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;"
-    "--ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;"
-    "--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;"
-    "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
-    "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
-    "--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;"
-    "--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;"
-    "--mono:ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;"
-    "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
-    "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
-    "--shadow-3:0 16px 40px rgba(0,0,0,.55);"
-    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);--t-fast:.15s ease;"
-    # 8pt spacing scale (EU-296) — mirrors _PAGE's :root block, kept byte-identical.
-    "--s-1:4px;--s-2:8px;--s-3:16px;--s-4:24px;--s-5:32px;--s-6:48px;"
-    # modular type scale (EU-296) — px-equivalents/usage documented on the _PAGE mirror.
-    "--t-xs:11px;--t-sm:12.5px;--t-md:14px;--t-lg:18px;--t-xl:24px;--t-2xl:32px;"
-    # semantic color-role aliases (EU-296) — map onto the existing palette above.
-    "--surface:var(--panel);--border:var(--line);--text:var(--ink);"
-    "--positive:var(--ok);--critical:var(--bad)}"
-    # 2026-07-19 theme pass — mirrors _PAGE's extra tokens + light override (kept in sync by
-    # the live extraction below; this fallback only serves tests / offline previews).
-    ":root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}"
-    ":root[data-theme=light]{color-scheme:light;"
-    "--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;"
-    "--ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;"
-    "--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;"
-    "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
-    "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
-    "--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;"
-    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;"
-    "--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}")
-
 # Applies the saved theme BEFORE first paint on every page that injects the tokens, so
 # sub-pages follow the War Room header's toggle with no flash.
 _THEME_BOOT = ("<script>try{document.documentElement.dataset.theme="
@@ -92,23 +51,10 @@ _THEME_BOOT = ("<script>try{document.documentElement.dataset.theme="
 
 def _token_css() -> str:
     """The slice-1 design tokens as a ``<style>:root{…}</style>`` block, so every standalone
-    cockpit page shares ONE palette source with the War Room (EU-39). Read live from
-    ``warroom._PAGE``; falls back to ``_TOKENS_FALLBACK`` when unavailable."""
-    try:
-        import re
-
-        from . import warroom
-        # 2026-07-19: grab the WHOLE token region — the dark :root, the extra-token :root, and
-        # the [data-theme=light] override — up to the END THEME TOKENS sentinel, so light mode
-        # flows to every standalone page from the one source in _PAGE.
-        m = re.search(r":root\{.*?/\* END THEME TOKENS \*/", warroom._PAGE, re.S)
-        if not m:
-            m = re.search(r":root\{[^}]*\}", warroom._PAGE)
-        if m:
-            return "<style>" + m.group(0) + "</style>" + _THEME_BOOT
-    except Exception:  # noqa: BLE001 - tests / preview render without the War Room module loaded
-        pass
-    return "<style>" + _TOKENS_FALLBACK + "</style>" + _THEME_BOOT
+    cockpit page shares ONE palette source with the War Room (EU-39). Uses the shared
+    ``warroom.THEME_TOKENS_CSS`` constant verbatim."""
+    from . import warroom
+    return "<style>" + warroom.THEME_TOKENS_CSS + "</style>" + _THEME_BOOT
 
 
 def _back_home() -> str:

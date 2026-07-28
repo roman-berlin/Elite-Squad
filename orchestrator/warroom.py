@@ -2356,7 +2356,607 @@ def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: 
             .replace("{{GEN}}", datetime.now().strftime("%H:%M:%S")))
 
 
+THEME_TOKENS_CSS = (
+    "/* ── DESIGN TOKENS (EU-39) ───────────────────────────────────────────────────────"
+    "   The single source of truth for the cockpit's look. Every surface below — and the"
+    "   other cockpit pages — pulls colour, radius, elevation, ring and motion from here,"
+    "   so a re-skin is one edit in this block, never a hunt through scattered literals. */"
+    ":root{color-scheme:dark;"
+    "/* palette */"
+    "--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;"
+    "--ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;"
+    "--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;"
+    "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
+    "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
+    "--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;--brand:#ff7a59;"
+    "--mono:ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;"
+    "/* corner radii */"
+    "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
+    "/* elevation (board-surface depth hierarchy) */"
+    "--shadow-1:0 1px 2px rgba(0,0,0,.35);"
+    "--shadow-2:0 8px 24px rgba(0,0,0,.45);"
+    "--shadow-3:0 16px 40px rgba(0,0,0,.55);"
+    "/* keyboard-focus ring + motion — shared so focus & transitions are uniform (a11y) */"
+    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(77,124,255,.6);"
+    "--t-fast:.15s ease;"
+    "/* 8pt spacing scale (EU-296) — additive foundation; nothing is rewired to consume these yet */"
+    "--s-1:4px; /* micro gap: icon-to-label spacing, tight inline gaps */"
+    "--s-2:8px; /* small gap: control padding, chip/tag spacing */"
+    "--s-3:16px; /* base gap: card padding, row gaps, standard margins */"
+    "--s-4:24px; /* medium gap: section padding, panel gutters */"
+    "--s-5:32px; /* large gap: section margin, major block spacing */"
+    "--s-6:48px; /* xl gap: page-level section margin, hero spacing */"
+    "/* modular type scale (EU-296) — will replace raw inline font-size numerals (e.g. the"
+    "   30/40px KPI numerals) in a later slice; additive only for now */"
+    "--t-xs:11px; /* micro labels, meta text, tags, timestamps */"
+    "--t-sm:12.5px; /* secondary body text, chips, list meta */"
+    "--t-md:14px; /* base body copy (matches body font-size) */"
+    "--t-lg:18px; /* section/run titles */"
+    "--t-xl:24px; /* group headers */"
+    "--t-2xl:32px; /* hero KPI numerals (e.g. the 30-40px inline KPI stat figures) */"
+    "/* semantic color-role aliases (EU-296) — map onto the existing palette so consumers"
+    "   read intent, not raw color; --warn already exists above and is reused as-is */"
+    "--surface:var(--panel); /* default elevated surface background */"
+    "--border:var(--line); /* default hairline border */"
+    "--text:var(--ink); /* default body text color */"
+    "--positive:var(--ok); /* success / good-state accent */"
+    "--critical:var(--bad)} /* error / bad-state accent */"
+    "/* deep-inset backgrounds that were hardcoded hexes before the 2026-07-19 theme pass */"
+    ":root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}"
+    "/* ── LIGHT THEME (2026-07-19) — toggled via <html data-theme=light>; persisted in"
+    "   localStorage('ui.theme') by the header toggle; every page consumes these through"
+    "   cockpit_views._token_css() so the whole cockpit follows one switch. ── */"
+    ":root[data-theme=light]{color-scheme:light;"
+    "--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;"
+    "--ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;"
+    "--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;"
+    "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
+    "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
+    "--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;"
+    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;--brand:#e8590c;"
+    "--shadow-1:0 1px 2px rgba(23,32,54,.08);"
+    "--shadow-2:0 8px 24px rgba(23,32,54,.12);"
+    "--shadow-3:0 16px 40px rgba(23,32,54,.16);"
+    "--ring:0 0 0 2px var(--bg),0 0 0 4px rgba(59,98,217,.5);"
+    "--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}"
+    "/* END THEME TOKENS */"
+    ""
+)
+
 _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>SQUAD — HQ</title>
+<style>
+""" + THEME_TOKENS_CSS + """*{box-sizing:border-box}
+/* Keyboard focus is visible on every interactive board surface (a11y): mouse clicks
+   stay clean (:focus-visible), but Tab navigation lands on a clear accent ring. */
+a.kpi:focus-visible,.offrow:focus-visible,.blrow:focus-visible,.blmore:focus-visible,
+.needrow:focus-visible,.needsok:focus-visible,.needall:focus-visible,.talkbtn:focus-visible,
+.recheck:focus-visible,.hbbtn:focus-visible,.apbtn:focus-visible,.stopbtn:focus-visible,
+.fitem a:focus-visible,select:focus-visible,summary:focus-visible{outline:none;box-shadow:var(--ring)}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;margin:0;color:var(--ink);
+background:radial-gradient(1100px 440px at 80% -10%,rgba(77,124,255,.10),transparent 60%),
+radial-gradient(820px 320px at 4% -6%,rgba(52,211,153,.045),transparent 55%),var(--bg);background-attachment:fixed}
+a{color:var(--info);text-decoration:none}
+.mono{font-family:var(--mono);font-size:.85em}
+.muted{color:var(--dim)}
+button{font:inherit}
+/* header */
+header{display:flex;align-items:center;gap:14px;padding:14px 26px;border-bottom:1px solid var(--line);
+background:linear-gradient(180deg,var(--panel),var(--bg));position:sticky;top:0;z-index:5;flex-wrap:wrap}
+.brand{font-size:15px;font-weight:750;letter-spacing:.4px;white-space:nowrap;text-transform:uppercase}
+.hosttag{margin-left:10px;font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:2px 9px;vertical-align:middle;letter-spacing:.06em;text-transform:lowercase}
+.brand b{color:var(--brand)}
+.brand .bmark{color:var(--brand)}
+header select{background:var(--well);border:1px solid var(--line2);color:var(--ink);border-radius:9px;
+padding:8px 12px;font:inherit;cursor:pointer}
+.spacer{flex:1}
+.gen{font-family:var(--mono);font-size:11px;color:var(--faint);letter-spacing:.02em}
+.sdot{display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--faint);margin-right:5px;vertical-align:middle}
+.sdot.on{background:var(--ok);box-shadow:0 0 7px var(--ok);animation:pulse2 1.6s infinite}
+.sdot.off{background:var(--warn)}
+/* health pill */
+.hpill{font-size:12px;font-weight:700;padding:6px 13px;border-radius:99px}
+.hpill.ok{color:var(--ok);background:var(--okbg);border:1px solid var(--okline)}
+.hpill.bad{color:var(--bad);background:var(--badbg);border:1px solid var(--badline)}
+.hd{position:relative}.hd>summary{list-style:none;cursor:pointer}
+.hd>summary::-webkit-details-marker{display:none}
+.hpanel{position:absolute;top:calc(100% + 8px);right:0;z-index:40;min-width:320px;background:var(--panel);
+border:1px solid var(--line2);border-radius:var(--r-lg);padding:10px;box-shadow:var(--shadow-3)}
+.hpi{font-size:12.5px;color:var(--dim);padding:5px 4px}
+.recheck{margin-top:9px;background:var(--line);border:1px solid var(--line2);color:var(--ink);border-radius:8px;
+padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer}
+/* autopilot switch */
+.apsw{display:flex;align-items:center;gap:9px;margin:0;padding:5px 6px 5px 13px;border:1px solid var(--line2);
+border-radius:99px;background:var(--well)}
+.apsw.on{border-color:var(--okline);background:var(--okbg)}
+.apdot{width:8px;height:8px;border-radius:99px;background:var(--faint)}
+.apdot.on{background:var(--ok);animation:pulse2 1.3s infinite}
+.aplabel{font-size:12px;color:var(--ink)}
+.apbtn{border:0;border-radius:99px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
+.apbtn.start{background:var(--accent);color:#fff}
+.apbtn.start:disabled{background:var(--line);color:var(--faint);cursor:not-allowed}
+.apbtn.stop{background:var(--bad);color:#fff}
+.apbtn.drain{background:var(--warn);color:#1a1205;margin-right:7px}
+/* health banner */
+.healthbar{padding:13px 26px}
+.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid var(--okline)}
+.healthbar.bad{background:linear-gradient(180deg,rgba(42,20,22,.6),transparent);border-bottom:1px solid #3a1a1c}
+.hbrow{display:flex;align-items:center;gap:14px}
+.hbtitle{display:flex;align-items:center;gap:11px;font-weight:650;font-size:14px;flex:1}
+.healthbar.ok .hbtitle{color:var(--ok)}.healthbar.bad .hbtitle{color:var(--bad)}
+.hbdot{width:11px;height:11px;border-radius:99px;flex:none}
+.healthbar.ok .hbdot{background:var(--ok);box-shadow:0 0 0 4px rgba(58,209,127,.13)}
+.healthbar.bad .hbdot{background:var(--bad);animation:pulse3 1.4s infinite}
+@keyframes pulse3{0%,100%{box-shadow:0 0 0 0 rgba(240,103,107,.45)}50%{box-shadow:0 0 0 8px rgba(240,103,107,0)}}
+.hbactions{display:flex;align-items:center;gap:12px}
+.themebtn{background:var(--panel2);border:1px solid var(--line2);color:var(--dim);width:34px;height:34px;
+border-radius:var(--r-md);font-size:16px;cursor:pointer;line-height:1;flex:none;margin-right:10px;
+transition:color var(--t-fast),border-color var(--t-fast)}
+.themebtn:hover{color:var(--ink);border-color:var(--accent)}
+.models{font-size:11px;color:var(--faint)}
+.hbbtn{background:var(--line);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:6px 13px;
+font-size:12px;font-weight:600;cursor:pointer}
+.hbissues{margin:11px 0 2px;padding:0;list-style:none;display:grid;gap:6px}
+.hbissues li{font-size:12.5px;color:var(--dim)}
+.tag{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:5px;margin-right:8px}
+.tag.bad{background:var(--badbg);color:var(--bad)}.tag.warn{background:var(--warnbg);color:var(--warn)}
+/* kpis */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;padding:22px 24px 8px}
+.kpi{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:16px 17px;
+overflow:hidden;box-shadow:var(--shadow-1);transition:border-color var(--t-fast),transform var(--t-fast),box-shadow var(--t-fast)}
+.kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--line2)}
+.kpi:hover{transform:translateY(-1px);border-color:var(--line2);box-shadow:var(--shadow-2)}
+a.kpi{display:block;text-decoration:none;color:inherit;cursor:pointer}
+a.kpi:hover{border-color:var(--accent)}
+.kpi .kv{font-family:var(--mono);font-size:30px;font-weight:600;line-height:1;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+.kpi .kl{font-size:11.5px;color:var(--ink);margin-top:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.kpi .kh{font-size:11px;color:var(--faint);margin-top:3px}
+.kpi.ok::before{background:var(--ok)}.kpi.ok .kv{color:var(--ok)}
+.kpi.warn::before{background:var(--warn)}.kpi.warn .kv{color:var(--warn)}
+.kpi.bad::before{background:var(--bad)}.kpi.bad .kv{color:var(--bad)}
+/* EU-145: Security blocks interactive card */
+.kpi{overflow:visible}
+.kpi summary{list-style:none;cursor:pointer}
+.kpi summary::-webkit-details-marker{display:none}
+.kpi summary.kpisum{padding:16px 17px}
+/* 2026-07-22 (Commander: "0 needs you and 0 security blocks seem to be on different levels").
+   A KPI renders two ways: <a class=kpi> for a plain tile, <details class=kpi><summary class=kpisum>
+   for an expandable one (the security card). Both got .kpi's own padding, and the details variant
+   then added summary.kpisum's padding INSIDE it — so its number started 16px lower than every
+   neighbour and the row of tiles read as misaligned. The summary owns the padding for that
+   variant; the container must not pay it twice. */
+details.kpi{padding:0}
+.kpi[open] summary.kpisum{padding-bottom:8px}
+.secissue{border-top:1px solid var(--line);padding:12px 17px}
+.sechead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.secticket{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--info);text-decoration:none}
+.secticket:hover{text-decoration:underline}
+.secmeta{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
+.secbody{font-size:12px;color:var(--dim);line-height:1.5;margin-bottom:10px;white-space:pre-wrap}
+.secreply{margin-top:8px}
+.secreply textarea{width:100%;background:var(--well);border:1px solid var(--line2);color:var(--ink);
+  border-radius:var(--r-sm);padding:8px 10px;font:inherit;font-size:11px;resize:vertical;min-height:50px;
+  margin-bottom:8px}
+.secreply textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring)}
+.secbtn{background:var(--accent);color:#fff;border:0;border-radius:var(--r-sm);padding:6px 12px;
+  font-size:11px;font-weight:600;cursor:pointer;transition:background var(--t-fast)}
+.secbtn:hover{background:#3b5ecc}
+.secempty{padding:12px 17px;color:var(--faint);font-size:12px;font-style:italic}
+.secmore{padding:8px 17px;font-size:11px;color:var(--dim);border-top:1px solid var(--line2)}
+.secmore a{color:var(--info);text-decoration:none}
+.secmore a:hover{text-decoration:underline}
+/* layout */
+.cols{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:14px 26px 40px}
+.col-main{display:flex;flex-direction:column;gap:16px;min-width:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-1)}
+.ph{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--dim);
+padding:13px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.ph::before{content:"";width:6px;height:6px;border-radius:2px;background:var(--accent)}
+/* active run */
+.run{padding:18px}
+.runhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:10px}
+.runhead .mono{font-size:15px;color:var(--ink);font-weight:600}
+.b{font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;text-transform:uppercase;letter-spacing:.06em}
+.b.live{color:var(--warn);background:var(--warnbg)}.b.muted{color:var(--dim);background:var(--panel2)}
+.b.mode{color:var(--ok);background:var(--okbg);box-shadow:0 0 0 1px var(--okline) inset}
+.b.dry{color:var(--info);background:var(--accentbg);box-shadow:0 0 0 1px var(--accentline) inset}
+.b.ok{color:var(--ok);background:var(--okbg)}.b.bad{color:var(--bad);background:var(--badbg)}.b.warn{color:var(--warn);background:var(--warnbg)}
+.phasebar{display:flex;gap:0;position:relative}
+.phasebar .ph{display:flex;flex-direction:column;align-items:center;gap:9px;flex:1;border:0;padding:0;text-transform:none;
+letter-spacing:.02em;font-size:11.5px;font-weight:600;color:var(--faint);position:relative}
+.phasebar .ph::before{display:none}
+.phasebar .ph::after{content:"";position:absolute;top:6px;left:50%;width:100%;height:2px;background:var(--line2);z-index:0}
+.phasebar .ph:last-child::after{display:none}
+.phasebar .ph span{width:13px;height:13px;border-radius:var(--r-pill);background:var(--bg);flex:none;border:2px solid var(--line2);z-index:1;position:relative;transition:background var(--t-fast),border-color var(--t-fast)}
+.phasebar .ph.done{color:var(--ink)}
+.phasebar .ph.done span{background:var(--ok);border-color:var(--ok);box-shadow:0 0 8px rgba(52,211,153,.5)}
+.phasebar .ph.done::after{background:var(--ok)}
+/* idle = a finished 'last run', not live -> grey the bar so it never reads as in-progress */
+.phasebar.idle .ph.done{color:var(--dim)}
+.phasebar.idle .ph.done span{background:var(--line2);border-color:var(--line2);box-shadow:none}
+.phasebar.idle .ph.done::after{background:var(--line2)}
+.phasebar .ph.now{color:var(--warn)}
+.phasebar .ph.now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
+/* failed = the run terminated at this phase -> red stopping node, never reads as cleanly-done */
+.phasebar .ph.failed,.phasebar.idle .ph.failed{color:var(--bad)}
+.phasebar .ph.failed span,.phasebar.idle .ph.failed span{background:var(--bad);border-color:var(--bad);box-shadow:0 0 8px rgba(240,103,107,.5)}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(245,179,74,.28)}50%{box-shadow:0 0 0 8px rgba(245,179,74,0)}}
+.runmeta{display:flex;gap:24px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);flex-wrap:wrap}
+.meta{font-size:12px;color:var(--dim)}.meta b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+/* EU-76: hero-merged header inside the Active Run panel */
+.runlive{align-items:flex-start!important}
+.runtitle{font-size:18px;font-weight:700;letter-spacing:-.25px;line-height:1.2;margin-bottom:4px}
+.runtapp{font-size:12.5px;color:var(--dim);font-weight:500;margin-left:9px;vertical-align:middle}
+/* EU-106: project label on the per-project Active-run panel header (text-transform:none so a name
+   like "Elite-Unit" isn't upper-cased by the .ph rule) */
+.boardproj{text-transform:none;letter-spacing:0;font-size:11.5px;font-weight:600;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+.runsub{font-size:12.5px;color:var(--dim)}.runsub b{color:var(--warn)}
+/* EU-710 (AC2): the run card's confirmed-stop chip — amber text + pulsing amber dot, shown in
+   place of 'Working' from the moment the slot's stop_event fires until release_run clears it
+   (render_board computes _run_html's `stopping` flag from that same event). EU-687: the flag
+   is ALSO persisted as st['stopping'] — set by the confirmed-stop paths, cleared in
+   release_run — and render_board ORs it in as the chip's primary source. Reuses the `pulse`
+   keyframes + --warn token so the chip matches the phasebar's amber 'now' treatment. */
+.runstopping{color:var(--warn);font-weight:600}
+.runstopping::before{content:"";display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--warn);margin-right:6px;animation:pulse 1.5s infinite;vertical-align:1px}
+.runempty{padding:26px 18px;color:var(--dim);display:flex;align-items:center;gap:10px}
+.dot2{width:8px;height:8px;border-radius:99px;background:var(--faint)}
+.stoprun{margin:0;display:inline}
+.stopbtn{background:var(--badbg);color:var(--bad);border:1px solid var(--badline);border-radius:var(--r-sm);
+padding:4px 11px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:background var(--t-fast)}
+.stopbtn:hover{background:#3a181b}
+/* EU-130: triage state bar */
+.triage-bar{margin-top:12px}
+.triage-bar .ph.triage-done{color:var(--ok)}
+.triage-bar .ph.triage-done span{background:var(--ok);border-color:var(--ok);box-shadow:0 0 8px rgba(52,211,153,.5)}
+.triage-bar .ph.triage-done::after{background:var(--ok)}
+.triage-bar .ph.triage-now{color:var(--warn)}
+.triage-bar .ph.triage-now span{background:var(--warn);border-color:var(--warn);animation:pulse 1.5s infinite}
+.triage-meta{font-size:12.5px;font-weight:600}
+/* roster */
+.roster{padding:6px 0}
+.offrow{display:flex;align-items:center;gap:12px;padding:10px 18px;border-left:2px solid transparent;transition:background var(--t-fast),border-left-color var(--t-fast)}
+.offrow:hover{background:var(--panel2);border-left-color:var(--accent)}
+a.offrow{text-decoration:none;color:inherit;cursor:pointer}
+.d{width:8px;height:8px;border-radius:99px;flex:none;background:var(--line2)}
+.d.live{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse2 1.4s infinite}
+.d.recent{background:var(--info)}.d.idle{background:var(--line2)}
+@keyframes pulse2{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}50%{box-shadow:0 0 0 5px rgba(52,211,153,0)}}
+.offmain{flex:1;min-width:0}.offname{font-weight:600;font-size:13px}
+.offrole{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}
+.offlast{font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap}
+/* feed */
+.feed{padding:5px 0;height:360px;min-height:120px;max-height:74vh;resize:vertical;overflow:auto}
+/* backlog — tickets to work, scoped to the project selector (all projects = every backlogged Jira) */
+.backlog{padding:4px 0 6px;height:260px;min-height:110px;max-height:74vh;resize:vertical;overflow:auto}
+.blhead{padding:6px 16px 4px}
+.blmore{font-size:11.5px;font-weight:700;color:var(--info)}
+.bllist{display:flex;flex-direction:column}
+.blrow{display:flex;gap:11px;align-items:baseline;padding:9px 16px;border-top:1px solid var(--line);color:var(--ink);transition:background var(--t-fast)}
+.blrow:hover{background:var(--panel2)}
+.blkey{font-family:var(--mono);font-size:12px;color:var(--info);white-space:nowrap}
+.blsum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.blapp{font-size:10.5px;font-weight:700;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-pill);padding:1px 8px;white-space:nowrap}
+.blempty{padding:14px 16px;color:var(--dim);font-size:13px}
+.fitem{display:flex;gap:11px;padding:9px 17px;border-top:1px solid var(--line)}
+.fitem:first-child{border-top:0}
+.fd{width:7px;height:7px;border-radius:99px;margin-top:6px;flex:none;background:var(--faint)}
+.fd.ok{background:var(--ok)}.fd.warn{background:var(--warn)}.fd.bad{background:var(--bad)}
+.fd.info{background:var(--info)}.fd.muted{background:var(--faint)}
+.fbody{font-size:13px;min-width:0}.fmeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:3px}
+.fbullets{margin:3px 0 2px 0;padding-left:15px;font-size:12px}.fbullets li{margin:1px 0;line-height:1.4}
+/* live log */
+.logbox{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--console-ink);background:var(--console);
+margin:0;padding:13px 16px;height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto;
+white-space:pre-wrap;word-break:break-word}
+.logbox .lg-b{color:var(--warn)}.logbox .lg-ok{color:var(--ok)}.logbox .lg-dim{color:var(--faint)}
+/* EU-200: live run log panel - same styles as logbox */
+.runlog{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--console-ink);background:var(--console);
+margin:0;padding:13px 16px;white-space:pre-wrap;word-break:break-word}
+/* EU-549: the #runlog DIV is the ONE scroll container. The inner <pre class=runlog> the JS renders
+   matches .runlog too, so both used to be 380px + overflow:auto — a scrollbox nested inside a
+   scrollbox (the inner pre captured the wheel and the outer panel never moved). Sizing + scroll now
+   live on div.runlog alone; the inner pre grows to fit its lines. */
+div.runlog{height:380px;min-height:150px;max-height:78vh;resize:vertical;overflow:auto}
+div.runlog pre.runlog{height:auto;overflow:visible;padding:0}
+.runlog .lg-b{color:var(--warn)}.runlog .lg-ok{color:var(--ok)}.runlog .lg-dim{color:var(--faint)}
+.runlog .logempty{color:var(--dim);font-style:italic;padding:13px 16px;}
+details.collapse{padding:0}
+details.collapse>summary{cursor:pointer;list-style:none;user-select:none}
+details.collapse>summary::-webkit-details-marker{display:none}
+details.collapse>summary::after{content:"\\25BE";float:right;color:var(--faint);font-size:11px;font-weight:400;transition:transform .15s;margin-top:1px}
+details.collapse[open]>summary::after{transform:rotate(180deg)}
+details.collapse>summary:hover::after{color:var(--ink)}
+details.collapse:not([open])>summary{opacity:.82}
+.logempty{padding:16px;color:var(--faint);font-size:12.5px}
+.lv{margin-left:auto;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.03em;
+padding:3px 9px;border-radius:6px;text-transform:none}
+.lv.work{color:var(--ok);background:var(--okbg)}
+.lv.work::after{content:"";display:inline-block;width:6px;height:6px;border-radius:99px;background:var(--ok);
+margin-left:7px;vertical-align:middle;box-shadow:0 0 6px var(--ok);animation:pulse2 1.4s infinite}
+.lv.quiet{color:var(--warn);background:var(--warnbg)}
+.lv.stuck{color:var(--bad);background:var(--badbg)}
+/* synced badge — which machines' audits are merged into this view */
+.synced{margin:6px 24px 0;font-size:11px;color:#5b6b86;letter-spacing:.02em}
+/* EU-298: a sync older than STALE_SYNC_CUTOFF_S reads as a warning, not as neutral chrome —
+   reuses the EU-285a --warn token rather than a new colour literal */
+.synced.stale{color:var(--warn)}
+/* hero — the live-run headline (biggest thing when a run is in flight) */
+.hero{margin:18px 24px 0;padding:16px 20px;border:1px solid var(--accentline);border-radius:var(--r-xl);
+background:linear-gradient(120deg,rgba(77,124,255,.14),rgba(245,179,74,.06));position:relative;overflow:hidden;box-shadow:var(--shadow-2)}
+.hgrow{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}
+.hgleft{display:flex;align-items:center;gap:14px;min-width:0}
+.hgdot{width:13px;height:13px;border-radius:99px;background:var(--warn);animation:pulse 1.5s infinite;flex:none}
+.hgtitle{font-size:22px;font-weight:700;letter-spacing:-.3px}
+.hgtitle .hgapp{font-size:13px;color:var(--dim);font-weight:500;margin-left:6px}
+.hgsub{font-size:13px;color:var(--dim);margin-top:2px}.hgsub b{color:var(--warn)}
+.hgchip{font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;text-transform:uppercase;letter-spacing:.05em}
+.hgchip.live{color:var(--ok);background:var(--okbg)}.hgchip.dry{color:var(--info);background:var(--accentbg)}
+.hgstats{display:flex;gap:26px}
+.hgstat{text-align:right}.hgk{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+.hgv{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+/* needs-you side panel + talk-to-the-unit */
+.needs{padding:6px 0}
+.needsok{display:flex;align-items:center;gap:9px;padding:14px 18px;color:var(--ok);text-decoration:none;font-size:13px}
+.nok{font-weight:800}
+.needrow{display:flex;align-items:flex-start;gap:11px;padding:10px 18px;text-decoration:none;color:inherit;border-left:2px solid transparent;transition:background var(--t-fast),border-left-color var(--t-fast)}
+.needrow:hover{background:var(--panel2);border-left-color:var(--warn)}
+.nd{width:8px;height:8px;border-radius:99px;margin-top:5px;flex:none;background:var(--faint)}
+.nd.ok{background:var(--ok)}.nd.warn{background:var(--warn)}.nd.bad{background:var(--bad)}
+.ndmain{min-width:0}.ndt{font-size:13px;font-weight:600;color:var(--ink)}
+.ndr{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;margin-top:1px}
+.needall{display:block;padding:11px 18px;font-size:12px;font-weight:650;color:var(--info);border-top:1px solid var(--line)}
+.needspanel .ph::before{background:var(--warn)}
+.talk{padding:6px;display:flex;flex-direction:column;gap:8px}
+.talkbtn{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-lg);
+background:var(--well);text-decoration:none;color:inherit;transition:border-color var(--t-fast),background var(--t-fast),transform var(--t-fast)}
+.talkbtn:hover{border-color:var(--accent);background:var(--panel2);transform:translateX(2px)}
+.tki{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;flex:none;
+font-size:17px;background:var(--accentbg);border:1px solid var(--accentline);border-radius:var(--r-md)}
+.tkbody{flex:1;min-width:0}
+.talkbtn b{display:block;font-size:13.5px}.talkbtn i{font-style:normal;font-size:11.5px;color:var(--dim)}
+.tkarrow{color:var(--faint);font-size:18px;flex:none;transition:color var(--t-fast)}
+.talkbtn:hover .tkarrow{color:var(--accent)}
+@media(max-width:1080px){.cols{grid-template-columns:1fr}.hgstats{gap:18px}}
+@media(max-width:680px){.kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.hbactions .models{display:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
+</style></head><body>
+<header>
+  <div class=brand><span class=bmark>&#x2B22;</span> SQUAD <b>·</b> HQ{{HOST}}</div>
+  {{PROJ}}
+  <div class=spacer></div>
+  {{AUTOPILOT}}
+  {{HEALTHPILL}}
+  <button id=themetoggle class=themebtn type=button title="Toggle light / dark" onclick="uiTheme()">&#9681;</button>
+  <span class=gen><span id=streamdot class="sdot off" title="live stream"></span>live · <span id=gentime>{{GEN}}</span></span>
+</header>
+{{HEALTHBAR}}
+{{BAR}}
+<div id=board>{{BOARD}}</div>
+<script>
+try{document.documentElement.dataset.theme=localStorage.getItem("ui.theme")||"dark"}catch(e){}
+function uiTheme(){try{var r=document.documentElement;
+  r.dataset.theme=r.dataset.theme==="light"?"dark":"light";
+  localStorage.setItem("ui.theme",r.dataset.theme);}catch(e){}}
+var APP="{{APP}}";
+function proj(v){APP=v;var p=new URLSearchParams(location.search);p.set("app",v);location.search="?"+p.toString();}
+document.addEventListener("click",function(e){
+  document.querySelectorAll("details[open]").forEach(function(d){
+    if(!d.classList.contains("collapse") && !d.contains(e.target)) d.removeAttribute("open");
+  });
+});
+// Collapsible Activity panel + resizable log panels live INSIDE #board, which the SSE feed re-renders
+// every frame — so persist their state and re-apply it after each refresh (otherwise it resets).
+function saveUi(){try{
+  ["actpanel","blpanel","secpanel"].forEach(function(id){var p=document.getElementById(id);
+    if(p)localStorage.setItem("ui.open."+id,p.open?"1":"0");});
+  ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);
+    if(el)localStorage.setItem("ui.scroll."+id,el.scrollTop);});
+}catch(e){}}
+function applyUi(){try{
+  ["actpanel","blpanel","secpanel"].forEach(function(id){var p=document.getElementById(id);
+    if(p){var v=localStorage.getItem("ui.open."+id);
+      if(v==="0")p.removeAttribute("open");else if(v==="1")p.setAttribute("open","");
+      p.addEventListener("toggle",saveUi);}});
+  ["logbox","blbox","actbox"].forEach(function(id){var el=document.getElementById(id);
+    if(el){var h=localStorage.getItem("ui.h."+id);if(h)el.style.height=h;
+      if(window.ResizeObserver)new ResizeObserver(saveUi).observe(el);}});
+}catch(e){}}
+function scrollLog(){var lb=document.getElementById("logbox");if(lb)lb.scrollTop=lb.scrollHeight;}
+function _atBottom(el){return (el.scrollHeight-el.scrollTop-el.clientHeight)<24;}
+function applyBoard(html){
+  saveUi();
+  var b=document.getElementById("board");if(!b)return;
+  // Remember each scroll panel's position so the 2s refresh doesn't yank you around while you read:
+  // if you were at the bottom (following live output) we keep you pinned there; otherwise we restore
+  // your exact scroll position instead of jumping to the top/bottom.
+  var keep={};
+  ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);
+    if(el)keep[id]={top:el.scrollTop,bottom:_atBottom(el)};});
+  // Focus guard — skip frame while user is typing so innerHTML doesn't wipe text or lose focus.
+  var ae=document.activeElement;
+  if(ae&&(ae.tagName==="TEXTAREA"||ae.tagName==="INPUT")&&b.contains(ae))return;
+  b.innerHTML=html;
+  applyUi();
+  ["logbox","blbox","actbox","runlog"].forEach(function(id){var el=document.getElementById(id);var k=keep[id];
+    if(el&&k)el.scrollTop=k.bottom?el.scrollHeight:k.top;
+    else if(el&&id==="logbox")el.scrollTop=el.scrollHeight;});
+}
+async function tick(){
+  try{
+    var r=await fetch("/api/board?app="+encodeURIComponent(APP),{cache:"no-store"});
+    if(r.ok)applyBoard(await r.text());
+  }catch(e){}
+}
+function setDot(s){var d=document.getElementById("streamdot");if(d)d.className="sdot "+s;}
+// Real-time: push board frames over SSE; fall back to the 5s poll if the stream drops.
+var _es=null,_poll=null;
+function fallback(){if(!_poll)_poll=setInterval(tick,5000);}
+function startStream(){
+  if(typeof(EventSource)==="undefined"){setDot("off");fallback();return;}
+  try{
+    _es=new EventSource("/api/stream?app="+encodeURIComponent(APP));
+    _es.addEventListener("board",function(e){applyBoard(e.data);setDot("on");var g=document.getElementById("gentime");if(g)g.textContent=new Date().toLocaleTimeString();});
+    _es.onopen=function(){setDot("on");if(_poll){clearInterval(_poll);_poll=null;}};
+    _es.onerror=function(){setDot("off");if(_es){_es.close();_es=null;}fallback();setTimeout(startStream,4000);};
+  }catch(e){setDot("off");fallback();}
+}
+applyUi();
+scrollLog();
+startStream();
+// EU-675: delegate dismiss-result button clicks — works for strips already present AND those added later via SSE/applyBoard.
+// Passes APP so the endpoint clears THIS tab's per-project state (the same state /api/board?app=APP renders from).
+document.addEventListener("click", function(e){
+  var btn=e.target.closest("[data-dismiss-result]");
+  if(!btn)return;
+  fetch("/api/dismiss-result?app="+encodeURIComponent(APP),{method:"POST"}).then(function(r){
+    return r.json().then(function(j){if(j.ok){var s=btn.closest("div");if(s)s.remove();}});
+  }).catch(function(){console.warn("[eu675] dismiss-result failed, strip left in place");});
+});
+// EU-200: Live run log streaming
+(function(){
+  var _runlogDone=false;
+  // EU-549: the one dim status line shown while the stream reconnects. Plain text, NOT markup —
+  // the leading · gets it the lg-dim class through renderRunlogLines' untouched dim branch, so the
+  // buffer never carries raw HTML and every line still goes through the escaper.
+  var RECONNECT_NOTE="· stream lost — reconnecting…";
+  var runlogPanel=document.getElementById("runlog");
+  if(!runlogPanel)return;
+
+  var logPath=runlogPanel.getAttribute("data-log-path");
+  if(!logPath){
+    runlogPanel.innerHTML='<div class=logempty>No active run log to display.</div>';
+    return;
+  }
+
+  /* EU-487: every Active-run card tails the SAME shared drain log, so the panel scopes
+     the stream to the newest card's ticket (cards render newest-first; the attribute
+     only exists on the multi-card path). No attribute (single-run board) → no &ticket=
+     and the stream URL is exactly what it was before EU-487. */
+  function readLogTicket(){
+    var hd=document.querySelector("div.run [data-log-ticket]");
+    return hd?(hd.getAttribute("data-log-ticket")||""):"";
+  }
+  var logTicket=readLogTicket();
+
+  var runlogEs=null;
+  var runlogBuffer=[];
+  var _runlogPoll=null;
+
+  function renderRunlogLines(){
+    // EU-549: re-query on every call — the board's innerHTML swap detaches the node captured once
+    // at startup, so writing to that cached reference rendered into a dead copy forever.
+    var rp=document.getElementById("runlog");
+    if(!rp)return;
+    if(runlogBuffer.length===0){
+      /* 2026-07-22: do NOT overwrite here. The server renders a live status placeholder
+         (stage / elapsed / last step) and refreshes it with the board; blanking it back to
+         a static string threw away the only information available during the silent first
+         pass of a run. Leave whatever the server put there until real lines arrive. */
+      return;
+    }
+
+    var linesHtml=runlogBuffer.map(function(line){
+      var low=line.toLowerCase();
+      var cls="";
+      if(low.includes('merged') || line.includes('✓') || low.includes(' pass') || low.includes('ready')){
+        cls="lg-ok";
+      }else if(/error|fail|park|block|✗|reject/.test(low)){
+        cls="lg-b";
+      }else if(/^·/.test(line) || /builder:|reviewer:/.test(low)){
+        cls="lg-dim";
+      }
+      return'<span class="'+cls+'">'+line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")+'</span>';
+    }).join("\\n");
+
+    // EU-549: the _atBottom scroll-keep pattern from applyBoard — pin to the bottom only if the
+    // user was already there; otherwise leave their reading position alone (new lines land on
+    // top, EU-637, so a top-anchored view needs no adjustment at all).
+    var wasAtBottom=_atBottom(rp);
+    rp.innerHTML='<pre class=runlog>'+linesHtml+'</pre>';
+    if(wasAtBottom)rp.scrollTop=rp.scrollHeight;
+  }
+
+  function startRunlogStream(){
+    if(!logPath)return;
+
+    try{
+      var runlogUrl="/api/run-log-stream?app="+encodeURIComponent(APP);
+      if(logTicket){runlogUrl+="&ticket="+encodeURIComponent(logTicket);}
+      runlogEs=new EventSource(runlogUrl);
+      runlogEs.addEventListener("log",function(e){
+        runlogBuffer.unshift(e.data);
+        // EU-549: a real line arrived — drop any stale reconnect notice so it doesn't sit
+        // in the panel after the stream recovered.
+        runlogBuffer=runlogBuffer.filter(function(l){return l!==RECONNECT_NOTE;});
+        // Keep buffer size manageable (last 1000 lines)
+        if(runlogBuffer.length>1000){
+          runlogBuffer=runlogBuffer.slice(0,1000);
+        }
+        renderRunlogLines();
+      });
+      runlogEs.addEventListener("done",function(e){
+        _runlogDone=true;
+        if(runlogEs){
+          runlogEs.close();
+          runlogEs=null;
+        }
+      });
+      runlogEs.onerror=function(){
+        // EU-549: reconnect like the board stream does (its 4s retry) instead of closing and never
+        // coming back. One dim status line says what's happening; it's deduped so repeated errors
+        // don't stack it, and removed again the moment a real line lands. After a normal 'done'
+        // the stream stays closed.
+        if(_runlogDone)return;
+        if(runlogEs){runlogEs.close();runlogEs=null;}
+        if(runlogBuffer.indexOf(RECONNECT_NOTE)<0){
+          runlogBuffer.unshift(RECONNECT_NOTE);
+        }
+        if(runlogBuffer.length>1000){runlogBuffer=runlogBuffer.slice(0,1000);}
+        renderRunlogLines();
+        setTimeout(startRunlogStream,4000);
+      };
+    }catch(e){
+      console.error("Failed to start run log stream:",e);
+    }
+  }
+
+  // Start the log stream
+  startRunlogStream();
+
+  // Update on board refresh (log path might change)
+  var originalApplyBoard=applyBoard;
+  applyBoard=function(html){
+    originalApplyBoard(html);
+    // EU-549: re-render buffered lines every frame so the live panel stays alive
+    // (the old cached node was detached by innerHTML swap).
+    renderRunlogLines();
+    // Restart log stream with new log path — or a new per-card ticket filter (EU-487:
+    // the newest card changed, or the board flipped between single- and multi-card).
+    var newPanel=document.getElementById("runlog");
+    if(newPanel){
+      var newPath=newPanel.getAttribute("data-log-path");
+      var newTicket=readLogTicket();
+      var pathChanged=newPath&&newPath!==logPath;
+      var ticketChanged=newTicket!==logTicket;
+      if(pathChanged||ticketChanged){
+        if(pathChanged)logPath=newPath;
+        logTicket=newTicket;
+        runlogBuffer=[];
+        _runlogDone=false; // EU-549: a freshly started stream may reconnect on error again
+        if(runlogEs){
+          runlogEs.close();
+          runlogEs=null;
+        }
+        if(logPath)startRunlogStream();
+      }
+    }
+  };
+})();
+</script>
+</body></html>""""""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>SQUAD — HQ</title>
 <style>
