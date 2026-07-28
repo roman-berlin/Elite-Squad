@@ -1553,100 +1553,192 @@ def _chat_tabs(active: str, npend: int = 0) -> str:
     return f'<div class=ctabs><a class="ctab {g}" href="/chat">&#128172; CTO{badge}</a></div>'
 
 
+# ── EU-122 / EU-760: provider budget gauge cards ────────────────────────────────────
+# Shared card markup + styles for the /usage subscription-limits panel (the merged home
+# of the old standalone gauge since EU-760) and the _dual_provider_gauge composition.
+
+_PROV_CARD_CSS = (
+    ".provcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}"
+    ".phead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}"
+    ".pname{color:var(--ink);font-size:15px;font-weight:700}"
+    ".pbrand{color:var(--dim);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
+    ".pstatus{display:flex;align-items:center;gap:8px;margin-bottom:10px}"
+    ".picon{font-size:14px}.picon.ok{color:#3fb950}.picon.warn{color:#d99a2b}.picon.bad{color:#f0676b}"
+    ".pstat{color:var(--dim);font-size:12px;font-weight:500;text-transform:uppercase}"
+    ".ppct{color:var(--ink);font-size:13px;font-weight:600;margin-left:auto}"
+    ".pgauge{margin:12px 0}"
+    ".pgbar{height:10px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
+    ".pgfill{display:block;height:100%;transition:width .3s ease}"
+    ".pgfill.g{background:#3fb950}.pgfill.a{background:#d99a2b}.pgfill.r{background:#f0676b}"
+    ".premain{color:var(--dim);font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
+    ".pmeta{color:var(--dim);font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
+    ".pnote{color:var(--dim);font-size:12px;margin-top:8px}"
+)
+
+
+def _alert_thresholds(cfg: Config) -> tuple[float, float]:
+    """The (warn, bad) utilization fractions that steer a gauge green → amber → red."""
+    warn = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
+    bad = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
+    return warn, bad
+
+
+def _no_tracking_card(name: str) -> str:
+    """EU-760: honest card for a provider with no connected usage ledger.
+
+    Never says 'unconfigured' / 'isn't set up yet' — the backend may well be configured
+    (e.g. Qwen running builds right now); we simply have no per-backend usage feed for it.
+    """
+    return (
+        '<div class=provcard>'
+        '<div class=phead>'
+        f'<span class=pname>{html.escape(name)}</span>'
+        '<span class=pbrand>usage tracking not connected</span>'
+        '</div>'
+        '<div class=pnote>Usage tracking not connected yet.</div>'
+        '</div>'
+    )
+
+
+def _ledger_card(name: str, brand: str, data: dict,
+                 warn_threshold: float, bad_threshold: float) -> str:
+    """One provider's budget gauge card rendered from a REAL usage ledger dict."""
+    # EU-540: plan-probe rows carry 'utilization' (fraction); glm_budget_status()/budget_status()
+    # carry 'pct' as a fraction (used/cap) with no 'utilization' key. Prefer 'utilization' when
+    # present (plan rows), else fall back to 'pct' so the GLM gauge reflects real ledger burn
+    # instead of a dead 0%. Both are 0.0–1.0 fractions here.
+    util = float(data.get("utilization", data.get("pct", 0.0)) or 0.0)
+    pct = int(util * 100)
+    wpct = min(100, max(0, pct))
+
+    # Calculate remaining percentage
+    remaining = max(0, 100 - pct)
+
+    # Reset time (if available)
+    reset = data.get("resets_in", "")
+    reset_meta = ""
+    if reset and reset not in ("now", ""):
+        reset_meta = f'<div class=pmeta>resets in {html.escape(str(reset))}</div>'
+    elif reset == "now":
+        reset_meta = '<div class=pmeta>resetting now</div>'
+
+    # Status indicator
+    if util >= bad_threshold:
+        status_icon = "&#9888;"  # warning icon
+        status_text = "critical"
+        tone, tone_cls = "bad", "r"
+    elif util >= warn_threshold:
+        status_icon = "&#9888;"
+        status_text = "low"
+        tone, tone_cls = "warn", "a"
+    else:
+        status_icon = "&#10003;"  # checkmark
+        status_text = "ok"
+        tone, tone_cls = "ok", "g"
+
+    aria = f"{html.escape(brand)} {pct}% used, {remaining}% remaining"
+
+    return (
+        '<div class=provcard>'
+        '<div class=phead>'
+        f'<span class=pname>{html.escape(name)}</span>'
+        f'<span class=pbrand>{html.escape(brand)}</span>'
+        '</div>'
+        '<div class=pstatus>'
+        f'<span class="picon {tone}">{status_icon}</span>'
+        f'<span class=pstat>{html.escape(status_text)}</span>'
+        f'<span class=ppct>{pct}% used</span>'
+        '</div>'
+        '<div class=pgauge>'
+        f'<div class=pgbar role=progressbar aria-valuemin=0 aria-valuemax=100 '
+        f'aria-valuenow={wpct} aria-label="{aria}">'
+        f'<span class="pgfill {tone_cls}" style="width:{wpct}%"></span>'
+        '</div>'
+        f'<div class=premain>{remaining}% remaining</div>'
+        '</div>'
+        + reset_meta +
+        '</div>'
+    )
+
+
+def _secondary_identity(cfg: Config) -> tuple[str | None, str]:
+    """EU-760: (canonical secondary backend id or None, display label) for the given config.
+
+    The id comes from the operator's sticky backend pref; the label from the model registry's
+    display_name when the secondary is a registry backend (e.g. Qwen), 'GLM' for the built-in
+    GLM backend, else a plain Title-cased id. Never raises — a pref/registry hiccup degrades
+    to (None, 'Secondary'), never breaks the render.
+    """
+    sec_id: str | None = None
+    try:
+        from . import backend_pref as _bp
+        sec_id = _bp.get_secondary(cfg)
+    except Exception:  # noqa: BLE001 — never break render on a pref read failure
+        return None, "Secondary"
+    if not sec_id:
+        return None, "Secondary"
+    try:
+        from . import backends as _bk
+        if sec_id == _bk.GLM:
+            return sec_id, "GLM"
+    except Exception:  # noqa: BLE001
+        pass
+    label = sec_id.title()
+    try:
+        from . import model_registry as _mr
+        rec = _mr.ModelRegistry(cfg).get(sec_id)
+        if rec and rec.get("display_name"):
+            label = rec["display_name"]
+    except Exception:  # noqa: BLE001 — never break render on registry read failure
+        pass
+    return sec_id, label
+
+
+def _secondary_provider_card(cfg: Config, glm_usage: dict | None) -> tuple[str, str]:
+    """EU-760: the secondary-provider card for /usage — (card_html, css).
+
+    Gate on the ACTUAL tracking signal, not on glm_usage being None (the /usage page always
+    passes a dict): the only genuine per-backend usage ledger we carry today is the GLM one
+    (usage.glm_budget_status — ledger rows stamped provider=='glm'). So the live ledger gauge
+    renders ONLY when the configured secondary IS GLM and its ledger is on. A configured
+    secondary with no connected tracking (e.g. Qwen — no per-backend ledger exists for it yet)
+    gets the honest 'usage tracking not connected yet' card; GLM's burn is NEVER displayed
+    under another backend's name, and nothing ever implies a configured backend is 'unset up'.
+    """
+    sec_id, label = _secondary_identity(cfg)
+    has_ledger = False
+    if sec_id is not None and bool(glm_usage) and glm_usage.get("on") is not False:
+        try:
+            from . import backends as _bk
+            has_ledger = sec_id == _bk.GLM
+        except Exception:  # noqa: BLE001
+            has_ledger = False
+    if has_ledger:
+        warn, bad = _alert_thresholds(cfg)
+        return _ledger_card(label, "Secondary", glm_usage or {}, warn, bad), _PROV_CARD_CSS
+    return _no_tracking_card(label), _PROV_CARD_CSS
+
+
 def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None = None) -> str:
-    """EU-122: Dual-provider budget gauge — shows Claude and GLM side-by-side with % remaining.
+    """EU-122: provider budget gauge — Claude and the configured secondary side-by-side.
 
     Each provider gets its own card with:
     - Provider name + brand label
     - Utilization percentage (visual bar + number)
-    - Low-watermark indicator (green → amber → red based on threshold)
+    - Status indicator (green → amber → red based on the alert thresholds)
     - Reset time (if available)
 
-    Pattern mirrors EU-118 plan_limit_banner for consistent alert styling.
+    The secondary card is the same _secondary_provider_card the /usage panel renders (EU-760):
+    it names the real configured backend and only shows numbers from a ledger that actually
+    belongs to it. Pattern mirrors EU-118 plan_limit_banner for consistent alert styling.
     """
-    from . import usage as _usg
+    warn_threshold, bad_threshold = _alert_thresholds(cfg)
 
-    # Low-watermark thresholds (configurable, with safe defaults)
-    warn_threshold = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
-    bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
-
-    def _gauge_tone(util: float) -> tuple[str, str]:
-        """Returns (tone_class, aria_label) for a utilization value."""
-        if util >= bad_threshold:
-            return "bad", "critical"
-        if util >= warn_threshold:
-            return "warn", "warning"
-        return "ok", "normal"
-
-    def _provider_card(name: str, brand: str, data: dict, is_placeholder: bool = False) -> str:
-        """Render a single provider's budget gauge card."""
-        if is_placeholder or not data:
-            # Placeholder for when GLM isn't configured yet
-            return (
-                '<div class=provcard>'
-                '<div class=phead>'
-                f'<span class=pname>{html.escape(name)}</span>'
-                f'<span class=pbrand>unconfigured</span>'
-                '</div>'
-                '<div class=pnote>This provider isn\'t set up yet. Add it to config.yaml to track its quota.</div>'
-                '</div>'
-            )
-
-        # EU-540: plan-probe rows carry 'utilization' (fraction); glm_budget_status()/budget_status()
-        # carry 'pct' as a fraction (used/cap) with no 'utilization' key. Prefer 'utilization' when
-        # present (plan rows), else fall back to 'pct' so the GLM gauge reflects real ledger burn
-        # instead of a dead 0%. Both are 0.0–1.0 fractions here.
-        util = float(data.get("utilization", data.get("pct", 0.0)) or 0.0)
-        pct = int(util * 100)
-        wpct = min(100, max(0, pct))
-        tone, aria_label = _gauge_tone(util)
-        tone_cls = {"ok": "g", "warn": "a", "bad": "r"}.get(tone, "g")
-
-        # Calculate remaining percentage
-        remaining = max(0, 100 - pct)
-
-        # Reset time (if available)
-        reset = data.get("resets_in", "")
-        reset_meta = ""
-        if reset and reset not in ("now", ""):
-            reset_meta = f'<div class=pmeta>resets in {html.escape(reset)}</div>'
-        elif reset == "now":
-            reset_meta = '<div class=pmeta>resetting now</div>'
-
-        # Status indicator (low-watermark)
-        if util >= bad_threshold:
-            status_icon = "&#9888;"  # warning icon
-            status_text = "critical"
-        elif util >= warn_threshold:
-            status_icon = "&#9888;"
-            status_text = "low"
-        else:
-            status_icon = "&#10003;"  # checkmark
-            status_text = "ok"
-
-        aria = f"{html.escape(brand)} {pct}% used, {remaining}% remaining"
-
-        return (
-            '<div class=provcard>'
-            '<div class=phead>'
-            f'<span class=pname>{html.escape(name)}</span>'
-            f'<span class=pbrand>{html.escape(brand)}</span>'
-            '</div>'
-            '<div class=pstatus>'
-            f'<span class="picon {tone}">{status_icon}</span>'
-            f'<span class=pstat>{html.escape(status_text)}</span>'
-            f'<span class=ppct>{pct}% used</span>'
-            '</div>'
-            '<div class=pgauge>'
-            f'<div class=pgbar role=progressbar aria-valuemin=0 aria-valuemax=100 '
-            f'aria-valuenow={wpct} aria-label="{aria}">'
-            f'<span class="pgfill {tone_cls}" style="width:{wpct}%"></span>'
-            '</div>'
-            f'<div class=premain>{remaining}% remaining</div>'
-            '</div>'
-            + reset_meta +
-            '</div>'
-        )
+    def _provider_card(name: str, brand: str, data: dict, no_tracking: bool = False) -> str:
+        """Render a single provider's budget gauge card (Claude side of this gauge)."""
+        if no_tracking or not data:
+            return _no_tracking_card(name)
+        return _ledger_card(name, brand, data, warn_threshold, bad_threshold)
 
     def _unknown_state_card(provider_name: str, brand: str) -> str:
         """EU-759: Unknown / unreadable live limits — grey card, never fake ok."""
@@ -1668,12 +1760,7 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
         if limits:
             # Sort by utilization descending, pick the worst one
             worst_limit = max(limits, key=lambda l: float(l.get("utilization", 0.0)))
-            claude_card = _provider_card(
-                "Claude",
-                "Max subscription",
-                worst_limit,
-                is_placeholder=False
-            )
+            claude_card = _provider_card("Claude", "Max subscription", worst_limit)
         else:
             # EU-759: available=True but no limits returned → unknown state (not blank)
             claude_card = _unknown_state_card("Claude", "Max subscription")
@@ -1681,37 +1768,19 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
         # EU-759: Claude data unavailable → unknown state (never fabricate ok/100%)
         claude_card = _unknown_state_card("Claude", "Max subscription")
 
-    # Build GLM card (placeholder if not configured)
-    glm_card = _provider_card(
-        "GLM",
-        "Secondary provider",
-        glm_usage or {},
-        is_placeholder=(glm_usage is None or not glm_usage)
-    )
+    # EU-760: the secondary card is resolved from the ACTUAL configured backend + its real
+    # tracking signal — shared with the /usage subscription-limits panel (single source of truth).
+    sec_card, _ = _secondary_provider_card(cfg, glm_usage)
 
     # Combine both cards in a side-by-side layout
     return (
         "<style>"
         ".dualprov{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:6px 0 20px}"
-        ".provcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}"
-        ".phead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}"
-        ".pname{color:var(--ink);font-size:15px;font-weight:700}"
-        ".pbrand{color:var(--dim);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}"
-        ".pstatus{display:flex;align-items:center;gap:8px;margin-bottom:10px}"
-        ".picon{font-size:14px}.picon.ok{color:#3fb950}.picon.warn{color:#d99a2b}.picon.bad{color:#f0676b}"
-        ".pstat{color:var(--dim);font-size:12px;font-weight:500;text-transform:uppercase}"
-        ".ppct{color:var(--ink);font-size:13px;font-weight:600;margin-left:auto}"
-        ".pgauge{margin:12px 0}"
-        ".pgbar{height:10px;background:var(--well);border-radius:6px;overflow:hidden;border:1px solid var(--line2)}"
-        ".pgfill{display:block;height:100%;transition:width .3s ease}"
-        ".pgfill.g{background:#3fb950}.pgfill.a{background:#d99a2b}.pgfill.r{background:#f0676b}"
-        ".premain{color:var(--dim);font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}"
-        ".pmeta{color:var(--dim);font-size:11px;margin-top:8px;font-family:ui-monospace,Menlo,monospace}"
-        ".pnote{color:var(--dim);font-size:12px;margin-top:8px}"
+        + _PROV_CARD_CSS +
         "@media(max-width:680px){.dualprov{grid-template-columns:1fr}}"
         "</style>"
         '<div class=dualprov>'
         f'{claude_card}'
-        f'{glm_card}'
+        f'{sec_card}'
         '</div>'
     )

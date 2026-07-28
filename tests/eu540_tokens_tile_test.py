@@ -19,7 +19,7 @@ sys.modules["requests"] = req
 
 sys.path.insert(0, ".")
 
-from orchestrator import usage, server, warroom
+from orchestrator import usage, server, warroom, backend_pref
 from orchestrator.config import Config, AppConfig
 
 results = []
@@ -180,7 +180,7 @@ glm_stat = usage.glm_budget_status(cfg)
 # GLM should be 0 for our seeded cfg. That's fine — the point is the gauge shows real data, not placeholder None.
 # Let's verify the /usage body doesn't say "unconfigured" for GLM when we have GLM data.
 
-# First check: with zero GLM, it still shouldn't show "unconfigured" since we pass real glm_budget_status() now
+# First check: EU-760 deleted the stale placeholder copy entirely — /usage never says 'unconfigured'.
 chk("AC5 /usage doesn't show 'unconfigured' anymore", "unconfigured" not in body_usage, "")
 
 # Now add real GLM rows and confirm gauge percent reflects them
@@ -198,19 +198,24 @@ chk("AC5 dual status includes live GLM data", dual["glm"].get("on") is True, "")
 
 # ── AC5 RENDER-LEVEL (review fix) ────────────────────────────────────────────────
 # It is not enough that glm_budget_status() returns the right number: the RENDERED /usage
-# GLM provider card must show a non-zero gauge that MATCHES that number. Re-fetch /usage now
-# that the GLM ledger is seeded (the page was first fetched at the top, before any GLM burn).
+# secondary-provider card must show a non-zero gauge that MATCHES that number. Re-fetch /usage
+# now that the GLM ledger is seeded (the page was first fetched at the top, before any GLM burn).
 # `client` is bound to the original `cfg`, and usage.configure() above pointed the global ledger
 # at the seeded GLM file — so /usage's glm_budget_status(cfg) reads the 50M of GLM burn.
+#
+# EU-760: the card carries the GLM ledger ONLY when the configured secondary IS GLM (otherwise
+# GLM's burn would be mislabeled under another backend). Pin GLM as this cfg's secondary —
+# hermetic: the pref store is anchored to cfg.audit_path's tmp parent, never operator state.
+backend_pref.set_secondary("glm", cfg)
 r_usage_glm = client.get("/usage")
 body_glm = r_usage_glm.get_data(as_text=True)
 glm_expected = int(usage.glm_budget_status(cfg)["pct"] * 100)  # closure cfg == /usage's cfg
 chk("AC5 render: expected GLM pct is non-zero", glm_expected > 0, f"expected={glm_expected}%")
 
-# Isolate the GLM card (2nd provcard) by anchoring on its pname marker, then bound the slice so
+# Isolate the GLM provider card by anchoring on its pname marker, then bound the slice so
 # we only ever match the GLM card's own gauge — never a later page section's 'width:NN%'.
 glm_anchor = body_glm.rfind("pname>GLM<")
-chk("AC5 render: /usage contains a GLM provider card", glm_anchor != -1, "")
+chk("AC5 render: /usage contains a GLM secondary card", glm_anchor != -1, "")
 glm_card_html = body_glm[glm_anchor:glm_anchor + 700] if glm_anchor != -1 else ""
 chk("AC5 render: GLM card shows 'NN% used' matching glm_budget_status pct",
     f"{glm_expected}% used" in glm_card_html, glm_card_html[:240])

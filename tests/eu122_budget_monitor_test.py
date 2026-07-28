@@ -565,14 +565,14 @@ def test_dual_provider_gauge_critical_threshold():
 
 
 def test_dual_provider_gauge_glm_placeholder():
-    """Test that _dual_provider_gauge shows GLM placeholder when not configured."""
+    """EU-760: no configured secondary → honest 'usage tracking not connected' card."""
     class MockConfig:
         budget_alert_pct = 0.80
         budget_bad_threshold = 0.95
 
     cfg = MockConfig()
 
-    # Claude available, GLM None (placeholder)
+    # Claude available, no GLM ledger
     claude_usage = {
         "available": True,
         "limits": [
@@ -588,17 +588,22 @@ def test_dual_provider_gauge_glm_placeholder():
         "probed_at": time.time()
     }
 
-    result = _dual_provider_gauge(cfg, claude_usage, glm_usage=None)
+    # Hermetic: pin the secondary pref to "none" (a bare MockConfig has no audit_path, so the
+    # pref read would otherwise fall back to the repo-root legacy file — operator-state leak).
+    with patch("orchestrator.backend_pref.get_secondary", return_value=None):
+        result = _dual_provider_gauge(cfg, claude_usage, glm_usage=None)
 
-    assert "GLM" in result, "Should show GLM provider name"
-    assert "unconfigured" in result, "Should show GLM as unconfigured"
-    assert "isn't set up yet" in result, "Should show setup instructions"
+    assert "Secondary" in result, "Should show the generic Secondary label"
+    assert "usage tracking not connected" in result, "Should show tracking-not-connected state"
+    assert "not connected yet" in result, "Should show 'not connected yet' copy"
+    assert "unconfigured" not in result, "No stale 'unconfigured' label"
+    assert "isn't set up yet" not in result, "No stale setup-instructions copy (EU-760)"
 
-    print("  ✓ _dual_provider_gauge shows GLM placeholder when not configured")
+    print("  ✓ _dual_provider_gauge shows Secondary with not-connected state when not configured")
 
 
 def test_dual_provider_gauge_both_providers():
-    """Test that _dual_provider_gauge renders both providers when GLM data is provided."""
+    """EU-760: secondary configured as GLM → its REAL ledger numbers render under the GLM name."""
     class MockConfig:
         budget_alert_pct = 0.80
         budget_bad_threshold = 0.95
@@ -629,16 +634,19 @@ def test_dual_provider_gauge_both_providers():
         "resets_in": "6d",
     }
 
-    result = _dual_provider_gauge(cfg, claude_usage, glm_usage)
+    # The GLM ledger belongs under the GLM label ONLY when the configured secondary IS GLM
+    # (EU-760 honest attribution) — pin it so this test never reads operator state.
+    with patch("orchestrator.backend_pref.get_secondary", return_value="glm"):
+        result = _dual_provider_gauge(cfg, claude_usage, glm_usage)
 
     assert "Claude" in result, "Should show Claude provider"
-    assert "GLM" in result, "Should show GLM provider"
+    assert "GLM" in result, "Configured GLM secondary should be named GLM"
     assert "60% used" in result, "Should show Claude utilization"
     assert "40% used" in result, "Should show GLM utilization"
     assert "40% remaining" in result, "Should show Claude remaining"
     assert "60% remaining" in result, "Should show GLM remaining"
 
-    print("  ✓ _dual_provider_gauge renders both providers (Claude 60%, GLM 40%)")
+    print("  ✓ _dual_provider_gauge renders both providers (Claude 60%, GLM 40%) when secondary=GLM")
 
 
 def test_dual_provider_gauge_resets_now():

@@ -59,8 +59,8 @@ from .cockpit_views import (  # noqa: F401
     _chat_inner,
     _chat_tabs,
     _control_bar,
-    _dual_provider_gauge,
     _result_strip,
+    _secondary_provider_card,
     _wrap,
     _working,
 )
@@ -3101,6 +3101,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
             ".plan .pnote{color:var(--dim);font-size:12px;margin-top:8px}"
             # EU-540 — qwen quota line (compact, dim)
             ".qwen-q{color:var(--dim);font-size:11.5px;margin:8px 0;font-family:ui-monospace,Menlo,monospace}"
+            # EU-760 — the merged subscription-limits panel: Claude's live plan rows + the
+            # configured secondary's card side by side (one panel, no duplicate Claude meter).
+            ".sublimits{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:16px;align-items:start}"
+            ".sublimits .plan{margin:0}"
+            "@media(max-width:900px){.sublimits{grid-template-columns:1fr}}"
             "</style>")
 
         # EU-77 — the REAL Claude Max ceiling (session / weekly · all models / per-model), read live.
@@ -3117,6 +3122,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                         "<div class=pnote>Live subscription limits aren’t machine-readable right now "
                         "(CLI probe unavailable) — falling back to the unit’s own token ledger below "
                         "(the daily-budget gauge). They’ll appear here when the probe can reach them."
+                        "</div></div>")
+            if not pu.get("limits"):
+                # EU-759/EU-760: probe claims available but returned no limits — never render an
+                # empty panel (the pre-EU-759 gauge fabricated ok/100% in this state); say it's unknown.
+                return ("<div class=plan>" + head +
+                        "<div class=pnote>&#8505;&nbsp;can't read live limits right now — the probe "
+                        "returned none. The unit’s own token ledger below (the daily-budget gauge) "
+                        "still tracks spend; the limits reappear when the probe can read them."
                         "</div></div>")
             rows = []
             for lim in pu.get("limits", []):
@@ -3181,18 +3194,18 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         else:
             mixbanner = ""
 
-        # The live subscription ceiling (EU-77) sits beside the own-ledger daily-budget gauge (EU-75):
-        # one shows the real plan cap, the other the unit's self-imposed budget. Best-effort probe.
-        plan = plan_panel(_usage.plan_usage(cfg))
-
-        # EU-122 / EU-540: Dual-provider budget gauge — Claude + GLM side-by-side, live data.
-        # Pass real glm_budget_status() instead of placeholder None so the secondary gauge
-        # shows actual numbers from the ledger, not a dead 0%. glm_budget_status() carries the
-        # fraction as 'pct' (no 'utilization' key); _provider_card falls back to 'pct'. The GLM
-        # daily ceiling resets at midnight, so annotate resets_in for the card's meta line.
-        glm_usage = {**_usage.glm_budget_status(cfg), "resets_in": "midnight"}
-        dual_gauge = _dual_provider_gauge(cfg, _usage.plan_usage(cfg), glm_usage=glm_usage)
-        # EU-540: one compact Qwen Token-Plan quota line under the dual-gauge if available
+        # EU-760: ONE merged subscription-limits panel — the live Claude Max ceiling (EU-77,
+        # computed exactly once) with the configured secondary's card folded in beside it.
+        # The secondary card (cockpit_views._secondary_provider_card) names whichever backend is
+        # actually configured and shows numbers ONLY from a ledger that belongs to it (GLM today);
+        # any other configured secondary gets "usage tracking not connected yet" — GLM's burn is
+        # never mislabeled as another backend. The own-ledger daily-budget bar (EU-75) below stays
+        # separate: it tracks the unit's self-imposed budget, not the subscription ceiling.
+        pu = _usage.plan_usage(cfg)
+        sec_card, sec_css = _secondary_provider_card(
+            cfg, {**_usage.glm_budget_status(cfg), "resets_in": "midnight"})
+        limits_panel = (sec_css + '<div class=sublimits>' + plan_panel(pu) + sec_card + '</div>')
+        # EU-540: one compact Qwen Token-Plan quota line under the limits panel if available
         qwen_line = ""
         try:
             qw = _usage.qwen_quota_status(cfg)
@@ -3201,48 +3214,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception:  # noqa: BLE001 — never break render on quota read failure
             pass
 
-        body = (style + dual_gauge + qwen_line + plan + budget + mixbanner + "<div class=ugrid>"
+        body = (style + limits_panel + qwen_line + budget + mixbanner + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
 
     @app.get("/budget")
-    def budget_page() -> str:
-        """EU-122: Dedicated budget page — dual-provider budget monitor with Claude + GLM side-by-side.
-
-        Shows a focused view of both providers' budget status with:
-        - Claude Max plan limits (live subscription data)
-        - GLM quota (placeholder until backend integration)
-        - Low-watermark indicators (green → amber → red)
-        - Reset times and remaining percentages
-        """
-        from . import usage as _usage
-
-        style = (
-            "<style>"
-            ".budgetpage{max-width:900px;margin:0 auto;padding:20px 0}"
-            ".bhead{color:var(--ink);font-size:22px;font-weight:700;margin-bottom:18px}"
-            ".bsubhead{color:var(--dim);font-size:14px;margin-bottom:24px}"
-            "</style>")
-
-        # EU-540: pass real GLM budget status instead of placeholder None. glm_budget_status()
-        # carries the fraction as 'pct'; _provider_card falls back to 'pct' for the gauge width.
-        claude_usage = _usage.plan_usage(cfg)
-        glm_usage = {**_usage.glm_budget_status(cfg), "resets_in": "midnight"}
-
-        # Render the dual-provider gauge
-        dual_gauge = _dual_provider_gauge(cfg, claude_usage, glm_usage)
-
-        # Additional explanation text
-        expl = (
-            '<div class=bsubhead>'
-            'Track remaining budget across all configured providers. '
-            'Low-watermark indicators show when a provider is running low (amber) or critical (red).'
-            '</div>'
-        )
-
-        return _wrap("Budget monitor", style + "<div class=budgetpage>"
-                     '<div class=bhead>Dual-provider budget monitor</div>' + expl + dual_gauge + "</div>")
+    def budget_redirect() -> Response:
+        """Retired: merged into /usage (EU-760)."""
+        return redirect("/usage")
 
     @app.get("/jira")
     def jira_page() -> str:
