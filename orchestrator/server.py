@@ -1638,7 +1638,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                     '<div class=trun>'
                     '<label><input type=checkbox name=dryrun> dry run (build only — no merge)</label>'
                     f'<select name=effort><option value="">effort: auto-size</option>{effort}</select>'
-                    f'<button id=devbtn disabled>&#9654; {html.escape(btn_label)} <span id=devcount></span></button>'
+                    # EU-741: data-eu-inflight-btn opts this native POST button into the shared
+                    # in-flight helper (cockpit_views._INFLIGHT_BUTTON_HELPER) — on submit it
+                    # disables + relabels to '⏳ developing…' for the duration of intake.from_tickets.
+                    # Keep this button VALUE-LESS (no name/value): lock() disables it mid-submit, so a
+                    # name/value here would be dropped from the POST (see _INFLIGHT_BUTTON_HELPER).
+                    f'<button id=devbtn data-eu-inflight-btn="⏳ developing…" disabled>'
+                    f'&#9654; {html.escape(btn_label)} <span id=devcount></span></button>'
                     '<span class=hint>default builds + merges to DEV — tick "dry run" to build only</span>'
                     '</div></form>'
                     # live count + disabled-at-zero: updates on every checkbox flip (incl. Select all)
@@ -2795,8 +2801,12 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # briefly shows the note AND the result strip — the note is one-shot (popped just
         # above), the strip persists until dismissed.
         res_strip = page_result_strip(appq or None)
+        # EU-741: data-eu-inflight-btn opts this VALUE-LESS submit button into the shared in-flight
+        # helper (_INFLIGHT_BUTTON_HELPER) — lock() disables it mid-submit for the full synchronous
+        # reconcile, so keep it name/value-free or that value would be dropped from the POST.
         sync_btn = ("<form method=post action=/api/needs-sync style='margin:0 0 14px'>"
-                    "<button class='nbtn x' title='Check every item against live Jira NOW — items "
+                    "<button class='nbtn x' data-eu-inflight-btn='⏳ syncing…' "
+                    "title='Check every item against live Jira NOW — items "
                     "whose ticket you already moved (Done/QA) or re-queued (To Do) in Jira are "
                     "cleared'>&#8635; Sync with Jira</button></form>")
         if not s.get("total"):

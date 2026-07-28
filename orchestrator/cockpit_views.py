@@ -282,6 +282,68 @@ window.euInflightSelect(n,fn);
 </script>"""
 
 
+# EU-741: the shared in-flight <button> submit helper — the button analogue of
+# ``_INFLIGHT_SELECT_HELPER`` (EU-717). 'Develop selected', 'Sync with Jira', and 'Add
+# backend' each fire a SYNCHRONOUS handler that can block for seconds while the cockpit
+# gives zero UI feedback: intake.from_drain (Develop), needs_sync.reconcile (Sync), and
+# backends.classify_model_tier (Add backend). The operator gets no signal the click landed
+# and can double-click into duplicate requests.
+#
+# Each button declares its busy label via ``data-eu-inflight-btn="<text>"``; the bootstrap
+# scans ``button[data-eu-inflight-btn]`` and binds the FORM's ``submit`` event (NOT click) so
+# the lock only engages once native constraint-validation has PASSED — an invalid Add-backend
+# form (missing required field) never locks its button. On submit the button is disabled +
+# relabelled to its busy text and ``aria-busy`` is set; a second click is a no-op
+# (``if(btn.disabled||locked)return``) so no duplicate POST can fire while one is in flight.
+# VALUE-LESS-BY-DESIGN (PM decision EU-741): the opt-in buttons carry NO ``name``/``value``,
+# so disabling them inside the submit handler drops ZERO POST data — the only residual risk is
+# a future edit adding a valued button, which would have its name/value dropped. The ``lock()``
+# body carries the same guard at the call site; if a valued button is ever needed, mirror its
+# value into a hidden field before disabling (as ``_INFLIGHT_SELECT_HELPER`` does for selects).
+# The form is still a native POST + 302, so the page reloads on completion and the button
+# reverts naturally; the 10s restore + the bfcache ``pageshow`` hook are safety nets so a
+# button can never lock up if navigation is blocked or the user returns via back-forward
+# cache. Additive like ``_SUBMIT_HELPER``: pages with no ``button[data-eu-inflight-btn]``
+# are untouched. Pinned by ``tests/eu741_inflight_button_test.py``.
+_INFLIGHT_BUTTON_HELPER = """<script>
+window.euInflightBtn=function(btn,label){
+if(!btn||btn.__eu741)return btn;
+btn.__eu741=true;
+var form=btn.form;if(!form)return btn;
+var prevHTML=null,locked=false;
+function restore(){
+if(!locked)return;
+locked=false;
+btn.disabled=false;
+btn.removeAttribute('aria-busy');
+if(prevHTML!==null){btn.innerHTML=prevHTML;prevHTML=null;}
+}
+function lock(){
+// EU-741 VALUE-LESS-BY-DESIGN: these submit buttons must stay value-less (no name/value) —
+// lock() disables them mid-submit, so any name/value would be dropped from the POST. If a
+// valued button is ever needed, mirror its value into a hidden field BEFORE disabling, as
+// _INFLIGHT_SELECT_HELPER does for selects.
+if(btn.disabled||locked)return;
+prevHTML=btn.innerHTML;
+locked=true;
+btn.disabled=true;
+btn.setAttribute('aria-busy','true');
+btn.innerHTML=label;
+setTimeout(restore,10000);
+}
+form.addEventListener('submit',lock);
+window.addEventListener('pageshow',function(e){if(e.persisted)restore();});
+return btn;
+};
+(function(){
+var nodes=document.querySelectorAll('button[data-eu-inflight-btn]');
+for(var i=0;i<nodes.length;i++){
+window.euInflightBtn(nodes[i],nodes[i].getAttribute('data-eu-inflight-btn')||'⏳ …');
+}
+})();
+</script>"""
+
+
 def _wrap(title: str, inner: str) -> str:
     """Page chrome with a **floating** back-to-cockpit button (EU-542)."""
     # body top-padding clears the fixed button's footprint (PM EU-542 call): 66px ≥ the
@@ -308,6 +370,11 @@ def _wrap(title: str, inner: str) -> str:
             # content so ``window.euPost`` is already defined when the consumer pages' inline
             # scripts parse (the /needs + /chat submit handlers call it on submit).
             + _SUBMIT_HELPER
+            # EU-741: the shared in-flight <button> submit helper (see _INFLIGHT_BUTTON_HELPER).
+            # Additive — the bootstrap no-ops on any page with no button[data-eu-inflight-btn];
+            # sits beside _SUBMIT_HELPER so a page carrying BOTH (e.g. /needs: native Sync
+            # button + euPost answer buttons) gets each exactly once.
+            + _INFLIGHT_BUTTON_HELPER
             + f"<h2>{html.escape(title)}</h2>{inner}")
 
 
