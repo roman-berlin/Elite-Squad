@@ -77,6 +77,37 @@ _INFRA_MARKERS: tuple[tuple[str, str], ...] = (
     ("bad gateway", "5xx"),
     ("service unavailable", "5xx"),
     ("internal server error", "5xx"),
+    # EU-740 — the DEAD BACKEND class: a 4xx that says the PROVIDER cannot serve us at all
+    # (exhausted quota, unknown model id, bad key). Anthropic's own docs are blunt about why this
+    # is not retryable: "retrying the same broken request will produce the same broken response
+    # every time" — unlike a 429 or 529, which are load and do warrant backoff.
+    #
+    # Measured cost of NOT having these: on 2026-07-24 the Qwen secondary answered
+    # HTTP 400 {"code":"InvalidParameter","message":"The free quota has been exhausted..."} in
+    # ~2 seconds with 0 tokens. With no 4xx entry here the notes classified as '' — i.e. the
+    # TICKET's fault — so EU-476 burned a strike and a full re-plan on every attempt: three
+    # Planner calls, ~$3.94, for provably zero possible progress.
+    #
+    # Kept deliberately narrow: each phrase names a provider/credential state, never anything a
+    # builder's own code or a test failure could produce. A truthy tag here means "no strike
+    # against the ticket, and arm the hold" — which is precisely the right response to a backend
+    # that cannot answer. (Plan/usage CAP refusals are NOT here: usage.is_cap_refusal owns that
+    # path further down the same chain and drives its own cooldown.)
+    # NOTE on precision, learned the hard way while writing the guard for this: the bare English
+    # phrases "invalid api key" / "incorrect api key" were in this list first and had to come out —
+    # they match a CODE failure such as
+    #     ValueError: invalid api key format in the user's config parser test
+    # and mis-tagging a real defect as infra is the worst outcome here: the ticket is never charged
+    # a strike, so a genuine bug hides behind a "backend problem" forever. What stays is either a
+    # provider ERROR CODE (snake_case, never prose) or a phrase specific enough that no test
+    # assertion or traceback plausibly contains it.
+    ("free quota has been exhausted", "backend-dead"),
+    ("quota has been exhausted", "backend-dead"),
+    ("insufficient_quota", "backend-dead"),
+    ("invalid_api_key", "backend-dead"),
+    ("authentication_error", "backend-dead"),
+    ("model not exist", "backend-dead"),
+    ("model does not exist", "backend-dead"),
 )
 
 

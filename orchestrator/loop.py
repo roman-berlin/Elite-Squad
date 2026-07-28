@@ -1962,6 +1962,37 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                          tokens_burned=_burned, token_budget=cfg.per_ticket_token_budget,
                          elapsed_min=round(_elapsed_min, 1),
                          time_budget_min=cfg.per_ticket_time_budget_min, reason=why)
+            # EU-739 AUTOSUBMIT — preserve the partial work BEFORE deciding what to do with the
+            # ticket. At this instant the worktree still holds everything the builder produced, and
+            # both downstream paths discard it: a split gives fragments a fresh branch, and a park
+            # leaves the diff to be reaped with the worktree. EU-659 died exactly here — 283 lines
+            # and 10,019,245 tokens thrown away, then rebuilt from scratch days later by sibling
+            # tickets under a different design. SWE-agent's rule is the right one: on a cost limit
+            # it runs a final `git diff` and submits whatever exists, because partial credit beats
+            # an exception. Committing here costs one commit and makes the work RECOVERABLE — the
+            # fragments (or the Commander) can start from it instead of from zero.
+            # Best-effort by contract: a git hiccup must never change the ticket's outcome.
+            _saved = None
+            try:
+                if not ticket.ephemeral and git.has_changes():
+                    _files = git.changed_paths()
+                    _saved = git.commit_all(
+                        f"WIP [autodev]: {ticket.id} partial work at the per-ticket budget stop\n\n"
+                        f"{why}. Committed so the work is not lost — this branch is the starting "
+                        f"point for the split fragments or for a manual pickup, NOT a finished "
+                        f"change (it never reached the gate or the reviewer).")
+                    if _saved:
+                        try:
+                            git.push(branch)
+                        except Exception:  # noqa: BLE001 — local commit already preserves it
+                            pass
+                        audit.record("budget_autosubmit", ticket_id=ticket.id, branch=branch,
+                                     sha=_saved[:12], files=len(_files))
+                        print(f"  💾 {ticket.id}: partial work committed to {branch} "
+                              f"({len(_files)} file(s)) — not lost.", flush=True)
+            except Exception as _exc:  # noqa: BLE001 — never let bookkeeping change the outcome
+                print(f"  · budget autosubmit skipped ({_exc})", flush=True)
+
             # "Too big for the budget" IS "too big" — hand it to the Scrum Master to split into right-sized
             # fragments, exactly like the turn-limit path (loop._exception_report), instead of parking on the
             # Commander. AUTO-85 burned 11.9M on one 8-page pass and parked here; splitting decomposes it. Only
@@ -1973,9 +2004,16 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 split_reason="budget", iterations=iteration, cost=cost, branch=branch)
             if _split is not None:
                 return _resolve(_split)
+            # EU-739: name the saved branch in the ask. Without it the Commander has no idea the
+            # partial work survived, which is how EU-659's 283 lines sat unnoticed until siblings
+            # rebuilt the same feature from scratch.
+            _recover = (f"\n\nThe partial work is SAVED on `{branch}` ({_saved[:12]}) — it never "
+                        "reached the gate or the reviewer, but it is a real starting point rather "
+                        "than a blank page." if _saved else "")
             decisions.add(cfg, ticket, app.name,
                           f"Per-ticket budget exceeded ({why}) after {iteration - 1} pass(es). "
-                          "Raise the budget, narrow the ticket, or answer the open review items.")
+                          "Raise the budget, narrow the ticket, or answer the open review items."
+                          + _recover)
             # Review fix (2026-07-05): also record the CANONICAL terminal event — the cockpit,
             # forensics and _run_in_flight all key on Outcome audit events (needs_human), not on
             # ticket_budget_exceeded; without this the parked ticket showed "running…" forever.
