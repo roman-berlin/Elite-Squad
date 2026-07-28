@@ -433,6 +433,38 @@ def _is_turn_limit(text: str | None) -> bool:
     return any(m in t for m in _TURN_LIMIT_MARKERS)
 
 
+def _is_dead_backend(build, err: str) -> bool:
+    """EU-625/757: is this builder failure the PROVIDER's fault rather than the ticket's?
+
+    Two independent signals, either sufficient:
+
+    * the provider said so — ``infra_classify`` tags the text ``backend-dead`` (exhausted quota,
+      unknown model id, bad key). This leads: a provider that answers "quota exhausted" is dead
+      whatever the clock read.
+    * the SHAPE says so — zero tokens consumed in a *measured* sub-5-second call, i.e. the request
+      was refused before any work happened.
+
+    EU-757: "measured" is the whole point of the ``0 <`` bound. A builder killed by the 3600s
+    wall-clock timeout returns no SDK result message, so ``duration_s`` keeps its 0.0 default and
+    ``input_tokens`` its 0 — and a bare ``duration < 5`` then labelled the SLOWEST possible failure
+    a dead backend. Measured live on 2026-07-28: three consecutive GLM builds each burned a full
+    hour and each was audited ``dead_backend=True``, aiming the diagnosis at the provider's health
+    instead of at its speed. A duration of exactly 0 means UNMEASURED, never instant.
+
+    Never raises — a classification hiccup must not break the error path it is describing.
+    """
+    try:
+        # Deferred import: infra_classify imports _TURN_LIMIT_MARKERS from THIS module, so a
+        # module-level import here would be circular.
+        from . import infra_classify as _ic
+        if _ic.classify(err) == "backend-dead":
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    duration = getattr(build, "duration_s", 0) or 0
+    return (getattr(build, "input_tokens", 0) or 0) == 0 and 0 < duration < 5
+
+
 # EU-197: Helper to wrap officer execution with transcript context
 def _officer_transcript_context(app: AppConfig, ticket: Ticket, officer: str, cfg: Config):
     """Context manager for per-officer transcript writing.
@@ -2323,8 +2355,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # provider's own message (bounded) so the cap/infra classification can see it, and audit
             # the shape of the failure — a 0-token, sub-5s error is a backend problem, never the code's.
             _err = (build.summary or build.raw or "").strip()
-            _dead_backend = (getattr(build, "input_tokens", 0) or 0) == 0 and \
-                            (getattr(build, "duration_s", 0) or 0) < 5
+            _dead_backend = _is_dead_backend(build, _err)
             audit.record("builder_process_error", ticket_id=ticket.id, iteration=iteration,
                          model=getattr(build, "model", "") or "", dead_backend=_dead_backend,
                          error=_err[:400])

@@ -84,6 +84,37 @@ LOOP = pathlib.Path("orchestrator/loop.py").read_text(encoding="utf-8")
 chk("(5) the builder's REAL error rides on the report notes (EU-625 feeds this)",
     'notes=("builder process errored — "' in LOOP)
 
+
+# ── EU-757: the dead_backend SHAPE heuristic must not read "unmeasured" as "instant" ────────
+# Live on 2026-07-28 three GLM builds each hit the 3600s wall-clock timeout. A killed builder
+# returns no SDK result message, so duration_s keeps its 0.0 default and input_tokens its 0 — and
+# the old `duration < 5` test labelled the SLOWEST possible failure "dead backend", aiming the
+# diagnosis at the provider's health instead of at its speed. These drive loop._is_dead_backend
+# ITSELF — the predicate was extracted from the middle of _run precisely so this could be real.
+from orchestrator import loop as _loop  # noqa: E402
+
+
+def _dead(input_tokens: float, duration_s: float, err: str) -> bool:
+    build = types.SimpleNamespace(input_tokens=input_tokens, duration_s=duration_s)
+    return _loop._is_dead_backend(build, err)
+
+
+chk("(11) the REAL 3600s timeout (0 tokens, duration unmeasured) is NOT called a dead backend",
+    _dead(0, 0.0, "wall-clock timeout after 3600s") is False)
+chk("(11a) …and a genuinely instant 0-token refusal still is",
+    _dead(0, 1.8, "API Error: 400 something odd") is True)
+chk("(11b) …as is a slow error whose TEXT names a dead provider (the classifier leads)",
+    _dead(0, 3600.0, REAL_400) is True)
+chk("(11c) a normal build error with real tokens spent is never a dead backend",
+    _dead(4210, 92.0, "AssertionError: expected 3 got 4") is False)
+chk("(11d) a build object missing the fields entirely never raises",
+    _loop._is_dead_backend(types.SimpleNamespace(), "boom") is False)
+chk("(12) the error path calls the extracted predicate (not an inline copy that can drift)",
+    "_dead_backend = _is_dead_backend(build, _err)" in LOOP)
+chk("(12a) …and infra_classify is imported LAZILY there (it imports loop — cycle)",
+    "from . import infra_classify as _ic" in LOOP
+    and "\nfrom .infra_classify import" not in LOOP)
+
 # ── EU-739: the partial work is committed before the split/park decision ────
 _bud = LOOP[LOOP.find('audit.record("ticket_budget_exceeded"'):]
 _bud = _bud[:_bud.find("_notify(cfg, f\"⛔")] if "_notify(cfg, f\"⛔" in _bud else _bud[:6000]
