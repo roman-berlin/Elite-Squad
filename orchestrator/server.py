@@ -2257,7 +2257,15 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                  else page_result_strip(None))
         intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
-                 "<a href=\"/chat\">chat with the CTO</a>.</p>")
+                 "<a href=\"/chat\">chat with the CTO</a>.</p>"
+                 '<p style="display:flex;gap:14px;margin:4px 0">'
+                 '<a class="btn" style="border-radius:var(--r-xl);padding:var(--s-2) var(--s-3);font-size:var(--t-md);'
+                 'text-decoration:none;font-weight:600;color:var(--ink)" href="/meeting">💬 Call a meeting</a>'
+                 '<a class="btn" style="border-radius:var(--r-xl);padding:var(--s-2) var(--s-3);font-size:var(--t-md);'
+                 'text-decoration:none;font-weight:600;color:var(--ink)" href="/standup">📋 Stand-up</a>'
+                 '<a class="btn" style="border-radius:var(--r-xl);padding:var(--s-2) var(--s-3);font-size:var(--t-md);'
+                 'text-decoration:none;font-weight:600;color:var(--ink)" href="/ship-preview">🚢 Ship-preview</a>'
+                 '</p>')
         if not hist:
             return _wrap("Daily Council", strip + acts + intro + top
                          + "<p style='color:#8a909c'>No councils yet.</p>")
@@ -3201,7 +3209,9 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         except Exception:  # noqa: BLE001 — never break render on quota read failure
             pass
 
-        body = (style + dual_gauge + qwen_line + plan + budget + mixbanner + "<div class=ugrid>"
+        budget_link = ('<p style="color:#8a909c;margin:2px 0"><a href="/budget" style="color:var(--ink);text-decoration:none">'
+                       '&#128203; View full budget page &rarr;</a></p>')
+        body = (style + dual_gauge + qwen_line + plan + budget + mixbanner + budget_link + "<div class=ugrid>"
                 + card("Today", w["today"]) + card("Last 7 days", w["week"])
                 + card("Last 30 days", w["month"]) + "</div>")
         return _wrap("Token usage", body)
