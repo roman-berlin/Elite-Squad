@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-07-28 · EU-741 · Elite-Unit · • All 5 ACs met: three value-less buttons opt into the shared window.euInflightBtn helper with the exact AC labels, disabled+relabelled on form submit, double-submit guarded. · 🔗 /tickets (Develop selected) — also /needs (Sync with Jira) and /models/add (Add backend)
 - 2026-07-28 · EU-717 · Elite-Unit · • AC1–AC4 all satisfied: one shared helper wired to all three selects, keyboard-safe (Enter/blur only, no change listener), disable+relabel+restore, and a substantive new harness. · 🔗 / (cockpit control bar — Main model / Secondary / Mode selects)
 - 2026-07-27 · EU-726 · Elite-Unit · • Shared setSending(on) helper correctly toggles `sending` + input.disabled + sendbtn.disabled together; guard `if(sending)return;` runs before a synchronous setSending(true) pre-fetch, so rapid/held Enter fires at most…
 - 2026-07-27 · EU-719 · Elite-Unit · • All 6 ACs met: shared euPost helper disables+relabels on both surfaces, .preply uses fetch, '✓ sent' inline swap + poll de-dup, error re-enable with .nerr/.perr.
