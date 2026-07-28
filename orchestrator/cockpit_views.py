@@ -1394,6 +1394,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <span class=tclabel>QA</span>
     <div class=tcrow>
       <form method=post action=/api/qa class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
+      {_btn("&#128293; Report&#160;a&#160;problem", tag="a", attrs=f' href="/report?app={html.escape(app0)}" title="File a bug against this project"')}
     </div>
   </div>
 
