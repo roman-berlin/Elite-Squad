@@ -214,7 +214,13 @@ def render_model_form(cfg, record: dict | None = None, values: dict | None = Non
            '</select></label>')
         + f'<label>API key{key_input}</label>'
         + '<div class=mactions>'
-        + f'<button type=submit>{"Save changes" if editing else "Add backend"}</button>'
+        # EU-741: data-eu-inflight-btn opts this native POST button into the shared in-flight
+        # helper (cockpit_views._INFLIGHT_BUTTON_HELPER). Add mode blocks on classify_model_tier
+        # → '⏳ adding…'; Edit uses '⏳ saving…' (same button, no classifier but still synchronous).
+        # Keep this button VALUE-LESS (no name/value): lock() disables it mid-submit, so a name/value
+        # here would be dropped from the POST (see _INFLIGHT_BUTTON_HELPER).
+        + (f'<button type=submit data-eu-inflight-btn="{"⏳ saving…" if editing else "⏳ adding…"}">'
+           f'{"Save changes" if editing else "Add backend"}</button>')
         # type=button: the test must never submit/persist the form (EU-237's no-state-change rule).
         + '<button type=button id=mtest class=mbtn>Test connection</button>'
         + '<a href="/models" class=mcancel>Cancel</a></div>'
