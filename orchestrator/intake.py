@@ -164,6 +164,54 @@ def is_epic(ticket) -> bool:
     return (str(getattr(ticket, "issue_type", "") or "").strip().lower() == "epic")
 
 
+def is_autofiled(ticket) -> bool:
+    """True when the ticket carries an 'autofiled' label — i.e. it was self-filed by the unit
+    rather than authored by the Commander. Used by the drain-selection quota gate (EU-784)."""
+    labels = [str(l).lower() for l in (getattr(ticket, "labels", None) or [])]
+    return "autofiled" in labels
+
+
+def apply_autofiled_quota(items: list[WorkItem], quota_per_n: int) -> list[WorkItem]:
+    """Reorder *items* so autofiled tickets beyond a 1-in-N ratio are deferred behind Commander
+    (non-autofiled) tickets. When only autofiled remain and cooldown is active, head emits anyway
+    to keep the drain progressing. Returns a new list.
+
+    Semantics (from AC): ``quota_per_n`` of N means *at most 1 autofiled per N consecutive picks*.
+    Greedy, order-preserving with a cooldown-based deferral: walk remaining items and emit the first
+    emittable one (Commander always emits; autofiled only while cooldown==0). On emitting an
+    autofiled set cooldown=N-1; decrement cooldown each pick (floor 0).
+
+    When *quota_per_n* <= 0 returns items unchanged (unlimited backward-compatible default).
+    """
+    if quota_per_n is None or quota_per_n <= 0:
+        return list(items)          # unlimited — no-op
+
+    remainder = list(items)
+    result: list[WorkItem] = []
+    cooldown = 0                   # how many picks remain blocked for autofiled
+
+    while remainder:
+        best = -1                  # index of next emittable item (-1 = none yet)
+
+        for i, (a, t) in enumerate(remainder):
+            af = is_autofiled(t)
+            if cooldown > 0 and af:
+                continue           # this autofiled is on cooldown — defer
+            best = i               # commander (always ok) or autofiled with cooldown==0
+            break                  # take the first emittable item, preserving order
+
+        item = remainder.pop(best)
+        result.append(item)
+
+        _, ticket = item
+        if is_autofiled(ticket):
+            cooldown = quota_per_n - 1   # block next N-1 picks for autofiled
+
+        cooldown = max(0, cooldown - 1)  # tick down toward open slot
+
+    return result
+
+
 def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
     """Pull ready tickets. With ``app_name=None`` this spans EVERY app that has a backlog — i.e. all
     connected Jiras — so Autopilot works across several Jira accounts at once. One connection failing
@@ -210,5 +258,16 @@ def from_drain(cfg: Config, app_name: str | None, limit: int) -> list[WorkItem]:
             if skipped:
                 print(f"  · EU-116 drain guard: skipped {skipped} ticket(s) with recent no_changes outcome", flush=True)
     except Exception:  # noqa: BLE001 - drain guard must not break the run
+        pass
+    # EU-784: autofiled-drain quota — defer excess autofiled picks behind Commander tickets
+    try:
+        quota_per_n = getattr(cfg, "autofiled_quota_per_n", 0) or 0
+        if quota_per_n > 0 and len(items) > 1:
+            n_before = sum(1 for _, t in items if is_autofiled(t))
+            items = apply_autofiled_quota(items, quota_per_n)
+            n_after = sum(1 for _, t in items if is_autofiled(t))
+            if n_after < n_before:
+                print(f"  · EU-784 drain quota ({quota_per_n}/1): deferred {n_before - n_after} autofiled ticket(s)", flush=True)
+    except Exception:  # noqa: BLE001 - quota gate must not break the run
         pass
     return items
