@@ -298,7 +298,7 @@ class StubBuilderFail:
 
 
 async def _stub_review_fail(diff, ticket, app, cfg, iteration, store=None, build_artifact=None,
-                            already_bounced=None, gate_evidence=""):   # EU-265: real signature
+                            already_bounced=None, gate_evidence="", final_pass=False):   # EU-265: real signature
     """Reviewer always returns FAIL so the loop exhausts its iterations."""
     return ReviewResult(
         verdict=Verdict.FAIL, spec_met=False,

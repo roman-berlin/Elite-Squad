@@ -219,7 +219,7 @@ class _StubBuilder:
 class _CapReviewer:
     @staticmethod
     async def review(diff, ticket, app, cfg, iteration=1, store=None, build_artifact=None,
-                     already_bounced=None, gate_evidence=""):
+                     already_bounced=None, gate_evidence="", final_pass=False):
         _CAPTURED["gate_evidence"] = gate_evidence
         if store is not None:
             store.put(ReviewVerdict(verdict=Verdict.PASS, blocking=[], notes=[]))

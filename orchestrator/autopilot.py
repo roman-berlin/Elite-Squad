@@ -1190,6 +1190,66 @@ _BOOT_PARK_COMMENT = (
 )
 
 
+# ── EU-738 (2026-07-28): the reconcile's SELF-DERIVED liveness signal is per-TICKET ───────────
+# The bug: ``active_ids`` was built by matching APP NAMES against ticket ids —
+#     active_ids = {t.id for app, t in in_progress if app.name in (active_apps or set())}
+# ``cockpit_state.active_runs()`` returns app NAMES, so ``app.name in active_apps`` was true for
+# EVERY In-Progress ticket of any app holding a run slot. ``resume_armed_drains`` claims that slot
+# SYNCHRONOUSLY (``claim_run``) before this reconcile runs at main.py's serve boot, so on a normal
+# boot the whole In-Progress column read as "genuinely running", nothing was ever dangling, and the
+# reconcile silently did nothing. Measured 2026-07-28: six EU tickets In Progress against
+# max_concurrent_builders=2, the newest boot_reconcile audit line days old.
+#
+# A boot has no per-ticket signal in memory — ``cockpit_state``'s run-state carries no ticket id
+# (_new_state()), and the per-ticket live subset (warroom.live_runs) is a render-path derivation of
+# log lines. The audit IS the per-ticket signal, and it is already read here for the dangling core.
+# So a ticket counts as genuinely running when it has ANY audit activity inside the window below.
+#
+# Window: a run writes an audit line when an agent call RETURNS, so the longest LEGITIMATE silence
+# is one agent call's wall-clock budget — ``cfg.builder_timeout_s`` (3600s default; the builder is
+# the longest-budgeted role, agent._timeout_for_tag). Two measurements from the live audit forced
+# this to be derived rather than guessed: a 15-minute window classified two genuinely-live tickets
+# as abandoned (their planner call had been silent 18 min) and would have posted "resumed after an
+# unclean stop" onto healthy builds; and EU-743's builder call on 2026-07-28 ran 42.9 minutes
+# silent between its `planner` and `build` lines. The margin covers a call that runs right up to
+# its timeout and only then records.
+_LIVE_SILENCE_MARGIN_S = 1800.0
+
+
+def _live_silence_window_s(cfg) -> float:
+    """How long an In-Progress ticket may be silent in the audit before this reconcile may call it
+    abandoned — the configured agent budget plus ``_LIVE_SILENCE_MARGIN_S``, never a bare literal,
+    so raising ``builder_timeout_s`` widens the window with it. ``getattr`` defaults mirror
+    ``Config`` so a test stand-in without the fields is fine."""
+    budget = max(float(getattr(cfg, "builder_timeout_s", 3600) or 3600),
+                 float(getattr(cfg, "officer_timeout_s", 900) or 900))
+    return budget + _LIVE_SILENCE_MARGIN_S
+
+
+def _recently_active_ids(in_progress_ids, audit_rows, *, window_s: float,
+                         now: float | None = None) -> set[str]:
+    """EU-738: which of ``in_progress_ids`` show audit activity within the last ``window_s`` seconds
+    — the per-TICKET "a run is genuinely working this one RIGHT NOW" answer the app-name check got
+    wrong. ANY event carrying the ticket id counts (ticket_start, agent_call, build, usage …): the
+    question is whether something is still writing about this ticket, not which phase it is in.
+
+    Pure + fail-safe: a row whose ts the audit's own ``%Y-%m-%dT%H:%M:%S%z`` stamp can't parse is
+    skipped rather than counted as "now", so an unreadable stamp can't mask an abandoned run."""
+    now = time.time() if now is None else float(now)
+    cutoff = now - float(window_s)
+    live: set[str] = set()
+    wanted = set(in_progress_ids)
+    for ev in audit_rows:
+        ev = ev or {}
+        tid = str(ev.get("ticket_id") or "")
+        if not tid or tid not in wanted or tid in live:
+            continue
+        ts = _parse_audit_ts(ev.get("ts"))
+        if ts is not None and ts >= cutoff:
+            live.add(tid)
+    return live
+
+
 def _dangling_in_progress(in_progress_ids, audit_rows, active_ids) -> list[str]:
     """EU-398 core: which In Progress tickets were left dangling by a killed/crashed run.
 
@@ -1428,10 +1488,15 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
     already resumed the same id and it is STILL dangling — is HONESTLY PARKED instead (Blocked +
     comment) so a recurring kill can't loop the board into phantom progress forever.
 
-    ``active_apps`` overrides the live run-state check (tests); the default derives from
-    ``cockpit_state.active_runs()`` so a ticket an in-flight drain is working right now is untouched.
-    Records one ``boot_reconcile`` audit event with the resumed / parked / skipped_active ids.
-    Returns ``{resumed, parked, skipped_active, dangling}``. Never raises — the boot proceeds."""
+    ``active_apps`` overrides the live run-state check (tests) and is honoured verbatim — every
+    In-Progress ticket of a named app is treated as running. EU-738: the SELF-DERIVED default no
+    longer asks ``cockpit_state.active_runs()`` (app NAMES, which exempted the whole column — see
+    ``_recently_active_ids``); it asks the audit per TICKET, so only a ticket something is still
+    writing about is left alone.
+
+    Records one ``boot_reconcile`` audit event on EVERY boot — a no-op boot included (EU-738), so a
+    reconcile that found nothing is distinguishable from one that never ran. Returns
+    ``{resumed, parked, struck, skipped_active, dangling}``. Never raises — the boot proceeds."""
     from .backlog.base import make_backlog
 
     summary = {"resumed": [], "parked": [], "skipped_active": [], "dangling": []}
@@ -1460,17 +1525,21 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
         ip_ids = {t.id for _, t in in_progress}
         by_id = {t.id: (app, t) for app, t in in_progress}
 
-        # 2) a live run's tickets are genuinely running — untouched
-        if active_apps is None:
-            try:
-                from . import cockpit_state
-                active_apps = {str(a) for a in cockpit_state.active_runs()}
-            except Exception:  # noqa: BLE001 — fall back to "nothing active" on any probe failure
-                active_apps = set()
-        active_ids = {t.id for app, t in in_progress if app.name in (active_apps or set())}
-
-        # 3) one audit read → dangling core + the recurrence set
+        # 2) one audit read → the liveness signal, the dangling core and the recurrence set
         rows = _read_audit_rows(cfg.audit_path)
+
+        # 3) which tickets a run is genuinely working right now — untouched.
+        # An EXPLICITLY passed ``active_apps`` keeps overriding verbatim: it is the documented test
+        # seam (tests/eu398_boot_reconcile_test.py §3 pins "genuinely-running ticket gets NO
+        # comment" through it), and a caller that names the apps is asserting the run state itself.
+        # Only the SELF-DERIVED path changed in EU-738 — see _recently_active_ids for why the old
+        # app-name derivation exempted the entire In-Progress column on every boot.
+        if active_apps is None:
+            active_ids = _recently_active_ids(ip_ids, rows,
+                                              window_s=_live_silence_window_s(cfg))
+        else:
+            active_ids = {t.id for app, t in in_progress if app.name in active_apps}
+
         dangling = _dangling_in_progress(ip_ids, rows, active_ids)
         prior_resumed = _prior_resumed_ids(rows)
 
@@ -1509,16 +1578,26 @@ def boot_reconcile(cfg: Config, *, audit: "AuditLog | None" = None,
             except Exception:  # noqa: BLE001 — a board hiccup on one ticket must not abort the pass
                 continue
 
-        # 5) one audit event with the affected ids (only when something was touched)
+        # 5) one audit event per BOOT — including a no-op one.
+        # EU-738: this used to record only `if resumed or parked`, so four days of a reconcile that
+        # was structurally incapable of finding anything (the app-name defect above) looked
+        # byte-identical to four days of a healthy reconcile with nothing to do. Recording every
+        # boot makes the silence provable: an absent line now means the reconcile did not RUN, and
+        # a no-op line carries the counts that say what it looked at. `_prior_resumed_ids` reads
+        # only `resumed`, so a no-op row (resumed=[]) contributes nothing to the recurrence set.
         skipped_active = sorted(active_ids & ip_ids)
+        try:
+            audit.record("boot_reconcile", resumed=sorted(resumed), parked=sorted(parked),
+                         struck=sorted(struck), skipped_active=skipped_active,
+                         dangling=sorted(dangling), in_progress_count=len(ip_ids))
+        except Exception:  # noqa: BLE001
+            pass
         if resumed or parked:
-            try:
-                audit.record("boot_reconcile", resumed=sorted(resumed), parked=sorted(parked),
-                             struck=sorted(struck), skipped_active=skipped_active)
-            except Exception:  # noqa: BLE001
-                pass
             print(f"  · boot reconcile: resumed {sorted(resumed)}; parked {sorted(parked)}; "
                   f"struck {sorted(struck)}; untouched {skipped_active} (active)", flush=True)
+        else:
+            print(f"  · boot reconcile: nothing to do — {len(ip_ids)} In Progress, "
+                  f"{len(skipped_active)} running, {len(dangling)} dangling", flush=True)
         summary = {"resumed": sorted(resumed), "parked": sorted(parked),
                    "struck": sorted(struck), "skipped_active": skipped_active,
                    "dangling": sorted(dangling)}

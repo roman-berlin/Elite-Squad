@@ -2600,6 +2600,12 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         # is satisfied by the gate that literally ran the tests instead of force-FAILing every
         # pass on missing Builder prose. '' for a no-op gate (see _gate_execution_evidence).
         gate_evidence = _gate_execution_evidence(app, gate, git.changed_paths())
+        # 2026-07-28: is this the LAST pass? Hoisted here (it was computed inline at the verdict-
+        # reconciliation below, which still reads it) because the Reviewer now needs it too: on the
+        # final pass reviewer._enforce_bounce_once demotes a FRESH unverifiable finding as well as a
+        # repeat, since no builder pass remains to satisfy it and the only alternative is parking a
+        # finished change on the Commander.
+        _final_pass = iteration >= max_passes
         # EU-72: hand the Reviewer the Builder's BuildArtifact (primary context) + the pool it
         # publishes its ReviewVerdict into. EU-52: escalate the reviewer on re-review.
         # EU-197: Wrap reviewer with transcript context to capture full tool inputs + reasoning
@@ -2607,7 +2613,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             review = await reviewer_mod.review(diff, ticket, app, cfg, iteration,
                                                store=store, build_artifact=store.build,
                                                already_bounced=bounced_unverifiable,
-                                               gate_evidence=gate_evidence)
+                                               gate_evidence=gate_evidence,
+                                               final_pass=_final_pass)
         cost += review.cost_usd
         budget.add(review.cost_usd)
         _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96
@@ -2623,7 +2630,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                 review = await reviewer_mod.review(diff, ticket, app, cfg, iteration + 1,
                                                    store=store, build_artifact=store.build,
                                                    already_bounced=bounced_unverifiable,
-                                                   gate_evidence=gate_evidence)
+                                                   gate_evidence=gate_evidence,
+                                                   final_pass=_final_pass)   # same pass, stronger model
             cost += review.cost_usd
             budget.add(review.cost_usd)
             _burn("reviewer", review.input_tokens, review.output_tokens)   # EU-96 retry
@@ -2664,8 +2672,7 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         if (review.verdict.value == "FAIL" and review.spec_met and not blockers
                 and not review.needs_human and not review.spec_gaps
                 and not review.required_changes):
-            _final_pass = iteration >= max_passes
-            if not review.blocking_issues or _final_pass:
+            if not review.blocking_issues or _final_pass:   # _final_pass hoisted above the review call
                 _rec_reason = ("fail-with-minors-only" if not review.blocking_issues
                                else "final-pass-criteria-met-majors")
                 review.verdict = Verdict.PASS
