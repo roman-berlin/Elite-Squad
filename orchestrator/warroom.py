@@ -2476,13 +2476,11 @@ border-radius:99px;background:var(--well)}
 .apbtn.drain{background:var(--warn);color:#1a1205;margin-right:7px}
 /* health banner */
 .healthbar{padding:13px 26px}
-.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid var(--okline)}
-.healthbar.bad{background:linear-gradient(180deg,rgba(42,20,22,.6),transparent);border-bottom:1px solid #3a1a1c}
+.healthbar.bad{background:var(--badbg);border-bottom:1px solid var(--badline)}
 .hbrow{display:flex;align-items:center;gap:14px}
 .hbtitle{display:flex;align-items:center;gap:11px;font-weight:650;font-size:14px;flex:1}
-.healthbar.ok .hbtitle{color:var(--ok)}.healthbar.bad .hbtitle{color:var(--bad)}
+.healthbar.bad .hbtitle{color:var(--bad)}
 .hbdot{width:11px;height:11px;border-radius:99px;flex:none}
-.healthbar.ok .hbdot{background:var(--ok);box-shadow:0 0 0 4px rgba(58,209,127,.13)}
 .healthbar.bad .hbdot{background:var(--bad);animation:pulse3 1.4s infinite}
 @keyframes pulse3{0%,100%{box-shadow:0 0 0 0 rgba(240,103,107,.45)}50%{box-shadow:0 0 0 8px rgba(240,103,107,0)}}
 .hbactions{display:flex;align-items:center;gap:12px}
