@@ -1,0 +1,45 @@
+name: Weekly maintainer reminder — refill contributor tasks
+
+# Opens a small checklist issue assigned to the maintainer every Monday morning
+# (06:00 UTC ≈ 09:00 Israel in summer, 08:00 in winter). GitHub's email
+# notification IS the reminder. Skips if last week's reminder is still open.
+# NOTE: scheduled workflows only run from the default branch (main).
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open the weekly reminder issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          open_reminder=$(gh issue list -R "$REPO" --label maintainer-weekly --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open_reminder" ]; then
+            echo "Reminder #$open_reminder still open — not filing another."
+            exit 0
+          fi
+          gfi_count=$(gh issue list -R "$REPO" --label "good first issue" --state open --json number --jq 'length')
+          body=$(printf '%s\n' \
+            "Weekly upkeep so contributors always have something to pick up." \
+            "" \
+            "Currently open \"good first issue\" tasks: **$gfi_count**" \
+            "" \
+            "- [ ] Review new issues and PRs from contributors (reply within the week)" \
+            "- [ ] If fewer than ~5 good-first-issues are open, convert 1-2 findings from Documentation/REVIEW_BACKLOG.md (or fresh TODOs) into labelled issues" \
+            "- [ ] Merge or give feedback on any waiting contributor PR" \
+            "- [ ] Close this issue when done — next reminder comes Monday")
+          gh issue create -R "$REPO" \
+            --title "Maintainer weekly: refill contributor tasks ($(date -u +%Y-%m-%d))" \
+            --label maintainer-weekly \
+            --assignee roman-berlin \
+            --body "$body"
