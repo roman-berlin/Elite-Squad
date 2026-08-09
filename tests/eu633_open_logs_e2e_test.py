@@ -10,6 +10,7 @@ Soft k/n tally so ``tests/run_all.py`` (the EU-44 gate) judges it honestly.
 from __future__ import annotations
 
 import inspect
+import platform
 import re as _re
 import sys
 import tempfile
@@ -289,11 +290,16 @@ with tempfile.TemporaryDirectory() as tmpdir_c:
     chk("AC3: /api/open-logs → 403 without same-origin (gate preserved)",
         r_oa.status_code == 403, f"status={r_oa.status_code}: {r_oa.get_data(as_text=True)[:80]}")
 
-    # With valid Referer it reaches the handler (path traversal still fails 403 — good)
+    # With valid Referer it reaches the handler. What answers next is platform-
+    # dependent: on macOS the path check ("outside the configured"), elsewhere the
+    # Darwin gate ("only available on macOS") — either message proves the
+    # same-origin gate was passed, which is what this check pins (CI runs Linux).
     r_oa_ok = client_c.get("/api/open-logs?path=/dummy",
                             headers={"Referer": "http://127.0.0.1:8787/"})
+    _expected = ("outside the configured" if platform.system() == "Darwin"
+                 else "only available on macOS")
     chk("AC3: /api/open-logs reaches handler with valid Referer (gate bypassable)",
-        r_oa_ok.status_code == 403 and "outside the configured" in r_oa_ok.get_data(as_text=True),
+        r_oa_ok.status_code == 403 and _expected in r_oa_ok.get_data(as_text=True),
         f"unexpected: {r_oa_ok.status_code} {r_oa_ok.get_data(as_text=True)[:80]}")
 
     # Handler source checks: /logs/* lack Darwin/platform; legacy does have it
