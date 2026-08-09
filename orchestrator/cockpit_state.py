@@ -282,6 +282,30 @@ def bump_log_seq(app: str | None = None) -> int:
     return seq
 
 
+# EU-574 / AC4-5: reset per-ticket run start so elapsed is honest across restarts/resumes.
+# Without this, ``state['run_started']`` set once at drain-claim time survives daemon restarts:
+# a resumed run measures elapsed from the OLD start (the 269m bug in EU-574 description).
+# mark_ticket_start resets both ``run_started`` and ``last_activity`` under the per-app lock,
+# called at ticket_start and retry boundaries by the loop so elapsed always derives from the
+# CURRENT run's start.
+
+def mark_ticket_start(app: str | None = None) -> None:
+    """Reset the per-app run-start clock for the NEW ticket / retry pass.
+
+    Sets ``state['run_started']`` and ``state['last_activity']`` to now, under ``run_lock_for(app)``,
+    so the log-panel elapsed timer (``_runlog_placeholder``, warroom.py:1757) derives from the
+    current run's start instead of a stale daemon-restart timestamp.  Also bumps the log-seq so
+    the SSE stream refreshes immediately on a new ticket or retry pass.
+    """
+    now = time.time()
+    with run_lock_for(app):
+        st = get_state(app)
+        st["run_started"] = now
+        st["last_activity"] = now
+    # Wake SSE immediately without bumping last_activity again (would be redundant).
+    _bump_log_seq_only(app)
+
+
 def _bump_log_seq_only(app: str | None = None) -> int:
     """Bump only the sequence counters, NOT last_activity. Used by release_run to wake SSE.
 

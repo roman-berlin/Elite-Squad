@@ -846,7 +846,6 @@ def render_html(tasks: list[TaskRow], show_cost: bool = True, dismissed: dict | 
 _TEMPLATE = """<!doctype html><html><head><meta charset=utf-8>
 <title>CTO — cockpit</title>
 <style>
-:root{color-scheme:dark}
 *{box-sizing:border-box}
 body{font:14px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
 header{padding:22px 30px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel),var(--bg))}

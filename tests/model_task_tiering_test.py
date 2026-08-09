@@ -53,18 +53,26 @@ chk("(2d) 'ultracode' counts as deep effort", models.is_deep_task(tk(), effort="
 chk("(2e) a small routine ticket is NOT deep", not models.is_deep_task(tk()))
 
 # ── (1) the planner pick ──
+# 2026-07-28: these assert against cfg.deep_model / models.DEEP, never a hardcoded model string.
+# The literal "claude-fable-5" used to be pinned right here, and that is precisely the rot this
+# suite exists to catch: when Fable-5 was capped, the CODE was wrong and this test still passed,
+# because both sides named the same dead model. A test that pins a version can only ever prove the
+# pin matches itself. The contract is "a deep task gets the configured DEEP model at max effort" —
+# assert that, and the suite survives every future model rename.
+DEEP_PIN = "test-deep-model"          # deliberately not a real id: nothing may special-case it
+cfg.deep_model = DEEP_PIN
 m, e, r = models.for_planner(cfg, tk(labels=["architecture"]))
-chk("(1a) deep architecture → the deep model at max effort",
-    m == "claude-fable-5" and e == "max", f"{m} {e}")
+chk("(1a) deep architecture → the configured deep model at max effort",
+    m == DEEP_PIN and e == "max", f"{m} {e}")
 m, e, r = models.for_planner(cfg, tk())
 chk("(1b) a routine PRD stays on the Opus-ceiling pick at high effort",
-    "fable" not in m and e == "high", f"{m} {e}")
+    m != DEEP_PIN and e == "high", f"{m} {e}")
 
 # ── (3) disabling the deep tier ──
 cfg.deep_model = ""
 m, e, r = models.for_planner(cfg, tk(labels=["architecture"]))
-chk("(3) deep_model='' disables the deep tier", "fable" not in m, m)
-cfg.deep_model = "claude-fable-5"
+chk("(3) deep_model='' disables the deep tier", m != DEEP_PIN and m == models.OPUS, m)
+cfg.deep_model = models.DEEP
 
 # ── (4) the officers route through for_planner ──
 psrc = Path("orchestrator/planner.py").read_text(encoding="utf-8")

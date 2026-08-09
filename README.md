@@ -1,5 +1,9 @@
 # ⬢ SQUAD — your autonomous dev squad
 
+[![tests](https://github.com/roman-berlin/Elite-Squad/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/roman-berlin/Elite-Squad/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg)](requirements.txt)
+
 *(engine codename: “The General”; brand guide: Documentation/BRAND.md)*
 
 You give an order. The **General** (the orchestrator) commands two engineers — the
@@ -8,8 +12,8 @@ implement it on a feature branch, test it, review it, and land it on your app's
 `dev` branch only if `dev` stays green. You remain the only one who merges
 `dev → main`, after your QA.
 
-It works across every app in your unit: automatixy, signaldesk, superadmin —
-each its own repo, branch, tests, and (optional) Jira project.
+It works across every app you register in `config.yaml` — each with its own
+repo, dev branch, test gate, and (optional) Jira project.
 
 See `ARCHITECTURE.md` for the design. This file is how to run it.
 
@@ -17,15 +21,15 @@ See `ARCHITECTURE.md` for the design. This file is how to run it.
 
 ```bash
 # 1) A bug or feature in plain words (no Jira needed) — your scrollbar example:
-./general task automatixy "Fix missing scrollbar on the dashboard table" \
+./general task myapp "Fix missing scrollbar on the dashboard table" \
     --ac "Scrollbar appears when content overflows" \
     --ac "No regression on window resize"
 
 # 2) An existing Jira ticket, or several:
-./general ticket automatixy AUTO-123 AUTO-130
+./general ticket myapp AUTO-123 AUTO-130
 
 # 3) Drain the backlog — every ticket labelled `autodev`:
-./general drain automatixy          # one app
+./general drain myapp          # one app
 ./general drain                     # every app that has a tracker
 ```
 
@@ -36,7 +40,7 @@ merge into dev to preview whether dev would stay green, but nothing is pushed,
 merged, or written to Jira. `--live` overrides a dry-run config for one invocation:
 
 ```bash
-./general --live task automatixy "Fix missing scrollbar on the dashboard table" --ac "..."
+./general --live task myapp "Fix missing scrollbar on the dashboard table" --ac "..."
 ```
 
 ## What happens on each order
@@ -59,8 +63,9 @@ The General never touches `main`. dev is your QA buffer; you merge to main.
 ## Setup (10 minutes, once)
 
 ```bash
-cd claude-pipeline
-python -m venv .venv && source .venv/bin/activate
+git clone https://github.com/roman-berlin/Elite-Squad.git
+cd Elite-Squad
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 chmod +x general
 
@@ -114,16 +119,16 @@ export JIRA_EMAIL="you@yourteam.com"
 export JIRA_API_TOKEN="..."        # id.atlassian.com → Security → API tokens
 ```
 
-Then label a ticket `autodev` and `./general drain automatixy` works it; or run a
-specific one with `./general ticket automatixy AUTO-123`. Give each ticket clear
+Then label a ticket `autodev` and `./general drain myapp` works it; or run a
+specific one with `./general ticket myapp AUTO-123`. Give each ticket clear
 **acceptance criteria** (a custom field, or an "Acceptance Criteria" section in the
 description) — the Reviewer judges against exactly those.
 
 ## Recommended workflow for building your SaaS
 
-1. `./general task <app> "..." --ac "..."` with `dry_run: true` set in config.yaml; read the summary + `audit.jsonl`.
+1. `./general task <app> "..." --ac "..."` with `dry_run: true` set in config.yaml; read the summary + `state/audit.jsonl`.
 2. When the trial says *would merge to dev (dev stays green)*, re-run with `--live` (or set `dry_run: false`).
-3. Do your QA on `dev` (with Cowork — k6, e2e, a visual check of that scrollbar).
+3. Do your QA on `dev` (e2e, load tests, a visual check of the fix).
 4. You merge `dev → main`.
 
 Scale up by raising `max_tickets_per_run` and using `drain` once you trust it.
@@ -132,7 +137,7 @@ Scale up by raising `max_tickets_per_run` and using `drain` once you trust it.
 
 ```cron
 # weekdays 07:00 — drain up to 3 autodev tickets per app, live
-0 7 * * 1-5  cd /path/to/claude-pipeline && ./general --live --max-tickets 3 drain >> run.log 2>&1
+0 7 * * 1-5  cd /path/to/Elite-Squad && ./general --live --max-tickets 3 drain >> run.log 2>&1
 ```
 
 ## Model backend — Opus (Claude) or GLM (Z.ai)
@@ -167,7 +172,7 @@ fallback. Opus is never affected and stays the default.
 - **dev is kept green**: a merge that fails dev's gate is auto-reverted and turned into a PR.
 - **Reviewer is read-only** at the permission layer — it cannot edit code.
 - **Bounded**: `max_iterations` per ticket and a `max_cost_usd` budget per run.
-- **Auditable**: `audit.jsonl` records every build, gate, review, verdict, cost, and diff hash.
+- **Auditable**: `state/audit.jsonl` records every build, gate, review, verdict, cost, and diff hash.
 
 ## Layout
 
@@ -188,3 +193,28 @@ orchestrator/
   audit.py       JSONL audit log
   backlog/       Jira (primary), Notion (stub), none
 ```
+
+## Going deeper
+
+- `ARCHITECTURE.md` — how the loop is designed and why
+- `SQUAD_HQ.md` — the web cockpit (`./general serve`): live board, run control, chat
+- `Documentation/SYSTEM_OVERVIEW.md` — the end-to-end system map
+- `ROADMAP.md` — where this is heading
+
+## Contributing
+
+PRs and issues are welcome — start with
+[CONTRIBUTING.md](CONTRIBUTING.md) and the
+[`good first issue`](https://github.com/roman-berlin/Elite-Squad/labels/good%20first%20issue)
+label. The whole test suite runs offline (the Agent SDK is stubbed), so you can develop
+without an API key: `python3 tests/run_all.py`.
+
+## Security
+
+Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md).
+
+## License
+
+[AGPL-3.0-only](LICENSE). You can use, modify, and self-host SQUAD freely; if you offer a
+modified version to others as a service, you must share your changes under the same
+license. For a commercial license without AGPL obligations, contact the maintainer.

@@ -153,12 +153,12 @@ class Config:
     # Reviewer + every verifier/staff officer (QA Engineer, Security Engineer, Release Manager,
     # Engineering Manager, Engineering Coach, the CTO/chair). Both default to Opus. On Opus, the "xhigh"/ultra effort
     # tier is real (it falls back to high only on non-Opus models).
-    builder_model: str = "claude-opus-4-8"
-    reviewer_model: str = "claude-opus-4-8"
+    builder_model: str = "opus"
+    reviewer_model: str = "opus"
     # 2026-07-19: the DEEP-architecture model — the Planner/Architect climbs to it (at max effort)
     # for L/XL, effort-max/ultracode, or architecture/epic-labelled tickets only. "" disables the
     # deep tier (the planner then stays on the normal Opus-ceiling auto pick).
-    deep_model: str = "claude-fable-5"
+    deep_model: str = "opus"
 
     # The server's MEETINGS and CHAT don't need Opus — only implementation (Builder/Reviewer, which
     # run on the Mac) does. Officer discussions run on Sonnet and corridor small-talk on Haiku, so the
@@ -415,6 +415,11 @@ class Config:
     #     builder->ERRORED+retry) — see orchestrator/agent.py `_timeout_for_tag`. ---
     officer_timeout_s: int = 900        # planner/reviewer/pm/adjutant/council/etc. (low-effort roles)
     builder_timeout_s: int = 3600       # builder — real code changes legitimately run long
+    # EU-784: limits how often autofiled tickets enter the build queue during drain selection.
+    # Value N = at most 1 autofiled per N consecutive picks (greedy, order-preserving).
+    # A Commander ticket bumps past the quota; if ONLY autofiled remain, head emits anyway.
+    # 0 (default) / absent = unlimited (backward-compatible).
+    autofiled_quota_per_n: int = 0
 
     # --- merge behaviour (auto-merge to dev if green) ---
     merge_to_dev: bool = True           # merge feature -> dev when review passes & dev stays green

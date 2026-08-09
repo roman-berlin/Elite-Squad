@@ -882,7 +882,7 @@ def _run_obj_for(cfg, t: dict, ts: list[dict], live: bool) -> dict:
 
 
 def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
-              within_s: int = _LIVE_WITHIN_S) -> list[dict]:
+              within_s: int = _LIVE_WITHIN_S, run_state: Optional[dict] = None) -> list[dict]:
     """The FULL set of genuinely-live runs for *app* as run-object dicts, newest-first,
     capped at ``max_concurrent_builders`` (config.py).
 
@@ -894,16 +894,30 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
     the multi-card loop reads), so downstream renderers don't need to know about the
     multi-run case.
 
-    A task counts as live when it has NO terminal outcome (``outcome`` unset) AND its OWN
-    audit activity falls within the shared ``within_s`` freshness window — the
-    ``_run_in_flight`` ~150 s idle-cutoff heuristic applied per-ticket instead of only to
-    ``ts[0]``.  Stale rows drop out of the live set — INCLUDING the newest scoped task:
-    a run silent for >150 s reads as crashed/interrupted (the written AC of EU-477), and
-    ``active_run`` renders it as an idle 'last run' via its fallback instead.
+    EU-574 liveness unification: a task counts as live when it has NO terminal outcome AND
+    **either** its own audit activity **or** the run-state heartbeat (``last_activity`` from
+    the same project's run state) falls within the shared ``within_s`` freshness window.
+    This means a model call lasting >150 s (which fires zero audit events at phase boundaries
+    but continuously bumps ``last_activity``) keeps the ticket in the live set — the card
+    stays LIVE with the current stage lit, never falling back to INTERRUPTED.  The pill
+    (which already reads ``last_activity``) and the card can never disagree about "working".
+
+    Stale rows still drop out when BOTH signals are stale — a truly dead run shows as
+    crashed/interrupted (EU-477 preserved).
+
+    Dedupe by ticket_id: ``last_ts`` is a per-ticket MAX, so every row sharing a ticket_id
+    inherits the SAME audit freshness score; the heartbeat is shared too when the tid is
+    in the run-state's ``run_tickets``.  Without dedup, a re-run or restart-orphaned GHOST
+    row passes the same gate as the current run and the ticket renders TWICE.
 
     EU-130: when the newest scoped run has CURRENT prebuild triage activity for a DIFFERENT
     ticket, the single synthetic triage run pre-empts the live subset — the branch
     ``active_run`` has always run first, moved here unchanged.
+
+    ``run_state``: optional dict carrying ``last_activity`` + ``run_tickets`` keys (from
+    ``cockpit_state.get_state(app)``).  When None, defaults to the per-app state via
+    ``cockpit_state``.  Pass explicitly when the caller already holds the state dict to
+    avoid an extra lookup / lazy-create of empty state for inactive apps.
 
     ``active=False`` → ``[]`` (idle boards render the 'last run' via ``active_run``'s
     fallback).  One ``D.audit_lines`` pass — cached on (size, mtime_ns) — so no extra
@@ -912,6 +926,14 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
     ts = _scope(tasks, app)
     if not ts or not active:
         return []
+
+    # Resolve run_state once (lazy-create guard: prefer caller-provided; else look up).
+    if run_state is None:
+        try:
+            from . import cockpit_state as _cs
+            run_state = _cs.get_state(app)
+        except Exception:  # noqa: BLE001
+            run_state = {}
 
     # EU-130: current prebuild triage pre-empts the live subset. This ran FIRST in the old
     # active_run (before the ts[0] selection), so it runs before the live-subset filter here:
@@ -948,16 +970,24 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
     except Exception:  # noqa: BLE001
         pass
 
-    # Filter: keep tasks with no terminal outcome AND fresh activity of their OWN —
-    # no always-include-ts[0] exception (EU-477 AC: a stale newest run drops out too).
+    # Filter: keep tasks with no terminal outcome AND fresh activity — scored as the MAXIMUM
+    # of audit recency and run-state heartbeat (EU-574).  No always-include-ts[0] exception:
+    # a stale newest run drops out too, unless its heartbeat says otherwise.
     # Dedupe by ticket_id: `last_ts` is a per-ticket MAX, so EVERY row sharing a ticket_id
-    # inherits the SAME freshness score. Without this, a re-run or restart-orphaned GHOST row
-    # (e.g. a 25h-old EU-474 verify that never got a terminal outcome) passes the same gate as
-    # the current run and the ticket renders TWICE. `ts` is newest-first, so the first row is
-    # the live run; later rows of that ticket are stale duplicates. The drain's sibling-mutex
-    # guarantees a ticket builds at most once at a time → exactly one live card per ticket.
+    # inherits the SAME audit freshness score; the heartbeat shares too when the tid is in
+    # run_state's ``run_tickets`` (or falls back to the state's own heartbeat for single
+    # manual runs where run_tickets may not be populated).
     result: list[tuple[float, dict]] = []          # (score, task) for sorting
     seen_tids: set[str] = set()
+    # Grab the heartbeat timestamp once (shared by all tickets of this app).
+    hb_ts = 0.0
+    if run_state:
+        la = run_state.get("last_activity")
+        if la:
+            try:
+                hb_ts = float(la)
+            except (TypeError, ValueError):
+                pass
     for t in ts:
         tid = str(t.get("ticket_id") or "")
         if tid and tid in seen_tids:
@@ -966,7 +996,17 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
             seen_tids.add(tid)
         if t.get("outcome"):
             continue                                  # newest run of this ticket is terminal → not live
-        score = last_ts.get(tid, 0.0)
+        audit_score = last_ts.get(tid, 0.0)
+        # EU-574: unify liveness — use max(audit, heartbeat) when they belong to the same run.
+        # Check membership in run_tickets (populated during drain/concurrent builds); fall
+        # back to app-matching for single-manual runs where run_tickets might be empty.
+        hb_inherited = False
+        rt = run_state.get("run_tickets", [])         # list[str] e.g. ["EU-200", "EU-201"]
+        if rt:
+            hb_inherited = tid in rt
+        elif hb_ts and (t.get("app") == app or not app):
+            hb_inherited = True                       # single-run fallback
+        score = max(audit_score, hb_ts if hb_inherited else 0.0)
         if (now - score) < within_s:
             result.append((score, t))
 
@@ -977,7 +1017,8 @@ def live_runs(cfg, tasks: list[dict], app: Optional[str], active: bool,
     return [_run_obj_for(cfg, t, ts, live=True) for _, t in result[:cap]]
 
 
-def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Optional[dict]:
+def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool,
+               run_state: Optional[dict] = None) -> Optional[dict]:
     """The live run if one is going, else the most recent run as 'last run'.
 
     EU-477: a THIN wrapper over ``live_runs()`` — the single shared live-subset
@@ -988,29 +1029,39 @@ def active_run(cfg, tasks: list[dict], app: Optional[str], active: bool) -> Opti
     rendered as an idle 'last run' (``live=False``) — the historical contract the cockpit
     has always relied on for its last-run panel.  ``None`` only when the app has no runs
     at all.
+
+    ``run_state``: optional dict forwarded to ``live_runs`` for liveness unification
+    (EU-574).  When None, defaults to ``cockpit_state.get_state(app)``.
     """
     ts = _scope(tasks, app)
     if not ts:
         return None
-    lives = live_runs(cfg, tasks, app, active)
+    lives = live_runs(cfg, tasks, app, active, run_state=run_state)
     if lives:
         return lives[0]
     # No genuinely-live run: show the newest one as 'last run' (idle structural path).
     return _run_obj_for(cfg, ts[0], ts, live=False)
 
 
-def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = _LIVE_WITHIN_S) -> bool:
+def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = _LIVE_WITHIN_S,
+                   run_state: Optional[dict] = None) -> bool:
     """True when a run is genuinely live RIGHT NOW even though the cockpit didn't start it — e.g. a build
     kicked off by the Needs-you answer box, /unblock, or autopilot in another process. Heuristic: the
-    newest run for this project has NO terminal outcome AND the audit shows activity within the last
-    `within_s` seconds. Time-bounded so a crashed/interrupted attempt stops reading as live.
+    newest run for this project has NO terminal outcome AND **either** the audit shows activity within
+    the last `within_s` seconds **or** the run-state heartbeat (``last_activity``) is fresh
+    (EU-574). Time-bounded so a crashed/interrupted attempt stops reading as live.
 
     EU-477: ``live_runs()`` generalises exactly this heuristic to the FULL per-ticket live subset
     (and shares the ``_LIVE_WITHIN_S`` window); this cheap newest-run boolean stays as the
-    ``render_board`` inflight flag for runs the cockpit didn't start."""
+    ``render_board`` inflight flag for runs the cockpit didn't start.
+
+    ``run_state``: optional dict forwarded for liveness unification (EU-574).
+    """
     ts = _scope(tasks, app)
     if not ts or ts[0].get("outcome"):     # no runs, or the newest one already finished
         return False
+    now = datetime.now().timestamp()
+    # Check audit recency first (the original fast path).
     try:
         for line in reversed(D.audit_lines(cfg.audit_path)):
             line = line.strip()
@@ -1021,10 +1072,19 @@ def _run_in_flight(cfg, tasks: list[dict], app: Optional[str], within_s: int = _
             except (json.JSONDecodeError, TypeError):
                 continue
             dt = D._parse_ts(ev.get("ts", ""))
-            if dt:
-                return (datetime.now().timestamp() - dt.timestamp()) < within_s
+            if dt and (now - dt.timestamp()) < within_s:
+                return True
     except Exception:  # noqa: BLE001
-        return False
+        pass
+    # EU-574 fallback: check run-state heartbeat when audit is stale.
+    if run_state:
+        la = run_state.get("last_activity")
+        if la:
+            try:
+                if (now - float(la)) < within_s:
+                    return True
+            except (TypeError, ValueError):
+                pass
     return False
 
 
@@ -2307,7 +2367,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 :root{color-scheme:dark;
 /* palette */
 --bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;
---ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;
+--ink:#e7ebf2;--dim:#7e8795;--faint:#a0aab8;
 --ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;
 --warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;
 --bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;
@@ -2351,7 +2411,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
    cockpit_views._token_css() so the whole cockpit follows one switch. ── */
 :root[data-theme=light]{color-scheme:light;
 --bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;
---ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;
+--ink:#1c2536;--dim:#5a6578;--faint:#626978;
 --ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;
 --warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;
 --bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;
@@ -2416,13 +2476,11 @@ border-radius:99px;background:var(--well)}
 .apbtn.drain{background:var(--warn);color:#1a1205;margin-right:7px}
 /* health banner */
 .healthbar{padding:13px 26px}
-.healthbar.ok{background:linear-gradient(180deg,rgba(16,42,29,.55),transparent);border-bottom:1px solid var(--okline)}
-.healthbar.bad{background:linear-gradient(180deg,rgba(42,20,22,.6),transparent);border-bottom:1px solid #3a1a1c}
+.healthbar.bad{background:var(--badbg);border-bottom:1px solid var(--badline)}
 .hbrow{display:flex;align-items:center;gap:14px}
 .hbtitle{display:flex;align-items:center;gap:11px;font-weight:650;font-size:14px;flex:1}
-.healthbar.ok .hbtitle{color:var(--ok)}.healthbar.bad .hbtitle{color:var(--bad)}
+.healthbar.bad .hbtitle{color:var(--bad)}
 .hbdot{width:11px;height:11px;border-radius:99px;flex:none}
-.healthbar.ok .hbdot{background:var(--ok);box-shadow:0 0 0 4px rgba(58,209,127,.13)}
 .healthbar.bad .hbdot{background:var(--bad);animation:pulse3 1.4s infinite}
 @keyframes pulse3{0%,100%{box-shadow:0 0 0 0 rgba(240,103,107,.45)}50%{box-shadow:0 0 0 8px rgba(240,103,107,0)}}
 .hbactions{display:flex;align-items:center;gap:12px}

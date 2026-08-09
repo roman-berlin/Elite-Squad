@@ -153,6 +153,31 @@ def _with_default_timeout(session):
     return session
 
 
+# EU-783: Jira priority → numeric rank for tiebreak ordering (ascending = higher priority first).
+# Unknown / None maps to 2 (the "medium" slot) so untagged tickets never outrank a known tier —
+# they stay mutually ordered by Python's stable sort (i.e. board Rank).
+_PRIORITY_RANK: dict[str, int] = {
+    "highest": 0, "high": 1, "medium": 2, "low": 3, "lowest": 4,
+}
+
+
+def _tiebreak_autofiled(tickets: list[Ticket]) -> list[Ticket]:
+    """Return *tickets* sorted within their Jira priority tier: Commander tickets (no 'autofiled'
+    label) drain before autofiled ones at equal priority. Preserves relative order for tickets that
+    share both (priority, autofiled) — Python's stable sort guarantees this, which means board
+    Rank-order is preserved inside each slice.
+
+    Applied PER QUERY-BLOCK in ``get_ready_tasks`` so the In-Progress-before-To-Do resume-first
+    invariant (EU-252) is unaffected — sorting the merged list would let a high-priority To Do
+    jump a low-priority In Progress.
+    """
+    return sorted(
+        tickets,
+        key=lambda t: (_PRIORITY_RANK.get((getattr(t, 'priority', None) or '').lower(), 2),
+                       1 if 'autofiled' in (getattr(t, 'labels', None) or []) else 0),
+    )
+
+
 class JiraAdapter(BacklogAdapter):
     def __init__(self, app):
         b = app.backlog
@@ -226,7 +251,7 @@ class JiraAdapter(BacklogAdapter):
         return f"{self.base_url}/rest/api/3/{path.lstrip('/')}"
 
     def _fields(self) -> list[str]:
-        fields = ["summary", "description", "status", "comment", "labels", "issuetype", "attachment"]
+        fields = ["summary", "description", "status", "comment", "labels", "issuetype", "attachment", "priority"]
         if self.ac_field:
             fields.append(self.ac_field)
         return fields
@@ -298,11 +323,15 @@ class JiraAdapter(BacklogAdapter):
             })
             resp.raise_for_status()
             self._raise_if_unauthenticated(resp)   # a 200-empty here can mean 'bad token', not 'no work'
+            # EU-783: collect deduped tickets into a batch, then sort so Commander tickets (no
+            # 'autofiled' label) drain before autofiled ones within the same Jira priority tier.
+            batch: list[Ticket] = []
             for issue in resp.json().get("issues", []):
                 t = self._to_ticket(issue)
                 if t.key not in seen:
                     seen.add(t.key)
-                    out.append(t)
+                    batch.append(t)
+            out.extend(_tiebreak_autofiled(batch))
         return out[:limit]
 
     def get_task(self, key: str) -> Ticket:
@@ -778,6 +807,9 @@ class JiraAdapter(BacklogAdapter):
             # Carry the Jira status through so the autopilot can split In Progress vs To Do
             # for the three-tier drain order (EU-87) without a second API call.
             status=((f.get("status") or {}) or {}).get("name"),
+            # EU-783: carry Jira priority so _tiebreak_autofiled can sort autofiled last within equal
+            # priority tier, while respecting board Rank via Python's stable sort.
+            priority=((f.get("priority") or {}) or {}).get("name"),
         )
 
 

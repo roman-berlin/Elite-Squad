@@ -18,10 +18,28 @@ Sonnet-cap fallback (per call, no persistence):
 """
 from __future__ import annotations
 
-# canonical model strings, cheapest → dearest
-HAIKU = "claude-haiku-4-5-20251001"
-SONNET = "claude-sonnet-5"   # upgraded 2026-07-05 (Commander order) — was claude-sonnet-4-6
-OPUS = "claude-opus-4-8"
+# Canonical model strings, cheapest → dearest.
+#
+# 2026-07-28 (Commander order): these are FAMILY ALIASES, never pinned versions. The Claude CLI
+# resolves a bare family name to that family's current flagship — probed today:
+#     opus -> claude-opus-5     sonnet -> claude-sonnet-5     haiku -> claude-haiku-4-5-20251001
+# so the unit picks up Opus 5.2 the day it ships, with no edit here and no redeploy.
+#
+# This is the fix for a CLASS of bug, not an instance. Every model id in this system was a pinned
+# literal, and by today two had rotted: OPUS still said claude-opus-4-8 (a superseded Opus), and the
+# deep tier said claude-fable-5 — which is CAPPED. Probed directly: "You've reached your Fable 5
+# limit". The cost was not a slow drain but a silent one: models.for_planner has no retry, so a
+# refused planner fails OPEN to a briefless BUILD (testable_ac=0, in_scope_files=0). 14/14 planner
+# calls on 2026-07-28 returned zero tokens; every ticket that day was built with no plan, ran to the
+# turn limit, and was split 6 ways. EU-553 and EU-554 each became 6 children and were marked Done
+# having shipped nothing. A pinned model id is a time bomb with no alarm on it.
+#
+# Safe because nothing downstream parses a version out of these: tier_of() classifies by family name
+# (opus=2, sonnet=1, haiku=0 — asserted in models_test), provider.get_provider_info() maps the alias
+# to ('Anthropic', <alias>), and backends.glm_model_for()/_apply_registry() route on tier_of alone.
+HAIKU = "haiku"
+SONNET = "sonnet"
+OPUS = "opus"
 LADDER = [HAIKU, SONNET, OPUS]
 
 _TOP = len(LADDER) - 1
@@ -157,7 +175,10 @@ def for_officer(cfg, *, size: str = "", effort: str = "", ceiling_model: str | N
 # thinking (Planner/Architect on L/XL or effort-max/ultracode tickets). Deliberately OUTSIDE the
 # LADDER so every existing ceiling/floor rule is untouched: nothing auto-climbs to it except the
 # one explicit deep-architecture pick below, and cfg.deep_model = "" disables it entirely.
-DEEP = "claude-fable-5"
+# 2026-07-28: was claude-fable-5, which is CAPPED (probed: "You've reached your Fable 5 limit").
+# A pinned id here has no alarm on it — see the LADDER comment for what that cost. "opus" is the
+# family alias, so this tracks the newest Opus automatically.
+DEEP = "opus"
 
 _DEEP_EFFORTS = {"max", "xhigh", "ultra", "ultracode", "maximum"}
 _DEEP_LABELS = {"architecture", "architect", "epic", "deep"}

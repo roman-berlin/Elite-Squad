@@ -53,7 +53,7 @@ def _rel(dt) -> str:
 _TOKENS_FALLBACK = (
     ":root{color-scheme:dark;"
     "--bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;"
-    "--ink:#e7ebf2;--dim:#7e8795;--faint:#515a67;"
+    "--ink:#e7ebf2;--dim:#7e8795;--faint:#a0aab8;"
     "--ok:#34d399;--okbg:#0e2a1e;--okline:#1c5238;"
     "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
     "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
@@ -76,7 +76,7 @@ _TOKENS_FALLBACK = (
     ":root{--well:#0d1119;--console:#070a0e;--console-ink:#b9c2cf;--accent-hover:#2f5ce0}"
     ":root[data-theme=light]{color-scheme:light;"
     "--bg:#eef1f6;--panel:#ffffff;--panel2:#f2f4f9;--line:#dde3ec;--line2:#c7d1e0;"
-    "--ink:#1c2536;--dim:#5a6578;--faint:#8b95a7;"
+    "--ink:#1c2536;--dim:#5a6578;--faint:#626978;"
     "--ok:#0f9d63;--okbg:#e2f5ec;--okline:#aadfc6;"
     "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
     "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
@@ -384,11 +384,11 @@ def _working(msg: str, secs: int = 5) -> str:
     return (
         "<style>.wk{display:flex;flex-direction:column;gap:13px;align-items:flex-start;max-width:560px}"
         ".wkrow{display:flex;align-items:center;gap:12px}"
-        ".spin{width:24px;height:24px;border:3px solid #232936;border-top-color:#3b6cff;border-radius:50%;"
+        ".spin{width:24px;height:24px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;"
         "animation:sp .9s linear infinite;flex:none}@keyframes sp{to{transform:rotate(360deg)}}"
-        ".wkmsg{font-size:15px}.wkhint{color:#8a909c;font-size:12px}"
-        ".wkbar{width:100%;height:6px;background:#1a1f29;border-radius:99px;overflow:hidden}"
-        ".wkfill{width:36%;height:100%;background:linear-gradient(90deg,#2b5cff,#6aa9ff);border-radius:99px;"
+        ".wkmsg{font-size:15px}.wkhint{color:var(--dim);font-size:12px}"
+        ".wkbar{width:100%;height:6px;background:var(--panel2);border-radius:99px;overflow:hidden}"
+        ".wkfill{width:36%;height:100%;background:linear-gradient(90deg,var(--accent),var(--info));border-radius:99px;"
         "animation:wksl 1.5s ease-in-out infinite}"
         "@keyframes wksl{0%{margin-left:-36%}100%{margin-left:100%}}</style>"
         f"<div class=wk><div class=wkrow><div class=spin></div><div class=wkmsg>{html.escape(msg)}</div></div>"
@@ -1394,6 +1394,7 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
     <span class=tclabel>QA</span>
     <div class=tcrow>
       <form method=post action=/api/qa class=tbf><input type=hidden name=app value="{html.escape(app0)}">{_btn("&#128269; Run QA", attrs=f' {busy("qa")}' if busy("qa") else "")}</form>
+      {_btn("&#128293; Report&#160;a&#160;problem", tag="a", attrs=f' href="/report?app={html.escape(app0)}" title="File a bug against this project"')}
     </div>
   </div>
 
@@ -1648,6 +1649,18 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
             '</div>'
         )
 
+    def _unknown_state_card(provider_name: str, brand: str) -> str:
+        """EU-759: Unknown / unreadable live limits — grey card, never fake ok."""
+        return (
+            '<div class=provcard style="opacity:.65">'
+            '<div class=phead>'
+            f'<span class=pname>{html.escape(provider_name)}</span>'
+            f'<span class=pbrand style=color:var(--warn)>limits unknown</span>'
+            '</div>'
+            '<div class=pnote>&#8505;&nbsp;can\'t read live limits right now</div>'
+            '</div>'
+        )
+
     # Build Claude card from plan_usage data
     claude_card = ""
     if claude_usage.get("available"):
@@ -1662,14 +1675,12 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
                 worst_limit,
                 is_placeholder=False
             )
+        else:
+            # EU-759: available=True but no limits returned → unknown state (not blank)
+            claude_card = _unknown_state_card("Claude", "Max subscription")
     else:
-        # Claude data unavailable - show fallback
-        claude_card = _provider_card(
-            "Claude",
-            "Max subscription",
-            {"utilization": 0.0, "resets_in": ""},
-            is_placeholder=False
-        )
+        # EU-759: Claude data unavailable → unknown state (never fabricate ok/100%)
+        claude_card = _unknown_state_card("Claude", "Max subscription")
 
     # Build GLM card (placeholder if not configured)
     glm_card = _provider_card(
