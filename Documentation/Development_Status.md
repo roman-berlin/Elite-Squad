@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-13 · EU-819 · Elite-Unit · • All 4 ACs met: alert fires at threshold with count + raw head, success resets streak, default 3 / 0 disables, and each is tested in the new harness. · 🔗 (no UI — verify via `python3 tests/eu786_planner_alert_test.py` or a live drain with planner errors)
 - 2026-08-13 · EU-823 · Elite-Unit · • Surgical two-line CSS-token drift fix — both hex values byte-match warroom._PAGE:2374/2419. • Four live-import test functions cover AC1 (count=2), AC2 (dark+light values), and warroom sync. · 🔗 (no UI — backend config string constant; verify via `grep -c "\-\-brand" orchestrator/cockpit_views.py → 2` and inspecting lines 61/84 for the correct hex values)
 - 2026-08-13 · EU-811 · Elite-Unit · • All 4 #8a909c occurrences in standup_page() and council_page() correctly replaced with var(--dim). • --dim token confirmed in warroom.py :root (both light and dark); no new :root variables added. · 🔗 /standup and /council — verify muted meta paragraphs render in the design-token grey (`--dim`) rather than the old hardcoded hex
 - 2026-08-13 · EU-804 · Elite-Unit · • All 4 target hex values removed from both surfaces (grep confirms zero matches). • AC2 contrast satisfied: --ink:#1c2536 on --accentbg:#e8edfb ≈ 13.1:1 in light mode. · 🔗 /dashboard (check deploy strip visibility) + /chat (check chat bubble appearance)
