@@ -50,6 +50,57 @@ def _notify(cfg: Config, text: str) -> None:
     notify.send(("[DRY-RUN] " if cfg.dry_run else "") + text)
 
 
+# --------------------------------------------------------------------------- #
+# Consecutive Planner-failure streak tracker (EU-819).
+# Resets at the top of each drain run; incremented on every "(planner error:"
+# raw reply head; fires ONE Telegram alert + cockpit-warning audit event when
+# it hits the configured threshold, then resets.  Zero threshold = disabled.
+_planner_failure_streak: int = 0
+
+
+def _note_planner_outcome(cfg: Config, pres, *, ticket_id: str = "",
+                          audit=None) -> None:
+    """Track consecutive Planner failures and alert when the streak hits *threshold*.
+
+    Call immediately after the Planner runs (after ``_burn("planner", ...)``, inside
+    the ``iteration == 1`` block).  Reads ``planner_failure_alert_threshold`` from *cfg*
+    (default 3; 0 = disabled).  The streak increments on any result whose ``raw`` begins
+    with ``'(planner error:'`` and resets on a normal plan.
+
+    When the streak reaches exactly the threshold: fires one Telegram alert via ``notify.send``
+    (with ``[DRY-RUN]`` prefix in dry-run mode), prints a cockpit-visible ``WARNING`` line,
+    and records an ``audit`` event ``'planner_failure_alert'``.
+    """
+    global _planner_failure_streak
+    threshold = int(getattr(cfg, "planner_failure_alert_threshold", 3) or 0)
+
+    if not threshold or not pres.raw.startswith("(planner error:"):
+        _planner_failure_streak = 0
+        return
+
+    _planner_failure_streak += 1
+    if _planner_failure_streak < threshold:
+        return  # not yet — keep counting
+
+    # ---- threshold reached: fire exactly once per streak ----
+    raw_head = (pres.raw[:200] if pres.raw else "").replace("\n", " ")
+
+    msg = (f"⚠️ **Planner failing repeatedly** — "
+           f"{_planner_failure_streak} consecutive failure(s) in this run. "
+           f"Last raw head: {raw_head!r}")
+    _notify(cfg, msg)
+    print(f"  ⚠ WARNING: planner failing repeatedly — "
+          f"{_planner_failure_streak} consecutive failure(s)", flush=True)
+    if audit is not None:
+        try:
+            audit.record("planner_failure_alert", ticket_id=ticket_id or "",
+                         count=_planner_failure_streak, raw_head=raw_head[:300])
+        except Exception:  # noqa: BLE001
+            pass  # instrumentation must never break a run
+
+    _planner_failure_streak = 0  # reset after firing
+
+
 def _test_url(app: AppConfig, build_summary: str | None) -> str:
     """Where the Commander should test this change on DEV: the builder's 'TEST: <route>' line,
     resolved against the app's qa_url. Returns a full URL, a bare route, or '' if neither exists."""
@@ -955,6 +1006,9 @@ async def _run_inner(cfg: Config, worklist: list[tuple[AppConfig, Ticket]],
     EU-222: before either drain touches the worklist, a fail-closed GLM budget pre-flight runs —
     if GLM is the active backend and its quota is exhausted, the run stops here with a clear
     audit event + notify instead of silently dispatching against a blind dollar cap."""
+    # EU-819: per-drain-reset for consecutive Planner-failure streak
+    global _planner_failure_streak
+    _planner_failure_streak = 0
     if _glm_budget_preflight_block(cfg, audit):
         return []
     n = max(1, int(getattr(cfg, "max_concurrent_builders", 1) or 1))
@@ -2083,6 +2137,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             cost += _pres.cost_usd
             budget.add(_pres.cost_usd)
             _burn("planner", _pres.input_tokens, _pres.output_tokens)
+            # EU-819: track consecutive Planner failures for threshold alerting
+            _note_planner_outcome(cfg, _pres, ticket_id=ticket.id, audit=audit)
             _planned = True
             if _pres.verdict == "SPLIT":
                 from . import scrum as _scrum

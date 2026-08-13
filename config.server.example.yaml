@@ -54,3 +54,4 @@ apps:
         Needs Human: "In Progress"
 # autofiled_quota_per_n: 0   # EU-784: limits how often self-filed tickets enter the build queue during drain (Mac-only; server doesn't drain). Value N = at most 1 autofiled per N consecutive picks. 0 = unlimited.
 planner_enabled: true
+planner_failure_alert_threshold: 3  # fire ONE Telegram alert after consecutive Planner failures hit this count (default 3; 0 = disabled)
