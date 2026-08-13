@@ -229,10 +229,12 @@ apps:
     backlog_backend: "none"
 
 # --- 2026-07 autonomy knobs (defaults shown; uncomment to change) ---
-# planner_enabled: false        # ONE Opus design call/ticket before the build (Phase-2 centerpiece);
-#                               # runs INSTEAD of the Architect when on
-# planner_verdict_park: true    # a Planner CLOSE/ANSWER verdict with no code evidence parks the
-#                               # ticket for you instead of building anyway (EU-375)
+# planner_enabled: false              # ONE Opus design call/ticket before the build (Phase-2 centerpiece);
+#                                     # runs INSTEAD of the Architect when on
+# planner_verdict_park: true          # a Planner CLOSE/ANSWER verdict with no code evidence parks the
+#                                     # ticket for you instead of building anyway (EU-375)
+# planner_failure_alert_threshold: 3  # fire ONE Telegram alert after this many consecutive Planner
+#                                     # failures in a drain run (default 3; set 0 = disabled, opt-in-silent)
 # builder_task_budget: 70000    # per-build SDK token budget, scaled by effort (EU-377); 0 = off.
 #                               # Anthropic-only — GLM ignores the beta header, so GLM passes have
 #                               # NO API-side budget; the in-pass brake below covers them instead.

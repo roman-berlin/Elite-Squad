@@ -319,6 +319,11 @@ class Config:
     planner_fanout_max_agents: int = 4
     planner_fanout_budget_usd: float = 3.0
 
+    # EU-819: fire ONE Telegram alert when *threshold* consecutive Planner failures occur in a run.
+    # The streak counts "(planner error:" raw reply heads (parse errors + aborts). Default 3;
+    # set 0 to disable (opt-in-silent — off-by-default, unlike other planner_* flags).
+    planner_failure_alert_threshold: int = 3
+
     # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
     # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a
     # recurring failure carries its known fix instead of the Builder rediscovering it. Reuses the
