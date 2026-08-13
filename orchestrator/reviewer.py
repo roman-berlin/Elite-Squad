@@ -129,7 +129,7 @@ If the surface applies, emit the finding (even minor) rather than passing silent
 # ===TICKETS=== block, which loop._route_out_of_scope parses off review.raw and routes into the
 # backlog (de-duped, labeled out-of-scope) instead of letting it evaporate. Reuses filing.py — the
 # same machine block the QA/Security/Release officers already use.
-REVIEWER_SYSTEM += filing.TICKET_BLOCK_RULE
+REVIEWER_SYSTEM += filing.ticket_block_rule_for("Reviewer")
 
 
 def _prompt(diff: str, ticket: Ticket, build_artifact: BuildArtifact | None = None) -> str:

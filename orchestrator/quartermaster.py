@@ -11,7 +11,7 @@ code. (Promotion to MAIN stays the Commander's call; the Release Manager just te
 from __future__ import annotations
 
 from .config import Config
-from .filing import TICKET_BLOCK_RULE
+from .filing import ticket_block_rule_for
 
 QUARTERMASTER_SYSTEM = """\
 You are the Release Manager (S-4) — logistics and deploy-readiness officer of an elite autonomous
@@ -60,7 +60,7 @@ async def inspect(cfg: Config, app_name: str, audit=None) -> str:
         print(f"  · quartermaster model: {mreason}", flush=True)
     return await recon.run_officer(
         officer="quartermaster", label="Release Manager",
-        system=QUARTERMASTER_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
+        system=QUARTERMASTER_SYSTEM + ticket_block_rule_for("Release Manager"), task=_prompt(app),
         cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
         empty="(Release Manager produced no report.)", audit=audit)

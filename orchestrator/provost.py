@@ -16,7 +16,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from . import guard, memory, models
 from .agent import run_agent
 from .config import Config
-from .filing import TICKET_BLOCK_RULE
+from .filing import ticket_block_rule_for
 
 PROVOST_SYSTEM = """\
 You are the Security Engineer — the Elite Unit's security officer, reporting to THE CTO.
@@ -64,7 +64,7 @@ async def inspect(cfg: Config, app_name: str, audit=None) -> str:
         print(f"  · provost model: {mreason}", flush=True)
     return await recon.run_officer(
         officer="provost", label="Security Engineer",
-        system=PROVOST_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app),
+        system=PROVOST_SYSTEM + ticket_block_rule_for("Security Engineer"), task=_prompt(app),
         cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
         empty="(Security Engineer produced no report.)", audit=audit)

@@ -12,7 +12,7 @@ application source — it verifies, it does not build.
 from __future__ import annotations
 
 from .config import Config
-from .filing import TICKET_BLOCK_RULE
+from .filing import ticket_block_rule_for
 
 SCOUT_SYSTEM = """\
 You are the QA Engineer (S-2) — the Elite Unit's reconnaissance / QA officer, reporting to THE
@@ -58,7 +58,7 @@ async def recon(cfg: Config, app_name: str, url: str | None = None, audit=None) 
         print(f"  · scout model: {mreason}", flush=True)
     return await _recon.run_officer(
         officer="scout", label="QA Engineer",
-        system=SCOUT_SYSTEM + TICKET_BLOCK_RULE, task=_prompt(app, url),
+        system=SCOUT_SYSTEM + ticket_block_rule_for("QA Engineer"), task=_prompt(app, url),
         cfg=cfg, cwd=app.repo_path, model=model,
         soldier_tools=["Read", "Grep", "Glob", "Bash"], max_turns=30, effort="high",
         empty="(QA Engineer produced no report.)", audit=audit)

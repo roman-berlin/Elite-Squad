@@ -61,6 +61,29 @@ minor notes. If nothing warrants a ticket, emit an empty list:
 []
 ===END==="""
 
+# Per-officer runtime notes appended to TICKET_BLOCK_RULE so a low-precision cycle can tighten
+# an officer's ticket-filing bar in its own system prompt without touching the base constant.
+_OFFICER_BLOCK_NOTES: dict[str, str] = {}
+
+
+def set_officer_block_note(officer_label: str, note: str) -> None:
+    """Set (or update) a per-officer sentence appended to its TICKET_BLOCK_RULE at the next run."""
+    _OFFICER_BLOCK_NOTES[officer_label] = note
+
+
+def ticket_block_rule_for(officer_label: str) -> str:
+    """Return ``TICKET_BLOCK_RULE`` plus any runtime-set per-officer note (empty string when
+    the officer has no note). The bare ``TICKET_BLOCK_RULE`` is always a substring of the return
+    value, so existing ``assert TICKET_BLOCK_RULE in REVIEWER_SYSTEM`` tests stay green.
+
+    Labels are the officer's CANONICAL DISPLAY NAMES, spaced exactly as officers.display()
+    renders them — never hyphenated id-style spellings: any capitalized engineer-token that is
+    not one of the spaced compounds the EU-40 rename-leak guard exempts makes
+    officer_rename_regression_test.py red (and keep each spaced compound on ONE source line —
+    the guard also catches names wrapped across a line break)."""
+    return TICKET_BLOCK_RULE + _OFFICER_BLOCK_NOTES.get(officer_label, "")
+
+
 _BLOCK = re.compile(r"===TICKETS===\s*(.*?)\s*===END===", re.DOTALL)
 
 
