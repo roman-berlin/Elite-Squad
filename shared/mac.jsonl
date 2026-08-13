@@ -1915,3 +1915,11 @@
 {"ts": "2026-08-13T18:54:58+0300", "event": "token_burn_report", "ticket_id": "EU-823", "payload": {"planner": 58938, "builder": 1121468, "reviewer": 93623}, "total": 1274029}
 {"ts": "2026-08-13T18:54:58+0300", "event": "ticket_start", "ticket_id": "EU-824", "app": "Elite-Unit", "branch": "autodev/EU-824-extract-theme-tokens-constant-refactor-t", "dry_run": false, "ephemeral": false}
 {"ts": "2026-08-13T18:54:59+0300", "event": "ticket_transition", "ticket_id": "EU-824", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-08-13T19:05:23+0300", "event": "dev_gate", "ticket_id": "EU-819", "passed": true, "failing": [], "report_tail": ""}
+{"ts": "2026-08-13T19:05:25+0300", "event": "land_pushed", "ticket_id": "EU-819", "base": "dev"}
+{"ts": "2026-08-13T19:05:28+0300", "event": "ticket_transition", "ticket_id": "EU-819", "wanted": "Done", "landed": "Done", "outcome": "matched"}
+{"ts": "2026-08-13T19:05:32+0300", "event": "merged", "ticket_id": "EU-819", "base": "dev", "done": false}
+{"ts": "2026-08-13T19:05:32+0300", "event": "self_update_pending_restart", "ticket_id": "EU-819"}
+{"ts": "2026-08-13T19:05:41+0300", "event": "token_burn_report", "ticket_id": "EU-819", "payload": {"planner": 630975, "builder": 4753422, "reviewer": 402734}, "total": 5787131}
+{"ts": "2026-08-13T19:05:41+0300", "event": "ticket_start", "ticket_id": "EU-820", "app": "Elite-Unit", "branch": "autodev/EU-820-fix-model-tiering-test-assert-parseable-", "dry_run": false, "ephemeral": false}
+{"ts": "2026-08-13T19:05:42+0300", "event": "ticket_transition", "ticket_id": "EU-820", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
