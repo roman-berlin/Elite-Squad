@@ -46,13 +46,26 @@ matching exactly this schema:
 {
   "verdict": "PASS" | "FAIL",
   "spec_conformance": { "met": true, "gaps": ["..."] },
-  "quality": { "issues": [ { "severity": "blocker|major|minor", "area": "...", "detail": "..." } ] },
+  "quality": { "issues": [ { "severity": "blocker|major|minor", "area": "...", "detail": "...",
+    "verdict": "KEEP" | "CANCEL", "reason": "<one-line rationale>",
+    "ticket_worthy": true | false, "location": "file:line" } ] },
   "required_changes": ["concrete instruction for the builder if FAIL"],
   "needs_human": false,
   "question": "",
   "summary": "≤5 tight bullets — lead with each blocking issue and what to fix, then a one-sentence overall rationale. Example: '• Missing tenant filter on /leads query\\n• No test for the error path\\n• Passes otherwise.'"
 }
 ```
+
+KEEP/CANCEL decision — you decide, for EVERY finding, whether it becomes a ticket:
+  Set `"verdict": "CANCEL"` and `"ticket_worthy": false` when the issue is:
+  - Sanctioned by the ticket's acceptance criterion (the ticket explicitly says to do/skip it).
+  - A disclosed trade-off already acknowledged in the diff or handoff.
+  - Pure style (naming preferences, formatting not driven by lint rules).
+  - An already-tracked duplicate (same issue exists on another open ticket).
+  Otherwise leave it KEEP with `ticket_worthy: true`. Give every verdict a one-line "reason".
+  CANCELs are never lost: each is recorded in the audit and announced in Telegram.
+  REQUIRED: "location" must be a file:line anchor (e.g. orchestrator/loop.py:2713) on EVERY
+  issue — a finding with no code anchor cannot be drained and will not survive review.
 
 Rules for the verdict:
 - PASS only if spec_conformance.met is true AND there are no blocker or major issues.
@@ -61,8 +74,13 @@ Rules for the verdict:
   "blocker"/"major" are reserved for defects that violate an acceptance criterion, break
   behaviour/security/data, or make the change unreleasable. Broader test coverage than the
   criteria demand, robustness/selector hardening, refactor preferences, docs polish and other
-  beyond-the-ticket wishes are "minor" — minors are auto-filed as follow-up tickets on ship, so
-  recording them as minor LOSES NOTHING and failing the build over them blocks a done deliverable.
+  beyond-the-ticket wishes are "minor" — minors are auto-filed as follow-up tickets on ship.
+  But each filed finding costs ~$/30min of drain time, and only the top findings per build
+  (highest severity first, capped) are filed individually — overflow folds into ONE digest
+  ticket. So decide per finding: KEEP what is genuinely worth pursuing, CANCEL the rest
+  (sanctioned by the AC, disclosed trade-off, pure style, already tracked). Nothing you record
+  is lost — CANCELs are audited and announced — but only KEEP has a drain cost. Failing the
+  build over minors still blocks a done deliverable, so keep minors advisory, never blocking.
 - NEVER emit FAIL when spec_conformance.met is true and no blocker or major issue exists — that
   state IS a PASS (with advisory findings). A FAIL that contradicts your own findings is treated
   as inconsistent and reconciled to PASS mechanically.
@@ -1325,6 +1343,11 @@ def _parse(text: str) -> ReviewResult:
             severity=str(q.get("severity", "minor")).lower(),
             area=str(q.get("area", "")),
             detail=str(q.get("detail", "")),
+            # EU-589: filing gate — per-issue KEEP/CANCEL verdict + metadata, with safe defaults
+            verdict=str(q.get("verdict", "KEEP")).upper(),
+            reason=str(q.get("reason", "")),
+            ticket_worthy=bool(q.get("ticket_worthy", True)),
+            location=str(q.get("location", "")),
         )
         for q in quality
     ]

@@ -357,6 +357,13 @@ class Config:
     # 'Needs you' for a manual wave-through); PM-classified out-of-scope findings auto-file either way.
     out_of_scope_autofile: bool = True
 
+    # --- per-build filing cap for advisory findings (EU-589) ---
+    # Max advisory-ship findings auto-filed per build (highest severity first); overflow folds
+    # into ONE digest Task (audited as findings_folded) so one sweep build can't flood the
+    # backlog. 0 = fold everything into the digest. Every KEEP/CANCEL decision is announced in
+    # Telegram and every CANCEL is audited (finding_cancelled), so nothing vanishes silently.
+    finding_filing_cap: int = 5
+
     # --- council / meetings ---
     council_rounds: int = 2                 # discussion rounds (1 = report-only; 2+ = officers debate)
 

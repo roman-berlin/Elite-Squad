@@ -215,8 +215,10 @@ def _run_route(report: str, autofile: bool = False, dry_run: bool = False):
     _reset_direct_stubs()
 
     # Stub filing.file_findings to capture the call without touching the backlog.
+    # EU-589: _route_out_of_scope now threads the loop's audit object (audit=...) so dedups
+    # record filing_suppressed — the stub must accept the kwarg like the real signature.
     _orig_ff = filing.file_findings
-    def _cap_file_findings(app, label, report_text):
+    def _cap_file_findings(app, label, report_text, audit=None):
         file_findings_calls.append(report_text)
         return _FakeFilingResult()
     filing.file_findings = _cap_file_findings
