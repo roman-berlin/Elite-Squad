@@ -666,12 +666,12 @@ def _plan_limit_banner(state: dict, cfg=None) -> str:
         continue_offer = ""
 
     return (
-        "<div style='background:#2a1417;border-bottom:2px solid #5a1f22;color:#f0676b;"
+        "<div style='background:var(--badbg);border-bottom:2px solid var(--badline);color:var(--bad);"
         "padding:16px 26px;font-size:14px;font-weight:650;display:flex;align-items:flex-start;gap:11px'>"
         "<span style='font-size:20px'>&#9888;</span>"
         "<div>"
-        f"<div style='font-size:15px;margin-bottom:4px'>&#9888; {html.escape(backend_label)} plan limit reached &#8212; implementation paused</div>"
-        f"<div style='font-size:13px;color:#e7ebf2;font-weight:400'>Resets at {html.escape(reset_text)}. "
+        f"<div style='font-size:15px;margin-bottom:4px'>{html.escape(backend_label)} plan limit reached &#8212; implementation paused</div>"
+        f"<div style='font-size:13px;color:var(--ink);font-weight:400'>Resets at {html.escape(reset_text)}. "
         "New builds will wait until the limit renews.</div>"
         f"{continue_offer}"
         "</div></div>"
