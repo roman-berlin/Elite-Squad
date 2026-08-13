@@ -2187,7 +2187,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     def standup_page() -> str:
         from . import council
         snap = "<pre class=rep>" + html.escape(D.standup(cfg)) + "</pre>"
-        intro = ("<p style='color:#8a909c;margin:-4px 0 14px'>The stand-up now runs inside the daily "
+        intro = ("<p style='color:var(--dim);margin:-4px 0 14px'>The stand-up now runs inside the daily "
                  "muster — see <a href='/council'>Daily muster &amp; meetings</a>. You don't initiate "
                  "it; engineers post anything actionable to <a href='/needs'>Needs you</a> and ping you "
                  "on Telegram if blocked. The button below is only for an on-demand extra.</p>")
@@ -2198,7 +2198,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         else:
             last = council.last_standup(cfg)
             rep = ("<pre class=rep>" + html.escape(last) + "</pre>" if last
-                   else "<p style='color:#8a909c'>No engineer stand-up recorded yet — the next one lands "
+                   else "<p style='color:var(--dim)'>No engineer stand-up recorded yet — the next one lands "
                         "automatically at the 10:00 muster. Each engineer reports Yesterday / Today / "
                         "Blockers and flags who they need.</p>")
         # EU-701: /api/standup's outcome (standup_api writes it app=None) renders inline here,
@@ -2255,7 +2255,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
         # not only on the home board — suppressed mid-session so the _working panel owns the page.
         strip = ("" if (_state.get("councilling") or _state.get("shipreview"))
                  else page_result_strip(None))
-        intro = ("<p style='color:#8a909c;margin:-6px 0 16px'>The engineers hold a council "
+        intro = ("<p style='color:var(--dim);margin:-6px 0 16px'>The engineers hold a council "
                  "automatically each day — you don't need to call it. To brainstorm with them yourself, "
                  "<a href=\"/chat\">chat with the CTO</a>.</p>"
                  '<p style="display:flex;gap:14px;margin:4px 0">'
@@ -2268,7 +2268,7 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                  '</p>')
         if not hist:
             return _wrap("Daily Council", strip + acts + intro + top
-                         + "<p style='color:#8a909c'>No councils yet.</p>")
+                         + "<p style='color:var(--dim)'>No councils yet.</p>")
         want = request.args.get("f") or hist[0]["file"]
         transcript = council.transcript_text(cfg, want) or "(transcript missing)"
         items = "".join(
