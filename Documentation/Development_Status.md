@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-836 · Elite-Unit · • AC1/AC2: source_officer_of correct — first non-autofiled/non-fp label, original case; None for Commander. · 🔗 (no UI — `python3 tests/run_all.py` + inspect `audit.jsonl` rows for terminal events on an autofiled ticket to see `source_officer` and `is_autofiled` fields populated, vs absent on a Commander ticket)
 - 2026-08-13 · EU-589 · Elite-Unit · • Spec met: per-build cap + digest overflow, KEEP/CANCEL per finding with ticket_worthy, minors→Task, bodies carry origin/files/AC/anchor, audit threaded at both named sites, Telegram announces each decision.
 - 2026-08-13 · EU-833 · Elite-Unit · • All 6 ACs implemented and covered: refusal detection (stamp + zero-token contradiction), single retry on a lower ladder tier, park-not-build/park-not-split on exhaustion, no error-strike, mutation-verified regression… · 🔗 No UI change — verify in the cockpit drain log or audit.jsonl for a ticket where the Planner's first model returns zero tokens (simulated by a cap/refusal): expect "planner refused — parking (EU-833)" and outcome=ESCALATED, NOT a blind build. Check `state/audit.jsonl` for `"event": "planner_refusal_park"`.
 - 2026-08-13 · EU-805 · Elite-Unit · • All 6 hex literals (#3fb950 ×2, #d99a2b ×2, #f0676b ×2) correctly replaced with var(--ok)/var(--warn)/var(--bad) in the gauge <style> block.
