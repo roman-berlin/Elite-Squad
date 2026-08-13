@@ -58,7 +58,7 @@ _TOKENS_FALLBACK = (
     "--warn:#f5b34a;--warnbg:#2c2410;--warnline:#5a4a1c;"
     "--bad:#f0676b;--badbg:#2a1417;--badline:#5a1f22;"
     "--info:#6aa9ff;--infobg:#0a1f2e;--infoline:#1a3a5c;"
-    "--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;"
+    "--accent:#4d7cff;--accentbg:#0f1c30;--accentline:#1e3457;--brand:#ff7a59;"
     "--mono:ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;"
     "--r-sm:6px;--r-md:9px;--r-lg:13px;--r-xl:14px;--r-pill:999px;"
     "--shadow-1:0 1px 2px rgba(0,0,0,.35);--shadow-2:0 8px 24px rgba(0,0,0,.45);"
@@ -81,7 +81,7 @@ _TOKENS_FALLBACK = (
     "--warn:#a8720f;--warnbg:#faf0d9;--warnline:#e8d5a5;"
     "--bad:#cf3a40;--badbg:#fae5e6;--badline:#efbfc1;"
     "--info:#2563c9;--infobg:#e7effc;--infoline:#c2d6f3;"
-    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;"
+    "--accent:#3b62d9;--accentbg:#e8edfb;--accentline:#c4d1f1;--brand:#e8590c;"
     "--well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}")
 
 # Applies the saved theme BEFORE first paint on every page that injects the tokens, so
