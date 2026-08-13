@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-13 · EU-803 · Elite-Unit · • All four dark hex literals in the main banner block replaced with correct CSS custom properties — AC1 met. • Duplicate &#9888; removed; exactly one remains — AC2 met.
 - 2026-07-28 · EU-785 · Elite-Unit · • Integration harness pins all three self-file-lane layers (severity→priority band, _tiebreak_autofiled, apply_autofiled_quota) against the real production functions. · 🔗 (no UI — import-only harness: `python3 tests/eu785_selffile_lane_integration_test.py` verifies all three layers together)
 - 2026-07-28 · EU-778 · Elite-Unit · • All introduced var(--…) tokens are defined in warroom._PAGE (dark + light) — no inherit-fallback traps. • Dead .healthbar.ok rules correctly deleted; health_banner() only ever emits 'healthbar bad'.
 - 2026-07-28 · EU-792 · Elite-Unit · • Both contrast values independently verified: dark #a0aab8 = 8.43:1 ✓, light #626978 = 4.87:1 ✓. · 🔗 /board — toggle theme switch to see `--faint` text elements (subtle/meta labels) legible against background in both dark and light modes
