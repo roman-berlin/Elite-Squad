@@ -58,6 +58,17 @@ def tier_of(model: str) -> int:
     return _TOP
 
 
+def family_of(model: str) -> str:
+    """Return the model's family name (``haiku``, ``sonnet``, ``opus``). An unknown model
+    resolves to ``opus`` (top), mirroring ``tier_of``'s unknown→_TOP behaviour."""
+    m = (model or "").lower()
+    if "haiku" in m:
+        return "haiku"
+    if "sonnet" in m:
+        return "sonnet"
+    return "opus"
+
+
 def model_at(tier: int) -> str:
     return LADDER[max(0, min(tier, _TOP))]
 

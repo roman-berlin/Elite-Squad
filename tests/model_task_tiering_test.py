@@ -29,6 +29,7 @@ sys.modules["claude_agent_sdk"] = sdk
 sys.path.insert(0, ".")
 
 from orchestrator import backends, models
+from orchestrator.planner import parse_plan
 from orchestrator.config import Config
 
 results = []
@@ -95,8 +96,8 @@ try:
         backends.glm_model_for(models.HAIKU) == "glm-4.5-air")
     chk("(5d) an Opus-class request keeps the top GLM",
         backends.glm_model_for("claude-opus-4-8") == backends.glm_model())
-    chk("(5e) the deep model keeps the top GLM (unknown → top, never downgraded)",
-        backends.glm_model_for("claude-fable-5") == backends.glm_model())
+    chk("(5e) a synthetic unknown model keeps the top GLM (unknown → top, never downgraded)",
+        backends.glm_model_for("synthetic-deep-model-x8z") == backends.glm_model())
 finally:
     for k, v in _env_saved.items():
         if v is None:
@@ -113,6 +114,33 @@ chk("(6) apply() picks the GLM variant from the requested model's class",
 chk("(7) the auto ladder is untouched (Haiku→Sonnet→Opus)",
     models.LADDER == [models.HAIKU, models.SONNET, models.OPUS])
 chk("(7b) auto_model stays ON by default", Config(apps=[], audit_path=str(tmp / "a.jsonl")).auto_model)
+
+# ── (8) behavioural plan-parse — feed parse_plan a stubbed reply and assert structural output ──
+import json as _json
+
+_good_plan = _json.dumps({
+    "verdict": "BUILD",
+    "approach": "edit the three files listed below",
+    "testable_ac": ["assert button emits click event", "assert form posts to /api/submit"],
+    "in_scope_files": ["apps/web/src/button.tsx", "apps/web/src/form.tsx"],
+})
+_res = parse_plan(_good_plan)
+chk("(8a) valid plan → BUILD with populated fields",
+    _res.verdict == "BUILD" and len(_res.testable_ac) > 0 and len(_res.in_scope_files) > 0,
+    f"{_res.verdict} ac={len(_res.testable_ac)} files={len(_res.in_scope_files)}")
+
+_garbage = parse_plan("not-json at all {{{")
+chk("(8b) garbled input → fail-safe BUILD with empty fields",
+    _garbage.verdict == "BUILD" and len(_garbage.testable_ac) == 0 and len(_garbage.in_scope_files) == 0,
+    f"{_garbage.verdict} ac={len(_garbage.testable_ac)} files={len(_garbage.in_scope_files)}")
+
+# ── (9) family_of routing membership (non-brittle) ──
+chk("(9a) claude-opus-4-8 ∈ opus", models.family_of("claude-opus-4-8") == "opus")
+chk("(9b) models.SONNET ∈ sonnet", models.family_of(models.SONNET) == "sonnet")
+chk("(9c) models.HAIKU ∈ haiku", models.family_of(models.HAIKU) == "haiku")
+chk("(9d) an unknown id resolves to opus (top family)", models.family_of("synthetic-deep-model-x8z") == "opus")
+# also verify the DEEP_PIN alias maps through family_of so deep-tier is always top-family
+chk("(9e) DEEP_PIN is opus-family", models.family_of(DEEP_PIN) == "opus")
 
 print("\n========== PER-TASK MODEL TIERING QA ==========")
 passed = sum(1 for _, ok, _ in results if ok)
