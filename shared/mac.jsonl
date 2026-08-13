@@ -1826,3 +1826,23 @@
 {"ts": "2026-07-28T23:57:12+0300", "event": "out_of_scope_filed", "ticket_id": "EU-780", "source": "reviewer", "filed": [], "deduped": ["EU-684"], "failed": []}
 {"ts": "2026-08-13T13:42:13+0300", "event": "self_restart_completed", "ticket_id": "EU-785", "old_sha": "ca2455328d38873d0c6043b49d170e5d7be66aed"}
 {"ts": "2026-08-13T13:42:14+0300", "event": "boot_smoke_pass", "ticket_id": "EU-785"}
+{"ts": "2026-08-13T13:42:36+0300", "event": "autopilot_resume", "app": "Elite-Unit", "armed_ts": 1785255168.089491}
+{"ts": "2026-08-13T13:42:36+0300", "event": "process_start", "role": "autopilot", "app": "Elite-Unit", "sha": "8b7f6eb", "pid": 1034, "dirty": false, "modified_paths": []}
+{"ts": "2026-08-13T13:42:40+0300", "event": "branch_retired", "key": "EU-555", "sha": "66b6b4d815910cd1520a68cc315bb9dc1ad2bfa8", "tag": null, "merged": true, "app": "Elite-Unit", "branch": "autodev/EU-555-light-theme-sweep-replace-all-hardcoded-"}
+{"ts": "2026-08-13T13:42:41+0300", "event": "boot_reconcile", "resumed": ["EU-780"], "parked": [], "struck": ["EU-780"], "skipped_active": [], "dangling": ["EU-780"], "in_progress_count": 7}
+{"ts": "2026-08-13T13:42:41+0300", "event": "process_start", "role": "serve", "sha": "8b7f6eb", "pid": 1034}
+{"ts": "2026-08-13T13:42:41+0300", "event": "branch_retired", "key": "EU-587", "sha": "66b6b4d815910cd1520a68cc315bb9dc1ad2bfa8", "tag": null, "merged": true, "app": "Elite-Unit", "branch": "autodev/EU-587-keep-self-filed-tickets-in-a-lower-prior"}
+{"ts": "2026-08-13T13:42:46+0300", "event": "branch_retired", "key": "EU-776", "sha": "66b6b4d815910cd1520a68cc315bb9dc1ad2bfa8", "tag": null, "merged": true, "app": "Elite-Unit", "branch": "autodev/EU-776-eu-555a-unify-token-source-of-truth-rais"}
+{"ts": "2026-08-13T13:42:55+0300", "event": "ticket_transition", "ticket_id": "AUTO-218", "wanted": "QA", "landed": "QA", "outcome": "no-op"}
+{"ts": "2026-08-13T13:42:56+0300", "event": "epic_ready_for_signoff", "epic": "AUTO-218", "app": "automatixy", "children": ["AUTO-219", "AUTO-220", "AUTO-221", "AUTO-222", "AUTO-223"], "exceptions": [], "via": "sweep"}
+{"ts": "2026-08-13T13:42:57+0300", "event": "autopilot_start", "mode": "LIVE \u00b7 automode", "app": "Elite-Unit", "once": false}
+{"ts": "2026-08-13T13:43:01+0300", "event": "hybrid_mode", "builder_backend": "f6be0ded-2b6d-4721-9fc1-4aabee7cee5b", "main_backend": "opus"}
+{"ts": "2026-08-13T13:43:02+0300", "event": "ticket_start", "ticket_id": "EU-780", "app": "Elite-Unit", "branch": "autodev/EU-780-verify-close-light-theme-sweep-replace-a", "dry_run": false, "ephemeral": false}
+{"ts": "2026-08-13T13:43:02+0300", "event": "prior_attempts_injected", "ticket_id": "EU-780", "chars": 1226}
+{"ts": "2026-08-13T13:43:02+0300", "event": "ticket_transition", "ticket_id": "EU-780", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
+{"ts": "2026-08-13T13:51:46+0300", "event": "ticket_start", "ticket_id": "EU-786", "app": "Elite-Unit", "branch": "autodev/EU-786-a-refused-planner-fails-open-to-a-briefl", "dry_run": false, "ephemeral": false}
+{"ts": "2026-08-13T13:51:48+0300", "event": "ticket_transition", "ticket_id": "EU-786", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-08-13T13:56:53+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 79413, "output_tokens": 11381, "cost_usd": 1.555359, "duration_s": 302.21, "turns": 5, "ticket_id": "EU-786"}
+{"ts": "2026-08-13T13:56:53+0300", "event": "planner", "ticket_id": "EU-786", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 6, "cost_usd": 1.555359, "provider": "Anthropic", "model": "opus"}
+{"ts": "2026-08-13T13:57:09+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 79044, "output_tokens": 11642, "cost_usd": 1.571021, "duration_s": 323.65, "turns": 5, "ticket_id": "EU-780"}
+{"ts": "2026-08-13T13:57:09+0300", "event": "planner", "ticket_id": "EU-780", "verdict": "SPLIT", "testable_ac": 0, "in_scope_files": 0, "cost_usd": 1.571021, "provider": "Anthropic", "model": "opus"}
