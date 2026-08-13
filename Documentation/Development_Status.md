@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-13 · EU-805 · Elite-Unit · • All 6 hex literals (#3fb950 ×2, #d99a2b ×2, #f0676b ×2) correctly replaced with var(--ok)/var(--warn)/var(--bad) in the gauge <style> block.
 - 2026-08-13 · EU-824 · Elite-Unit · • All 4 ACs verified in the live files: _THEME_TOKENS extracted and spliced correctly, re.search gone, --brand present in both dark/light token blocks, test suite updated to match new invariant.
 - 2026-08-13 · EU-820 · Elite-Unit · • All four ACs satisfied: 'claude-fable-5' literal gone, (8a)/(8b) behavioral plan-parse assertions are correct and will pass, (9a)–(9e) assert family membership not model IDs, typing annotation present.
 - 2026-08-13 · EU-819 · Elite-Unit · • All 4 ACs met: alert fires at threshold with count + raw head, success resets streak, default 3 / 0 disables, and each is tested in the new harness. · 🔗 (no UI — verify via `python3 tests/eu786_planner_alert_test.py` or a live drain with planner errors)
