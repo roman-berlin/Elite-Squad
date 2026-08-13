@@ -2356,15 +2356,10 @@ def render_page(cfg, app: Optional[str], state: dict, control_bar: str, health: 
             .replace("{{GEN}}", datetime.now().strftime("%H:%M:%S")))
 
 
-_PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>SQUAD — HQ</title>
-<style>
-/* ── DESIGN TOKENS (EU-39) ───────────────────────────────────────────────────────
-   The single source of truth for the cockpit's look. Every surface below — and the
-   other cockpit pages — pulls colour, radius, elevation, ring and motion from here,
-   so a re-skin is one edit in this block, never a hunt through scattered literals. */
-:root{color-scheme:dark;
+# Canonical CSS token set for the cockpit (EU-39).  Every standalone cockpit page pulls
+# these live from warroom._THEME_TOKENS via _token_css().  Also spliced verbatim into
+# the War Room _PAGE string below so the board renders without importing anything.
+_THEME_TOKENS = r""":root{color-scheme:dark;
 /* palette */
 --bg:#080a0f;--panel:#0f141d;--panel2:#141a25;--line:#1b2230;--line2:#283342;
 --ink:#e7ebf2;--dim:#7e8795;--faint:#a0aab8;
@@ -2423,7 +2418,17 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 --ring:0 0 0 2px var(--bg),0 0 0 4px rgba(59,98,217,.5);
 --well:#e7ebf3;--console:#f7f9fc;--console-ink:#33415c;--accent-hover:#2f54c4}
 /* END THEME TOKENS */
-*{box-sizing:border-box}
+""".rstrip('\n')
+
+_PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>SQUAD — HQ</title>
+<style>
+/* ── DESIGN TOKENS (EU-39) ───────────────────────────────────────────────────────
+   The single source of truth for the cockpit's look. Every surface below — and the
+   other cockpit pages — pulls colour, radius, elevation, ring and motion from here,
+   so a re-skin is one edit in this block, never a hunt through scattered literals. */
+""" + _THEME_TOKENS + """\n*{box-sizing:border-box}
 /* Keyboard focus is visible on every interactive board surface (a11y): mouse clicks
    stay clean (:focus-visible), but Tab navigation lands on a clear accent ring. */
 a.kpi:focus-visible,.offrow:focus-visible,.blrow:focus-visible,.blmore:focus-visible,

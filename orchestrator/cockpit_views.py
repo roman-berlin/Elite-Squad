@@ -93,19 +93,10 @@ _THEME_BOOT = ("<script>try{document.documentElement.dataset.theme="
 def _token_css() -> str:
     """The slice-1 design tokens as a ``<style>:root{…}</style>`` block, so every standalone
     cockpit page shares ONE palette source with the War Room (EU-39). Read live from
-    ``warroom._PAGE``; falls back to ``_TOKENS_FALLBACK`` when unavailable."""
+    ``warroom._THEME_TOKENS``; falls back to ``_TOKENS_FALLBACK`` when unavailable."""
     try:
-        import re
-
         from . import warroom
-        # 2026-07-19: grab the WHOLE token region — the dark :root, the extra-token :root, and
-        # the [data-theme=light] override — up to the END THEME TOKENS sentinel, so light mode
-        # flows to every standalone page from the one source in _PAGE.
-        m = re.search(r":root\{.*?/\* END THEME TOKENS \*/", warroom._PAGE, re.S)
-        if not m:
-            m = re.search(r":root\{[^}]*\}", warroom._PAGE)
-        if m:
-            return "<style>" + m.group(0) + "</style>" + _THEME_BOOT
+        return "<style>" + warroom._THEME_TOKENS + "</style>" + _THEME_BOOT
     except Exception:  # noqa: BLE001 - tests / preview render without the War Room module loaded
         pass
     return "<style>" + _TOKENS_FALLBACK + "</style>" + _THEME_BOOT

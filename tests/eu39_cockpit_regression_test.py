@@ -50,6 +50,9 @@ chk("live path returns a :root token block (+ theme boot, 2026-07-19)",
     live.startswith("<style>:root{") and "</style>" in live and "data-theme=light" in live)
 
 # Force the failure branch: blow away the :root{} the regex looks for.
+# EU-824: after extracting _THEME_TOKENS, _token_css() reads the constant directly
+# (module-level, always available on successful import); _TOKENS_FALLBACK now serves
+# only when the warroom module cannot be imported at all (tests / offline preview).
 _saved = warroom._PAGE
 try:
     warroom._PAGE = "<!doctype html><style>body{color:#fff}</style>"  # no :root{} to match
@@ -57,8 +60,9 @@ try:
 finally:
     warroom._PAGE = _saved
 
+# After EU-824: the canonical source is _THEME_TOKENS, which survives the swap
 chk("fallback still yields a valid :root style block (+ theme boot, 2026-07-19)",
-    fb == "<style>" + V._TOKENS_FALLBACK + "</style>" + V._THEME_BOOT)
+    fb == "<style>" + warroom._THEME_TOKENS + "</style>" + V._THEME_BOOT)
 chk("fallback is never an empty/broken <style>", fb.startswith("<style>:root{") and "</style>" in fb)
 chk("fallback carries the core palette + system tokens",
     all(t in fb for t in ("--bg", "--ink", "--accent", "--ring", "--r-md", "--okline")))
