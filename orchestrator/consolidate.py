@@ -197,6 +197,58 @@ def recurrence_lessons(cfg, *, min_tickets: int = 3) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# EU-837 — filing_precision: deterministic autofile quality scores per officer.
+# Reads the audit log, filters is_autofiled terminal events, buckets by source_officer,
+# computes precision = merged / total, excludes officers below min_outcomes,
+# returns results sorted by precision ascending (worst first). Free + deterministic.
+# --------------------------------------------------------------------------- #
+_BUCKET_MAP = {
+    "land_pushed": "merged",
+    "no_changes": "closed_unchanged",
+    "needs_human": "escalated",
+}
+
+
+def filing_precision(cfg, *, min_outcomes: int = 5) -> list[dict]:
+    """Bucket autofiled terminal events by source_officer and compute precision = merged / total.
+
+    Returns ``[{officer, merged, escalated, closed_unchanged, total, precision}]`` sorted
+    by precision ascending (worst first). Officers with ``total < min_outcomes`` are silently
+    excluded. Returns ``[]`` when no autofiled terminal events exist.
+    """
+    buckets: dict[str, dict[str, int]] = {}
+    for line in D.audit_lines(cfg.audit_path):
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not ev.get("is_autofiled"):
+            continue
+        mapped = _BUCKET_MAP.get(ev.get("event"))
+        if not mapped:
+            continue
+        officer = ev.get("source_officer")
+        if not officer:
+            continue
+        buckets.setdefault(officer, {"merged": 0, "escalated": 0, "closed_unchanged": 0})
+        buckets[officer][mapped] += 1
+    out: list[dict] = []
+    for officer, counts in buckets.items():
+        total = counts["merged"] + counts["escalated"] + counts["closed_unchanged"]
+        if total >= min_outcomes:
+            out.append({
+                "officer": officer,
+                "merged": counts["merged"],
+                "escalated": counts["escalated"],
+                "closed_unchanged": counts["closed_unchanged"],
+                "total": total,
+                "precision": round(counts["merged"] / total, 10),
+            })
+    out.sort(key=lambda r: r["precision"])
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Lessons-log consolidation (dedup + prune)
 _DATE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}\s*[:\-—]\s*")
 
@@ -282,7 +334,9 @@ def run(cfg, *, write: bool = True, max_bullets: int = 24, min_count: int = 2,
             memory.update_log("\n".join(f"- {b}" for b in kept))
         return {"patterns": patterns, "recurrences": recurrences, "added": added,
                 "removed_dupes": removed, "pruned": pruned, "kept": len(kept),
-                "written": bool(write and (added or removed or pruned))}
+                "written": bool(write and (added or removed or pruned)),
+                "filing_precision": filing_precision(cfg)}
     except Exception as exc:  # noqa: BLE001 - memory hygiene must never break a run
         return {"patterns": [], "recurrences": [], "added": [], "removed_dupes": 0, "pruned": 0,
-                "kept": 0, "written": False, "error": str(exc)}
+                "kept": 0, "written": False, "error": str(exc),
+                "filing_precision": []}
