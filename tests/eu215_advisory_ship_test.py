@@ -141,8 +141,9 @@ loop._land = _fake_land
 filing_calls: list[dict] = []
 
 
-def _fake_file_findings(app, officer_label, report):
-    filing_calls.append({"app": app.name, "label": officer_label, "report": report})
+def _fake_file_findings(app, officer_label, report, audit=None):
+    filing_calls.append({"app": app.name, "label": officer_label, "report": report,
+                         "audit_threaded": audit is not None})
     return FilingResult(filed=["EU-9001"], deduped=["EU-9002"], lines=["✓ EU-9001 filed"])
 
 
@@ -212,6 +213,8 @@ chk("advisory-only: the ticket LANDS (outcome MERGED)", report1.outcome == Outco
 chk("advisory-only: _land was actually invoked", land_calls == [1], land_calls)
 chk("advisory-only: filing.file_findings was called exactly once", len(filing_calls) == 1,
     filing_calls)
+chk("advisory-only: the loop's audit object is threaded into file_findings (EU-589)",
+    bool(filing_calls) and filing_calls[0].get("audit_threaded") is True, filing_calls)
 if filing_calls:
     _proposals = json.loads(
         filing_calls[0]["report"].split("===TICKETS===\n", 1)[1].rsplit("\n===END===", 1)[0]

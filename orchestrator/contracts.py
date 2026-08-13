@@ -97,6 +97,13 @@ class QualityIssue:
     severity: str                 # "blocker" | "major" | "minor"
     area: str
     detail: str
+    # EU-589: filing gate — every finding carries an explicit KEEP/CANCEL verdict plus metadata
+    # so the loop can cap volume, fold overflow into a digest, and record cancelled items instead
+    # of silently dropping them.
+    verdict: str = "KEEP"         # "KEEP" | "CANCEL"
+    reason: str = ""              # one-line rationale for the verdict
+    ticket_worthy: bool = True   # False when sanctioned by AC / pure style / already-tracked dup
+    location: str = ""            # file:line anchor where the issue lives (file:line or file:line-start-end)
 
 
 @dataclass

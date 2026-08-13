@@ -141,8 +141,11 @@ loop._land = _fake_land
 filing_calls: list[dict] = []
 
 
-def _fake_file_findings(app, officer_label, report):
-    filing_calls.append({"app": app.name, "label": officer_label, "report": report})
+def _fake_file_findings(app, officer_label, report, audit=None):
+    # EU-589: the loop threads its audit object (audit=...) so dedups record filing_suppressed;
+    # the fake must accept it exactly like filing.file_findings does.
+    filing_calls.append({"app": app.name, "label": officer_label, "report": report,
+                         "audit_threaded": audit is not None})
     return FilingResult(filed=["EU-9001"], deduped=[], lines=[])
 
 
@@ -195,6 +198,8 @@ r2, a2 = _run(ReviewResult(verdict=Verdict.FAIL, spec_met=True, quality_issues=[
 chk("(A2) final-pass FAIL + spec_met + majors-no-blocker → advisory-ships (lands)",
     r2.outcome == Outcome.MERGED, r2.outcome)
 chk("(A2) the major got FILED as a backlog ticket", len(filing_calls) == 1, filing_calls)
+chk("(A2) the loop's audit object was threaded into file_findings (EU-589: filing_suppressed live)",
+    bool(filing_calls) and filing_calls[0].get("audit_threaded") is True, filing_calls)
 chk("(A2) reconciled with the final-pass reason",
     any(e["event"] == "review_verdict_reconciled" and e["reason"] == "final-pass-criteria-met-majors"
         for e in a2.ev))

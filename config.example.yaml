@@ -50,6 +50,10 @@ mark_done_on_merge: false   # false = leave ticket In Progress for your manual Q
 out_of_scope_autofile: false  # false = PROPOSE-FIRST: a finding outside the ticket's scope is proposed
                               # (de-duped) but NOT auto-filed into the backlog. Flip true to let filing.py
                               # open backlog tickets for out-of-scope findings automatically.
+finding_filing_cap: 5         # EU-589: max advisory findings auto-filed per build (highest severity
+                              # first); overflow folds into ONE digest ticket (audited, never dropped).
+                              # 0 = fold everything into the digest. Every KEEP/CANCEL decision is
+                              # announced in Telegram; CANCELs are audited as finding_cancelled.
 
 # --- opt-in extras (both OFF: extra cost/noise) ---
 # scout_after_merge: false    # OFF: don't smoke-test DEV after each merge (extra QA-Engineer cost)

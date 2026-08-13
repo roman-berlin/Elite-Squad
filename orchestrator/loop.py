@@ -50,6 +50,118 @@ def _notify(cfg: Config, text: str) -> None:
     notify.send(("[DRY-RUN] " if cfg.dry_run else "") + text)
 
 
+# EU-589: per-build filing cap and KEEP/CANCEL decision for advisory_ship findings.
+# The severity priority map used here matches filing._SEVERITY_TO_PRIORITY ordering:
+#   blocker > major > minor (highest severity first).
+_SEVERITY_PRIORITY_ORDER = {"blocker": 0, "major": 1, "minor": 2}
+
+
+def _advisory_ship_decide(
+    issues: list["QualityIssue"],
+    ticket_id: str,
+    ticket_summary: str,
+    ac_one_line: str,
+    files_changed: list[str],
+    cap: int,
+) -> tuple[list[dict], list[tuple[str, str]], dict | None, int]:
+    """Apply the reviewer's KEEP/CANCEL verdicts and the per-build filing cap to advisory findings.
+
+    Returns (proposals, cancelled, digest_proposal, deferred_count) where:
+      - *proposals*: dicts ready for ===TICKETS=== (KEEP + ticket_worthy only, highest severity
+        first, cut at *cap*). Each dict also carries a "reason" key (the reviewer's KEEP
+        rationale) that the loop uses for its Telegram lines; filing.parse_tickets /
+        file_findings read only title/type/severity/body, so the extra key is inert downstream.
+      - *cancelled*: (title, reason) tuples — CANCELled / non-ticket-worthy findings are NOT
+        filed, but each one becomes a finding_cancelled audit record, so nothing vanishes.
+      - *digest_proposal*: when more than *cap* findings survive, the overflow folds into ONE
+        digest Task (else None) — a single ticket instead of N, audited as findings_folded.
+      - *deferred_count*: how many findings were folded into the digest (0 when no overflow).
+    """
+    cap = max(0, int(cap))
+    # Partition: CANCEL / non-ticket-worthy → audited drop; KEEP + ticket_worthy → candidates
+    kept_worthy: list["QualityIssue"] = []
+    cancelled: list[tuple[str, str]] = []
+    for q in issues:
+        if q.verdict == "CANCEL" or not q.ticket_worthy:
+            title = f"[{q.severity.upper()}/{q.area}] {q.detail[:80]}"
+            reason = q.reason or ("reviewer CANCELLED" if q.verdict == "CANCEL"
+                                  else "reviewer marked it not ticket-worthy")
+            cancelled.append((title, reason))
+        else:
+            kept_worthy.append(q)
+
+    # Sort surviving items by severity (blocker > major > minor), highest first
+    kept_worthy.sort(key=lambda q: _SEVERITY_PRIORITY_ORDER.get(q.severity, 99))
+
+    top_k, deferred = kept_worthy[:cap], kept_worthy[cap:]
+    proposals = [_make_advisory_proposal(q, ticket_id, ticket_summary, ac_one_line, files_changed)
+                 for q in top_k]
+    if not deferred:
+        return proposals, cancelled, None, 0
+
+    # Overflow: file the top-K, fold the rest into ONE digest Task (never drop them)
+    digest_body_lines = [f"{len(deferred)} findings beyond the per-build filing cap ({cap}), "
+                         f"folded into this digest. Origin: {ticket_id} — {ticket_summary}"]
+    for d in deferred:
+        loc = f" @{d.location}" if d.location else ""
+        digest_body_lines.append(f"  [{d.severity.upper()}/{d.area}] {d.detail[:100]}{loc}")
+    digest_proposal = {
+        "title": f"[digest] {len(deferred)} deferred findings from {ticket_id}",
+        "type": "Task",
+        "severity": "LOW",
+        "body": "\n".join(digest_body_lines),
+        "reason": f"cap overflow: {len(deferred)} findings folded into one digest ticket",
+    }
+    return proposals, cancelled, digest_proposal, len(deferred)
+
+
+def _make_advisory_proposal(
+    q: "QualityIssue",
+    ticket_id: str,
+    ticket_summary: str,
+    ac_one_line: str,
+    files_changed: list[str],
+) -> dict:
+    """Build a single ===TICKETS=== proposal dict for one quality issue.
+
+    EU-589: the synthesized body must be drainable on its own — it carries the origin ticket id,
+    the reviewer's file:line anchor, one AC line, and the files the origin build changed. Minors
+    file as Task (not Bug): they are improvements, not defects.
+    """
+    # EU-589: minors are filed as Task, not Bug
+    issue_type = "Task" if q.severity == "minor" else "Bug"
+    location_prefix = f" @{q.location}" if q.location else ""
+    body_parts = [
+        f"Origin: {ticket_id} — {ticket_summary}",
+        f"Area: {q.area} | Severity: {q.severity}{location_prefix}",
+        f"Issue: {q.detail}",
+    ]
+    if q.reason:
+        body_parts.append(f"Reviewer rationale: {q.reason}")
+    if ac_one_line:
+        body_parts.append(f"One-line AC: {ac_one_line}")
+    if files_changed:
+        body_parts.append(f"Files changed: {', '.join(files_changed)}")
+    body = "\n\n".join(body_parts)
+    return {
+        "title": f"[{q.severity.upper()}/{q.area}] {q.detail[:160]}",
+        "type": issue_type,
+        "severity": q.severity.upper(),
+        "body": body,
+        "reason": q.reason,   # KEEP rationale for the loop's Telegram lines (inert for filing)
+    }
+
+
+def _format_filing_decisions(decisions: list[tuple[str, str, str]]) -> str:
+    """One human line per (label, subject, reason) decision, Telegram-ready:
+    '📋 kept: EU-123 — <reason>' / '🗑 cancelled: <title> — <reason>'."""
+    parts = []
+    for label, subject, reason in decisions:
+        emoji = "📋" if label == "kept" else "🗑"
+        parts.append(f"{emoji} {label}: {subject}" + (f" — {reason}" if reason else ""))
+    return "\n".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # Consecutive Planner-failure streak tracker (EU-819).
 # Resets at the top of each drain run; incremented on every "(planner error:"
@@ -2971,34 +3083,85 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
         )
         if advisory_ship:
             filed_keys: list[str] = []
+            telegram_decisions: list[tuple[str, str, str]] = []  # (label, subject, reason)
             if review.quality_issues:
                 import json as _json
-                advisory_proposals = [
-                    {
-                        "title": f"[{q.severity.upper()}/{q.area}] {q.detail[:160]}",
-                        "type": "Bug",
-                        "severity": q.severity.upper(),
-                        "body": q.detail,
-                    }
-                    for q in review.quality_issues
-                ]
-                advisory_block = f"===TICKETS===\n{_json.dumps(advisory_proposals)}\n===END==="
-                if cfg.dry_run or ticket.ephemeral:
-                    titles = ", ".join(p["title"] for p in advisory_proposals)
-                    print(f"  filing · {len(advisory_proposals)} advisory finding(s) "
-                          f"(dry-run/ephemeral — not filed): {titles}", flush=True)
-                else:
-                    from . import filing as _filing
-                    filing_result = _filing.file_findings(app, "out-of-scope", advisory_block)
-                    filed_keys = list(filing_result.filed) + list(filing_result.deduped)
-                    if filing_result.lines:
-                        print("  filing · advisory findings (shipped-with-advisories):", flush=True)
+
+                # EU-589: per-build filing cap (config knob; highest severity first, overflow
+                # folds into ONE digest ticket). An unset/None knob keeps the default 5; 0 is a
+                # legal value meaning "fold everything into the digest".
+                _raw_cap = getattr(cfg, "finding_filing_cap", 5)
+                cap = max(0, int(_raw_cap)) if _raw_cap is not None else 5
+                # Gather origin metadata for the synthesized bodies (EU-589: every filed body
+                # carries the origin ticket id, the files the build changed, and one AC line so
+                # the follow-up ticket is drainable on its own).
+                ac_one_line = ""
+                if store and store.spec and store.spec.acceptance:
+                    ac_one_line = store.spec.acceptance[0]
+                elif ticket.acceptance_criteria:
+                    ac_one_line = ticket.acceptance_criteria[0]
+                files_changed_list = (store.build.files_changed
+                                      if store and store.build and store.build.files_changed else [])
+
+                # EU-589: apply the reviewer's KEEP/CANCEL verdicts per issue, then the cap,
+                # folding any overflow into ONE digest proposal.
+                proposals, cancelled_items, digest_proposal, deferred_count = _advisory_ship_decide(
+                    review.quality_issues, ticket.id, ticket.summary, ac_one_line,
+                    files_changed_list, cap,
+                )
+
+                # Record a finding_cancelled audit event for every dropped finding — a CANCEL is
+                # a decision, not a silent drop (each one also gets a Telegram line below).
+                for title, reason in cancelled_items:
+                    audit.record("finding_cancelled", ticket_id=ticket.id, title=title, reason=reason)
+                    telegram_decisions.append(("cancelled", title, reason))
+
+                # Record a findings_folded audit event when overflow went into the digest
+                if digest_proposal is not None:
+                    audit.record("findings_folded", ticket_id=ticket.id, cap=cap,
+                                 filed=len(proposals), deferred=deferred_count)
+                    proposals.append(digest_proposal)
+
+                # Build the ===TICKETS=== block and file
+                key_by_title: dict[str, str] = {}
+                if proposals:
+                    advisory_block = f"===TICKETS===\n{_json.dumps(proposals)}\n===END==="
+                    if cfg.dry_run or ticket.ephemeral:
+                        titles = ", ".join(p["title"] for p in proposals)
+                        print(f"  filing · {len(proposals)} advisory finding(s) "
+                              f"(dry-run/ephemeral — not filed): {titles}", flush=True)
+                    else:
+                        from . import filing as _filing
+                        # EU-589/requirement 4: audit threaded so dedups record filing_suppressed
+                        filing_result = _filing.file_findings(app, "out-of-scope", advisory_block,
+                                                              audit=audit)
+                        filed_keys = list(filing_result.filed) + list(filing_result.deduped)
+                        if filing_result.lines:
+                            print("  filing · advisory findings (shipped-with-advisories):", flush=True)
+                            for ln in filing_result.lines:
+                                print(f"    {ln}", flush=True)
+                        if filing_result.failed:
+                            _notify(cfg, f"⚠️ {ticket.id} — {len(filing_result.failed)} advisory finding(s) "
+                                         "could not be filed:\n" +
+                                         "\n".join(f"• {t}: {e}" for t, e in filing_result.failed))
+                        # Map proposal title -> filed/deduped key for the Telegram lines
+                        # ("✓ EU-x filed — <title>" / "↺ EU-x already open — <title>")
                         for ln in filing_result.lines:
-                            print(f"    {ln}", flush=True)
-                    if filing_result.failed:
-                        _notify(cfg, f"⚠️ {ticket.id} — {len(filing_result.failed)} advisory finding(s) "
-                                     "could not be filed:\n" +
-                                     "\n".join(f"• {t}: {e}" for t, e in filing_result.failed))
+                            if " — " in ln:
+                                head, subj = ln.split(" — ", 1)
+                                toks = head.split()
+                                if len(toks) >= 2 and toks[0] in ("✓", "↺"):
+                                    key_by_title[subj] = toks[1]
+
+                # One Telegram line per decision: kept findings named by their filed key when we
+                # have one (title otherwise), cancelled findings by title + the reviewer's reason.
+                for p in proposals:
+                    subject = key_by_title.get(p.get("title", "")) or p.get("title", "")
+                    telegram_decisions.append(("kept", subject, str(p.get("reason") or "")))
+                if telegram_decisions:
+                    _notify(cfg, f"📊 {ticket.id} filing decisions:\n"
+                                 + _format_filing_decisions(telegram_decisions))
+
             audit.record("shipped_with_advisories", ticket_id=ticket.id, iteration=iteration,
                          filed=filed_keys,
                          issues=[{"severity": q.severity, "area": q.area, "detail": q.detail}
@@ -3802,7 +3965,10 @@ def _route_out_of_scope(cfg, ticket, app, audit, report, source: str) -> None:
                 print(f"  filing · {len(proposals)} out-of-scope finding(s) ({source}, dry-run — not filed): "
                       f"{titles}", flush=True)
                 return
-            result = filing.file_findings(app, "out-of-scope", report)
+            # EU-589/requirement 4: thread the loop's audit object so dedups on this
+            # highest-volume path record filing_suppressed (the EU-439 fix) instead of dying
+            # silent where most findings flow.
+            result = filing.file_findings(app, "out-of-scope", report, audit=audit)
             if audit is not None:
                 audit.record("out_of_scope_filed", ticket_id=ticket.id, source=source,
                              filed=result.filed, deduped=result.deduped,
