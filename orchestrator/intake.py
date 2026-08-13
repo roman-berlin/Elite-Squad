@@ -171,6 +171,42 @@ def is_autofiled(ticket) -> bool:
     return "autofiled" in labels
 
 
+def source_officer_of(ticket) -> str | None:
+    """Return the officer-label string from an autofiled ticket's labels.
+
+    Only meaningful when ``is_autofiled(ticket)`` is True: returns the FIRST label
+    (original case preserved) that is *not* ``"autofiled"`` and does *not* start
+    with ``"fp-"`` (prefix stripped / lowercase for comparison).  Returns ``None``
+    when the ticket is not autofiled or no non-fp label survives.
+    """
+    if not is_autofiled(ticket):
+        return None
+    labels = getattr(ticket, "labels", None) or []
+    skip_lower: set[str] = {"autofiled"}
+    for lbl in labels:
+        s = str(lbl)
+        if s.lower() in skip_lower:
+            continue
+        if s.lower().startswith("fp-"):
+            continue
+        return s  # first surviving label, original case
+    return None
+
+
+def origin_audit_fields(ticket) -> dict:
+    """Kwargs suitable for spreading into terminal ``audit.record()`` calls.
+
+    Returns ``{}`` for a Commander ticket (keys absent) and
+    ``{"source_officer": <label>, "is_autofiled": True}`` for an autofiled one.
+    Keys are **absent** (not ``None``/``False``) for Commander tickets so
+    ``audit.record(**kwargs)`` never writes null sentinel columns.
+    """
+    officer = source_officer_of(ticket)
+    if officer is not None:
+        return {"source_officer": officer, "is_autofiled": True}
+    return {}
+
+
 def apply_autofiled_quota(items: list[WorkItem], quota_per_n: int) -> list[WorkItem]:
     """Reorder *items* so autofiled tickets beyond a 1-in-N ratio are deferred behind Commander
     (non-autofiled) tickets. When only autofiled remain and cooldown is active, head emits anyway

@@ -32,6 +32,7 @@ from .gate import (base_gate_check, base_gate_environmental, base_gate_timed_out
                    evict_base_green, extract_failure_evidence, gate_fingerprint,
                    gate_vs_builder_verdict, publish_base_green, run_deterministic_checks,
                    run_gate, select_gate_groups)
+from . import intake as _intake
 from . import jira_adapter as jira_commenter
 from . import cockpit_state
 from . import run_logger
@@ -748,7 +749,8 @@ async def _exception_report(cfg: Config, ticket: Ticket, app: AppConfig, exc: Ex
             decisions.add(cfg, ticket, app.name, note)
         except Exception:  # noqa: BLE001 - never let the escalation path itself crash the run
             pass
-        audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=note)
+        audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=note,
+                     **_intake.origin_audit_fields(ticket))
         _notify(cfg, f"🛑 {ticket.id} — ran out of turns (too big for one pass) and couldn't be split. "
                      "Split it, or raise builder_max_turns.\n\n" + decisions.reply_hint(ticket.id))
         print(f"  🛑 {ticket.id}: ran out of turns — too big and unsplittable; escalated to you.", flush=True)
@@ -2527,7 +2529,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     decisions.add(cfg, ticket, app.name, _note)
                 except Exception:  # noqa: BLE001 - the escalation path must never crash the run
                     pass
-                audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=_note)
+                audit.record("needs_human", ticket_id=ticket.id, reason="turn-limit", question=_note,
+                             **_intake.origin_audit_fields(ticket))
                 _notify(cfg, f"🛑 {ticket.id} — ran out of turns twice and couldn't be split. "
                              "Re-scope it or raise builder_max_turns.\n\n"
                              + decisions.reply_hint(ticket.id))
@@ -2610,7 +2613,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     except Exception:  # noqa: BLE001 - a comment failure must not break the run
                         pass
                 audit.record("needs_human", ticket_id=ticket.id, iteration=iteration,
-                             question=proposal[:1500], reason="product blocker — escalated to Commander")
+                             question=proposal[:1500], reason="product blocker — escalated to Commander",
+                             **_intake.origin_audit_fields(ticket))
                 _notify(cfg, f"🛑 {ticket.id} — needs your product call"
                              + (" (the PM recommends):" if pm_outcome is not None else ":")
                              + f"\n\n{await _decision_brief(cfg, ticket.id, proposal)}"
@@ -2716,7 +2720,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                     pass
             print(f"  🔵 {ticket.id}: no changes — moved to QA for verification (nothing was built).",
                   flush=True)
-            audit.record("no_changes", ticket_id=ticket.id, iteration=iteration)
+            audit.record("no_changes", ticket_id=ticket.id, iteration=iteration,
+                         **_intake.origin_audit_fields(ticket))
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes="no changes — already satisfied"))
         print(f"    builder done — {build.num_turns} steps, files changed ✓", flush=True)
@@ -2945,7 +2950,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             if not cfg.dry_run and not ticket.ephemeral:
                 # decisions.add already parked it to 'Blocked' (EU-61) — just record the open question.
                 backlog.add_comment(ticket, f"Needs a product decision: {proposal}")
-            audit.record("needs_human", ticket_id=ticket.id, question=proposal)
+            audit.record("needs_human", ticket_id=ticket.id, question=proposal,
+                         **_intake.origin_audit_fields(ticket))
             return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
                                          notes=f"needs decision: {proposal[:140]}"))
 
@@ -3330,7 +3336,8 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
                  reviewer_position=[(c or "")[:300] for c in (last_changes or [])[:6]])
     _notify(cfg, f"🛑 {ticket.id} — needs you:\n\n{await _decision_brief(cfg, ticket.id, esc)}\n\n{decisions.reply_hint(ticket.id)}")
     audit.record("needs_human", ticket_id=ticket.id, iterations=max_passes,
-                 reason="max passes — PM escalated", question=esc[:1500])
+                 reason="max passes — PM escalated", question=esc[:1500],
+                 **_intake.origin_audit_fields(ticket))
     # EU-353: surface any escalated unverifiable_gaps on the last review this attempt saw —
     # exactly once (post_unverifiable_gaps self-guards per ticket_id) — and fold them into the
     # report's notes for cockpit/status-board visibility. Best-effort: a tracker hiccup here must
@@ -3549,7 +3556,8 @@ def _land(ticket, app, cfg, git, backlog, audit, branch, iteration, cost, build,
                 # rebuilt on top of its own merged code (the EU-307 class; AUTO-80 re-billed ~$7
                 # after the 2026-07-20 machine sleep). Record the durable audit event NOW; the
                 # richer post-land event below keeps its fields.
-                audit.record("land_pushed", ticket_id=ticket.id, base=app.base_branch)
+                audit.record("land_pushed", ticket_id=ticket.id, base=app.base_branch,
+                             **_intake.origin_audit_fields(ticket))
                 break
             except LandRaceError as exc:
                 race_detail = str(exc).splitlines()[0][:200]
