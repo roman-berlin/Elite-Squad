@@ -494,10 +494,10 @@ async def hold_council(cfg: Config, topic: str | None = None, audit=None, *,
         *([f"Hand-offs needing coordination: {'; '.join(handoffs)}\n"] if handoffs else []),
         "Now write the briefing.",
     ])
-    from .filing import TICKET_BLOCK_RULE
+    from .filing import ticket_block_rule_for
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model,
-        system_prompt=memory.preamble() + _CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
+        system_prompt=memory.preamble() + _CHAIR_SYSTEM + ticket_block_rule_for("Council-Chair"), cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
@@ -614,10 +614,10 @@ async def hold_meeting(cfg: Config, topic: str, officers=None, rounds: int | Non
     # Mirror hold_council: the chair is ALWAYS told to propose a ticket block, so ad-hoc meetings
     # feed the approval queue in the default (queue-for-approval) mode. The meeting_autospawn flag
     # only decides file-vs-queue downstream in _autospawn_tickets — never whether tickets are proposed.
-    from .filing import TICKET_BLOCK_RULE
+    from .filing import ticket_block_rule_for
     chair = await run_agent(chair_prompt, ClaudeAgentOptions(
         model=cfg.discussion_model,
-        system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM + TICKET_BLOCK_RULE, cwd=cwd,
+        system_prompt=memory.preamble() + _MEETING_CHAIR_SYSTEM + ticket_block_rule_for("Council-Chair"), cwd=cwd,
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],
         max_turns=6, effort="high"), tag="the-general")
@@ -1037,7 +1037,7 @@ async def respond_to_commander(cfg: Config, message: str) -> str:
     from . import filing
     run = await run_agent(prompt, ClaudeAgentOptions(
         model=cfg.discussion_model,
-        system_prompt=memory.preamble() + system + _COMMANDER_TICKET_RULE + filing.TICKET_BLOCK_RULE,
+        system_prompt=memory.preamble() + system + _COMMANDER_TICKET_RULE + filing.ticket_block_rule_for("General"),
         cwd=_general_root(),
         permission_mode="bypassPermissions", allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Write", "Edit", "Bash", "Task", "Agent"], setting_sources=["project"],

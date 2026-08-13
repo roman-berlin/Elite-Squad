@@ -294,16 +294,19 @@ def consolidate_log(raw: str, *, max_bullets: int = 24) -> tuple[str, dict]:
 
 
 def run(cfg, *, write: bool = True, max_bullets: int = 24, min_count: int = 2,
-        min_tickets: int = 3) -> dict:
+        min_tickets: int = 3, precision_bar: float = 0.5) -> dict:
     """Fold recurring lessons into the log, then dedup + prune it. Best-effort; never raises.
 
-    Two lesson sources, both folded through the SAME idempotent/deduped path so they share one cap:
+    Three lesson sources, all folded through the SAME idempotent/deduped path so they share one cap:
       * rejection_patterns (``min_count`` distinct tickets) — the 8 reviewer-rejection themes.
       * recurrence_lessons  (``min_tickets`` distinct tickets) — EU-399: needs_human reasons,
         ticket_exception signatures, and stuck gate fingerprints. New on top of the keyword themes.
+      * filing_precision (EU-838) — officers whose autofile precision drops below ``precision_bar``
+        (default 50%) get a unit-memory lesson and a per-officer tightening note appended to their
+        TICKET_BLOCK_RULE system-prompt block.
     """
     try:
-        from . import memory
+        from . import filing, memory
         try:
             raw = memory.LIVE_PATH.read_text(encoding="utf-8")
         except OSError:
@@ -327,6 +330,31 @@ def run(cfg, *, write: bool = True, max_bullets: int = 24, min_count: int = 2,
             _fold(f"Reviewer repeatedly required {p['label']}", p["count"], p["tickets"], p["action"])
         for r in recurrences:
             _fold(r["phrase"], r["count"], r["tickets"], r["action"])
+
+        # ------------------------------------------------------------------- #
+        # EU-838 — folding a Unit Memory lesson for each low-precision officer,
+        # appending a per-officer tightening sentence to its TICKET_BLOCK_RULE.
+        # ------------------------------------------------------------------- #
+        precisions = filing_precision(cfg)
+        filing_precision_alerts: list[dict] = []
+        for row in precisions:
+            officer = row["officer"]
+            prec = row["precision"]
+            total = row["total"]
+            if prec >= precision_bar:
+                continue
+            pct = round(prec * 100)
+            phrase = f"Officer {officer} self-filing precision low ({pct}% across {total} outcomes)"
+            action = ("tighten its ticket-filing criteria or reduce its "
+                      "TICKET_BLOCK_RULE scope before next cycle")
+            _fold(phrase, total, [officer], action)
+            # The note is the tightening sentence (phrase + action together): in the officer's OWN
+            # system prompt the instruction needs its grounding (the precision numbers) to act on.
+            filing.set_officer_block_note(officer, f"{phrase} — {action}")
+            filing_precision_alerts.append({
+                "officer": officer, "precision": prec, "total": total,
+            })
+
         deduped, removed = _dedup(bullets)
         pruned = max(0, len(deduped) - max_bullets)
         kept = deduped[:max_bullets]
@@ -335,8 +363,9 @@ def run(cfg, *, write: bool = True, max_bullets: int = 24, min_count: int = 2,
         return {"patterns": patterns, "recurrences": recurrences, "added": added,
                 "removed_dupes": removed, "pruned": pruned, "kept": len(kept),
                 "written": bool(write and (added or removed or pruned)),
-                "filing_precision": filing_precision(cfg)}
+                "filing_precision": precisions,
+                "filing_precision_alerts": filing_precision_alerts}
     except Exception as exc:  # noqa: BLE001 - memory hygiene must never break a run
         return {"patterns": [], "recurrences": [], "added": [], "removed_dupes": 0, "pruned": 0,
                 "kept": 0, "written": False, "error": str(exc),
-                "filing_precision": []}
+                "filing_precision": [], "filing_precision_alerts": []}

@@ -215,7 +215,7 @@ End with EXACTLY one line, nothing after it:  TRIAGE: RESOLVE   or   TRIAGE: ESC
 # same out-of-scope findings channel (shared ===TICKETS=== block) so those land in the backlog via
 # loop._route_out_of_scope — which reads the PM's full raw reply (parse_triage(...)['raw']) so the block
 # survives regardless of where the model places it relative to the TRIAGE verdict line.
-PM_TRIAGE_SYSTEM += filing.TICKET_BLOCK_RULE
+PM_TRIAGE_SYSTEM += filing.ticket_block_rule_for("PM")
 
 
 def parse_triage(text: str | None) -> dict[str, str]:
