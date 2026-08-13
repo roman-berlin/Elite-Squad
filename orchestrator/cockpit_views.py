@@ -1354,10 +1354,10 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
 .tbar .aptbtn.drain{{background:var(--warn);color:#1a1205}}.tbar .aptbtn.drain:hover{{background:#c99020}}
 .tbar .aptbtn.stop{{background:var(--bad);color:#fff}}.tbar .aptbtn.stop:hover{{background:#c74c50}}
 .deploybar{{display:flex;align-items:center;gap:13px;padding:11px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline)}}
-.qa-strip{{display:flex;align-items:center;gap:10px;padding:9px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline);color:#cfe0ff;font-size:13px;font-weight:650}}
+.qa-strip{{display:flex;align-items:center;gap:10px;padding:9px 26px;background:var(--accentbg);border-bottom:1px solid var(--accentline);color:var(--ink);font-size:13px;font-weight:650}}
 .qa-strip #qaelapsed{{font-variant-numeric:tabular-nums;color:var(--dim);font-weight:400}}
 .deploybar .dspin{{width:18px;height:18px;border:3px solid var(--accentline);border-top-color:var(--accent);border-radius:50%;animation:dsp .9s linear infinite;flex:none}}
-.deploybar .dmsg{{color:#cfe0ff;font-size:13px;font-weight:650}}
+.deploybar .dmsg{{color:var(--ink);font-size:13px;font-weight:650}}
 .deploybar .dsub{{color:var(--dim);font-weight:400;font-size:12px}}
 .deploybar .dprog{{flex:1;max-width:300px;height:6px;background:var(--bg);border-radius:var(--r-pill);overflow:hidden;border:1px solid var(--accentline)}}
 .deploybar .dprogfill{{display:block;width:38%;height:100%;background:linear-gradient(90deg,var(--accent),var(--info));border-radius:var(--r-pill);animation:dsl 1.4s ease-in-out infinite}}
@@ -1516,7 +1516,7 @@ _CHAT_STYLE = ("<style>"
                ".ctab.on{color:var(--ink);border-bottom-color:var(--accent)}.ctab:hover{color:var(--ink)}"
                ".ctab:focus-visible{outline:none;box-shadow:var(--ring);border-radius:var(--r-sm)}"
                ".cbadge{background:var(--bad);color:#fff;font-size:10px;font-weight:800;border-radius:var(--r-pill);padding:1px 6px;margin-left:5px}"
-               ".aim{max-width:780px;margin:0 auto 10px;color:#9be7bd;font-size:13px}.aim a{color:var(--info)}"
+               ".aim{max-width:780px;margin:0 auto 10px;color:var(--ok);font-size:13px}.aim a{color:var(--info)}"
                ".pcard{background:var(--warnbg);border:1px solid var(--warnline);border-radius:var(--r-xl);padding:14px 16px;margin-bottom:12px}"
                ".pcard .ph2{color:var(--warn);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
                ".pcard .pq{color:var(--ink);font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;font-family:var(--mono);line-height:1.5}"
@@ -1537,7 +1537,7 @@ _CHAT_STYLE = ("<style>"
                ".who{font-size:10px;color:var(--faint);margin:0 6px 2px}"
                ".bub{padding:9px 13px;border-radius:var(--r-xl);font-size:13px;line-height:1.5;white-space:pre-wrap}"
                ".msg.unit .bub{background:var(--panel2);border:1px solid var(--line2);border-bottom-left-radius:4px}"
-               ".msg.you .bub{background:#1e3a5f;border-bottom-right-radius:4px;color:#eaf1fb}"
+               ".msg.you .bub{background:var(--accentbg);border-bottom-right-radius:4px;color:var(--ink)}"
                ".cempty{color:var(--dim);padding:30px 8px;text-align:center;font-size:13px}"
                ".typing{max-width:780px;margin:0 auto 8px;color:var(--faint);font-size:12px;font-style:italic}"
                ".composer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--line);padding:12px 30px}"
