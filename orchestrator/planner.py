@@ -18,6 +18,8 @@ proceeds from the raw ticket exactly as it does today when the Planner is disabl
 """
 from __future__ import annotations
 
+import copy
+import types
 import json
 import re
 from dataclasses import dataclass, field
@@ -136,6 +138,10 @@ class PlannerResult:
     output_tokens: int = 0
     provider: str = ""
     model_version: str = ""
+    # EU-833: true when the agent returned nothing useful (zero tokens / unparseable → refusal),
+    # even if parse_plan produced a BUILD (its fail-safe default). The loop intercepts this to
+    # park rather than build blind. Always False on a legitimate BUILD with real content.
+    refused: bool = False
 
     def to_dict(self) -> PlannerResultDict:
         return {"verdict": self.verdict, "approach": self.approach,
@@ -234,6 +240,26 @@ def parse_plan(text: str | None) -> PlannerResult:
     )
 
 
+def _is_refusal(res: PlannerResult, run) -> bool:
+    """Return True when the agent call produced nothing useful — a refusal that should NOT build.
+
+    A refusal is one of:
+      * The raw reply was stamped by EU-266 as unparseable (the JSON parser failed and the
+        code marked it with '(planner error:' so the downstream verifier can spot it); or
+      * The agent returned zero output tokens AND the plan has no usable content (an empty
+        build with zero tokens is a contradiction — the model didn't answer).
+    """
+    if res.raw.startswith("(planner error:"):
+        return True
+    if res.verdict == "BUILD" and run.output_tokens == 0:
+        # Zero tokens = model didn't answer. An empty build here is impossible with real content;
+        # refuse rather than proceed blind. (If approach exists despite 0 tokens it's a data bug
+        # in the caller, not a genuine refusal signal.)
+        if not res.approach:
+            return True
+    return False
+
+
 def _fanout_addendum(max_agents: int) -> str:
     """Instructions for a Planner that may fan out. Only composed when the gate armed (L/XL ticket,
     native backend, enabled in config) — a Planner that cannot spawn must never be told it can.
@@ -274,88 +300,157 @@ it; they do not replace it, and you remain accountable for every claim in it.
 async def plan(cfg: Config, ticket: Ticket, app=None, audit=None) -> PlannerResult:
     """Run the Planner on one ticket → a PlannerResult. Read-only, Opus-tier, high effort.
 
-    Fail-safe: ANY error (SDK, network, parse) returns a BUILD result with empty fields, so the
-    ticket always proceeds to the Builder — the Planner can only ADD guidance, never block."""
+    EU-833 retry-on-refusal: when the agent returns nothing useful (zero tokens / unparseable),
+    retry ONCE on a different model from ``models.LADDER``. If the retry also refuses, set
+    ``res.refused = True`` so the loop parks rather than builds blind. Only active when the
+    ``planner_refusal_park`` knob is truthy (default True).
+
+    Fail-safe: with the knob OFF, ANY error (SDK, network, parse) returns a BUILD result with
+    empty fields, so the ticket always proceeds to the Builder — the Planner can only ADD guidance,
+    never block."""
     from . import provider as _provider
     if app is None:
         app = cfg.app(ticket.app or cfg.apps[0].name)
-    try:
-        # 2026-07-22: the Planner's effort now scales with the TICKET instead of being pinned at
-        # "high" for everything. size_ticket() already grades every ticket for the Builder; a
-        # planner that thinks equally hard about a typo and an architecture migration was both
-        # wasteful and under-powered at the top end. Floored at medium — planning is cheap relative
-        # to building, and a thin plan costs a whole build pass, so we never go below medium here
-        # even when the sizer says low.
-        _p_effort = "high"
-        _p_size = ""
+
+    _can_retry = bool(getattr(cfg, "planner_refusal_park", True))
+    _attempt = 0          # how many calls have been made (0-based)
+    # EU-833: accumulate burn across retries; assign to ``res`` once at the end.
+    _total_cost = 0.0
+    _total_turns = 0
+    _total_input = 0
+    _total_output = 0
+    _last_run = types.SimpleNamespace(
+        output_tokens=0, cost_usd=0.0, num_turns=0, input_tokens=0,
+        provider="", model_version="", final="", text="")
+    while True:
         try:
-            from .builder import size_ticket as _size
-            _p_size, _sized_effort, _ = _size(ticket)
-            _p_effort = _sized_effort if _sized_effort in ("high", "xhigh", "max") else "medium"
-        except Exception:  # noqa: BLE001 — a sizer hiccup must never block a plan
+            # 2026-07-22: the Planner's effort now scales with the TICKET instead of being pinned
+            # at "high" for everything. size_ticket() already grades every ticket for the Builder;
+            # a planner that thinks equally hard about a typo and an architecture migration was
+            # both wasteful and under-powered at the top end. Floored at medium — planning is
+            # cheap relative to building, and a thin plan costs a whole build pass, so we never go
+            # below medium here even when the sizer says low.
             _p_effort = "high"
-        model, _peffort, mreason = models.for_planner(cfg, ticket, effort=_p_effort)
-        if getattr(cfg, "auto_model", False) or "deep" in mreason:
-            print(f"  · planner model: {mreason}", flush=True)
-        # Fan-out gate (all three must hold, else the Planner stays single-agent as before):
-        #   · enabled in config, · the ticket is genuinely large (L/XL), · the effective backend is
-        #     NATIVE — Task is a Claude Code capability and the GLM compat endpoint is not
-        #     guaranteed to serve it, so arming it there would burn turns on a tool that never works.
-        _fanout = False
-        try:
-            _fanout = (bool(getattr(cfg, "planner_fanout", True))
-                       and _p_size in ("L", "XL")
-                       and backends.normalize(backends.current_for_tag("planner")) == backends.NATIVE)
-        except Exception:  # noqa: BLE001 — never let the gate itself break planning
+            _p_size = ""
+            try:
+                from .builder import size_ticket as _size
+                _p_size, _sized_effort, _ = _size(ticket)
+                _p_effort = (_sized_effort if _sized_effort in ("high", "xhigh", "max")
+                             else "medium")
+            except Exception:  # noqa: BLE001 — a sizer hiccup must never block a plan
+                _p_effort = "high"
+            model, _peffort, mreason = models.for_planner(cfg, ticket, effort=_p_effort)
+            if getattr(cfg, "auto_model", False) or "deep" in mreason:
+                print(f"  · planner model: {mreason}", flush=True)
+            # Fan-out gate (all three must hold, else the Planner stays single-agent as before):
+            #   · enabled in config, · the ticket is genuinely large (L/XL), · the effective
+            #     backend is NATIVE — Task is a Claude Code capability and the GLM compat
+            #     endpoint is not guaranteed to serve it, so arming it there would burn turns
+            #     on a tool that never works.
             _fanout = False
-        _max_agents = max(1, int(getattr(cfg, "planner_fanout_max_agents", 4) or 4))
-        if _fanout:
-            print(f"  · planner: fan-out armed (≤{_max_agents} read-only sub-agents, "
-                  f"≤${float(getattr(cfg, 'planner_fanout_budget_usd', 3.0)):.2f})", flush=True)
-        options = ClaudeAgentOptions(
-            model=model,
-            system_prompt=memory.preamble() + PLANNER_SYSTEM
-                          + PLAN_ADDENDUM
-                          + (_fanout_addendum(_max_agents) if _fanout else ""),
-            cwd=app.workdir or app.repo_path,
-            permission_mode="bypassPermissions",
-            allowed_tools=(["Read", "Grep", "Glob", "Task"] if _fanout
-                           else ["Read", "Grep", "Glob"]),
-            disallowed_tools=(["Write", "Edit", "Bash", "NotebookEdit"] if _fanout
-                              else ["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"]),
-            # A fan-out is the one officer call that can multiply its own spend — bound it in dollars,
-            # not just turns, so a runaway investigation cannot outlive the ticket's economics.
-            max_budget_usd=(float(getattr(cfg, "planner_fanout_budget_usd", 3.0)) if _fanout else None),
-            # 24 turns, not 14: GLM-routed planners batch ~1 tool call per turn (Anthropic batches
-            # many), so on monorepo tickets they hit the old cap mid-exploration and fail-safe into
-            # a briefless BUILD — 4 of 6 GLM planner calls on 2026-07-16 (AUTO-155/156/157/137,
-            # "Reached maximum number of turns (14)"), one of which (AUTO-156) then burned a full
-            # build into a turn-limit park. A read-only planner turn is far cheaper than that.
-            setting_sources=[], max_turns=24, effort=_p_effort,
-        )
-        run = await run_agent(_prompt(ticket), options, tag="planner", ticket_id=ticket.id)
-        res = parse_plan(run.final or run.text)
-        if res.verdict == "BUILD" and not res.testable_ac and not res.in_scope_files \
-                and not res.approach:
-            # EU-266: a garbled/JSON-less reply used to fall back to a SILENT briefless BUILD —
-            # indistinguishable in audit from a designed one. Stamp the raw with the error marker
-            # so the audit event (below) carries WHY the brief is empty; the build still proceeds
-            # (fail-safe contract unchanged), it just stops lying about being planned.
-            res.raw = (f"(planner error: unparseable plan reply — briefless BUILD; "
-                       f"head: {(run.final or run.text or '')[:120]!r})")
-        res.cost_usd = run.cost_usd
-        res.num_turns = run.num_turns
-        res.input_tokens = getattr(run, "input_tokens", 0)
-        res.output_tokens = getattr(run, "output_tokens", 0)
-        res.provider = run.provider
-        res.model_version = run.model_version
-    except Exception as exc:  # noqa: BLE001 — the Planner must never break a run; default to BUILD
-        res = PlannerResult(verdict="BUILD", raw=f"(planner error: {type(exc).__name__}: {exc})")
-        # Surface the swallowed failure in the live stream too — a briefless BUILD looks identical
-        # to a designed one downstream (2026-07-16: AUTO-155/156/157 fail-safed silently; AUTO-156
-        # then built briefless into a turn-limit park, with the burn unmetered).
-        print(f"  · planner failed ({type(exc).__name__}: {exc}) — building without a design brief",
-              flush=True)
+            try:
+                _fanout = (bool(getattr(cfg, "planner_fanout", True))
+                           and _p_size in ("L", "XL")
+                           and backends.normalize(
+                               backends.current_for_tag("planner")) == backends.NATIVE)
+            except Exception:  # noqa: BLE001 — never let the gate itself break planning
+                _fanout = False
+            _max_agents = max(1, int(getattr(cfg, "planner_fanout_max_agents", 4) or 4))
+            if _fanout:
+                print(f"  · planner: fan-out armed (≤{_max_agents} read-only sub-agents, "
+                      f"≤${float(getattr(cfg, 'planner_fanout_budget_usd', 3.0)):.2f})",
+                      flush=True)
+
+            # ---- pick a different model on retry ----
+            if _attempt > 0:
+                _first_family = models.family_of(model)
+                for _t in range(models.tier_of(model) - 1, -1, -1):
+                    _alt = models.model_at(_t)
+                    if _alt != _first_family:
+                        model = _alt
+                        print(f"  · planner retry → {model} (original {_first_family} refused)",
+                              flush=True)
+                        break
+                else:
+                    # already at lowest tier — stay put and try again
+                    print(f"  · planner retry: already lowest tier ({model}); trying anyway",
+                          flush=True)
+
+            # ---- compose options once, clone+swap model on retry ----
+            if _attempt == 0:
+                _saved_options = ClaudeAgentOptions(
+                    model=model,
+                    system_prompt=memory.preamble() + PLANNER_SYSTEM
+                                  + PLAN_ADDENDUM
+                                  + (_fanout_addendum(_max_agents) if _fanout else ""),
+                    cwd=app.workdir or app.repo_path,
+                    permission_mode="bypassPermissions",
+                    allowed_tools=(["Read", "Grep", "Glob", "Task"] if _fanout
+                                   else ["Read", "Grep", "Glob"]),
+                    disallowed_tools=(["Write", "Edit", "Bash", "NotebookEdit"] if _fanout
+                                      else ["Write", "Edit", "Bash", "NotebookEdit", "Task", "Agent"]),
+                    max_budget_usd=(float(
+                        getattr(cfg, "planner_fanout_budget_usd", 3.0)) if _fanout else None),
+                    setting_sources=[], max_turns=24, effort=_p_effort,
+                )
+            _options = copy.copy(_saved_options)
+            _options.model = model
+
+            run = await run_agent(_prompt(ticket), _options, tag="planner", ticket_id=ticket.id)
+            res = parse_plan(run.final or run.text)
+            _last_run = run
+            if res.verdict == "BUILD" and not res.testable_ac and not res.in_scope_files \
+                    and not res.approach:
+                # EU-266: a garbled/JSON-less reply used to fall back to a SILENT briefless BUILD
+                # — indistinguishable in audit from a designed one. Stamp the raw with the error
+                # marker so the audit event (below) carries WHY the brief is empty; the build still
+                # proceeds (fail-safe contract unchanged), it just stops lying about being planned.
+                res.raw = (f"(planner error: unparseable plan reply — briefless BUILD; "
+                           f"head: {(run.final or run.text or '')[:120]!r})")
+            # EU-833: accumulate burn per-call; assign totals to ``res`` only at the very end.
+            _total_cost += run.cost_usd
+            _total_turns += run.num_turns
+            _total_input += getattr(run, "input_tokens", 0)
+            _total_output += getattr(run, "output_tokens", 0)
+        except Exception as exc:  # noqa: BLE001 — the Planner must never break a run; default to
+                                 # BUILD. EU-833: on refusal, retry once on a different model
+                                 # before parking.
+            res = PlannerResult(verdict="BUILD",
+                                raw=f"(planner error: {type(exc).__name__}: {exc})")
+            _last_run = types.SimpleNamespace(output_tokens=0, cost_usd=0.0, num_turns=0,
+                                              input_tokens=0, provider="", model_version="")
+            _total_output = 0   # ensures _is_refusal picks it up
+            print(f"  · planner failed ({type(exc).__name__}: {exc}) — ", end="", flush=True)
+
+        _attempt += 1
+
+        # EU-833: detect refusal (stamp OR zero-tokens) and retry once on a different model.
+        # Burn already added to _total_* above.
+        if _is_refusal(res, _last_run) and _can_retry and _attempt < 2:
+            print("refused — retrying on different model …", flush=True)
+            continue       # loop body → different model → fresh run_agent call
+
+        # ---- done (final attempt or refused-and-knob-off): settle the result ----
+        if _is_refusal(res, _last_run) and not _can_retry:
+            res.refused = True
+            print(f"  · planner refused (no retry — knob off) — building without a design brief",
+                  flush=True)
+        elif _is_refusal(res, _last_run):
+            res.refused = True
+            print(f"  · planner refused (retry exhausted) — building without a design brief",
+                  flush=True)
+
+        # Assign accumulated burn (EU-833: totals persist across retries).
+        res.cost_usd = _total_cost
+        res.num_turns = _total_turns
+        res.input_tokens = _total_input
+        res.output_tokens = _total_output
+        if _last_run:
+            res.provider = _last_run.provider
+            res.model_version = _last_run.model_version
+
+        break                        # final result — exit loop
+
     if audit is not None:
         try:
             extra = {}

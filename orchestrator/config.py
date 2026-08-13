@@ -323,6 +323,11 @@ class Config:
     # The streak counts "(planner error:" raw reply heads (parse errors + aborts). Default 3;
     # set 0 to disable (opt-in-silent — off-by-default, unlike other planner_* flags).
     planner_failure_alert_threshold: int = 3
+    # EU-833: when the Planner returns a refusal (zero tokens, unparseable JSON, or BUILD with all
+    # three fields empty), retry ONCE on a different model from the LADDER. If the retry also
+    # refuses, park the ticket with ESCALATED (never build blind, never split). Set False to restore
+    # the pre-EU-833 fail-open (briefless BUILD proceeds as before). Default True.
+    planner_refusal_park: bool = True
 
     # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
     # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a

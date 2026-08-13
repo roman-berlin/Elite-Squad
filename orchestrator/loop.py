@@ -2140,6 +2140,26 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             # EU-819: track consecutive Planner failures for threshold alerting
             _note_planner_outcome(cfg, _pres, ticket_id=ticket.id, audit=audit)
             _planned = True
+            # EU-833: refuse-park gate — when the Planner returned nothing useful
+            # (zero tokens / unparseable / BUILD with all-three-empty), retry was
+            # exhausted and the knob is on, then PARK the ticket rather than building
+            # blind or splitting it as "too big". Does NOT touch the error-strike
+            # counter and does NOT call scrum.split.
+            if getattr(_pres, "refused", False) and getattr(cfg, "planner_refusal_park", True):
+                decisions.add(cfg, ticket, app.name,
+                              f"{ticket.id}: the Planner could not produce a plan "
+                              f"(call refused — zero tokens or unparseable reply). "
+                              f"Its reason: {_pres.raw[:600]}\n\n"
+                              "/unblock to force a build.")
+                audit.record("planner_refusal_park", ticket_id=ticket.id,
+                             model=_pres.model_version, cost_usd=round(_pres.cost_usd, 6))
+                print(f"  ⛔ {ticket.id}: planner refused — parking (EU-833).", flush=True)
+                _notify(cfg, f"⛔ {ticket.id} parked — the Planner refused twice in a row "
+                           f"(EU-833). Nothing built; move back to To Do to force a build.")
+                return _resolve(TicketReport(ticket.id, Outcome.ESCALATED, iteration, cost,
+                                             app.name, branch,
+                                             notes="Planner refused (zero tokens/unparseable); "
+                                                   "parked per EU-833"))
             if _pres.verdict == "SPLIT":
                 from . import scrum as _scrum
                 recap = _pres.answer or _pres.approach
