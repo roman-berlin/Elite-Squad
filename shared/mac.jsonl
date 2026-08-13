@@ -1927,3 +1927,5 @@
 {"ts": "2026-08-13T20:18:44+0300", "event": "ticket_transition", "ticket_id": "EU-805", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
 {"ts": "2026-08-13T20:28:09+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 206569, "output_tokens": 4474, "cost_usd": 0.803659, "duration_s": 61.84, "turns": 8, "ticket_id": "EU-805"}
 {"ts": "2026-08-13T20:28:09+0300", "event": "planner", "ticket_id": "EU-805", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 2, "cost_usd": 0.803659, "provider": "Anthropic", "model": "opus"}
+{"ts": "2026-08-13T20:31:13+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 70318, "output_tokens": 10669, "cost_usd": 1.254624, "duration_s": 749.44, "turns": 4, "ticket_id": "EU-821"}
+{"ts": "2026-08-13T20:31:13+0300", "event": "planner", "ticket_id": "EU-821", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 5, "cost_usd": 1.254624, "provider": "Anthropic", "model": "opus"}
