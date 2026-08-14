@@ -286,12 +286,38 @@ def _audit_backend_change(field: str, from_val: str | None, to_val: str | None,
     """The single EU-842 choke-point: record ONE ``model_backend_changed`` row carrying the field
     changed, the ``from``/``to`` values, the app scope (``global`` or an app name) and the source
     tag. ``cfg`` only routes the sink (see :func:`_audit_sink`) and never enters the event.
-    Best-effort — an audit failure is swallowed so it can never break the write path."""
+    Best-effort — an audit failure is swallowed so it can never break the write path.
+
+    EU-844: fires exactly one Telegram announcement per mutation, AFTER the audit record.
+    Independently try/except-garded so a notifier outage cannot affect the audit write.
+    """
     try:
         _audit_sink(cfg).record("model_backend_changed",
                                 **{"field": field, "from": from_val, "to": to_val,
                                    "scope": scope, "source": source})
     except Exception:  # noqa: BLE001 — see docstring
+        pass
+
+    # EU-844: Telegram notification — independently best-effort, separate from audit.
+    _try_notify(from_val, to_val, scope, source)
+
+
+def _try_notify(from_val, to_val, scope, source):
+    """EU-844: send exactly one Telegram message for this backend change.
+
+    Deferred import keeps module load cycle-free.  The actual ``send`` inside
+    ``notify`` is itself no-raise / no-op when unconfigured, but we wrap it in
+    its own try/except as a hard guard so nothing in the notification path can
+    escape back into the caller.
+    """
+    from . import notify
+
+    f = str(from_val) if from_val is not None else "none"
+    t = str(to_val) if to_val is not None else "none"
+    msg = f"⚙️ Model backend changed [{scope}]: {f} → {t} (via {source})"
+    try:
+        notify.send(msg)
+    except Exception:  # noqa: BLE001 — notification must never block the caller
         pass
 
 
