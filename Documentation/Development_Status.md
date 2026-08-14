@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-842 · Elite-Unit · • All 4 ACs met: single _audit_backend_change choke-point emits one model_backend_changed row (field/from/to/scope/source) for active/per-app/secondary/mode; test stubs _AUDIT_LOG and covers each path; only…
 - 2026-08-14 · EU-748 · Elite-Unit · • Spec met: option (a) implemented — cross-process stop-intent file the drain peeks each cycle; current ticket lands, drain stands down, cockpit stays up.
 - 2026-08-14 · EU-839 · Elite-Unit · • Epic pieces verified present: origin stamping (loop.py), filing_precision (EU-837), lesson+TICKET_BLOCK_RULE actuation (EU-838). · 🔗 /cockpit → click the Daily Stand-Up tab and observe a "📉 Filing precision below bar: ..." line appears when any autofiled officer has <50% merged rate across ≥5 terminal audit events
 - 2026-08-14 · EU-838 · Elite-Unit · • All 7 ACs met; gate green (572/572). • AC6 verified by grep — no bare TICKET_BLOCK_RULE left in the 6 officer files. • Typing/error-handling/tenant checks clean.
