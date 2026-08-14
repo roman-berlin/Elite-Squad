@@ -682,3 +682,5 @@
 {"ts": "2026-08-14T10:02:55+0300", "event": "token_burn_report", "ticket_id": "EU-844", "payload": {"planner": 175147, "builder": 2963668, "reviewer": 237085}, "total": 3375900}
 {"ts": "2026-08-14T10:02:55+0300", "event": "ticket_start", "ticket_id": "EU-845", "app": "Elite-Unit", "branch": "autodev/EU-845-verify-close-model-backend-changes-are-n", "dry_run": false, "ephemeral": false}
 {"ts": "2026-08-14T10:02:56+0300", "event": "ticket_transition", "ticket_id": "EU-845", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-08-14T10:14:08+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 167682, "output_tokens": 5861, "cost_usd": 1.113063, "duration_s": 159.93, "turns": 7, "ticket_id": "EU-845"}
+{"ts": "2026-08-14T10:14:08+0300", "event": "planner", "ticket_id": "EU-845", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 2, "cost_usd": 1.113063, "provider": "Anthropic", "model": "opus"}
