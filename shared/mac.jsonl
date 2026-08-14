@@ -622,3 +622,4 @@
 {"ts": "2026-08-14T07:00:01+0300", "event": "token_burn_report", "ticket_id": "EU-753", "payload": {"planner": 312925}, "total": 312925}
 {"ts": "2026-08-14T07:02:39+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 153843, "output_tokens": 5784, "cost_usd": 1.287096, "duration_s": 229.96, "turns": 7, "ticket_id": "EU-749"}
 {"ts": "2026-08-14T07:02:39+0300", "event": "planner", "ticket_id": "EU-749", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 5, "cost_usd": 1.287096, "provider": "Anthropic", "model": "opus"}
+{"ts": "2026-08-14T07:17:46+0300", "event": "agent_call", "tag": "scrum-lead", "model": "sonnet", "provider": "Anthropic", "model_version": "sonnet", "input_tokens": 24432, "output_tokens": 1192, "cost_usd": 0.16574, "duration_s": 28.62, "turns": 1}
