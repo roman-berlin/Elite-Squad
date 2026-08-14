@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-547 · Elite-Unit · • AC1–AC3 all met: pre-claim self-check checklist added inside BUILDER_SYSTEM, references the gate rules (vacuous_assertion_guard_test / stub_signature_test / mechanism 3/5) so wording can't drift, and a source-pin test…
 - 2026-08-14 · EU-489 · Elite-Unit · • Test-only diff adds tests/warroom_render_test.py covering all four ACs (2-card, 1-/0-card identity, cap enforcement) against the real render_board. · 🔗 /api/board?app=testapp
 - 2026-08-14 · EU-788 · Elite-Unit · • Send-failure now records outcome and surfaces as an 'Alerting' warn on the health panel + /api/health — degraded is visible, not just a log line.
 - 2026-08-14 · EU-852 · Elite-Unit · • AC1: secondary card now resolves backend_pref.get_secondary → _display_label_for_id, falls back to 'Secondary'. • AC2: placeholder reads 'usage tracking not connected yet'; GLM/old copy removed.
