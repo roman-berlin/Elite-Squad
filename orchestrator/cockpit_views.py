@@ -1547,12 +1547,16 @@ def _chat_inner(cfg: Config, limit: int = 20, offset: int = 0) -> str:
     if not bubbles and not cards:
         bubbles = ('<div class=cempty>No messages yet. When an engineer needs a decision it shows '
                    'up here — or send the CTO a message below.</div>')
+    # EU-743 — "CTO is typing…" banner driven by the chat_typing state flag
+    typing_html = ""
+    if _state.get("chat_typing"):
+        typing_html = '<div class=typing>&#128202;&#65039; CTO is typing&#8230;</div>'
     load_earlier = ""
     if start > 0:
         load_earlier = (f'<button type=button class=load-earlier data-offset="{window_limit}" '
                          f'data-limit="{window_limit}" onclick="loadEarlierChat(this)">'
                          '&#8593; Load earlier messages</button>')
-    return pending_html + load_earlier + f'<div class=thread>{bubbles}</div>'
+    return pending_html + typing_html + load_earlier + f'<div class=thread>{bubbles}</div>'
 
 
 def _safe_chat_transcript(cfg: Config) -> str:

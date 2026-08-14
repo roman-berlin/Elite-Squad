@@ -37,7 +37,10 @@ _STATE_KEYS = ("active", "last_msg", "last_msg_record", "last_result", "last_res
                # EU-579/582: QA run-state fields — set/reset/tracked by qa_api()._bg
                "qa_started", "qa_phase", "qa_error_phase",
                "qa_findings", "qa_verdict", "qa_dismissed",
-               "qa_app")   # EU-582: remembers the app that ran QA (for retry after failure)
+               "qa_app",   # EU-582: remembers the app that ran QA (for retry after failure)
+               # EU-743: chat typing indicator flag — claimed on POST to /api/chat, cleared when the
+               # reply thread settles (success or error), rendered via _chat_inner's .typing style.
+               "chat_typing")
 
 
 def _new_state() -> dict:
@@ -55,7 +58,9 @@ def _new_state() -> dict:
             # EU-579/582: QA run-state defaults
             "qa_started": None, "qa_phase": None, "qa_error_phase": None,
             "qa_findings": [], "qa_verdict": "", "qa_dismissed": True,
-            "qa_app": None}   # EU-582
+            "qa_app": None,   # EU-582
+            # EU-743
+            "chat_typing": False}
 
 # ``last_msg``  : sticky control-bar note (run/standup/drill state); cleared on /memory & /needs.
 # ``last_result``: one-shot read-and-clear result banner for the side-effectful / actions

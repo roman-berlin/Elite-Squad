@@ -3888,6 +3888,16 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 'else if(oldPending){'
                 'if(!(serverHoldsSent&&oldPending.querySelector(".psent")))oldPending.remove();}'
                 'var newThread=frag.querySelector(".thread"),oldThread=cinner.querySelector(".thread");'
+                # EU-743 — 'CTO is typing…' banner: the server renders it (from the chat_typing
+                # state flag) while the reply thread generates, and omits it once the flag clears.
+                # The append-only poll only carries selectors it knows about, so reconcile it like
+                # .pending — insert when it newly appears (before the load-earlier control/thread,
+                # matching the server's render order), remove when the fetched fragment no longer
+                # has it — otherwise the stay-on-page composer flow would never surface it.
+                'var newTyping=frag.querySelector(".typing"),oldTyping=cinner.querySelector(".typing");'
+                'if(newTyping){if(!oldTyping)cinner.insertBefore(newTyping,'
+                'cinner.querySelector(".load-earlier")||oldThread||null);}'
+                'else if(oldTyping)oldTyping.remove();'
                 # EU-318 — capture the fetched window's max seq BEFORE the append loop below moves
                 # those nodes OUT of frag. The old code scanned frag for `total` AFTER the move, so on
                 # any burst tick total undercounted by the burst size (thread 10-29, 6 new → fetch
@@ -4047,11 +4057,14 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 council.append_chat(cfg, "Q", msg)
 
             def _bg():
-                try:
+                _state["chat_typing"] = True   # EU-743 — claim before work starts so the render
+                try:                             #     picks up "CTO is typing…" while it runs.
                     from . import decisions
                     decisions.route_message(cfg, audit, msg)
                 except Exception as exc:  # noqa: BLE001
                     set_last_msg(None, "error", f"chat failed: {exc}")   # EU-656: red from tone
+                finally:
+                    _state["chat_typing"] = False   # EU-743 — clear on EVERY path (success or error)
             threading.Thread(target=_bg, daemon=True).start()
         return redirect("/chat")
 
