@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-844 · Elite-Unit · • All 4 ACs met: one notification per write, correct format/scope, raise-non-propagation verified with persistence + audit checks, tests extended, gate green. • Minor: `from . · 🔗 Cockpit Settings → "Model backend" dropdown (global or per-app) — observe Telegram announcement fires on change
 - 2026-08-14 · EU-843 · Elite-Unit · • All 5 ACs met: /api/backend/effective endpoint + #effective-backend element, derived from persisted backend_pref state, covering single/hybrid/backup/per-app. · 🔗 /
 - 2026-08-14 · EU-842 · Elite-Unit · • All 4 ACs met: single _audit_backend_change choke-point emits one model_backend_changed row (field/from/to/scope/source) for active/per-app/secondary/mode; test stubs _AUDIT_LOG and covers each path; only…
 - 2026-08-14 · EU-748 · Elite-Unit · • Spec met: option (a) implemented — cross-process stop-intent file the drain peeks each cycle; current ticket lands, drain stands down, cockpit stays up.
