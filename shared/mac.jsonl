@@ -772,3 +772,13 @@
 {"ts": "2026-08-14T12:13:31+0300", "event": "token_burn_report", "ticket_id": "EU-597", "payload": {"planner": 165937, "builder": 2162826, "reviewer": 540304}, "total": 2869067}
 {"ts": "2026-08-14T12:13:31+0300", "event": "ticket_start", "ticket_id": "EU-743", "app": "Elite-Unit", "branch": "autodev/EU-743-fix-chat-composer-double-enter-duplicate", "dry_run": false, "ephemeral": false}
 {"ts": "2026-08-14T12:13:31+0300", "event": "ticket_transition", "ticket_id": "EU-743", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
+{"ts": "2026-08-14T12:24:07+0300", "event": "dev_gate", "ticket_id": "EU-731", "passed": true, "failing": [], "report_tail": ""}
+{"ts": "2026-08-14T12:24:08+0300", "event": "land_pushed", "ticket_id": "EU-731", "base": "dev"}
+{"ts": "2026-08-14T12:24:13+0300", "event": "ticket_transition", "ticket_id": "EU-731", "wanted": "Done", "landed": "Done", "outcome": "matched"}
+{"ts": "2026-08-14T12:24:15+0300", "event": "merged", "ticket_id": "EU-731", "base": "dev", "done": false}
+{"ts": "2026-08-14T12:24:15+0300", "event": "self_update_pending_restart", "ticket_id": "EU-731"}
+{"ts": "2026-08-14T12:24:17+0300", "event": "token_burn_report", "ticket_id": "EU-731", "payload": {"planner": 192244, "builder": 1392572, "reviewer": 155742}, "total": 1740558}
+{"ts": "2026-08-14T12:24:17+0300", "event": "ticket_start", "ticket_id": "EU-760", "app": "Elite-Unit", "branch": "autodev/EU-760-merge-budget-into-usage-as-one-canonical", "dry_run": false, "ephemeral": false}
+{"ts": "2026-08-14T12:24:18+0300", "event": "ticket_transition", "ticket_id": "EU-760", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
+{"ts": "2026-08-14T12:33:30+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 0, "output_tokens": 107, "cost_usd": 0.0, "duration_s": 587.33, "turns": 0, "ticket_id": "EU-743"}
+{"ts": "2026-08-14T12:33:30+0300", "event": "planner", "ticket_id": "EU-743", "verdict": "BUILD", "testable_ac": 0, "in_scope_files": 0, "cost_usd": 0.0, "provider": "Anthropic", "model": "opus", "error": "(planner error: unparseable plan reply \u2014 briefless BUILD; head: '')"}
