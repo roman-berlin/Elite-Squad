@@ -219,7 +219,7 @@ upkeep is Commander-driven now.
 | Run (dry + live) + controls | ☐ | |
 | Autopilot | ☐ | |
 | Delegation | ☐ | |
-| Chat + group + standup | ☐ | |
+| CTO chat + standup | ☐ | |
 | Council/meeting/ship-review | ☐ | |
 | Patrol + autonomy | ☐ | |
 | Memory/scribe | ☐ | |
