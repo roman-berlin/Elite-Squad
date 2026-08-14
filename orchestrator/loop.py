@@ -1465,6 +1465,23 @@ async def _run_inner_serial(cfg: Config, worklist: list[tuple[AppConfig, Ticket]
                 continue
             if app.name in base_halted:
                 continue   # base-level verdict already hit THIS app — leave its tickets queued
+            # EU-754: RE-READ THE BACKEND PREFERENCE at the ticket boundary so a switch binds on
+            # this ticket, not the next cycle boundary (which can be up to 90 min for a full
+            # worklist). Best-effort: minimal test cfgs may lack the attrs; never break the drain.
+            try:
+                from . import backend_pref as _bp754
+                _pref_bk = _bp754.active(cfg, app.name)
+                _cur = backends.current()
+                if getattr(cfg, "model_backend", _cur) != _pref_bk:
+                    _was = getattr(cfg, "model_backend", None)
+                    cfg.model_backend = _pref_bk
+                    audit.record("model_backend_refreshed", app=app.name,
+                                 was=str(_was or ""), now=str(_pref_bk))
+                    print(f"  ⇄ backend preference changed ({_was} → {_pref_bk}) — rebind for "
+                          f"{ticket.id}", flush=True)
+                    backends.set_backend(_pref_bk)
+            except Exception:  # noqa: BLE001 — a pref hiccup must never stall the drain
+                pass
             backlog = None   # pre-bind: an exception before assignment must not NameError the handler
             # EU-253: bracket THIS ticket with a per-ticket log file before any work starts, and
             # close it once the ticket is done (success OR caught exception — so even a
