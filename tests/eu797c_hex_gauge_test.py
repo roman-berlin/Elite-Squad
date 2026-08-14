@@ -28,7 +28,7 @@ def chk(n, c, d=""):
 
 # Build usage payloads that trigger real gauge cards with each tone:
 #   • Claude → bad tone  (utilization > 0.95 → red via .pgfill.r)
-#   • GLM   → warn tone  (utilization ~0.85 → amber via .pgfill.a)
+#   • Secondary → warn tone  (utilization ~0.85 → amber via .pgfill.a)
 cfg = Config(apps=[], audit_path="/dev/null", glm_quota_tokens=100_000)
 
 claude_usage = {

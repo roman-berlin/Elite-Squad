@@ -564,15 +564,15 @@ def test_dual_provider_gauge_critical_threshold():
     print("  ✓ _dual_provider_gauge critical tone at 97% (red, warning icon, 'critical' status)")
 
 
-def test_dual_provider_gauge_glm_placeholder():
-    """Test that _dual_provider_gauge shows GLM placeholder when not configured."""
+def test_dual_provider_gauge_secondary_placeholder():
+    """Test that _dual_provider_gauge shows secondary placeholder when not configured."""
     class MockConfig:
         budget_alert_pct = 0.80
         budget_bad_threshold = 0.95
 
     cfg = MockConfig()
 
-    # Claude available, GLM None (placeholder)
+    # Claude available, no secondary configured (placeholder)
     claude_usage = {
         "available": True,
         "limits": [
@@ -590,15 +590,15 @@ def test_dual_provider_gauge_glm_placeholder():
 
     result = _dual_provider_gauge(cfg, claude_usage, glm_usage=None)
 
-    assert "GLM" in result, "Should show GLM provider name"
-    assert "unconfigured" in result, "Should show GLM as unconfigured"
-    assert "isn't set up yet" in result, "Should show setup instructions"
-
-    print("  ✓ _dual_provider_gauge shows GLM placeholder when not configured")
+    assert "unconfigured" in result, "Should show unconfigured brand"
+    assert "usage tracking not connected yet" in result, "Should show new placeholder text"
+    assert "GLM" not in result, "Must not contain hardcoded GLM"
+    assert "isn't set up yet" not in result, "Must not use old placeholder copy"
+    print("  ✓ _dual_provider_gauge shows secondary placeholder when not configured")
 
 
 def test_dual_provider_gauge_both_providers():
-    """Test that _dual_provider_gauge renders both providers when GLM data is provided."""
+    """Test that _dual_provider_gauge renders both providers when secondary data is provided."""
     class MockConfig:
         budget_alert_pct = 0.80
         budget_bad_threshold = 0.95
@@ -632,13 +632,14 @@ def test_dual_provider_gauge_both_providers():
     result = _dual_provider_gauge(cfg, claude_usage, glm_usage)
 
     assert "Claude" in result, "Should show Claude provider"
-    assert "GLM" in result, "Should show GLM provider"
+    assert "Secondary" in result, "Should show resolved secondary name (fallback when none configured)"
     assert "60% used" in result, "Should show Claude utilization"
-    assert "40% used" in result, "Should show GLM utilization"
+    assert "40% used" in result, "Should show secondary utilization"
     assert "40% remaining" in result, "Should show Claude remaining"
-    assert "60% remaining" in result, "Should show GLM remaining"
+    assert "60% remaining" in result, "Should show secondary remaining"
+    assert "GLM" not in result, "Must not contain hardcoded GLM"
 
-    print("  ✓ _dual_provider_gauge renders both providers (Claude 60%, GLM 40%)")
+    print("  ✓ _dual_provider_gauge renders both providers (Claude 60%, Secondary 40%)")
 
 
 def test_dual_provider_gauge_resets_now():
@@ -801,7 +802,7 @@ def main():
     test_dual_provider_gauge_renders_claude_card()
     test_dual_provider_gauge_warning_threshold()
     test_dual_provider_gauge_critical_threshold()
-    test_dual_provider_gauge_glm_placeholder()
+    test_dual_provider_gauge_secondary_placeholder()
     test_dual_provider_gauge_both_providers()
     test_dual_provider_gauge_resets_now()
     test_dual_provider_gauge_empty_limits()

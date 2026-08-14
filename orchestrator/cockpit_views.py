@@ -1621,19 +1621,23 @@ def _chat_tabs(active: str, npend: int = 0) -> str:
 
 
 def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None = None) -> str:
-    """EU-122: Dual-provider budget gauge — shows Claude and GLM side-by-side with % remaining.
+    """EU-122: Budget gauge — shows Claude and a secondary provider side-by-side.
 
     Each provider gets its own card with:
     - Provider name + brand label
     - Utilization percentage (visual bar + number)
-    - Low-watermark indicator (green → amber → red based on threshold)
+    - Status indicator (green → amber → red based on thresholds)
     - Reset time (if available)
+
+    When the secondary provider is not configured, a neutral placeholder is shown.
+    Otherwise the card resolves the configured backend name and displays usage data.
 
     Pattern mirrors EU-118 plan_limit_banner for consistent alert styling.
     """
     from . import usage as _usg
+    from . import backend_pref
 
-    # Low-watermark thresholds (configurable, with safe defaults)
+    # Utilization thresholds (configurable, with safe defaults)
     warn_threshold = float(getattr(cfg, "budget_alert_pct", 0.8) or 0.8)
     bad_threshold = float(getattr(cfg, "budget_bad_threshold", 0.95) or 0.95)
 
@@ -1648,20 +1652,20 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
     def _provider_card(name: str, brand: str, data: dict, is_placeholder: bool = False) -> str:
         """Render a single provider's budget gauge card."""
         if is_placeholder or not data:
-            # Placeholder for when GLM isn't configured yet
+            # Placeholder for when a secondary backend isn't set up yet
             return (
                 '<div class=provcard>'
                 '<div class=phead>'
                 f'<span class=pname>{html.escape(name)}</span>'
                 f'<span class=pbrand>unconfigured</span>'
                 '</div>'
-                '<div class=pnote>This provider isn\'t set up yet. Add it to config.yaml to track its quota.</div>'
+                '<div class=pnote>usage tracking not connected yet</div>'
                 '</div>'
             )
 
         # EU-540: plan-probe rows carry 'utilization' (fraction); glm_budget_status()/budget_status()
         # carry 'pct' as a fraction (used/cap) with no 'utilization' key. Prefer 'utilization' when
-        # present (plan rows), else fall back to 'pct' so the GLM gauge reflects real ledger burn
+        # present (plan rows), else fall back to 'pct' so the secondary gauge reflects real ledger burn
         # instead of a dead 0%. Both are 0.0–1.0 fractions here.
         util = float(data.get("utilization", data.get("pct", 0.0)) or 0.0)
         pct = int(util * 100)
@@ -1680,7 +1684,7 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
         elif reset == "now":
             reset_meta = '<div class=pmeta>resetting now</div>'
 
-        # Status indicator (low-watermark)
+        # Status indicator
         if util >= bad_threshold:
             status_icon = "&#9888;"  # warning icon
             status_text = "critical"
@@ -1748,10 +1752,13 @@ def _dual_provider_gauge(cfg: Config, claude_usage: dict, glm_usage: dict | None
         # EU-759: Claude data unavailable → unknown state (never fabricate ok/100%)
         claude_card = _unknown_state_card("Claude", "Max subscription")
 
-    # Build GLM card (placeholder if not configured)
+    # Build secondary card (placeholder if not configured)
+    sec_id = backend_pref.get_secondary(cfg)
+    sec_name = _display_label_for_id(cfg, sec_id) if sec_id else "Secondary"
+
     glm_card = _provider_card(
-        "GLM",
-        "Secondary provider",
+        sec_name,
+        "secondary",
         glm_usage or {},
         is_placeholder=(glm_usage is None or not glm_usage)
     )
