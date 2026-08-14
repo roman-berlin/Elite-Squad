@@ -838,3 +838,5 @@
 {"ts": "2026-08-14T13:48:24+0300", "event": "conflict_deferred", "ticket_id": "EU-852", "against": "EU-787"}
 {"ts": "2026-08-14T13:48:24+0300", "event": "conflict_deferred", "ticket_id": "EU-853", "against": "EU-787"}
 {"ts": "2026-08-14T13:48:24+0300", "event": "conflict_deferred", "ticket_id": "EU-854", "against": "EU-787"}
+{"ts": "2026-08-14T13:52:11+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 130421, "output_tokens": 9466, "cost_usd": 1.643792, "duration_s": 263.68, "turns": 8, "ticket_id": "EU-787"}
+{"ts": "2026-08-14T13:52:11+0300", "event": "planner", "ticket_id": "EU-787", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 6, "cost_usd": 1.643792, "provider": "Anthropic", "model": "opus"}
