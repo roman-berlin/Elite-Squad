@@ -6,6 +6,12 @@
 
 *(engine codename: “The General”; brand guide: Documentation/BRAND.md)*
 
+> **Status: frozen (2026-08-14).** The maintainer has stopped active development and
+> shut down the automation that used to build this repo. The whole backlog now lives in
+> [GitHub Issues](https://github.com/roman-berlin/Elite-Squad/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
+> as `help wanted` tasks — contributions are welcome. CI still runs on every pull request,
+> but reviews and merges may be slow.
+
 You give an order. The **General** (the orchestrator) commands two engineers — the
 **Builder** (Claude Code) and the **Reviewer** (a second, read-only Claude) — to
 implement it on a feature branch, test it, review it, and land it on your app's
