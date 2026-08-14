@@ -362,6 +362,33 @@ def boot_smoke(cfg: Config, audit: "AuditLog | None" = None, *, ticket: str | No
     return True, "boot smoke green"
 
 
+def boot_alerting_probe(cfg: Config) -> bool:
+    """EU-788 AC3: one silent probe sent at serve-boot time to verify Telegram is reachable.
+
+    Only sends when notify.configured() (when TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set);
+    otherwise no-ops and returns False without marking anything degraded (the existing 'Telegram:
+    not configured' health signal covers that case — EU-788 AC5). The probe uses ``silent=True``
+    (disable_notification) so it does NOT produce a toast/ping on the Commander's device.
+
+    Records the outcome into notify's alerting state (ok/failed), so the health check immediately
+    surfaces the result. Never raises — the boot must proceed regardless.
+
+    Returns True only when the probe send succeeded; False on failure or when not configured."""
+    try:
+        from . import notify as _notify
+        if not _notify.configured():
+            return False
+        _ok = _notify.send("EU-788 alerting self-test: OK", silent=True)
+        return _ok
+    except Exception:  # noqa: BLE001 — the probe must never block a boot
+        try:
+            from . import notify as _notify
+            _notify._set_alerting("failed", "boot_alerting_probe raised an exception")
+        except Exception:  # noqa: BLE001 - even this rescue must not fail
+            pass
+        return False
+
+
 # 2026-07-21: which UNTRACKED files can actually "activate un-gated code" on a respawn. A stray
 # .py/.sh inside the tree can be imported or executed; a leftover .md/.bak/.log cannot. Only the
 # former may block a self-update restart — see respawn_blocking_paths.

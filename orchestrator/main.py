@@ -683,6 +683,13 @@ async def _main(argv: list[str]) -> int:
                     _resume_block = f"boot-smoke-failed: {_detail}"
             except Exception:  # noqa: BLE001 — boot must proceed; treat an unrunnable smoke as green
                 pass                          # (the import in THIS process already succeeded)
+        # EU-788: alerting self-test — send one silent probe at boot to verify Telegram
+        # reachability so a dead channel shows on the health surface instead of being discovered
+        # during an incident. Never raises / blocks boot.
+        try:
+            _ap.boot_alerting_probe(cfg)
+        except Exception:  # noqa: BLE001
+            pass
         # EU-385 (EU-224a): auto-resume drains persisted as RUNNING when the previous process
         # died — the crash-respawn recovery that closed the 66-minute dead-drain gap. A drain the
         # Commander explicitly stopped is never resurrected (the intent file's STOPPED state and
