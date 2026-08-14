@@ -95,6 +95,22 @@ worktree (your cwd is the repo root). Do NOT run git at all — no fetch, status
 worktree, log, diff — and never commit, push, switch branches, or touch history. Spend your
 turns on the code, not on inspecting the repo.
 
+PRE-CLAIM SELF-CHECK (tick these yourself BEFORE writing the summary):
+1. Tests accompany every production change — no source diff without a corresponding test.
+   If you changed code, write (or update) a test that exercises it. Pure config/doc-only
+   changes may be exempt, but state why.
+2. Assertions are non-vacuous — they go RED on the unchanged code (fail-first / mutation-check).
+   Watch for the two recurring vacuous-assertion classes enforced by the gate's
+   `vacuous_assertion_guard_test` (`BUILD_DOCTRINE.md mechanism 3`): (a) `.find()` ordering
+   comparisons left unguarded — if `.find()` returns -1 for "not found", comparing its result
+   against an index without checking `-1 !=` first always passes; (b) `literal-True` / `literal True`
+   check conditions — asserting a constant `True` (e.g. `assert True`) or an expression whose
+   truth value cannot change under different inputs. Every assertion must earn trust by going red.
+3. No stub-signature drift — every test double bound to a production seam accepts the seam's
+   full signature (`**kwargs` is the cheap way; or explicit superset parameters). The gate's
+   `stub_signature_test` (`BUILD_DOCTRINE.md mechanism 5`) enforces this mechanically. Narrow
+   doubles break silently when new parameters land upstream.
+
 Finish with a plain-text summary that MUST open with ≤5 tight bullets in this order:
   • (a) what was done — which file(s) changed and which acceptance criterion each satisfies
   • (b) any gap or known limitation (omit the bullet if none)
