@@ -884,3 +884,5 @@
 {"ts": "2026-08-14T16:18:15+0300", "event": "prior_attempts_injected", "ticket_id": "EU-852", "chars": 113}
 {"ts": "2026-08-14T16:18:16+0300", "event": "ticket_transition", "ticket_id": "EU-852", "wanted": "In Progress", "landed": "In Progress", "outcome": "no-op"}
 {"ts": "2026-08-14T16:18:19+0300", "event": "conflict_deferred", "ticket_id": "EU-788", "against": "EU-852"}
+{"ts": "2026-08-14T16:20:33+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 272496, "output_tokens": 9904, "cost_usd": 1.026956, "duration_s": 134.49, "turns": 11, "ticket_id": "EU-852"}
+{"ts": "2026-08-14T16:20:33+0300", "event": "planner", "ticket_id": "EU-852", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 5, "cost_usd": 1.026956, "provider": "Anthropic", "model": "opus"}
