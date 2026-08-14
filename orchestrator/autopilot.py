@@ -953,6 +953,127 @@ def clear_drain_intent(cfg: Config, app_name: str | None, reason: str) -> None:
               "auto-resume on the next boot despite this stop", flush=True)
 
 
+# ── Stop-intent file — cross-process lever that the drain honours each cycle ──────────────────────
+# Sibling of the intent file; used by the cockpit to signal an external daemon (or any running
+# autopilot process) that it should stand down after its current ticket lands (EU-748). Two read
+# modes: the live drain PEEKS (peek_stop_intent — non-destructive, so the KeepAlive respawn gate
+# honour_pending_stop_intent still sees the record after the stand-down); deliberate fresh arms
+# clear it (consume_stop_intent — cockpit Start / a --force CLI start retract the stop order).
+
+_STOP_INTENT_FILE_NAME = "autopilot_stop_intent.json"
+
+
+def _stop_intent_file(cfg: Config) -> Path:
+    """The JSON file that carries pending drain-stop requests."""
+    return Path(cfg.audit_path).with_name(_STOP_INTENT_FILE_NAME)
+
+
+def request_drain_stop(cfg: Config, app_name: str | None, mode: str = "drain") -> None:
+    """Write a pending drain-stop intent for this app (``""`` = unit-wide). Best-effort, never raises."""
+    key = app_name or ""
+
+    def _set(cur):
+        cur = cur if isinstance(cur, dict) else {}
+        cur[key] = {"requested_ts": time.time(), "mode": mode, "pid": os.getpid()}
+        return cur
+
+    try:
+        locking.locked_rmw(_stop_intent_file(cfg), _set, default={}, corrupt_to_default=True)
+    except (OSError, ValueError) as exc:
+        print(f"  ⚠ drain-stop intent write failed ({exc}) — drain will NOT stand down", flush=True)
+
+
+def load_stop_intent(cfg: Config) -> dict:
+    """Load the stop-intent map; returns ``{}`` when absent."""
+    try:
+        data = json.loads(_stop_intent_file(cfg).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def consume_stop_intent(cfg: Config, app_name: str | None) -> dict | None:
+    """One-shot: return and clear the stop intent for *this* app or the unit-wide ``""`` key.
+
+    Returns the matching record on success, or ``None`` when there's nothing to consume.
+    Best-effort — never raises (mirrors record/clear_drain_intent style).
+    """
+    key = app_name or ""
+
+    # Try per-app first; fall back to unit-wide if no per-app intent exists.
+    for candidate in (key, "") if key != "" else [""]:
+        _found: list[dict | None] = [None]  # captured by the closure
+
+        def _consume(cur):
+            rec = cur.pop(candidate, None)
+            _found[0] = rec   # capture outside the lock-callback scope
+            return cur         # MUST return just the new dict — any tuple serialises as JSON array
+
+        try:
+            locking.locked_rmw(_stop_intent_file(cfg), _consume, default={},
+                               corrupt_to_default=False)
+            if _found[0] is not None:
+                return _found[0]
+        except (OSError, ValueError):
+            return None
+
+    return None
+
+
+def peek_stop_intent(cfg: Config, app_name: str | None) -> dict | None:
+    """Non-destructive sibling of ``consume_stop_intent``: return the pending stop-intent for THIS
+    app or the unit-wide ``""`` key WITHOUT clearing it.
+
+    The live drain PEEKS (not consumes) at each cycle top: the record must SURVIVE the stand-down,
+    because under the launchd keepalive the process launchd respawns next must still see it and
+    refuse to resume building (``honour_pending_stop_intent``). Deliberate fresh arms are what
+    clear it — the cockpit's Start (server.py) and a ``--force`` CLI start consume it. Never
+    raises: an unreadable file answers None (no pending stop)."""
+    key = app_name or ""
+    data = load_stop_intent(cfg)
+    for candidate in (key, "") if key != "" else [""]:
+        rec = data.get(candidate)
+        if isinstance(rec, dict):
+            return rec
+    return None
+
+
+def honour_pending_stop_intent(cfg: Config, app_name: str | None, force: bool = False) -> bool:
+    """CLI-start gate for a pending cockpit stop-intent — returns True when the caller MUST stand
+    down instead of starting a drain.
+
+    A stop-intent is written by the cockpit's Finish&stop / Stop when the drain runs in a FOREIGN
+    process (EU-748). The addressed drain peeks it at its next cycle boundary and stands down —
+    deliberately non-destructively, because under the launchd keepalive the very same command is
+    respawned ~10s later and must not resume building where the stop was ordered. This gate is
+    that refusal:
+
+      * pending intent + ``force`` → a deliberate start retracts the stop: consume the record and
+        proceed;
+      * pending intent, no force   → best-effort bootout of the keepalive service (ends the
+        respawn cycle — done by the daemon process itself here, NOT by the cockpit, so the UI
+        stays up; a no-op when the plist isn't installed, e.g. a terminal drain), consume the
+        record, report True (exit without draining).
+
+    Bootout runs BEFORE the consume so a SIGTERM mid-gate (bootout signals this very process)
+    leaves the record behind for the next pass — self-healing, never a silent resume. Best-effort:
+    never raises."""
+    rec = peek_stop_intent(cfg, app_name)
+    if rec is None:
+        return False
+    if force:
+        consume_stop_intent(cfg, app_name)
+        return False
+    try:
+        _stop_launchd_daemon()
+    except Exception:  # noqa: BLE001 — a start gate must never become a crash
+        pass
+    consume_stop_intent(cfg, app_name)
+    print("🛸 Pending cockpit stop-intent — the drain was asked to stand down; NOT starting "
+          "(pass --force to start deliberately).", flush=True)
+    return True
+
+
 def _parse_audit_ts(ts) -> float | None:
     """audit.py's local-time ``%Y-%m-%dT%H:%M:%S%z`` stamp → epoch seconds; None if unreadable."""
     from datetime import datetime
@@ -2638,6 +2759,18 @@ async def autopilot(cfg: Config, app_name: str | None = None,
 
         while True:
             run_state["last_activity"] = time.time()   # per-app heartbeat — proves THIS project's loop is alive
+            # EU-748: cross-process stop-intent — honour a drain-stop written by the cockpit
+            # (or any other process) at the TOP of each cycle so the in-flight ticket lands
+            # then the drain stands down without needing a shared Event object. PEEK, not
+            # consume: the record must survive this stand-down so the keepalive-respawn gate
+            # (honour_pending_stop_intent, main.py's CLI entry) still sees it and refuses to
+            # resume building; deliberate fresh arms (cockpit Start / --force) clear it.
+            if stop_reason is None:
+                intent = peek_stop_intent(cfg, app_name)
+                if intent is not None:
+                    stop_reason = "cockpit-stop-intent"
+                    print("🛸 Drain stop signalled — landing current ticket then standing down.", flush=True)
+                    break
             if stop_event is not None and stop_event.is_set():
                 # EU-232: sigterm already claimed this reason via nonlocal above; anything else that
                 # set the same stop_event (the cockpit Stop/Drain toggle) is a cockpit-stop.
@@ -3280,8 +3413,9 @@ async def autopilot(cfg: Config, app_name: str | None = None,
         # skipped it, leaving an unpaired autopilot_start and a phantom "Working" card (the Jul-1 signature).
         # Gated on `started`: a setup failure BEFORE autopilot_start must NOT record an unpaired stop
         # (the mirror-image invariant break the 2026-07-06 review caught).
-        # EU-232: every autopilot_stop now carries a reason= — cockpit-stop / sigterm / once-complete /
-        # plan-limit / budget / keyboard-interrupt / exception:<type> — set at the exit path above.
+        # EU-232: every autopilot_stop now carries a reason= — cockpit-stop / cockpit-stop-intent /
+        # sigterm / once-complete / plan-limit / budget / keyboard-interrupt / exception:<type> —
+        # set at the exit path above. EU-748 added cockpit-stop-intent (cross-process file lever).
         # Falls back to "once-complete" for the handful of other `if once: break` holds (git/pre-flight/
         # graceful-stop/idle-queue) that don't set their own reason — still a genuine --once completion.
         # EU-385: ANY reasoned stand-down that reaches this finally — cockpit-stop, sigterm,
