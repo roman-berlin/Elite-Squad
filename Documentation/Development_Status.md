@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-731 · Elite-Unit · • All four ACs met: `r.ok` guard, `.catch` for network errors, success path unchanged, test harness covers all branches (is_mac=True and is_mac=False). · 🔗 / — the cockpit homepage where the control bar renders (visible on Mac only as "Finder" beside "📂 Open logs"; click the Finder link while offline or against a broken backend to verify the inline error spans in red)
 - 2026-08-14 · EU-597 · Elite-Unit · • All 3 ACs met: 'group room' grep returns only past-tense/historical hits, QA_MANUAL.md checklist row fixed, test subprocess runs correctly against repo root (cwd=ROOT confirmed).
 - 2026-08-14 · EU-754 · Elite-Unit · • AC2 satisfied: per-ticket rebind re-reads the pref and re-pins both cfg.model_backend and the contextvar before dispatch, so a switch binds on the next ticket rather than the next ~90-min cycle.
 - 2026-08-14 · EU-845 · Elite-Unit · • Production change is minimal and correct: single configure_source('cockpit') call in create_app() is the right choke-point — all cockpit-driven writes now stamp source='cockpit' without touching call sites.
