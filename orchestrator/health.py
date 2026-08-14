@@ -193,8 +193,20 @@ def checks(cfg) -> list[dict[str, str]]:
         "present" if _has("gh") else "missing — PRs will be skipped")
 
     from . import notify
-    add("Telegram", "ok" if notify.configured() else "warn",
-        "configured" if notify.configured() else "off — status alerts disabled")
+    _tg_cfg = notify.configured()
+    add("Telegram", "ok" if _tg_cfg else "warn",
+        "configured" if _tg_cfg else "off — status alerts disabled")
+    # EU-788: alerting surface — when Telegram IS configured but sends are failing,
+    # flag it so the Commander can see it on the cockpit health pill/banner.
+    if _tg_cfg:
+        _st = notify.alerting_status()
+        if _st.get("status") == "failed":
+            reason = _st.get("reason", "")
+            detail = ("Telegram sends failing — the Commander is not receiving alerts"
+                      + (f" ({reason})" if reason else ""))
+            add("Alerting", "warn", detail)
+        else:
+            add("Alerting", "ok", "Telegram alerting operational")
 
     jira_have = bool(os.environ.get("JIRA_EMAIL") and os.environ.get("JIRA_API_TOKEN"))
 

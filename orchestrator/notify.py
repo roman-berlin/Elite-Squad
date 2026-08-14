@@ -44,6 +44,36 @@ def configured() -> bool:
     return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
 
 
+# EU-788: per-send alerting health tracking — so a dead Telegram channel shows on the
+# cockpit health surface instead of vanishing into a throttled log line. The module tracks
+# the LATEST send outcome (ok / failed), its timestamp, and why it failed; ``alerting_status()``
+# exposes it for health checks. A successful send flips it back to "ok"; a failure records
+# degraded. Never throttled for health state — only the console warning is throttled.
+
+_alerting_outcome: dict = {"status": "ok", "ts": None, "reason": ""}
+
+
+def alerting_status() -> dict[str, str | None]:
+    """Return the latest Telegram send outcome: {status, ts, reason}.
+
+    ``status`` is "ok" (the last send succeeded) or "failed" (a send failed or raised).
+    ``ts`` is the epoch when the last non-ok event was recorded (None while still "ok").
+    ``reason`` carries why it failed (short string)."""
+    return _alerting_outcome.copy()
+
+
+def _set_alerting(status: str, reason: str = "") -> None:
+    """Record an alerting outcome change. Called from send() — never throttled."""
+    if status == "ok":
+        _alerting_outcome["status"] = "ok"
+        _alerting_outcome["ts"] = None
+        _alerting_outcome["reason"] = ""
+    else:
+        _alerting_outcome["status"] = status
+        _alerting_outcome["ts"] = time.time()
+        _alerting_outcome["reason"] = reason[:200]  # cap for audit hygiene
+
+
 def bulletize(text: str, max_bullets: int = 9, max_chars: int = 1000) -> str:
     """Deterministically fold a report into a tight, phone-skimmable bullet list — the never-fails
     fallback behind ``report_brief`` when the cheap model is unavailable.
@@ -210,7 +240,7 @@ def jira_brief(text: str, max_chars: int = 1400) -> str:
         return (text or "")[:max_chars]
 
 
-def send(text: str, chat_id: str | int | None = None) -> bool:
+def send(text: str, chat_id: str | int | None = None, *, silent: bool = False) -> bool:
     """Send a Telegram message. Returns True if sent, False if not configured or
     failed. Never raises — notifications must not break the pipeline.
 
@@ -230,18 +260,30 @@ def send(text: str, chat_id: str | int | None = None) -> bool:
     hunting each verbose call site (and re-hunting every new one). Deliberately the DETERMINISTIC
     bulletizer, never the model: this runs on the notification path of every officer event, so it
     must add no latency, no cost and no failure mode of its own. Short messages — the overwhelming
-    majority — are untouched."""
+    majority — are untouched.
+
+    Args:
+        text: Message body (will be briefly-folded for phone-readability).
+        chat_id: Optional override target; otherwise uses TELEGRAM_CHAT_ID.
+        silent: When True, sends with disable_notification=True so it does NOT
+            produce a toast/ping on the recipient's device (for probes/smoke tests).
+            Defaults to False for normal alert traffic.
+    """
     text = brief_for_phone(text)
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     target = str(chat_id) if chat_id is not None else os.environ.get("TELEGRAM_CHAT_ID")
     if not (token and target):
         return False
     ok = True
+    error_reason = ""
     for chunk in _tg_chunks(text):
         try:
+            payload = {"chat_id": target, "text": chunk, "disable_web_page_preview": True}
+            if silent:
+                payload["disable_notification"] = True
             r = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": target, "text": chunk, "disable_web_page_preview": True},
+                json=payload,
                 timeout=10,
             )
             if r.status_code == 429:
@@ -252,13 +294,24 @@ def send(text: str, chat_id: str | int | None = None) -> bool:
                 time.sleep(min(max(wait, 0.0), 10.0))
                 r = requests.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": target, "text": chunk, "disable_web_page_preview": True},
+                    json=payload,
                     timeout=10,
                 )
-            ok = ok and r.status_code == 200
-        except requests.RequestException:
+            if r.status_code != 200:
+                ok = False
+                error_reason = f"http {r.status_code}"
+                try:
+                    err = r.json()
+                    error_reason += f" — {err.get('description', '')}".rstrip(" — ")
+                except Exception:  # noqa: BLE001
+                    pass
+        except requests.RequestException as exc:
             ok = False
-    if not ok:
+            error_reason = str(exc)[:200]
+    if ok:
+        _set_alerting("ok")
+    else:
+        _set_alerting("failed", error_reason or "Telegram returned non-200")
         _note_send_failure()
     return ok
 
