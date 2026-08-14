@@ -1301,9 +1301,17 @@ def _control_bar(cfg: Config, current_app: str | None = None, healthy: bool = Tr
                'title="Browse this project\'s run logs by day"'))
     if is_mac:
         open_logs_html += (
+            '<span id=foerr style="display:none;color:var(--bad);font-size:12px;'
+            'font-weight:600;margin-left:4px"></span>'
             ' <a style="font-size:11px;color:var(--info)" '
             'href="/api/open-logs" '
-            'onclick="fetch(this.href);return false" '
+            'onclick="fetch(this.href).then(function(r){'
+            'if(!r.ok){var e=document.getElementById(\x27foerr\x27);'
+            'e.textContent=\x27Failed to open log: \x27+r.status;'
+            'e.style.display=\x27\x27;}})'
+            '.catch(function(e){var el=document.getElementById(\x27foerr\x27);'
+            'el.textContent=\x27Failed to open log: \x27+e.message;'
+            'el.style.display=\x27\x27;});return false" '
             'title="Reveal the logs folder in Finder (macOS only)">Finder</a>'
         )
 
