@@ -1027,6 +1027,22 @@ def _needs_you_label(row: dict[str, object]) -> str:
     return str(row.get("outcome") or row.get("category") or "needs you")
 
 
+def _filing_precision_line(cfg) -> str | None:
+    """Best-effort 📉 line for officers below precision bar; returns None when none qualify."""
+    from . import consolidate as _consolidate
+    precisions = _consolidate.filing_precision(cfg)
+    alerts: list[dict] = []
+    for row in precisions:
+        if row["precision"] < 0.5:
+            alerts.append(row)
+    if not alerts:
+        return None
+    # Surface the worst 1–2; format one-capped line per AC(3).
+    caps = alerts[:2]
+    parts = [f"{r['officer']} {round(r['precision'] * 100)}% ({r['total']} outcomes)" for r in caps]
+    return "📉 Filing precision below bar: " + ", ".join(parts)
+
+
 def _needs_you_rows(cfg) -> list[dict[str, object]]:
     """The deduped, currently-actionable Needs-you rows for the daily digest — one row per ticket,
     oldest (longest-waiting) first. Sourced from needs.summary(cfg), the same live inbox the cockpit's
@@ -1154,6 +1170,12 @@ def standup(cfg) -> str:
                          + " · ".join(f"{r['label']} ×{r['count']}" for r in _tax)
                          + " (details: cockpit → /forensics)")
     except Exception:  # noqa: BLE001
+        pass
+    try:
+        _fp = _filing_precision_line(cfg)
+        if _fp:
+            lines.append(_fp)
+    except Exception:  # noqa: BLE001 - best-effort; a read failure must not sink the daily
         pass
     return "\n".join(lines)
 
