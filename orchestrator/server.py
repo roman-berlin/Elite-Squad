@@ -471,6 +471,11 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
     # `audit` above was built from). See main.py for the rationale — the adapter can't see cfg.
     from .backlog import jira as _jira
     _jira.configure_audit_path(cfg.audit_path)
+    # EU-845: tag cockpit-driven backend changes as source='cockpit' (not the default 'cli').
+    # Without this every POST through the cockpit UI would be unaudited by source —
+    # the exact bug that sparked EU-749. The CLI path (main.py) keeps the 'cli' default.
+    from . import backend_pref as _bp
+    _bp.configure_source("cockpit")
 
     # ----------------------------------------------------------------------------------------------
     # EU-63 — tabbed one-project-per-tab workspace. The cockpit no longer has an "All projects"/`*`
