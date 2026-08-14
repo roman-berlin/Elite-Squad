@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-787 · Elite-Unit · • All shipped/velocity surfaces (standup, dashboard cards+filter, warroom.kpis) now route through one predicate; scrum.split adds the 'superseded' Jira label + an honest 'no code produced' comment naming children —…
 - 2026-08-14 · EU-743 · Elite-Unit · • AC1 (double-Enter dedupe) already met in base by EU-726's setSending re-entry guard + disabled input/button, independently tested; diff correctly leaves the composer untouched (AC4 preserved).
 - 2026-08-14 · EU-855 · Elite-Unit · • All 6 ACs met: single plan panel (plan_usage computed once), config-derived secondary card, /budget→/usage 301 with no remaining internal links, jargon removed, test added & auto-discovered, unknown-state preserved…
 - 2026-08-14 · EU-731 · Elite-Unit · • All four ACs met: `r.ok` guard, `.catch` for network errors, success path unchanged, test harness covers all branches (is_mac=True and is_mac=False). · 🔗 / — the cockpit homepage where the control bar renders (visible on Mac only as "Finder" beside "📂 Open logs"; click the Finder link while offline or against a broken backend to verify the inline error spans in red)
