@@ -63,6 +63,7 @@ from .cockpit_views import (  # noqa: F401
     _result_strip,
     _wrap,
     _working,
+    resolved_backend_summary,   # EU-843
 )
 
 
@@ -1757,6 +1758,13 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                      f"{app_param}: Model set to {_label} (this project only)." if app_param
                      else "Model backend set to " + _label)
         return redirect("/")
+
+    # ── EU-843: GET /api/backend/effective — resolved backend summary as JSON ───
+    @app.get("/api/backend/effective")
+    def effective_backend_api() -> dict[str, str]:
+        """EU-843: read-only plain-English summary of the RESOLVED backend config."""
+        summary = resolved_backend_summary(cfg)
+        return {"effective": summary}
 
     @app.post("/api/continue-on-alternate")
     def continue_on_alternate_api() -> Response:

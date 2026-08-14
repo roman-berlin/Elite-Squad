@@ -18,6 +18,65 @@ from . import dashboard as D
 from .cockpit_state import _state, get_autopilot_status, get_state
 from .config import Config
 
+# ── EU-843: resolved backend summary helper ───────────────────────────────────
+# Pure Python — no request/response, just reads backend_pref and formats
+# the resolved config into a human-readable sentence. Used both in the
+# backend_control() template and the /api/backend/effective JSON endpoint.
+
+
+def _display_label_for_id(cfg, backend_id: str | None) -> str:
+    """Return the human-facing label for a backend id (e.g. "Opus (Claude)")."""
+    from . import backends, model_registry
+
+    entries = {}
+    try:
+        for entry in backends.list_backends(registry=model_registry.ModelRegistry(cfg)):
+            entries[entry["id"]] = entry.get("label", entry["id"])
+    except Exception:  # noqa: BLE001 — degradation: use raw id
+        pass
+    return entries.get(backend_id, backend_id or "")
+
+
+def resolved_backend_summary(cfg) -> str:
+    """EU-843: produce a single plain-English sentence for the RESOLVED backend config.
+
+    Derived entirely from backend_pref accessors — it reflects the persisted
+    model_backend.json state, NOT any unsaved UI selection.
+
+    Returns patterns::
+
+        single:      "Opus (Claude) plans, reviews and builds"
+        hybrid:      "Opus (Claude) plans and reviews · GLM (Z.ai) builds"
+        backup:      "Opus (Claude) (all roles) · GLM (Z.ai) on standby"
+        per-app:     "… · automatixy: GLM (Z.ai)"  appended when apps are set
+    """
+    from . import backend_pref
+
+    main_id = backend_pref.active(cfg)
+    secondary_id = backend_pref.get_secondary(cfg)
+    mode = backend_pref.get_mode(cfg)
+    apps = backend_pref.get_apps(cfg)
+
+    main_label = _display_label_for_id(cfg, main_id)
+
+    if not secondary_id:
+        summary = f"{main_label} plans, reviews and builds"
+    else:
+        sec_label = _display_label_for_id(cfg, secondary_id)
+        if mode == "hybrid":
+            summary = f"{main_label} plans and reviews · {sec_label} builds"
+        else:
+            # backup mode
+            summary = f"{main_label} (all roles) · {sec_label} on standby"
+
+    if apps:
+        parts = []
+        for app_name, app_id in sorted(apps.items()):
+            parts.append(f"{app_name}: {_display_label_for_id(cfg, app_id)}")
+        summary += " · " + "; ".join(parts)
+
+    return summary
+
 
 # ── Relative-time formatting (EU-702) ────────────────────────────────────────────────
 def _rel(dt) -> str:
@@ -875,6 +934,10 @@ def backend_control(cfg, app_name: str | None = None) -> str:
            if secondary else "")
         + '<a class=btn href="/models" style="height:30px;font-size:12px;padding:0 10px" '
         'title="Add / manage model backends (API key, base URL, connection test)">&#10133; Add model</a>'
+        # EU-843: read-only plain-English summary of the RESOLVED backend config
+        + ('<p id="effective-backend" title="Resolved backend configuration — reflects persisted state">'
+           + html.escape(resolved_backend_summary(cfg))
+           + '</p>')
         # EU-717: the shared in-flight helper is emitted ONCE here (backend_control renders all
         # three selects in one call), AFTER them so they're in the DOM when it runs. The
         # bootstrap wires each select via its data-eu-inflight attribute; a missing Mode select
