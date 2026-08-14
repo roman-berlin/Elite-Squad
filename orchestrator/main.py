@@ -847,6 +847,12 @@ async def _main(argv: list[str]) -> int:
                   "launchd keepalive agent, or close the terminal it runs in) before starting "
                   "another, or pass --force if you're sure.")
             return 2
+        # EU-748: keepalive-respawn gate. A cockpit Finish&stop on a foreign daemon writes a
+        # stop-intent the live drain only PEEKS — so this entry (which launchd re-runs after the
+        # stand-down) must refuse to resume building. --force retracts the stop and proceeds.
+        if autopilot_mod.honour_pending_stop_intent(cfg, args.app,
+                                                    force=getattr(args, "force", False)):
+            return 0
         await autopilot_mod.autopilot(cfg, args.app, once=getattr(args, "once", False),
                                       interval=getattr(args, "interval", 60))
         return 0

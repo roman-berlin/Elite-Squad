@@ -1148,6 +1148,10 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                                  "too many projects are running at once — wait for one to finish, "
                                  "then start this one"))
                 return redirect(_redir)
+            # EU-748: a deliberate Start retracts any pending stop-intent — a stop order addressed
+            # to a previous (now-dead) external daemon must not stand this fresh drain down at its
+            # first cycle. consume probes this app's key first, then the unit-wide "" fallback.
+            ap.consume_stop_intent(ap_cfg, key)
             # The dedicated autopilot signal (distinct from a manual run's bare ``active``). Set
             # synchronously so the first render after Start already shows Autopilot ON; the loop sets it
             # again and the _bg finally clears it.
@@ -1180,22 +1184,36 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 # flag with the event so the run card shows the amber chip at once (cleared by
                 # the worker's finally → release_run when the drain completes).
                 st["stopping"] = True
-            # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
-            # the launchd service after signaling the stop_event so the current ticket finishes.
-            # This must happen AFTER ev.set() so graceful shutdown happens first.
+            # EU-120/EU-748: a foreign daemon reaches one of two shapes here.
+            #  · ev is not None — this cockpit ALSO has a live loop (rare coexistence): signal it
+            #    above, then durably bootout the launchd service as before (EU-120).
+            #  · ev is None — the EU-748 shape: this cockpit never started that process, so no
+            #    in-process Event can reach it (get_autopilot_status reports on=True via the PID
+            #    probe, which is how this branch is entered at all). Write the stop-intent file
+            #    the drain polls at every cycle top: the in-flight ticket lands, then the drain
+            #    stands down while the cockpit stays up — no launchctl lever from this process.
+            #    Unit-wide "" key: the PID file records no app, so the cockpit cannot know which
+            #    project the daemon drains; every consume/peek falls back to "".
             if ap.daemon_is_external():
-                stopped = ap._stop_launchd_daemon()
-                # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout, so this is a
-                # verified outcome (not launchctl's optimistic exit code) — surface it to the operator.
-                if stopped:
-                    set_last_msg(key, "ok",   # EU-656: verified success — green from tone
-                                 "✓ external launchd daemon confirmed stopped — it will not respawn.")
+                if ev is None:
+                    ap.request_drain_stop(cfg, "", mode="drain")
+                    st["stopping"] = True
+                    set_last_msg(key, "ok",   # EU-656
+                                 ("✓ finish & stop signalled — the drain will land its current "
+                                  "ticket then stand down; the cockpit stays up."))
                 else:
-                    # EU-656: an unconfirmed stop is a failure outcome — explicit error tone so
-                    # the note still renders red (previously the ⚠/error text forced it red).
-                    set_last_msg(key, "error",
-                                 "⚠ couldn't confirm the external launchd daemon stopped — "
-                                 "KeepAlive may respawn it; check `launchctl list` manually.")
+                    stopped = ap._stop_launchd_daemon()
+                    # EU-232: _stop_launchd_daemon() now polls daemon_running() post-bootout, so this is a
+                    # verified outcome (not launchctl's optimistic exit code) — surface it to the operator.
+                    if stopped:
+                        set_last_msg(key, "ok",   # EU-656: verified success — green from tone
+                                     "✓ external launchd daemon confirmed stopped — it will not respawn.")
+                    else:
+                        # EU-656: an unconfirmed stop is a failure outcome — explicit error tone so
+                        # the note still renders red (previously the ⚠/error text forced it red).
+                        set_last_msg(key, "error",
+                                     "⚠ couldn't confirm the external launchd daemon stopped — "
+                                     "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         if action == "stop" and ap_on:
@@ -1209,21 +1227,29 @@ def create_app(cfg: Config, port: int = 8787) -> Flask:
                 ev.set()
                 st["stopping"] = True   # EU-687: confirmed stop — chip flips at once (see drain)
             st["autopilot_on"] = False
-            # EU-120: for external daemons (launchd keepalive or detached terminal), durably stop
-            # the launchd service. Without launchctl bootout, clicking 'Stop' on an external daemon
-            # doesn't actually stop it—the KeepAlive respawn makes the button a no-op for external runs.
+            # EU-120/EU-748: same split as the drain branch — a coexisting live local event gets
+            # the launchd bootout (EU-120); a foreign daemon this cockpit never started gets the
+            # stop-intent file (EU-748, mode="stop"). Cross-process there is no "immediate" — the
+            # message names what really happens: the current ticket lands first.
             if ap.daemon_is_external():
-                stopped = ap._stop_launchd_daemon()
-                # EU-232: verified outcome (see the drain branch above) — surface it to the operator.
-                if stopped:
-                    set_last_msg(key, "ok",   # EU-656: verified success — green from tone
-                                 "✓ external launchd daemon confirmed stopped — it will not respawn.")
+                if ev is None:
+                    ap.request_drain_stop(cfg, "", mode="stop")
+                    st["stopping"] = True
+                    set_last_msg(key, "ok",   # EU-656
+                                 ("✓ stop signalled — the drain will land its current ticket "
+                                  "then stand down; the cockpit stays up."))
                 else:
-                    # EU-656: an unconfirmed stop is a failure outcome — explicit error tone so
-                    # the note still renders red (previously the ⚠/error text forced it red).
-                    set_last_msg(key, "error",
-                                 "⚠ couldn't confirm the external launchd daemon stopped — "
-                                 "KeepAlive may respawn it; check `launchctl list` manually.")
+                    stopped = ap._stop_launchd_daemon()
+                    # EU-232: verified outcome (see the drain branch above) — surface it to the operator.
+                    if stopped:
+                        set_last_msg(key, "ok",   # EU-656: verified success — green from tone
+                                     "✓ external launchd daemon confirmed stopped — it will not respawn.")
+                    else:
+                        # EU-656: an unconfirmed stop is a failure outcome — explicit error tone so
+                        # the note still renders red (previously the ⚠/error text forced it red).
+                        set_last_msg(key, "error",
+                                     "⚠ couldn't confirm the external launchd daemon stopped — "
+                                     "KeepAlive may respawn it; check `launchctl list` manually.")
             return redirect(_redir)
 
         # toggle / unknown action → no-op (the mode persist above already took effect).
