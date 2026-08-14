@@ -66,6 +66,11 @@ def parse_subtickets(text: str | None) -> list[dict[str, str]]:
 # type it verbatim — unlike a plain "[split-depth: N]" that a ticket ABOUT this feature could spoof). 3
 # levels is far more than any real ticket needs and still bounds the blast radius.
 _MAX_SPLIT_DEPTH = 3
+
+# EU-787: distinguishes a split-closed parent (no code produced) from a genuinely merged ticket
+# (code exists).  Both the Jira board and any downstream consumer can filter on this so a
+# decomposed parent never masquerades as "shipped".
+SUPERSEDED_LABEL = "superseded"
 _DEPTH_RE = re.compile(r"<!--\s*autosplit-depth:\s*(\d+)\s*-->")
 
 # EU-374: the verify child's identity markers. The PRODUCER (verify_child below) and the DETECTOR
@@ -212,17 +217,23 @@ async def split(cfg: Config, app_name: str, parent, recap: str = "", reason: str
         except Exception:  # noqa: BLE001
             pass
 
-    # Close the parent: a comment naming the epic + children, then move it out of the queue (→ Done).
+    # Close the parent: add a distinguishing label so downstream consumers can tell "superseded"
+    # from "shipped", write a comment that makes the absence of code explicit, then move it out
+    # of the queue (→ Done).
     if filed_all and not getattr(parent, "ephemeral", False):
         _into = (f"Epic {epic_key} with children " if epic_key else "children ") + ", ".join(keys)
         try:
-            bl.add_comment(parent, "🧩 Too heavy to land as one ticket — the Scrum Master decomposed it "
-                           f"into {_into}. The children build one at a time (verify child last); closing "
-                           "this parent.")
+            bl.add_comment(parent, "🧩 Too heavy to land as one ticket — the Scrum Master decomposed "
+                           f"it into {_into}, no code produced.  The children build one at a time "
+                           "(verify child last); this parent is superseded.")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            bl.set_labels(str(getattr(parent, "key", parent.id)), add=(SUPERSEDED_LABEL,))
         except Exception:  # noqa: BLE001
             pass
         try:
             bl.set_status(parent, "Done")
-        except Exception:  # noqa: BLE001 - if "Done" isn't a valid transition, the comment still records it
+        except Exception:  # noqa: BLE001 - if "Done" isn't a valid transition, the comment + label survive
             pass
     return result

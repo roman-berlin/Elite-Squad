@@ -323,7 +323,8 @@ def kpis(cfg, tasks: list[dict], app: Optional[str]) -> list[dict]:
         s = t.get("ended") or t.get("started")
         return s.strftime("%Y-%m-%d") if s else ""
 
-    merged = [t for t in ts if t.get("outcome") == "merged→dev"]
+    # EU-787: superseded label → excluded from shipped even when outcome reads "merged→dev"
+    merged = [t for t in ts if D._is_merged_and_not_superseded(t)]
     merged_today = [t for t in merged if day(t) == today]
     sec_blocks = _load_security_blocks(cfg)  # all-time — the historical record (see /forensics)
     active_sec_blocks = _active_security_blocks(cfg, sec_blocks)  # EU-313: only still-live blocks count

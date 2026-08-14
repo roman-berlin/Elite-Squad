@@ -37,6 +37,18 @@ _OUTCOME = {
 # from ``outcome``.
 _NEEDS_YOU = {"PR / needs you", "escalated", "errored", "awaiting decision"}
 
+# EU-787: predicate shared by standup(), kpis() and the dashboard card counters to decide whether a
+# TaskRow counts as "shipped" (outcome == "merged→dev" AND no superseded label).  The "superseded"
+# label field may be absent on audit-derived TaskRows; when absent the check is skipped so existing
+# merge-only logic is preserved and the predicate stays backward-compatible.
+def _is_merged_and_not_superseded(t: dict[str, object]) -> bool:
+    if t.get("outcome") != "merged→dev":
+        return False
+    labels = t.get("labels")
+    if labels is not None and "superseded" in (labels if isinstance(labels, list) else (labels or {}).values()):
+        return False
+    return True
+
 
 def _parse_ts(ts: str) -> Optional[datetime]:
     for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
@@ -699,7 +711,7 @@ def render_html(tasks: list[TaskRow], show_cost: bool = True, dismissed: dict | 
         tasks = [t for t in tasks if not t.get("app") or str(t.get("app")) == app_name]
     # Cards summarize the FULL scoped run set, regardless of any active ?filter= narrowing.
     total = len(tasks)
-    merged = sum(1 for t in tasks if t["outcome"] == "merged→dev")
+    merged = sum(1 for t in tasks if _is_merged_and_not_superseded(t))
     needs = latest_needs_you(tasks, dismissed)   # one row per ticket (latest run), not every old run
     # needs_count may be supplied by the caller (server.py) as the full cross-stream total from
     # needs.summary() — decisions + approvals + proposals + tasks.  Fall back to the task-only
@@ -715,7 +727,7 @@ def render_html(tasks: list[TaskRow], show_cost: bool = True, dismissed: dict | 
     blocked_set = {str(b) for b in (blocked or [])}
     _FILTER_LABEL = {"merged": "Merged → dev", "needs": "Needs you", "parked": "Parked"}
     if flt == "merged":
-        tasks = [t for t in tasks if t["outcome"] == "merged→dev"]
+        tasks = [t for t in tasks if _is_merged_and_not_superseded(t)]
     elif flt == "needs":
         tasks = [t for t in tasks if t["outcome"] in _NEEDS_YOU and not _is_dismissed(t, dismissed)]
     elif flt == "parked":
@@ -1083,7 +1095,7 @@ def standup(cfg) -> str:
     def _in_window(t) -> bool:
         d = _landed(t)
         return d is not None and d > cutoff   # undateable run → not counted; the count stays exact
-    shipped = [t for t in tasks if t["outcome"] == "merged→dev" and _in_window(t)]
+    shipped = [t for t in tasks if _is_merged_and_not_superseded(t) and _in_window(t)]
     needs_rows = _needs_you_rows(cfg)
     base_red = _active_base_red(cfg)
     pending = decisions.load(cfg)
