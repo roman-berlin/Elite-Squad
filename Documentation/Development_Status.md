@@ -2,6 +2,7 @@
 
 Feature changelog — one line per successful live land to the dev branch, newest first. Maintained automatically by the Technical Writer (orchestrator/loop.py).
 
+- 2026-08-14 · EU-839 · Elite-Unit · • Epic pieces verified present: origin stamping (loop.py), filing_precision (EU-837), lesson+TICKET_BLOCK_RULE actuation (EU-838). · 🔗 /cockpit → click the Daily Stand-Up tab and observe a "📉 Filing precision below bar: ..." line appears when any autofiled officer has <50% merged rate across ≥5 terminal audit events
 - 2026-08-14 · EU-838 · Elite-Unit · • All 7 ACs met; gate green (572/572). • AC6 verified by grep — no bare TICKET_BLOCK_RULE left in the 6 officer files. • Typing/error-handling/tenant checks clean.
 - 2026-08-14 · EU-837 · Elite-Unit · • All 5 ACs met: computation, non-autofiled exclusion, min_outcomes filter, run() key, gate stays green. • filing_precision() follows established patterns (audit_lines, JSON guard, no-raise contract).
 - 2026-08-14 · EU-836 · Elite-Unit · • AC1/AC2: source_officer_of correct — first non-autofiled/non-fp label, original case; None for Commander. · 🔗 (no UI — `python3 tests/run_all.py` + inspect `audit.jsonl` rows for terminal events on an autofiled ticket to see `source_officer` and `is_autofiled` fields populated, vs absent on a Commander ticket)
