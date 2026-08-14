@@ -24,13 +24,20 @@ different backend. Shape: ``{"backend": "opus", "apps": {"automatixy": "glm"}}``
 ``active(cfg, app_name)``: the app's own override -> the global ``backend`` -> the config.yaml
 default. A flat legacy file (no ``apps`` key) keeps working unchanged — every app just inherits the
 global pref, exactly as before EU-223.
+
+EU-842: every mutation (``set_active`` / ``set_secondary`` / ``set_mode``, global or per-app)
+emits exactly ONE ``model_backend_changed`` audit row — field, from, to, scope, source — through
+the single ``_audit_backend_change`` choke-point at the bottom of this module. Instrumented here,
+not at the call sites, exactly as EU-397 instrumented the ticket-transition adapter.
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from . import backends, locking
+from .audit import AuditLog
 
 
 def _registry(cfg=None):
@@ -134,10 +141,18 @@ def set_active(bk: str | None, cfg=None, app_name: str | None = None) -> None:
             data["backend"] = backends.resolve_selection(bk, reg)
         return data
 
+    # EU-842: capture the BEFORE value, run the write, then audit the transition exactly once
+    # through the choke-point below (never inside _mutate — locked_rmw owns that closure). Note
+    # the clear-markers mean "remove the override" ONLY per-app; a global write always persists
+    # resolve_selection(bk) — so to_val mirrors _mutate in both branches.
+    from_val = get(cfg) if not app_name else get_apps(cfg).get(app_name)
+    to_val = None if (app_name and bk in _INHERIT) else backends.resolve_selection(bk, reg)
     try:
         locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
     except (OSError, ValueError):
-        pass
+        return   # the write failed — nothing was persisted, so nothing is audited
+    _audit_backend_change("active", from_val, to_val, "global" if not app_name else app_name,
+                          _SOURCE, cfg=cfg)
 
 
 # 2026-07-19 (Commander order): the MAIN + SECONDARY model pair. "secondary" is the designated
@@ -167,10 +182,16 @@ def set_secondary(bk: str | None, cfg=None) -> None:
             data["secondary"] = backends.resolve_selection(bk, reg)
         return data
 
+    # EU-842: capture BEFORE, write, then audit once through the choke-point below. `clearing`
+    # mirrors _mutate's own condition so the audited `to` is exactly what gets persisted.
+    from_val = get_secondary(cfg)
+    clearing = bk in _NO_SECONDARY or str(bk).lower() == "none"
+    to_val = None if clearing else backends.resolve_selection(bk, reg)
     try:
         locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
     except (OSError, ValueError):
-        pass
+        return   # the write failed — nothing was persisted, so nothing is audited
+    _audit_backend_change("secondary", from_val, to_val, "global", _SOURCE, cfg=cfg)
 
 
 def get_mode(cfg=None) -> str:
@@ -191,9 +212,86 @@ def set_mode(mode: str, cfg=None) -> None:
             data["mode"] = m
         return data
 
+    # EU-842: capture BEFORE, write, then audit once through the choke-point below. An INVALID
+    # mode leaves the store untouched — the event then carries to == from, honestly recording
+    # the no-op instead of a phantom value.
+    from_val = get_mode(cfg)
+    m = str(mode or "").strip().lower()
+    to_val = m if m in ("hybrid", "backup") else from_val
     try:
         locking.locked_rmw(_file(cfg), _mutate, default={}, corrupt_to_default=True)
     except (OSError, ValueError):
+        return   # the write failed — nothing was persisted, so nothing is audited
+    _audit_backend_change("mode", from_val, to_val, "global", _SOURCE, cfg=cfg)
+
+
+
+# EU-842: every state mutation above funnels through ONE choke-point and records exactly one
+# ``model_backend_changed`` audit row — instrumented HERE inside backend_pref, never at the many
+# call sites (server.py / main.py), exactly as EU-397 instrumented the ticket-transition adapter
+# (backlog/jira.py). Tests substitute the module attribute directly with a fake sink
+# (``backend_pref._AUDIT_LOG = fake``); the resolution below short-circuits on it before any real
+# file touches disk.
+_AUDIT_LOG: object | None = None
+_SOURCE: str = "cli"
+
+
+def configure_source(tag: str) -> None:
+    """Set the source tag (``cockpit`` / ``cli`` / ``api``) stamped on subsequent
+    ``model_backend_changed`` events. The choke-point cannot see its caller and AC3 forbids
+    call-site changes, so the tag is process-wide state an entry point may set once at boot;
+    it defaults to ``cli``."""
+    global _SOURCE
+    _SOURCE = tag
+
+
+class _NullAudit:
+    """Fallback sink when no ledger is resolvable — the backend write still succeeds, just
+    unaudited (best-effort doctrine shared by every write path in this module)."""
+
+    def record(self, event: str, **fields: object) -> None:
+        pass
+
+
+def _audit_sink(cfg=None) -> object:
+    """Resolve the ledger for one emission. Built fresh per call on purpose: parallel drains run
+    with DIFFERENT cfgs (EU-223), so a cached sink could route one process's events into another
+    process's file. Resolution order mirrors backlog/jira.py's EU-397/EU-425 contract:
+
+      1. ``_AUDIT_LOG`` — the test stub, winning over everything;
+      2. ``GENERAL_AUDIT_PATH`` — run_all's suite-wide isolation env (EU-355 class): it WINS over
+         any configured path so no harness can reach the live ledger;
+      3. ``cfg.audit_path`` — the SAME anchor this module's store file uses (:func:`_file`), so a
+         test with a tmp Config stays hermetic even run bare, and live events land in the live
+         ledger (never the EU-425 class-default mismatch);
+      4. the Config class default — the pre-EU-425 jira fallback, reachable only with cfg=None.
+    """
+    if _AUDIT_LOG is not None:
+        return _AUDIT_LOG
+    env_path = os.environ.get("GENERAL_AUDIT_PATH", "").strip()
+    if env_path:
+        return AuditLog(env_path)
+    p = getattr(cfg, "audit_path", None) if cfg is not None else None
+    if p:
+        return AuditLog(p)
+    try:
+        from .config import Config
+        return AuditLog(Config.audit_path)
+    except Exception:  # noqa: BLE001 — the ledger must never block a backend write
+        return _NullAudit()
+
+
+def _audit_backend_change(field: str, from_val: str | None, to_val: str | None,
+                          scope: str, source: str, cfg=None) -> None:
+    """The single EU-842 choke-point: record ONE ``model_backend_changed`` row carrying the field
+    changed, the ``from``/``to`` values, the app scope (``global`` or an app name) and the source
+    tag. ``cfg`` only routes the sink (see :func:`_audit_sink`) and never enters the event.
+    Best-effort — an audit failure is swallowed so it can never break the write path."""
+    try:
+        _audit_sink(cfg).record("model_backend_changed",
+                                **{"field": field, "from": from_val, "to": to_val,
+                                   "scope": scope, "source": source})
+    except Exception:  # noqa: BLE001 — see docstring
         pass
 
 
