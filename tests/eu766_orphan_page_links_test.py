@@ -1,14 +1,15 @@
-"""EU-766: Assert that all 5 orphan pages are reachable via visible links on existing pages.
+"""EU-766: Assert that all 4 orphan pages are reachable via visible links on existing pages.
 
   1. /report     — link in QA cluster of the per-project control bar
   2. /meeting    — link in council page body
   3. /standup    — link in council page body
   4. /ship-preview — link in council page body AND NOT in control bar (EU-206 guard)
-  5. /budget     — link in usage page body
 
 All checks use a Flask test_client so they run without any running server or
 network dependencies. The fixture mirrors the pattern from eu206_ship_button_removal_test.py
 and eu39_cockpit_regression_test.py.
+
+Note: /budget was retired by EU-855 and now redirects to /usage. That assertion was removed.
 """
 import os
 import subprocess
@@ -88,11 +89,8 @@ chk("/ship-preview NOT in control bar (EU-206 guard)",
     "/ship-preview" not in bar_html,
     "/ship-preview must not appear in _control_bar")
 
-# ── 5) /budget link in usage page ───────────────────────────────────────────────
-usage_body = client.get("/usage").get_data(as_text=True)
-chk("/budget link present in usage page",
-    'href="/budget"' in usage_body,
-    "Expected <a href=\"/budget\" in usage page HTML")
+# Note: /budget retired EU-855 — removed this assertion; the new /budget redirect is verified
+# by tests/eu855_usage_merge_test.py AC3a instead.
 
 # ── Report results ──────────────────────────────────────────────────────────────
 print("\n=============== EU-766 Orphan Page Links Test ===============")
