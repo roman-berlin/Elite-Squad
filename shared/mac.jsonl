@@ -623,3 +623,11 @@
 {"ts": "2026-08-14T07:02:39+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 153843, "output_tokens": 5784, "cost_usd": 1.287096, "duration_s": 229.96, "turns": 7, "ticket_id": "EU-749"}
 {"ts": "2026-08-14T07:02:39+0300", "event": "planner", "ticket_id": "EU-749", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 5, "cost_usd": 1.287096, "provider": "Anthropic", "model": "opus"}
 {"ts": "2026-08-14T07:17:46+0300", "event": "agent_call", "tag": "scrum-lead", "model": "sonnet", "provider": "Anthropic", "model_version": "sonnet", "input_tokens": 24432, "output_tokens": 1192, "cost_usd": 0.16574, "duration_s": 28.62, "turns": 1}
+{"ts": "2026-08-14T07:18:29+0300", "event": "agent_call", "tag": "scrum", "model": "sonnet", "provider": "Anthropic", "model_version": "sonnet", "input_tokens": 24302, "output_tokens": 2044, "cost_usd": 0.177625, "duration_s": 42.51, "turns": 1}
+{"ts": "2026-08-14T07:18:38+0300", "event": "ticket_transition", "ticket_id": "EU-749", "wanted": "Done", "landed": "Done", "outcome": "matched"}
+{"ts": "2026-08-14T07:18:38+0300", "event": "scrum_split", "ticket_id": "EU-749", "reason": "turn-limit", "into": ["EU-842", "EU-843", "EU-844", "EU-845"]}
+{"ts": "2026-08-14T07:18:39+0300", "event": "fragment_injection", "ticket_id": "EU-749", "fragment_count": 4, "fragment_keys": ["EU-842", "EU-843", "EU-844", "EU-845"]}
+{"ts": "2026-08-14T07:18:39+0300", "event": "ticket_start", "ticket_id": "EU-842", "app": "Elite-Unit", "branch": "autodev/EU-842-audit-every-backend-pref-write-at-the-ch", "dry_run": false, "ephemeral": false}
+{"ts": "2026-08-14T07:18:40+0300", "event": "ticket_transition", "ticket_id": "EU-842", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-08-14T07:20:33+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 224220, "output_tokens": 7806, "cost_usd": 0.730258, "duration_s": 112.58, "turns": 8, "ticket_id": "EU-842"}
+{"ts": "2026-08-14T07:20:33+0300", "event": "planner", "ticket_id": "EU-842", "verdict": "BUILD", "testable_ac": 6, "in_scope_files": 2, "cost_usd": 0.730258, "provider": "Anthropic", "model": "opus"}
