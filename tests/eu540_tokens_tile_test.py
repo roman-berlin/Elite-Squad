@@ -170,55 +170,21 @@ chk("AC4 labels match expected order", actual_labels == expected_labels,
     str(actual_labels))
 
 # ════════════════════════════════════════════════════════════
-# AC5: /usage dual-provider section has live GLM data (not dead 0%)
+# AC5: /usage secondary-provider card uses config-derived backend name
+#       (EU-855 retired the dual _dual_provider_gauge; now one
+#        neutral "not connected yet" card — no hard-coded GLM).
 # ════════════════════════════════════════════════════════════
 
-glm_stat = usage.glm_budget_status(cfg)
-# Our seeded GLM ledger has 94M tokens used (from the qwen record which has provider="glm" by model name check... wait, actually
-# "qwen3.8-max-preview" does NOT match glm detection, so GLM may be near zero. Let's add an explicit GLM row.)
-# Actually the seed was: qwen3.8 ... m="qwen" → that's NOT glm. Only claude-opus is counted for Claude.
-# GLM should be 0 for our seeded cfg. That's fine — the point is the gauge shows real data, not placeholder None.
-# Let's verify the /usage body doesn't say "unconfigured" for GLM when we have GLM data.
-
-# First check: with zero GLM, it still shouldn't show "unconfigured" since we pass real glm_budget_status() now
-chk("AC5 /usage doesn't show 'unconfigured' anymore", "unconfigured" not in body_usage, "")
-
-# Now add real GLM rows and confirm gauge percent reflects them
-glm_audit_dir = Path(tempfile.mkdtemp()) / "audit.jsonl"
-usage.configure(str(glm_audit_dir))
-usage.record("glm-4", 50_000_000, 0, 0.0, "soldier·test")  # 50M GLM input
-glm_cfg = Config(apps=[], audit_path=str(glm_audit_dir), daily_token_budget=500_000_000)
-glm_st = usage.glm_budget_status(glm_cfg)
-glm_pct = round(glm_st["pct"] * 100)  # 50M/500M = 10%
-chk("AC5 GLM budget status reflects ledger", glm_pct >= 10, f"GLM pct={glm_st['pct']}")
-
-# Verify the gauge function itself receives the live data correctly
-dual = usage.dual_provider_budget_status(glm_cfg)
-chk("AC5 dual status includes live GLM data", dual["glm"].get("on") is True, "")
-
-# ── AC5 RENDER-LEVEL (review fix) ────────────────────────────────────────────────
-# It is not enough that glm_budget_status() returns the right number: the RENDERED /usage
-# GLM provider card must show a non-zero gauge that MATCHES that number. Re-fetch /usage now
-# that the GLM ledger is seeded (the page was first fetched at the top, before any GLM burn).
-# `client` is bound to the original `cfg`, and usage.configure() above pointed the global ledger
-# at the seeded GLM file — so /usage's glm_budget_status(cfg) reads the 50M of GLM burn.
-r_usage_glm = client.get("/usage")
-body_glm = r_usage_glm.get_data(as_text=True)
-glm_expected = int(usage.glm_budget_status(cfg)["pct"] * 100)  # closure cfg == /usage's cfg
-chk("AC5 render: expected GLM pct is non-zero", glm_expected > 0, f"expected={glm_expected}%")
-
-# Isolate the GLM card (2nd provcard) by anchoring on its pname marker, then bound the slice so
-# we only ever match the GLM card's own gauge — never a later page section's 'width:NN%'.
-glm_anchor = body_glm.rfind("pname>GLM<")
-chk("AC5 render: /usage contains a GLM provider card", glm_anchor != -1, "")
-glm_card_html = body_glm[glm_anchor:glm_anchor + 700] if glm_anchor != -1 else ""
-chk("AC5 render: GLM card shows 'NN% used' matching glm_budget_status pct",
-    f"{glm_expected}% used" in glm_card_html, glm_card_html[:240])
-chk("AC5 render: GLM gauge 'width:NN%' is non-zero and matches pct",
-    f"width:{glm_expected}%" in glm_card_html, glm_card_html[:480])
-# Guard against the dead-0% regression specifically: the GLM card must NOT read '0% used'.
-chk("AC5 render: GLM card is not the stale '0% used'", "0% used" not in glm_card_html,
-    glm_card_html[:240])
+# With no secondary configured in fixture, the merged page shows
+# "No secondary provider configured" + "usage tracking not connected yet".
+# GLM-era checks that relied on the _dual_provider_gauge side-by-side layout
+# were removed by EU-855; they are superseded by tests/eu855_usage_merge_test.py.
+chk("AC5 /usage shows neutral secondary message when none configured",
+    "usage tracking not connected yet" in body_usage or "secondary" in body_usage.lower(),
+    "Expected neutral 'not connected yet' fallback on /usage after EU-855 merge")
+chk("AC5 /usage no longer hardcodes 'GLM' as a provider label",
+    "<span class=pname>GLM</span>" not in body_usage and "pname>GLM<" not in body_usage,
+    "Hardcoded 'GLM' provider label should be absent — EU-855 uses config-derived name")
 
 # ════════════════════════════════════════════════════════════
 # RUN_ALL GATE (AC6) — just sanity-import-check for now;
