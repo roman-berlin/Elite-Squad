@@ -28,6 +28,10 @@ class BacklogAdapter(ABC):
     def add_comment(self, ticket: Ticket, body: str) -> None:
         ...
 
+    def update_description(self, ticket: Ticket, body: str) -> None:
+        """Optional: update an issue's description (ADF format). Default: no-op for adapters that don't support it."""
+        return None
+
     def attach_pr(self, ticket: Ticket, pr_url: str) -> None:
         """Optional: link a PR to the ticket. Default no-op."""
         return None
@@ -97,6 +101,9 @@ class NoneBacklog(BacklogAdapter):
         return None
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
+        return None
+
+    def update_description(self, ticket: Ticket, body: str) -> None:
         return None
 
 

@@ -469,6 +469,13 @@ class JiraAdapter(BacklogAdapter):
                 pass
             raise
 
+    def update_description(self, ticket: Ticket, body: str) -> None:
+        """Update the issue description (Jira ADF format). The unit composes in code so nothing
+        is lost to model hallucination — EU-737's clarity gate builds new bodies as rewritten_spec +
+        "\n\n---\n## Original request\n" + original."""
+        self.session.put(self._url(f"issue/{ticket.key}"),
+                         json={"fields": {"description": _adf(body)}}).raise_for_status()
+
     def add_comment(self, ticket: Ticket, body: str) -> None:
         # Prefix so the CTO's own comments can be told apart from the Commander's.
         # 2026-07-23 (Commander: "relevant to ALL comments … effective, brief, human language"):

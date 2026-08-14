@@ -329,6 +329,11 @@ class Config:
     # the pre-EU-833 fail-open (briefless BUILD proceeds as before). Default True.
     planner_refusal_park: bool = True
 
+    # EU-737: before any build, judge whether the ticket's spec is buildable (from zero testable AC,
+    # no identifiable files, contradictory requirements). Thin-but-inferable tickets get rewritten;
+    # genuinely ambiguous ones get parked before burning a build pass. Fail-open + fire-once.
+    planner_clarity_gate: bool = True
+
     # EU-341: on a retry (or /unblock re-run), prepend the deterministic forensics classification
     # (failure category → recommended action) + prior-attempt count to the Builder's feedback, so a
     # recurring failure carries its known fix instead of the Builder rediscovering it. Reuses the

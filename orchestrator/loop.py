@@ -1956,6 +1956,72 @@ def _planner_verdict_question(ticket_id: str, verdict: str, reason: str) -> str:
     )
 
 
+def _clarity_parked_before(cfg: Config, ticket_id: str) -> bool:
+    """True if this ticket was ALREADY parked once by the clarity gate.
+
+    Mirrors _planner_verdict_parked_before so a Commander answer + return to To Do does not
+    re-ask. Fails open (returns False → build), never strands a ticket.
+    """
+    try:
+        import json
+        from . import dashboard as _D
+        for line in _D.audit_lines(cfg.audit_path):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("event") == "ticket_unclear_parked" and e.get("ticket_id") == ticket_id:
+                return True
+    except Exception:  # noqa: BLE001 — unreadable audit → fail open
+        pass
+    return False
+
+
+def _clarity_clarified_before(cfg: Config, ticket_id: str) -> bool:
+    """True if this ticket was ALREADY clarified once by the clarity gate.
+
+    Mirrors _planner_verdict_parked_before so a Commander answer + return to To Do does not
+    re-rewrite or re-comment. Fails open (returns False → fall through), never strands a ticket.
+    """
+    try:
+        import json
+        from . import dashboard as _D
+        for line in _D.audit_lines(cfg.audit_path):
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if e.get("event") == "ticket_clarified" and e.get("ticket_id") == ticket_id:
+                return True
+    except Exception:  # noqa: BLE001 — unreadable audit → fail open
+        pass
+    return False
+
+
+# The loop itself folds scaffolding blocks into ticket.description BEFORE the Planner runs
+# (_inject_prior_attempts, _resume_from_jira_answer, PM decide-first). EU-737's clarity gate writes
+# the description BACK to the board — echoing those blocks would pass unit text off as the
+# Commander's original request, so cut at the earliest marker before composing the new body.
+_INJECTED_CONTEXT_MARKERS = (
+    "\n\n---\nPrior attempts on this ticket",              # EU-395 _inject_prior_attempts
+    "\n\n---\nResolved decision (the Commander answered",  # EU-61 _resume_from_jira_answer
+    "\n\n---\nPRODUCT MANAGER DECISION",                   # PM decide-first injection
+)
+
+
+def _strip_injected_context(desc: str) -> str:
+    """The Commander's own words only: cut the unit's injected context blocks off a description.
+
+    Markers are the exact openers the injection sites use; a description without them passes
+    through unchanged (stripped). Never raises."""
+    cut = len(desc)
+    for m in _INJECTED_CONTEXT_MARKERS:
+        i = desc.find(m)
+        if i != -1:
+            cut = min(cut, i)
+    return desc[:cut].strip()
+
+
 def _changes_sig(changes: list[str]) -> str:
     """A stable fingerprint of a review's required changes, so two passes that get the SAME blocking
     feedback can be detected as 'stuck' (the build isn't addressing it) and escalated instead of burning
@@ -2393,6 +2459,68 @@ async def _attempt(ticket, app, cfg, git, backlog, audit, budget, branch, stop_e
             else:
                 print(f"  planner · BUILD · {len(_pres.testable_ac)} testable AC · "
                       f"{len(_pres.in_scope_files)} in-scope files", flush=True)
+
+            # EU-737: CLARITY GATE — judge buildability AFTER the Planner produces a result,
+            # BEFORE any code is written. Three branches: unclear→park, clarified→rewrite+build,
+            # clear→fall through. Fail-open (any error → build). Fire-once (mirrors park-before).
+            _clarity_ok = (getattr(cfg, "planner_clarity_gate", True)
+                           and getattr(cfg, "planner_enabled", False))
+            if _clarity_ok and iteration == 1:
+                try:
+                    # Fire-once: skip if this ticket was already clarified or parked on clarity —
+                    # a Commander answer + return to To Do must not re-ask or re-rewrite (AC4).
+                    _was_clarified = (_clarity_clarified_before(cfg, ticket.id)
+                                      or _clarity_parked_before(cfg, ticket.id))
+                    _clr = getattr(_pres, "clarity", "clear")
+                    if _clr == "unclear" and not _was_clarified and not ticket.ephemeral and not cfg.dry_run:
+                        # Genuinely unbuildable — park BEFORE any build with the Planner's
+                        # decision-card question (what's missing + options + recommendation).
+                        _q = _pres.clarification_request or (
+                            f"{ticket.id}: the ticket description is too thin to build safely "
+                            f"(zero testable ACs / no identifiable files / contradictory requirements). "
+                            f"Please clarify what should be built."
+                        )
+                        _entry = None
+                        try:
+                            _entry = decisions.add(cfg, ticket, app.name, _q)
+                        except Exception as _exc:  # noqa: BLE001 — a park failure falls through to build
+                            print(f"  · clarity-gate park failed ({_exc}) — building instead.", flush=True)
+                        if _entry:
+                            audit.record("ticket_unclear_parked", ticket_id=ticket.id,
+                                         reason="no buildable spec derivable")
+                            print(f"  ⛔ {ticket.id}: clarity gate — unclear, parked BEFORE building (EU-737)",
+                                  flush=True)
+                            _notify(cfg, f"⛔ {ticket.id} parked BEFORE building — the ticket is unclear. "
+                                         "Answer here or edit the ticket, then move it back to To Do.\n\n"
+                                         + decisions.reply_hint(ticket.id))
+                            return _resolve(TicketReport(
+                                ticket.id, Outcome.ESCALATED, iteration, cost, app.name, branch,
+                                notes="Clarity gate: ticket unclear — parked for clarification (EU-737)"))
+                        # decisions.add rejected the ask or raised → fall through and BUILD: never
+                        # strand a ticket with no pending decision card (fail-open, same as above).
+                    elif (_clr == "clarified" and _pres.clarified_description and not _was_clarified
+                            and not ticket.ephemeral and not cfg.dry_run):
+                        # Thin but inferable — self-improve: rewrite the description into a buildable
+                        # spec, keep the Commander's own words under a divider, then fall through to
+                        # build. Strip the loop's own injected context first so only HIS text is
+                        # preserved as the 'Original request'.
+                        original_desc = _strip_injected_context(ticket.description or "")
+                        new_body = (_pres.clarified_description
+                                      + "\n\n---\n## Original request\n" + original_desc)
+                        try:
+                            backlog.update_description(ticket, new_body)
+                            backlog.add_comment(
+                                ticket, "Clarified the ticket: rewrote the description into a buildable "
+                                        "spec (what / where / acceptance criteria). Your original words "
+                                        "are preserved under the 'Original request' divider.")
+                        except Exception:  # noqa: BLE001 — board hiccup must not block the build
+                            pass
+                        audit.record("ticket_clarified", ticket_id=ticket.id)
+                        print(f"  🔧 {ticket.id}: clarity gate — spec rewritten, building (EU-737)", flush=True)
+                        # Fall through to build with the design brief unchanged.
+                    # clear / absent / garbled → no-op, build as usual.
+                except Exception as _cexc:  # noqa: BLE001 — fail-open: any error → build
+                    print(f"  · clarity gate exception ({_cexc}) — building anyway", flush=True)
 
         # 0b) ARCHITECT — only when the Planner didn't run (the Planner absorbs it, §2).
         # (Only on first iteration; retry passes reuse the ADR from the first pass.)

@@ -36,3 +36,7 @@ class NotionAdapter(BacklogAdapter):
 
     def add_comment(self, ticket: Ticket, body: str) -> None:
         raise NotImplementedError("NotionAdapter.add_comment — POST /v1/comments.")
+
+    def update_description(self, ticket: Ticket, body: str) -> None:
+        """No-op for Notion — descriptions are managed via page properties."""
+        return None

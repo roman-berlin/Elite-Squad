@@ -86,9 +86,26 @@ For a BUILD verdict, produce:
     scopes the change. Empty is acceptable if you genuinely can't tell.
 
 Output ONLY a single JSON object, no prose around it, exactly this shape:
-{"verdict": "BUILD", "approach": "...", "testable_ac": ["...", "..."], "in_scope_files": ["path/a.py"], "answer": ""}
+{"verdict": "BUILD", "approach": "...", "testable_ac": ["...", "..."], "in_scope_files": ["path/a.py"], "answer": "", "clarity": "clear", "clarified_description": "", "clarification_request": ""}
 For ANSWER/CLOSE/REFILE/SPLIT put the reply/reason/sub-ticket list in "answer" and leave the
-build fields empty. Never wrap the JSON in markdown fences; never add commentary after it."""
+build fields empty. Never wrap the JSON in markdown fences; never add commentary after it.
+
+EU-737 CLARITY GATE — JUDGE BUILDABILITY BEFORE OUTPUTTING THE PLAN:
+Look at the ticket's description and acceptance criteria and decide if it can be built as written.
+Signals that make a ticket unbuildable: zero testable ACs, no in-scope files identifiable, or contradictory requirements.
+
+DECISION TREE (pick ONE):
+• "clear" — the ticket is already buildable. Leave clarified_description and clarification_request empty.
+• "clarified" — the ticket is thin but the intent is inferable from context, labels, issue type, etc. Rewrite the
+  spec: fill in the missing steps/files/AC. Put ONLY the rewritten spec in clarified_description — do NOT copy the
+  Commander's original text into it: the loop itself appends his original words under an "## Original request"
+  heading, so including them here would duplicate them on the ticket. Leave clarification_request empty.
+• "unclear" — you genuinely cannot build it, even after trying to infer intent. Fill clarification_request with a
+  plain-language question naming what is missing, plus 2–3 concrete options and a recommendation (the decision-card format).
+  Leave clarified_description empty.
+
+Never silently overwrite the Commander's own words for a "clarified" ticket — always preserve them verbatim.
+Never ask more than once per ticket on the same ambiguity — assume a prior answer persists."""
 
 # ALWAYS appended to PLANNER_SYSTEM (2026-07-22). The Analyst's decompose-first duties: an ordered
 # step plan the Builder executes one-at-a-time, and every assumption/question surfaced NOW —
@@ -119,6 +136,10 @@ class PlannerResultDict(TypedDict):
     testable_ac: list[str]
     in_scope_files: list[str]
     answer: str
+    # EU-737 clarity gate fields (present when applicable)
+    clarity: str  # "clear" | "clarified" | "unclear"
+    clarified_description: str
+    clarification_request: str
 
 
 @dataclass
@@ -142,11 +163,17 @@ class PlannerResult:
     # even if parse_plan produced a BUILD (its fail-safe default). The loop intercepts this to
     # park rather than build blind. Always False on a legitimate BUILD with real content.
     refused: bool = False
+    # EU-737: clarity judgement (the gate judges before building)
+    clarity: str = "clear"           # "clear" | "clarified" | "unclear"
+    clarified_description: str = ""  # rewritten spec when clarity=="clarified"
+    clarification_request: str = ""  # decision-card question when clarity=="unclear"
 
     def to_dict(self) -> PlannerResultDict:
         return {"verdict": self.verdict, "approach": self.approach,
                 "testable_ac": self.testable_ac, "in_scope_files": self.in_scope_files,
-                "answer": self.answer}
+                "answer": self.answer, "clarity": self.clarity,
+                "clarified_description": self.clarified_description,
+                "clarification_request": self.clarification_request}
 
     def as_builder_brief(self) -> str:
         """Render the plan as the design brief injected into the Builder prompt (the channel the
@@ -237,6 +264,10 @@ def parse_plan(text: str | None) -> PlannerResult:
         in_scope_files=_str_list(obj.get("in_scope_files")),
         answer=str(obj.get("answer", "") or "").strip(),
         raw=raw,
+        # EU-737: clarity gate — default "clear" so a garbled reply builds (fail-open)
+        clarity=str(obj.get("clarity", "clear") or "clear").strip().lower(),
+        clarified_description=str(obj.get("clarified_description", "") or "").strip(),
+        clarification_request=str(obj.get("clarification_request", "") or "").strip(),
     )
 
 
