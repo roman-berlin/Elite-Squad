@@ -911,3 +911,5 @@
 {"ts": "2026-08-14T17:31:16+0300", "event": "token_burn_report", "ticket_id": "EU-852", "payload": {"planner": 282400, "builder": 8752482, "reviewer": 837279}, "total": 9872161}
 {"ts": "2026-08-14T17:31:16+0300", "event": "ticket_start", "ticket_id": "EU-788", "app": "Elite-Unit", "branch": "autodev/EU-788-mac-telegram-sends-are-failing-the-mac-c", "dry_run": false, "ephemeral": false}
 {"ts": "2026-08-14T17:31:17+0300", "event": "ticket_transition", "ticket_id": "EU-788", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-08-14T17:44:20+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 70889, "output_tokens": 6324, "cost_usd": 1.1326, "duration_s": 190.94, "turns": 4, "ticket_id": "EU-788"}
+{"ts": "2026-08-14T17:44:20+0300", "event": "planner", "ticket_id": "EU-788", "verdict": "BUILD", "testable_ac": 5, "in_scope_files": 4, "cost_usd": 1.1326, "provider": "Anthropic", "model": "opus"}
