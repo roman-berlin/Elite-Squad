@@ -665,3 +665,5 @@
 {"ts": "2026-08-14T09:14:44+0300", "event": "token_burn_report", "ticket_id": "EU-843", "payload": {"planner": 388295, "builder": 5593080, "reviewer": 240099}, "total": 6221474}
 {"ts": "2026-08-14T09:14:44+0300", "event": "ticket_start", "ticket_id": "EU-844", "app": "Elite-Unit", "branch": "autodev/EU-844-telegram-announcement-on-model-backend-c", "dry_run": false, "ephemeral": false}
 {"ts": "2026-08-14T09:14:45+0300", "event": "ticket_transition", "ticket_id": "EU-844", "wanted": "In Progress", "landed": "In Progress", "outcome": "matched"}
+{"ts": "2026-08-14T09:24:12+0300", "event": "agent_call", "tag": "planner", "model": "opus", "provider": "Anthropic", "model_version": "opus", "input_tokens": 172261, "output_tokens": 2886, "cost_usd": 0.613951, "duration_s": 45.21, "turns": 7, "ticket_id": "EU-844"}
+{"ts": "2026-08-14T09:24:12+0300", "event": "planner", "ticket_id": "EU-844", "verdict": "BUILD", "testable_ac": 4, "in_scope_files": 2, "cost_usd": 0.613951, "provider": "Anthropic", "model": "opus"}
