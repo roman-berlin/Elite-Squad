@@ -64,6 +64,21 @@ def chk(n, ok, detail=""):
     results.append((n, bool(ok), detail))
 
 
+# ── Notify stub for EU-844 ───────────────────────────────────────────────────
+class _NotifyStub:
+    """Minimal mock for ``notify.send`` — counts calls, stores positional args, can raise."""
+    def __init__(self):
+        self.call_count = 0
+        self.call_args_text: str | None = None
+        self.side_effect: BaseException | None = None
+    def __call__(self, text: str, chat_id=None) -> bool:
+        if self.side_effect:
+            raise self.side_effect
+        self.call_count += 1
+        self.call_args_text = text
+        return True
+
+
 # ============================================================================= #
 # Test 1 — set_active globally emits model_backend_changed
 # ============================================================================= #
@@ -235,6 +250,96 @@ test_set_active_per_app()
 test_set_secondary()
 test_set_mode()
 test_source_tag()
+
+
+# ============================================================================= #
+# EU-844: NEW test helpers — Telegram notification on model-backend change
+# ============================================================================= #
+
+def test_telegram_notify_once():
+    """Each write triggers exactly ONE notify.send with the correct message shape. (AC1)"""
+    _setup_stub()
+    d = Path(tempfile.mkdtemp())
+    cfg = _tmp_cfg(d)
+    from orchestrator import notify
+    orig_send = notify.send
+    notify.send = _NotifyStub()
+    stub = notify.send
+
+    # Reset source to 'cli' in case previous tests clobbered it via configure_source()
+    backend_pref.configure_source("cli")
+    backend_pref.set_active("glm", cfg)
+    chk("global set_active → call_count==1",
+        stub.call_count == 1, f"call_count={stub.call_count}")
+    text = stub.call_args_text
+    expected = "⚙️ Model backend changed [global]: none → glm (via cli)"
+    chk("global message exact text", text == expected, f"expected {expected!r} got {text!r}")
+
+    # Per-app
+    backend_pref.configure_source("cli")
+    stub.call_count = 0
+    stub.call_args_text = None
+    backend_pref.set_active("glm", cfg, app_name="automatixy")
+    chk("per-app → call_count==1", stub.call_count == 1, f"call_count={stub.call_count}")
+    chk("per-app scope automatixy", "automatixy" in str(stub.call_args_text), f"text={stub.call_args_text!r}")
+    chk("per-app none→glm", "none → glm" in str(stub.call_args_text), f"text={stub.call_args_text!r}")
+
+    # set_secondary
+    stub.call_count = 0
+    stub.call_args_text = None
+    backend_pref.set_secondary("glm", cfg)
+    chk("set_secondary → call_count==1", stub.call_count == 1, f"call_count={stub.call_count}")
+
+    notify.send = orig_send
+
+
+def test_raise_does_not_propagate():
+    """A notifier that raises must NOT block the write or audit. (AC2)"""
+    _setup_stub()
+    d = Path(tempfile.mkdtemp())
+    cfg = _tmp_cfg(d)
+    from orchestrator import notify
+    notify.send = _NotifyStub()
+    notify.send.side_effect = RuntimeError("telegram down")
+    ok = True
+    try:
+        backend_pref.set_active("glm", cfg)
+    except Exception:
+        ok = False
+    chk("set_active did NOT raise", ok, "got exception")
+    chk("backend persisted", backend_pref.get(cfg) == "glm", f"saved={backend_pref.get(cfg)}")
+    rec = _last_record()
+    chk("audit recorded",
+        rec is not None and rec.get("event") == "model_backend_changed", f"rec={rec}")
+    notify.send.side_effect = None
+
+
+def test_per_app_clear_emits_one():
+    """A per-app clear emits exactly ONE notification, not zero, not two. (AC3)"""
+    _setup_stub()
+    d = Path(tempfile.mkdtemp())
+    cfg = _tmp_cfg(d)
+    from orchestrator import notify
+    orig_send = notify.send
+    stub = _NotifyStub()
+    notify.send = stub
+
+    backend_pref.configure_source("cli")
+    # Set override first
+    backend_pref.set_active("opus", cfg, app_name="automatixy")
+    events_before = len(backend_pref._AUDIT_LOG.records)
+    # Clear it
+    backend_pref.set_active(None, cfg, app_name="automatixy")
+    emitted = len(backend_pref._AUDIT_LOG.records) - events_before
+    chk("emit==1 after per-app clear", emitted == 1, f"emitted={emitted}")
+    chk("notify called for both ops", stub.call_count >= 2, f"count={stub.call_count}")
+    chk("clear has opus→none", "opus → none" in str(stub.call_args_text), f"text={stub.call_args_text!r}")
+
+    notify.send = orig_send
+# Fail-first: call the EU-844 tests now so they FAIL against the unchanged code.
+test_telegram_notify_once()
+test_raise_does_not_propagate()
+test_per_app_clear_emits_one()
 
 # ============================================================================= #
 # Results
